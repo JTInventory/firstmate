@@ -56,8 +56,9 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 
 ## Project modes are explicit
 
-`data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
+`data/projects.md` records each project's delivery mode plus optional `+yolo` and `+nm-gate` flags.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+`direct-PR +nm-gate` keeps the worker in direct-PR mode, but stops for firstmate scope review before any no-mistakes gate is run.
 
 ## Project memory belongs to projects
 

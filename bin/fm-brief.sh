@@ -20,7 +20,8 @@
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
 # and task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge,
+#                unless +nm-gate makes Firstmate own post-scope validation
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -154,15 +155,29 @@ fi
 
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
 # yolo does not affect the brief (it governs firstmate's approval behaviour), so discard it.
-read -r MODE _ <<EOF
+read -r MODE _ NM_GATE <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+: "${NM_GATE:=off}"
 
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
+    if [ "$NM_GATE" = on ]; then
+      RULE1='1. Never push to any remote, never open a PR, never run no-mistakes, and never merge. Work only on your `fm/'"$ID"'` branch until Firstmate reviews scope.'
+      DOD=$(cat <<EOF
+# Definition of done
+This project ships **direct-PR +nm-gate**: no-mistakes is available only as a Firstmate-controlled delivery gate after PR scope review.
+The task is complete when the intended diff is ready for Firstmate PR scope review. Commit only if the task explicitly authorizes commits.
+Before stopping, keep the diff narrow, run targeted checks, and report the recommended PR scope.
+When the intended diff is ready, append \`done: ready for Firstmate PR scope review\` to the status file and stop.
+Do NOT run /no-mistakes. Do NOT push. Do NOT open a PR.
+Firstmate and the captain decide whether to run \`git push no-mistakes <branch>\`, \`no-mistakes axi run\`, or normal direct PR flow.
+EOF
+)
+    else
+      RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
@@ -170,6 +185,7 @@ When it is implemented and committed, push your branch and open a PR with \`gh-a
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
 )
+    fi
     ;;
   local-only)
     SETUP2=""
