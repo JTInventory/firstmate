@@ -19,6 +19,7 @@ Each file also starts with a short header comment.
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
 | `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line |
+| `fm-supervise.sh`        | Read-only operational checklist and `firstmate.supervision.v1` `--json` model from state, tmux, treehouse, git, and GitHub signals |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification sourced by bootstrap and guard         |
 | `fm-tasks-axi-lib.sh`    | Shared `tasks-axi` compatibility probe sourced by bootstrap and teardown                                            |
@@ -32,3 +33,21 @@ Each file also starts with a short header comment.
 | `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, checks child work, and prints the backlog reminder |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness                                                  |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
+
+## Read-only supervision model
+
+`bin/fm-supervise.sh` is passive: it reads local state, tmux liveness, treehouse status, git worktree state, and GitHub PR/status data, then prints either a short checklist or JSON.
+It does not change state files, backlog files, tmux panes, git branches, treehouse leases, services, teardown state, merge state, or GitHub.
+
+```sh
+bin/fm-supervise.sh                 # text checklist
+bin/fm-supervise.sh --include-ok    # include routine watch items in text
+bin/fm-supervise.sh --json          # firstmate.supervision.v1 model
+bin/fm-supervise.sh --schema        # v1 schema without reading runtime state
+bin/fm-supervise.sh --external-pr https://github.com/owner/repo/pull/123
+bin/fm-supervise.sh --no-default-reminders
+```
+
+The JSON model always includes `schema_version: "firstmate.supervision.v1"`, `read_only: true`, and top-level `sources`, `summary`, `checklist`, `tasks`, `worktrees`, and `external_reminders`.
+GitHub read failures are data, not command failures: affected PRs become `unknown`, `sources.github.ok` becomes `false`, and the command still exits successfully.
+By default, the command includes Firstmate PR `https://github.com/kunchenguid/firstmate/pull/68` as an external reminder; use `--no-default-reminders` to omit it or `--external-pr` to add more reminder PRs.

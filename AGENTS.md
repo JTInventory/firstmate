@@ -427,8 +427,16 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
+bin/fm-supervise.sh        # read-only operational checklist and firstmate.supervision.v1 JSON model
 bin/fm-wake-drain.sh       # drain queued wake records at turn start
 ```
+
+`bin/fm-supervise.sh` is passive and may be used during heartbeat review or recovery when current next actions are unclear.
+It reads state/status files, tmux liveness, treehouse status, git worktree state, and GitHub PR/status data through `gh-axi`, then emits either text, `--json`, or `--schema`.
+It must not be treated as approval or automation: it never drains wakes, edits backlog, sends tmux input, changes git or treehouse state, arms the watcher, tears down work, merges PRs, or changes GitHub.
+Use `--include-ok` only when routine watch items are useful, `--no-default-reminders` to omit the built-in Firstmate PR `https://github.com/kunchenguid/firstmate/pull/68`, and repeat `--external-pr <url>` for extra external PR reminders.
+The JSON contract is `firstmate.supervision.v1` with `read_only: true`, source health, summary counts, checklist items, task records, worktree records, and external reminders.
+GitHub read failures are model data, not command failure: affected PRs become unknown and `sources.github.ok=false`.
 
 On wake, in order of cheapness:
 
@@ -437,7 +445,7 @@ On wake, in order of cheapness:
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
    If the pane is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
 4. `check:` a per-task poll fired (usually a merge); act on it.
-5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
+5. `heartbeat:` review the whole fleet: skim each window's status file, run `bin/fm-supervise.sh` when a read-only checklist would clarify next actions, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.

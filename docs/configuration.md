@@ -76,6 +76,10 @@ FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shar
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
+# read-only supervision model (bin/fm-supervise.sh)
+FM_SUPERVISE_DEFAULT_REMINDERS=https://github.com/kunchenguid/firstmate/pull/68
+FM_SUPERVISE_TREEHOUSE_TIMEOUT=5   # seconds allowed for each treehouse status read
+FM_SUPERVISE_GH_TIMEOUT=5          # seconds allowed for each GitHub API read
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

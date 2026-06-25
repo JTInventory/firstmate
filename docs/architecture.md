@@ -20,6 +20,10 @@ It leads with prominent bordered banners for the tangle and no-watcher cases so 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
 Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 
+`bin/fm-supervise.sh` is the read-only decision model for explicit fleet reviews.
+It turns the same state files, tmux panes, treehouse worktrees, git state, and GitHub PR signals into a concise checklist or a stable `firstmate.supervision.v1` JSON object.
+Radar-style displays should consume `bin/fm-supervise.sh --json` after they migrate instead of duplicating supervision decision rules.
+
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.
