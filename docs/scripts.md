@@ -49,5 +49,7 @@ bin/fm-supervise.sh --no-default-reminders
 ```
 
 The JSON model always includes `schema_version: "firstmate.supervision.v1"`, `read_only: true`, and top-level `sources`, `summary`, `checklist`, `tasks`, `worktrees`, and `external_reminders`.
+Displays should render `summary` and `checklist` directly and use the other arrays only for detail.
+The nested JSON contract is available through `--schema`; the consumer rules are documented in [Radar Supervision Contract](radar-supervision-contract.md).
 GitHub read failures are data, not command failures: affected PRs become `unknown`, `sources.github.ok` becomes `false`, and the command still exits successfully.
 By default, the command includes Firstmate PR `https://github.com/kunchenguid/firstmate/pull/68` as an external reminder; use `--no-default-reminders` to omit it or `--external-pr` to add more reminder PRs.

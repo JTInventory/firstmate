@@ -19,7 +19,7 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
 # and task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
+#   no-mistakes  implement -> no-mistakes pipeline -> PR -> captain merge (default)
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
@@ -58,6 +58,19 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+cat_skill_invocation_contract() {
+cat <<'EOF'
+# Skill invocation
+If this task requires a skill, read that skill's `SKILL.md` before acting.
+Use the invocation form for the harness you are running:
+- Claude: `/<skill-name>`
+- Codex: `$<skill-name>`
+- Other verified harnesses: use their native skill invocation surface, or follow the skill file directly when no slash/dollar surface exists.
+EOF
+}
+
+SKILL_INVOCATION_CONTRACT=$(cat_skill_invocation_contract)
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -89,6 +102,8 @@ Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+
+$SKILL_INVOCATION_CONTRACT
 
 # Escalation to main firstmate
 Handle routine work yourself.
@@ -142,6 +157,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
+$SKILL_INVOCATION_CONTRACT
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -167,7 +184,7 @@ case "$MODE" in
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
+Do NOT run the no-mistakes skill. The captain reviews and merges the PR; firstmate relays it.
 EOF
 )
     ;;
@@ -192,7 +209,8 @@ EOF
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run the no-mistakes skill to validate and ship a PR.
+Use the skill invocation form from this brief: Claude uses \`/no-mistakes\`; Codex uses \`\$no-mistakes\`.
 
 During validation you drive the gates while the pipeline owns the fixes. Run it in the foreground and follow this contract:
 - Never edit or \`git commit\` code yourself while a run is active; the pipeline applies every fix in its own worktree.
@@ -200,7 +218,7 @@ During validation you drive the gates while the pipeline owns the fixes. Run it 
 - \`no-mistakes axi run\` and \`axi respond\` block synchronously for many minutes (test and CI especially); the pipeline often fixes findings itself with no gate, so when a call returns no \`gate:\` object that is normal - just let it return.
 - Never cancel, abort, re-run, or background the run, and never idle-wait for a background notification: the call is in the foreground and returns on its own.
 
-After /no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
+After no-mistakes reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
     ;;
@@ -235,6 +253,8 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+$SKILL_INVOCATION_CONTRACT
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

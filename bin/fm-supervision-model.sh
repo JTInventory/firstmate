@@ -33,12 +33,146 @@ fm_supervision_schema_json() {
     "generated_at": { "type": "string", "format": "date-time" },
     "home": { "type": "string" },
     "read_only": { "const": true },
-    "sources": { "type": "object" },
-    "summary": { "type": "object" },
-    "checklist": { "type": "array" },
-    "tasks": { "type": "array" },
-    "worktrees": { "type": "array" },
-    "external_reminders": { "type": "array" }
+    "sources": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["ok", "detail"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "detail": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["level", "tasks_total", "actions_total", "high_total", "medium_total", "github_state"],
+      "properties": {
+        "level": { "enum": ["ok", "watch", "action"] },
+        "tasks_total": { "type": "integer", "minimum": 0 },
+        "actions_total": { "type": "integer", "minimum": 0 },
+        "high_total": { "type": "integer", "minimum": 0 },
+        "medium_total": { "type": "integer", "minimum": 0 },
+        "github_state": { "enum": ["ok", "partial", "unavailable", "skipped"] }
+      },
+      "additionalProperties": false
+    },
+    "checklist": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "owner", "action", "why", "task_id", "project", "pr_url", "evidence", "read_only_commands"],
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "enum": ["high", "medium", "info"] },
+          "owner": { "enum": ["captain", "firstmate", "worker", "external"] },
+          "action": { "type": "string" },
+          "why": { "type": "string" },
+          "task_id": { "type": "string" },
+          "project": { "type": "string" },
+          "pr_url": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "read_only_commands": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "project", "kind", "mode", "yolo", "window", "window_live", "worktree", "branch", "dirty_count", "last_status", "turn_ended", "pr", "classification", "next", "evidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "project": { "type": "string" },
+          "kind": { "enum": ["ship", "scout", "secondmate"] },
+          "mode": { "type": "string" },
+          "yolo": { "enum": ["on", "off"] },
+          "window": { "type": "string" },
+          "window_live": { "type": "boolean" },
+          "worktree": { "type": "string" },
+          "branch": { "type": "string" },
+          "dirty_count": { "type": "integer", "minimum": 0 },
+          "last_status": { "type": "string" },
+          "turn_ended": { "type": "boolean" },
+          "pr": {
+            "type": "object",
+            "required": ["url", "state", "ci_state", "mergeable_state"],
+            "properties": {
+              "url": { "type": "string" },
+              "state": { "type": "string" },
+              "ci_state": { "type": "string" },
+              "mergeable_state": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "classification": { "type": "string" },
+          "next": {
+            "type": "object",
+            "required": ["owner", "action"],
+            "properties": {
+              "owner": { "enum": ["captain", "firstmate", "worker", "external"] },
+              "action": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "worktrees": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "project", "branch", "dirty_count", "has_active_task", "classification", "next", "evidence"],
+        "properties": {
+          "path": { "type": "string" },
+          "project": { "type": "string" },
+          "branch": { "type": "string" },
+          "dirty_count": { "type": "integer", "minimum": 0 },
+          "has_active_task": { "type": "boolean" },
+          "classification": { "type": "string" },
+          "next": {
+            "type": "object",
+            "required": ["owner", "action"],
+            "properties": {
+              "owner": { "enum": ["captain", "firstmate", "worker", "external"] },
+              "action": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "external_reminders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["url", "state", "ci_state", "mergeable_state", "classification", "next", "evidence"],
+        "properties": {
+          "url": { "type": "string" },
+          "state": { "type": "string" },
+          "ci_state": { "type": "string" },
+          "mergeable_state": { "type": "string" },
+          "classification": { "type": "string" },
+          "next": {
+            "type": "object",
+            "required": ["owner", "action"],
+            "properties": {
+              "owner": { "enum": ["captain", "firstmate", "worker", "external"] },
+              "action": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

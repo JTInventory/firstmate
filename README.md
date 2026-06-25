@@ -130,6 +130,9 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, the files you set, and harness support.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
+- [docs/radar-supervision-contract.md](docs/radar-supervision-contract.md) - JSON consumer contract for Radar-style displays.
+- [docs/skill-roots.md](docs/skill-roots.md) - Firstmate's canonical and compatibility skill roots.
+- [docs/solutions/](docs/solutions/) - documented solutions to past problems and patterns, organized by category with YAML frontmatter.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
 

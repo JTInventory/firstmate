@@ -126,6 +126,12 @@ test_brief_assertion_precedes_branch() {
     "brief is missing the isolation blocked-status contract"
   assert_grep "The path check is authoritative" "$brief" \
     "brief must make the path check authoritative"
+  assert_grep 'Claude: `/<skill-name>`' "$brief" \
+    "brief must document Claude skill invocation"
+  assert_grep 'Codex: `$<skill-name>`' "$brief" \
+    "brief must document Codex skill invocation"
+  assert_grep 'Claude uses `/no-mistakes`; Codex uses `$no-mistakes`' "$brief" \
+    "no-mistakes validation contract must be harness-aware"
   assert_no_grep "A reliable test that you are in a linked worktree" "$brief" \
     "brief must not present git-dir/common-dir as decisive"
   assert_no_grep "they are identical in the primary checkout" "$brief" \

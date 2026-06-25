@@ -106,6 +106,9 @@ pass "model is sourceable"
 
 out=$("$CLI" --schema) || fail "schema command failed"
 assert_contains "$out" 'firstmate.supervision.v1' "schema missing id"
+assert_contains "$out" '"required": ["id", "project", "kind", "mode", "yolo", "window", "window_live", "worktree", "branch", "dirty_count", "last_status", "turn_ended", "pr", "classification", "next", "evidence"]' "schema missing task contract"
+assert_contains "$out" '"level": { "enum": ["ok", "watch", "action"] }' "schema missing summary level enum"
+assert_contains "$out" '"read_only_commands": { "type": "array", "items": { "type": "string" } }' "schema missing checklist read-only command contract"
 pass "schema prints v1 id"
 
 home=$(new_home)

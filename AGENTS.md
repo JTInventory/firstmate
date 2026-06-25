@@ -69,6 +69,7 @@ README.md            public overview and development notes
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed; read each script's header before first use
+docs/solutions/      documented solutions to past problems and patterns, organized by category with YAML frontmatter (`module`, `tags`, `problem_type`)
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -138,6 +139,7 @@ Resolve `default` with `bin/fm-harness.sh`; resolve the active crewmate harness 
 
 Each adapter splits into mechanics and knowledge.
 The mechanics (launch command, autonomy flag, turn-end hook) live in `bin/fm-spawn.sh`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks, skill invocation, resume) lives in the agent-only `harness-adapters` skill.
+When instructing a crewmate or secondmate to invoke a skill, use the target harness's form: Claude uses `/<skill-name>`, Codex uses `$<skill-name>`, and other verified harnesses use their native skill surface or direct `SKILL.md` reading when no slash/dollar surface exists.
 **Never dispatch a crewmate on an unverified adapter.**
 If `config/crew-harness` names an unverified one, tell the captain and fall back to your own harness until it is verified.
 If the captain asks for a new harness, load `harness-adapters`, verify it empirically with a trivial supervised task, then commit the script and knowledge changes.

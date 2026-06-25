@@ -42,6 +42,16 @@ When `FM_HOME` is unset, it also behaves as the old whole-root override.
 claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+Claude invokes skills with `/<skill-name>`.
+Codex invokes the same skill names with `$<skill-name>`.
+Generated briefs include that convention so workers can use the right form without treating a skill as unavailable.
+
+## Skill roots
+
+Firstmate's canonical skill root is `.agents/skills/`.
+`.claude/skills` is a compatibility symlink to that root.
+Plugin, global, OpenClaw, and other runtime skill folders are external unless a separate scout proves they belong to this repo.
+See [Skill Roots](skill-roots.md) for the current root map.
 
 ## Toolchain
 
