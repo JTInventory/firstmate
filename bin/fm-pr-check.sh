@@ -10,12 +10,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-task-identity-lib.sh
+. "$SCRIPT_DIR/fm-task-identity-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
 
 META="$STATE/$ID.meta"
-if [ -f "$META" ] && ! grep -qxF "pr=$URL" "$META"; then
+fm_assert_task_branch_matches_meta "$ID" "$META" "error" || exit 1
+
+EXPECTED_BRANCH=$(fm_task_expected_branch "$ID")
+PR_BRANCH=$(gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null || true)
+[ -n "$PR_BRANCH" ] || { echo "error: could not determine head branch for PR $URL" >&2; exit 1; }
+if [ "$PR_BRANCH" != "$EXPECTED_BRANCH" ]; then
+  echo "error: task identity mismatch for $ID: PR $URL head branch is $PR_BRANCH; expected $EXPECTED_BRANCH." >&2
+  echo "Use the matching task id or intentionally reconcile the metadata before continuing." >&2
+  exit 1
+fi
+
+if ! grep -qxF "pr=$URL" "$META"; then
   echo "pr=$URL" >> "$META"
 fi
 

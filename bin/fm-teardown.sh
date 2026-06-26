@@ -34,6 +34,8 @@ SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-task-identity-lib.sh
+. "$SCRIPT_DIR/fm-task-identity-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -50,6 +52,10 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ]; then
+  fm_assert_task_branch_matches_meta "$ID" "$META" "REFUSED" || exit 1
+fi
 
 default_branch() {
   local ref branch
