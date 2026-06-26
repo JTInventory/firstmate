@@ -62,6 +62,24 @@ git_danger=$(write_task "$tmp" git-danger 'Plan git reset, force push, merge, de
 assert_profile critical "$git_danger"
 pass "git reset/force/merge/delete/prune routes critical"
 
+git_clean=$(write_task "$tmp" git-clean 'Run git clean on the task worktree.')
+assert_profile critical "$git_clean"
+pass "git clean routes critical"
+
+docs_typo_cleanup=$(write_task "$tmp" docs-typo-cleanup 'read-only docs typo cleanup')
+out=$(run_route --kind scout --task-file "$docs_typo_cleanup") || fail "docs typo cleanup route failed: $out"
+profile=$(route_profile "$out")
+[ "$profile" = cheap ] || fail "read-only docs typo cleanup should route cheap, got $profile"$'\n'"$out"
+pass "read-only docs typo cleanup stays cheap"
+
+cleanup_notes=$(write_task "$tmp" cleanup-notes 'cleanup notes')
+assert_profile standard "$cleanup_notes"
+pass "cleanup notes does not match git clean"
+
+cleaner_wording=$(write_task "$tmp" cleaner-wording 'cleaner wording')
+assert_profile standard "$cleaner_wording"
+pass "cleaner wording does not match git clean"
+
 out=$("$ROUTE" route-test bin/fm-spawn.sh 2>&1) || fail "Firstmate core route failed: $out"
 assert_contains "$out" "profile=critical" "Firstmate core script did not route critical"
 assert_contains "$out" "risk_flags=firstmate-core" "Firstmate core script did not record core risk"

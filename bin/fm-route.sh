@@ -65,6 +65,17 @@ contains_any() {
   return 1
 }
 
+contains_git_danger() {
+  local haystack=$1
+  local normalized
+  normalized=$(printf '%s' "$haystack" | tr -c '[:alnum:]' ' ')
+  normalized=" $normalized "
+  case "$normalized" in
+    *" merge "*|*" rebase "*|*" reset "*|*" clean "*|*" force "*|*" history rewrite "*) return 0 ;;
+  esac
+  return 1
+}
+
 join_reasons() {
   local result= part
   for part in "$@"; do
@@ -194,7 +205,7 @@ if contains_any "$text" security vulnerability threat exploit pii "customer data
   security_reason="security/customer data"
 fi
 
-if contains_any "$text" merge rebase reset clean force "history rewrite"; then
+if contains_git_danger "$text"; then
   risk_flags=$(append_unique git-danger "$risk_flags")
   git_reason="git history/destructive operations"
 fi
