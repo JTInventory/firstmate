@@ -227,3 +227,49 @@ dead_pid() {
   done
   printf '%s\n' "$p"
 }
+
+fm_test_cleanup_watch_processes() {
+  local d f pid pgid
+  for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    while IFS= read -r f; do
+      pid=$(cat "$f" 2>/dev/null || true)
+      case "$pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      [ "$pid" != "$$" ] || continue
+      [ "$pid" != "${BASHPID:-$$}" ] || continue
+      kill -TERM "$pid" 2>/dev/null || true
+    done <<EOF
+$(find -L "$d" -path '*/state/.watch*.lock/pid' -type f 2>/dev/null)
+EOF
+  done
+  sleep 0.2
+  for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    while IFS= read -r f; do
+      pid=$(cat "$f" 2>/dev/null || true)
+      case "$pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      [ "$pid" != "$$" ] || continue
+      [ "$pid" != "${BASHPID:-$$}" ] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ' || true)
+        kill -KILL "$pid" 2>/dev/null || true
+        case "$pgid" in
+          "$pid") kill -KILL "-$pgid" 2>/dev/null || true ;;
+        esac
+      fi
+    done <<EOF
+$(find -L "$d" -path '*/state/.watch*.lock/pid' -type f 2>/dev/null)
+EOF
+  done
+}
+
+fm_test_watch_cleanup_exit() {
+  local rc=$?
+  fm_test_cleanup_watch_processes
+  fm_test_cleanup
+  exit "$rc"
+}

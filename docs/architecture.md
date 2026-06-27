@@ -21,7 +21,8 @@ Optional X mode rides the same check path: bootstrap drops a local `state/x-watc
 
 Routine re-arms go through `bin/fm-watch-arm.sh`, which forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `healthy` / `FAILED`, the last exiting non-zero) - never a false `already running` off a dying process.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
-A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, or if tasks are in flight and that watcher stops running or queued wakes are waiting to be drained.
+For harnesses where a tracked background call is not durable enough, `bin/fm-watch-session.sh` provides a home-scoped runner that repeatedly arms the normal watcher from a persistent process, reports status from `state/.watch-session.lock`, and stops only the runner recorded for the current `FM_HOME`.
+A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, queued wakes are waiting to be drained, or tasks are in flight and watcher liveness is not proved by both a fresh beacon and a live `state/.watch.lock` for this same home/path.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
@@ -118,5 +119,5 @@ Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## Development notes
 
-The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
+The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, a self-verifying tracked-child arm wrapper, and a home-scoped durable active-mode session runner.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.

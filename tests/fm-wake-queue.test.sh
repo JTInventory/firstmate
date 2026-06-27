@@ -15,6 +15,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
+trap fm_test_watch_cleanup_exit EXIT
 
 
 test_concurrent_append_and_drain() {
@@ -173,7 +174,7 @@ test_drain_dedupes_obvious_duplicates() {
 # when work is in flight with no live watcher, and stay silent right after a
 # normal fire (a fresh beacon within grace), so it never false-alarms every wake.
 test_drain_asserts_watcher_liveness() {
-  local dir state err
+  local dir state err peer identity
   dir=$(make_case drain-liveness)
   state="$dir/state"
   err="$dir/drain.err"
@@ -183,10 +184,26 @@ test_drain_asserts_watcher_liveness() {
   : > "$err"
   touch "$state/.last-watcher-beat"
   FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a fresh beacon"
-  if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
-    fail "drain false-alarmed right after a normal fire (fresh beacon within grace)"
-  fi
-  pass "drain asserts watcher liveness: warns on a lapse, stays silent right after a fire"
+  grep -F 'fresh beacon but no live watcher lock' "$err" >/dev/null || fail "drain did not warn for a fresh beacon without a live watcher lock"
+
+  : > "$err"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$peer") || fail "could not identify drain peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || {
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "drain failed with a live matching watcher"
+  }
+  [ ! -s "$err" ] || fail "drain warned with a fresh beacon and live matching watcher lock: $(cat "$err")"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "drain asserts watcher liveness: warns on missing/fresh-only watcher, stays silent with a live matching lock"
 }
 
 test_concurrent_append_and_drain
