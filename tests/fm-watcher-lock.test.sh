@@ -14,6 +14,7 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
+trap fm_test_watch_cleanup_exit EXIT
 
 
 test_singleton_start() {
@@ -89,7 +90,7 @@ test_guard_warnings() {
   #       warning follows it, and the guidance is re-arm-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line
+  local dir state err first banner_line queue_line peer identity
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
@@ -122,12 +123,91 @@ test_guard_warnings() {
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify guard peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
-  pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh"
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || {
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "guard failed"
+  }
+  [ ! -s "$err" ] || fail "guard warned with a fresh live watcher and no queued wakes: $(cat "$err")"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "guard banner leads when down with pending wakes (re-arm-after-drain) and stays silent when fresh+live"
+}
+
+test_guard_requires_live_matching_watch_lock() {
+  local dir state err peer identity
+
+  # A fresh beacon alone is not proof: the previous watcher may have exited
+  # cleanly after writing a wake, leaving a fresh .last-watcher-beat behind.
+  dir=$(make_case guard-fresh-no-lock)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed with no lock"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard stayed silent with fresh beacon but no watcher lock"
+  grep -F 'fresh beacon but no live watcher lock' "$err" >/dev/null || fail "guard did not explain the false-fresh beacon"
+
+  # A live pid is still not proof unless the lock identifies THIS home and the
+  # current watcher script. This protects sibling homes and reused pids.
+  dir=$(make_case guard-live-wrong-home)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'window=test:fm-y\nkind=ship\n' > "$state/y.meta"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir/other-home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || {
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "guard failed with mismatched lock"
+  }
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard stayed silent for a lock from another home"
+  grep -F 'watcher lock does not name a live watcher for this home' "$err" >/dev/null || fail "guard did not explain the mismatched lock"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+
+  # Silence requires all three facts: live pid, matching identity/home/path, and
+  # fresh beacon.
+  dir=$(make_case guard-live-matching-home)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'window=test:fm-z\nkind=ship\n' > "$state/z.meta"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify matching peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || {
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "guard failed with matching lock"
+  }
+  [ ! -s "$err" ] || fail "guard warned with a live matching watcher lock and fresh beacon: $(cat "$err")"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "guard requires a fresh beacon plus a live matching watcher lock"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -611,6 +691,7 @@ test_singleton_start
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_guard_requires_live_matching_watch_lock
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency

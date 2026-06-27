@@ -4,13 +4,11 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
-# missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
-# banner so the agent cannot skim past it in the tool output of whatever it was
-# doing - the one channel every harness has. Normal wake handling (watcher
-# briefly down between a wake and its re-arm) stays inside the grace window and
-# stays silent. Always exits 0: the guard warns, it never blocks.
+# Then, if any task is in flight (a state/<id>.meta exists), prove the watcher is
+# live by checking both the liveness beacon and the home-scoped watcher lock. A
+# fresh state/.last-watcher-beat alone is not enough: a one-shot watcher can write
+# a wake and exit while leaving a fresh beacon behind. Always exits 0: the guard
+# warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +52,38 @@ else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
 
+WATCH_LOCK="$STATE/.watch.lock"
+WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+watcher_lock_desc="no watcher lock"
+
+watcher_lock_healthy() {
+  local pid lock_home lock_path lock_identity current_identity
+  watcher_lock_desc="no watcher lock"
+  [ -e "$WATCH_LOCK" ] || [ -L "$WATCH_LOCK" ] || return 1
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if ! fm_pid_alive "$pid"; then
+    watcher_lock_desc="watcher lock has no live pid"
+    return 1
+  fi
+  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  if [ "$lock_home" != "$FM_HOME" ] || [ "$lock_path" != "$WATCH_PATH" ] || [ -z "$lock_identity" ]; then
+    watcher_lock_desc="watcher lock does not name a live watcher for this home"
+    return 1
+  fi
+  current_identity=$(fm_pid_identity "$pid") || {
+    watcher_lock_desc="watcher lock pid identity is unavailable"
+    return 1
+  }
+  if [ "$current_identity" != "$lock_identity" ]; then
+    watcher_lock_desc="watcher lock pid identity no longer matches"
+    return 1
+  fi
+  watcher_lock_desc="live watcher pid=$pid"
+  return 0
+}
+
 # Only act with tasks in flight; count them so the banner can say how much is
 # riding on an absent watcher.
 in_flight=0
@@ -80,10 +110,18 @@ if [ -e "$BEAT" ]; then
     beacon_desc=unknown
   fi
 fi
+lock_healthy=false
+watcher_lock_healthy && lock_healthy=true
+watcher_problem=
+if [ "$watcher_fresh" = false ]; then
+  watcher_problem="no fresh beacon (last beat: $beacon_desc, grace ${GRACE}s)"
+elif [ "$lock_healthy" = false ]; then
+  watcher_problem="fresh beacon but no live watcher lock: $watcher_lock_desc"
+fi
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line.
-if [ "$watcher_fresh" = false ]; then
+if [ -n "$watcher_problem" ]; then
   if "$queue_pending"; then
     fix='After draining queued wakes, re-arm the watcher: run bin/fm-watch-arm.sh as the harness-tracked background task (never a shell & that gets reaped).'
   else
@@ -93,7 +131,7 @@ if [ "$watcher_fresh" = false ]; then
   {
     printf '●%s\n' "$rule"
     printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-    printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+    printf '●  %s task(s) in flight, but watcher liveness is not proved: %s.\n' "$in_flight" "$watcher_problem"
     printf '●  Trust bin/fm-watch-arm.sh for the true state: it confirms a live watcher and a fresh beacon, or fails loudly.\n'
     printf '●  %s\n' "$fix"
     printf '●%s\n' "$rule"
