@@ -144,23 +144,72 @@ launch_template() {
   esac
 }
 
+HARNESS=
+LAUNCH=
+ROUTE_PROFILE=manual
+ROUTE_HARNESS=
+ROUTE_MODEL=default
+ROUTE_EFFORT=default
+ROUTE_REASON=
+ROUTE_OVERRIDE=none
+ROUTE_RISK_FLAGS=none
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
-    HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    ROUTE_HARNESS=${HARNESS:-raw}
+    ROUTE_REASON="raw launch command selected for adapter verification"
+    ROUTE_OVERRIDE=raw-launch
     ;;
   '')
-    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    # Deferred until BRIEF/PROJ_ABS are known, so the route can read task text.
     ;;
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    ROUTE_HARNESS=$HARNESS
+    ROUTE_REASON="manual harness override selected $HARNESS"
+    ROUTE_OVERRIDE=manual-harness
     ;;
 esac
+
+parse_route_output() {
+  local line key value
+  while IFS= read -r line; do
+    key=${line%%=*}
+    value=${line#*=}
+    [ "$key" != "$line" ] || continue
+    case "$key" in
+      profile) ROUTE_PROFILE=$value ;;
+      harness) ROUTE_HARNESS=$value ;;
+      model) ROUTE_MODEL=$value ;;
+      effort) ROUTE_EFFORT=$value ;;
+      reason) ROUTE_REASON=$value ;;
+      override) ROUTE_OVERRIDE=$value ;;
+      risk_flags) ROUTE_RISK_FLAGS=$value ;;
+    esac
+  done
+}
+
+append_route_block() {
+  [ "$KIND" != secondmate ] || return 0
+  grep -qxF '<!-- firstmate-route -->' "$BRIEF" 2>/dev/null && return 0
+  cat >> "$BRIEF" <<EOF
+
+<!-- firstmate-route -->
+# Route
+
+route: $ROUTE_PROFILE because $ROUTE_REASON
+Harness: $ROUTE_HARNESS
+Model: $ROUTE_MODEL
+Reasoning effort: $ROUTE_EFFORT
+Override: $ROUTE_OVERRIDE
+Risk flags: $ROUTE_RISK_FLAGS
+Do not downgrade this route without an explicit firstmate override.
+EOF
+}
 
 secondmate_registry_value() {
   local id=$1 key=$2 reg line value
@@ -338,6 +387,23 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+if [ -z "$ARG3" ]; then
+  route_out=
+  if ! route_out=$("$FM_ROOT/bin/fm-route.sh" "$ID" "$PROJ_ABS" --kind "$KIND" --task-file "$BRIEF" 2>&1); then
+    printf '%s\n' "$route_out" >&2
+    exit 1
+  fi
+  parse_route_output <<EOF
+$route_out
+EOF
+  HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
+  if [ "$HARNESS" != "$ROUTE_HARNESS" ]; then
+    ROUTE_OVERRIDE=config-harness
+    ROUTE_REASON="$ROUTE_REASON; launch harness overridden by config/crew-harness: $HARNESS"
+  fi
+  LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from route profile '$ROUTE_PROFILE'); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+fi
+
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.
 if [ -n "${TMUX:-}" ]; then
   SES=$(tmux display-message -p '#S')
@@ -465,6 +531,8 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+append_route_block
+
 mkdir -p "$STATE"
 {
   echo "window=$T"
@@ -474,6 +542,13 @@ mkdir -p "$STATE"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "route_profile=$ROUTE_PROFILE"
+  echo "route_harness=$ROUTE_HARNESS"
+  echo "route_model=$ROUTE_MODEL"
+  echo "route_effort=$ROUTE_EFFORT"
+  echo "route_reason=$ROUTE_REASON"
+  echo "route_override=$ROUTE_OVERRIDE"
+  echo "route_risk_flags=$ROUTE_RISK_FLAGS"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
