@@ -17,6 +17,8 @@ Each file also starts with a short header comment.
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
+| `fm-cognee-lookup.sh`    | Local-only dry-run wrapper for future Cognee lookup; treats answer fixtures as hints and delegates source proof to the manifest checker |
+| `fm-cognee-manifest-check.sh` | Validate TSV Cognee manifest rows and verify `SOURCE_ID`, `SOURCE_PATH`, or `SEED_FILE` answer references against reopened local files |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker and detector sourced by `fm-send.sh`, `fm-brief.sh`, and tests                 |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
 | `fm-watch.sh`            | Singleton-safe always-on watcher; absorbs no-verb signal and stale wakes only when the crew is provably working, queues and exits for actionable wakes, and reverts to daemon-owned one-shot behavior while `state/.afk` exists |
