@@ -111,6 +111,7 @@ event = {
     "vendor_estimated_cost_usd": number_or_none("FM_COGNEE_T_VENDOR_ESTIMATED_COST_USD"),
     "vendor_cost_status": label("FM_COGNEE_T_VENDOR_COST_STATUS"),
     "currency": "USD",
+    "external_action_authorized": False,
 }
 try:
     path = Path(os.environ["FM_COGNEE_T_FILE"])

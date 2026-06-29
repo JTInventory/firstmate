@@ -93,7 +93,31 @@ test_absent_cognee_brief_note() {
   pass "fm-memory-lookup: unavailable Cognee can be attached as a non-blocking brief note"
 }
 
+test_configured_backend_failure_is_non_blocking() {
+  local dir fake out rc
+  dir="$TMP_ROOT/backend-failure"
+  mkdir -p "$dir"
+  fake="$dir/failing-cognee"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'label=blocked_missing_proof reason=missing_required_env external_action_authorized=false' >&2
+exit 2
+SH
+  chmod +x "$fake"
+
+  set +e
+  out=$(FM_COGNEE_LOOKUP_CMD="$fake" "$LOOKUP" -- "lookup can fail")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "failed configured backend should not block dispatch"
+  assert_contains "$out" "lookup command failed; dispatch continues without memory context" "backend failure should be visible and non-blocking"
+  assert_contains "$out" "verified local source path:" "source section should still render"
+  assert_contains "$out" "none" "no source should be verified after backend failure"
+  pass "fm-memory-lookup: configured backend failure exits 0 for dispatch"
+}
+
 test_absent_cognee_is_non_blocking
 test_lookup_separates_hint_verified_path_and_warning
 test_brief_append_excludes_raw_hint
 test_absent_cognee_brief_note
+test_configured_backend_failure_is_non_blocking

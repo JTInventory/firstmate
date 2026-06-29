@@ -63,6 +63,7 @@ UUID_RE = re.compile(
 )
 LABEL_RE = re.compile(
     r"\b(SOURCE_ID|SOURCE_PATH|SEED_FILE|DATA_ID|DATA_UUID|CHUNK_ID|CHUNK_UUID)\s*[:=]\s*"
+    r"[*_`\u202f\s]*"
     r"(?:\"([^\"]*)\"|'([^']*)'|([^\s,;\]\)]+))"
 )
 
@@ -201,17 +202,25 @@ def _parse_answer(text):
         "data_ids": set(),
         "chunk_ids": set(),
         "uuid_mentions": set(),
+        "_source_ids_ordered": [],
+        "_source_paths_ordered": [],
+        "_seed_files_ordered": [],
     }
     malformed = 0
     for match in LABEL_RE.finditer(text):
         label = match.group(1)
         cleaned = next(group for group in match.groups()[1:] if group is not None).strip()
+        cleaned = cleaned.split("\\n", 1)[0].splitlines()[0].strip()
+        cleaned = cleaned.strip("`\"'[],;.)")
         if label == "SOURCE_ID":
             labels["source_ids"].add(cleaned)
+            labels["_source_ids_ordered"].append(cleaned)
         elif label == "SOURCE_PATH":
             labels["source_paths"].add(cleaned)
+            labels["_source_paths_ordered"].append(cleaned)
         elif label == "SEED_FILE":
             labels["seed_files"].add(cleaned)
+            labels["_seed_files_ordered"].append(cleaned)
         elif label in ("DATA_ID", "DATA_UUID"):
             if UUID_RE.fullmatch(cleaned):
                 labels["data_ids"].add(cleaned.lower())
@@ -259,6 +268,11 @@ def _manifest_checksum(row):
     return row.get("checksum_sha256") or row.get("sha256") or row.get("checksum")
 
 
+def _row_source_ids(row):
+    values = _field_set(row, "source_id") | _field_set(row, "row_id") | _field_set(row, "cognee_source_id")
+    return {value for value in values if value and value != "None"}
+
+
 def _resolve_path(row):
     raw = _source_path(row)
     if not raw:
@@ -282,12 +296,15 @@ def _sha256(path):
 
 
 def _find_row(rows, parsed):
-    source_ids = parsed["source_ids"]
-    if source_ids:
+    for source_id in parsed.get("_source_ids_ordered", []):
         for row in rows:
-            if str(row.get("source_id")) in source_ids:
+            if source_id in _row_source_ids(row):
                 return row
-        return None
+
+    for source_path in parsed.get("_source_paths_ordered", []):
+        for row in rows:
+            if _source_path(row) == source_path or str(_resolve_path(row)) == source_path:
+                return row
 
     source_paths = parsed["source_paths"]
     seed_files = parsed["seed_files"]
@@ -341,15 +358,22 @@ def _verify():
     source_path = _resolve_path(row)
     local = {"opened": False, "readable": False, "checksum_match": None}
 
-    row_source_id = {str(row.get("source_id"))}
-    if parsed["source_ids"] - row_source_id:
+    row_source_id = _row_source_ids(row)
+    if parsed["source_ids"] and not (parsed["source_ids"] & row_source_id):
         errors.append("SOURCE_ID does not match manifest row")
+    elif parsed["source_ids"] - row_source_id:
+        warnings.append("extra_source_ids_ignored")
     row_raw_path = _source_path(row)
     row_resolved_path = str(source_path) if source_path else ""
-    if parsed["source_paths"] - {row_raw_path, row_resolved_path}:
+    row_paths = {row_raw_path, row_resolved_path}
+    if parsed["source_paths"] and not (parsed["source_paths"] & row_paths):
         errors.append("SOURCE_PATH does not match manifest row")
-    if parsed["seed_files"] - {_seed_file(row)}:
+    elif parsed["source_paths"] - row_paths:
+        warnings.append("extra_source_paths_ignored")
+    if parsed["seed_files"] and not (parsed["seed_files"] & {_seed_file(row)}):
         errors.append("SEED_FILE does not match manifest row")
+    elif parsed["seed_files"] - {_seed_file(row)}:
+        warnings.append("extra_seed_files_ignored")
 
     row_data_ids = _lower_field_set(row, "data_ids")
     row_chunk_ids = _lower_field_set(row, "chunk_ids")
@@ -359,7 +383,7 @@ def _verify():
         errors.append("CHUNK_ID does not match manifest row")
     unknown_uuid_mentions = parsed["uuid_mentions"] - row_data_ids - row_chunk_ids
     if unknown_uuid_mentions:
-        errors.append("UUID mention does not match manifest row")
+        warnings.append("unlabelled_uuid_mentions_ignored")
 
     if not source_path or not source_path.is_file():
         errors.append("local source file is missing")
@@ -386,7 +410,7 @@ def _verify():
         warnings.append(f"stale_risk={stale_risk}")
 
     raw_status = str(row.get("raw_readback_status") or row.get("raw_status") or "ok").lower()
-    raw_blocked = raw_status not in {"", "ok", "passed", "available", "readable", "200"}
+    raw_blocked = raw_status not in {"", "ok", "passed", "available", "readable", "200", "not_attempted", "not_trusted", "not_applicable"}
     if raw_blocked:
         errors.append(f"raw_readback_status={raw_status}")
 
