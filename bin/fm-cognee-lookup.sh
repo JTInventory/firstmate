@@ -87,6 +87,8 @@ live_telemetry_log() {
     FM_COGNEE_LIVE_DATASET_ID_HASH=$dataset_id_hash_value \
     FM_COGNEE_LIVE_SEARCH_TYPE=$(safe_label "${FM_COGNEE_SEARCH_TYPE:-RAG_COMPLETION}") \
     FM_COGNEE_LIVE_TOP_K=${FM_COGNEE_TOP_K:-8} \
+    FM_COGNEE_LIVE_MAX_ATTEMPTS=${FM_COGNEE_MAX_ATTEMPTS:-3} \
+    FM_COGNEE_LIVE_TIMEOUT_MS=${FM_COGNEE_TIMEOUT_MS:-} \
     python3 - <<'PY' >/dev/null 2>&1
 import datetime as dt
 import json
@@ -117,7 +119,7 @@ def boolean(name):
 
 now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 event = {
-    "schema_version": "cognee_live_lookup.v1",
+    "schema_version": "cognee_telemetry.v2",
     "ts_utc": now,
     "event_type": "api_attempt",
     "operation_name": "cognee_lookup",
@@ -136,21 +138,41 @@ event = {
     },
     "status": {
         "status": os.environ.get("FM_COGNEE_LIVE_STATUS") or "unknown",
+        "success": (os.environ.get("FM_COGNEE_LIVE_STATUS") or "") in {"success", "verified"},
         "error_class": os.environ.get("FM_COGNEE_LIVE_ERROR") or "none",
         "http_status": maybe_int("FM_COGNEE_LIVE_HTTP_STATUS"),
         "retryable": boolean("FM_COGNEE_LIVE_RETRYABLE"),
     },
     "attempt": {
         "retry_count": integer("FM_COGNEE_LIVE_RETRY_COUNT", 0),
+        "attempt_number": integer("FM_COGNEE_LIVE_RETRY_COUNT", 0) + 1,
+        "max_attempts": integer("FM_COGNEE_LIVE_MAX_ATTEMPTS", 3),
+        "is_retry": integer("FM_COGNEE_LIVE_RETRY_COUNT", 0) > 0,
+        "retry_reason": "retryable_http_or_transport" if integer("FM_COGNEE_LIVE_RETRY_COUNT", 0) > 0 else "none",
     },
     "latency": {
         "duration_ms": integer("FM_COGNEE_LIVE_LATENCY_MS", 0),
+        "timeout_ms": maybe_int("FM_COGNEE_LIVE_TIMEOUT_MS"),
     },
     "results": {
         "parsed_source_count": integer("FM_COGNEE_LIVE_PARSED_SOURCE_COUNT", 0),
         "answer_body_logged": False,
     },
     "source_verification_outcome": os.environ.get("FM_COGNEE_LIVE_VERIFICATION") or "not_attempted",
+    "source_verification": {
+        "verification_status": os.environ.get("FM_COGNEE_LIVE_VERIFICATION") or "not_attempted",
+        "verification_required": True,
+    },
+    "cost_estimate": {
+        "estimated_cost_usd": None,
+        "currency": "USD",
+        "confidence": "unknown",
+        "estimate_source": "vendor_metadata_missing",
+    },
+    "vendor_usage_present": False,
+    "answer_body_logged": False,
+    "answer_body_redacted": True,
+    "response_content_redacted": True,
     "external_action_authorized": False,
 }
 try:
