@@ -184,7 +184,7 @@ test_drain_asserts_watcher_liveness() {
   : > "$err"
   touch "$state/.last-watcher-beat"
   FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a fresh beacon"
-  grep -F 'fresh beacon but no live watcher lock' "$err" >/dev/null || fail "drain did not warn for a fresh beacon without a live watcher lock"
+  grep -F 'no watcher has a confirmed live lock' "$err" >/dev/null || fail "drain did not warn for a fresh beacon without a live watcher lock"
 
   : > "$err"
   sleep 300 &

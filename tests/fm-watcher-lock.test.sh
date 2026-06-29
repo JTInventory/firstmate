@@ -157,7 +157,7 @@ test_guard_requires_live_matching_watch_lock() {
   touch "$state/.last-watcher-beat"
   FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed with no lock"
   grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard stayed silent with fresh beacon but no watcher lock"
-  grep -F 'fresh beacon but no live watcher lock' "$err" >/dev/null || fail "guard did not explain the false-fresh beacon"
+  grep -F 'no watcher has a confirmed live lock' "$err" >/dev/null || fail "guard did not explain the false-fresh beacon"
 
   # A live pid is still not proof unless the lock identifies THIS home and the
   # current watcher script. This protects sibling homes and reused pids.
@@ -180,7 +180,7 @@ test_guard_requires_live_matching_watch_lock() {
     fail "guard failed with mismatched lock"
   }
   grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard stayed silent for a lock from another home"
-  grep -F 'watcher lock does not name a live watcher for this home' "$err" >/dev/null || fail "guard did not explain the mismatched lock"
+  grep -F 'watch lock belongs to another FM_HOME' "$err" >/dev/null || fail "guard did not explain the mismatched lock"
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
 

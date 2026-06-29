@@ -1,153 +1,120 @@
 #!/usr/bin/env bash
-# Home-scoped durable active watcher runner.
+# Durable, home-scoped active watcher runner.
 #
-# fm-watch-arm.sh intentionally keeps the watcher as its child. That is good for
-# harness-tracked foreground tasks, but fragile when a harness cannot keep that
-# foreground call alive. This wrapper gives active mode a durable process for the
-# current FM_HOME: it starts a small runner that repeatedly arms the watcher,
-# records the runner pid in state/.watch-session.lock, and can report or stop
-# only that home-scoped runner.
+# Use this in harnesses where a tracked background task is not durable enough.
+# It creates one tmux window per FM_HOME/STATE pair and runs fm-watch-arm.sh in a
+# loop there. The watcher itself remains the same singleton: it is still scoped by
+# this home's state/.watch.lock, and no broad process matching is used.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
-WATCH_ARM="$SCRIPT_DIR/fm-watch-arm.sh"
-SESSION_LOCK="$STATE/.watch-session.lock"
-LOG="$STATE/.watch-session.log"
-RUNNER_PATH="$SCRIPT_DIR/fm-watch-session.sh"
+SESSION_NAME=${FM_WATCH_SESSION_TMUX_SESSION:-firstmate-watch}
+HASH=$(printf '%s\n%s\n' "$FM_HOME" "$STATE" | cksum | awk '{print $1}')
+WINDOW_NAME=${FM_WATCH_SESSION_TMUX_WINDOW:-fm-watch-$HASH}
+TARGET="$SESSION_NAME:$WINDOW_NAME"
+SESSION_DIR="$STATE/.watch-session"
+ENV_FILE="$SESSION_DIR/env.sh"
+RUNNER_FILE="$SESSION_DIR/runner.sh"
+STOP_FILE="$SESSION_DIR/stop"
+RETRY_DELAY=${FM_WATCH_SESSION_RETRY_DELAY:-5}
+AFK_DELAY=${FM_WATCH_SESSION_AFK_DELAY:-15}
 
 usage() {
-  echo "usage: $(basename "$0") [--start|--stop|--status|--foreground|--tmux]" >&2
+  echo "usage: $(basename "$0") [start|--status|status|stop|restart]" >&2
 }
 
-session_lock_matches_pid() {
-  local pid=$1 lock_home lock_path lock_identity current_identity
-  lock_home=$(cat "$SESSION_LOCK/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$SESSION_LOCK/runner-path" 2>/dev/null || true)
-  lock_identity=$(cat "$SESSION_LOCK/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$FM_HOME" ] || return 1
-  [ "$lock_path" = "$RUNNER_PATH" ] || return 1
-  [ -n "$lock_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+shell_quote() {
+  # POSIX single-quote escaping.
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-session_pid() {
-  cat "$SESSION_LOCK/pid" 2>/dev/null || true
+tmux_window_exists() {
+  command -v tmux >/dev/null 2>&1 || return 1
+  tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 1
+  tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -Fx "$WINDOW_NAME" >/dev/null
 }
 
-session_running() {
-  local pid
-  pid=$(session_pid)
-  fm_pid_alive "$pid" || return 1
-  session_lock_matches_pid "$pid"
+write_runner_files() {
+  mkdir -p "$SESSION_DIR"
+  {
+    printf 'export FM_HOME=%s\n' "$(shell_quote "$FM_HOME")"
+    printf 'export FM_ROOT_OVERRIDE=%s\n' "$(shell_quote "$FM_ROOT")"
+    printf 'export FM_STATE_OVERRIDE=%s\n' "$(shell_quote "$STATE")"
+    printf 'export PATH=%s\n' "$(shell_quote "$PATH")"
+  } > "$ENV_FILE"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -u\n'
+    printf '. %s\n' "$(shell_quote "$ENV_FILE")"
+    printf 'rm -f %s\n' "$(shell_quote "$STOP_FILE")"
+    printf 'while :; do\n'
+    printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
+    printf '  if [ -e "$FM_STATE_OVERRIDE/.afk" ]; then sleep %s; continue; fi\n' "$AFK_DELAY"
+    printf '  %s/fm-watch-arm.sh\n' "$(shell_quote "$SCRIPT_DIR")"
+    printf '  rc=$?\n'
+    printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
+    printf '  if [ "$rc" -ne 0 ]; then sleep %s; else sleep 1; fi\n' "$RETRY_DELAY"
+    printf 'done\n'
+  } > "$RUNNER_FILE"
+  chmod +x "$RUNNER_FILE"
 }
 
-write_session_identity() {
-  local pid=$1
-  printf '%s\n' "$FM_HOME" > "$SESSION_LOCK/fm-home" || true
-  printf '%s\n' "$RUNNER_PATH" > "$SESSION_LOCK/runner-path" || true
-  fm_pid_identity "$pid" > "$SESSION_LOCK/pid-identity" 2>/dev/null || true
+start_runner() {
+  local command
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "watch-session: FAILED - tmux not found" >&2
+    return 1
+  fi
+  if tmux_window_exists; then
+    echo "watch-session: running target=$TARGET home=$FM_HOME"
+    return 0
+  fi
+  command="bash $(shell_quote "$RUNNER_FILE")"
+  write_runner_files
+  rm -f "$STOP_FILE"
+  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    tmux new-window -d -t "$SESSION_NAME:" -n "$WINDOW_NAME" "$command" || {
+      echo "watch-session: FAILED - could not start target=$TARGET" >&2
+      return 1
+    }
+  else
+    tmux new-session -d -s "$SESSION_NAME" -n "$WINDOW_NAME" "$command" || {
+      echo "watch-session: FAILED - could not start target=$TARGET" >&2
+      return 1
+    }
+  fi
+  echo "watch-session: started target=$TARGET home=$FM_HOME"
 }
 
-status_cmd() {
-  local pid
-  if session_running; then
-    pid=$(session_pid)
-    echo "watch-session: running pid=$pid home=$FM_HOME log=$LOG"
-    exit 0
+status_runner() {
+  if tmux_window_exists; then
+    echo "watch-session: running target=$TARGET home=$FM_HOME"
+    return 0
   fi
   echo "watch-session: stopped home=$FM_HOME"
-  exit 1
-}
-
-stop_cmd() {
-  local pid i pgid
-  if ! session_running; then
-    fm_lock_remove_path "$SESSION_LOCK" 2>/dev/null || true
-    echo "watch-session: stopped home=$FM_HOME"
-    return 0
-  fi
-  pid=$(session_pid)
-  kill -TERM "$pid" 2>/dev/null || true
-  pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ' || true)
-  i=0
-  while [ "$i" -lt 80 ] && fm_pid_alive "$pid"; do
-    if [ "$i" -eq 10 ] && [ "$pgid" = "$pid" ]; then
-      kill -TERM "-$pid" 2>/dev/null || true
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if fm_pid_alive "$pid"; then
-    echo "watch-session: FAILED - runner still alive pid=$pid" >&2
-    return 1
-  fi
-  fm_lock_remove_path "$SESSION_LOCK" 2>/dev/null || true
-  echo "watch-session: stopped pid=$pid home=$FM_HOME"
-}
-
-foreground_cmd() {
-  if ! fm_lock_try_acquire "$SESSION_LOCK"; then
-    if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
-      echo "watch-session: already running pid=$FM_LOCK_HELD_PID home=$FM_HOME" >&2
-    else
-      echo "watch-session: already running home=$FM_HOME" >&2
-    fi
-    exit 1
-  fi
-  trap 'fm_lock_release "$SESSION_LOCK"; exit 143' TERM INT HUP
-  trap 'fm_lock_release "$SESSION_LOCK"' EXIT
-  write_session_identity "${BASHPID:-$$}"
-  while :; do
-    "$WATCH_ARM" >> "$LOG" 2>&1 || true
-    sleep "${FM_WATCH_SESSION_REARM_DELAY:-1}"
-  done
-}
-
-start_cmd() {
-  local pid i
-  if session_running; then
-    pid=$(session_pid)
-    echo "watch-session: running pid=$pid home=$FM_HOME log=$LOG"
-    return 0
-  fi
-  fm_lock_remove_path "$SESSION_LOCK" 2>/dev/null || true
-  : > "$LOG" || {
-    echo "watch-session: FAILED - cannot write $LOG" >&2
-    return 1
-  }
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$RUNNER_PATH" --foreground >> "$LOG" 2>&1 < /dev/null &
-  else
-    nohup "$RUNNER_PATH" --foreground >> "$LOG" 2>&1 < /dev/null &
-  fi
-  pid=$!
-  i=0
-  while [ "$i" -lt 80 ]; do
-    if session_running; then
-      pid=$(session_pid)
-      echo "watch-session: started pid=$pid home=$FM_HOME log=$LOG"
-      return 0
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  echo "watch-session: FAILED - runner did not confirm" >&2
   return 1
 }
 
-mode=${1:---status}
+stop_runner() {
+  touch "$STOP_FILE" 2>/dev/null || true
+  if tmux_window_exists; then
+    tmux kill-window -t "$TARGET"
+    echo "watch-session: stopped target=$TARGET home=$FM_HOME"
+    return 0
+  fi
+  echo "watch-session: stopped home=$FM_HOME"
+  return 0
+}
+
+mode=${1:-start}
 case "$mode" in
-  --start|start) start_cmd ;;
-  --stop|stop) stop_cmd ;;
-  --status|status) status_cmd ;;
-  --foreground|foreground) foreground_cmd ;;
-  --tmux)
-    echo "tmux new-window -n fm-watch-$(basename "$FM_HOME") 'cd \"$FM_ROOT\" && FM_HOME=\"$FM_HOME\" bin/fm-watch-session.sh --foreground'"
-    ;;
+  start|--start) start_runner ;;
+  status|--status) status_runner ;;
+  stop|--stop) stop_runner ;;
+  restart|--restart) stop_runner >/dev/null; start_runner ;;
   -h|--help|help) usage; exit 0 ;;
   *) usage; exit 2 ;;
 esac
