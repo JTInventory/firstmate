@@ -11,6 +11,7 @@ Each file also starts with a short header comment.
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
 | `fm-backlog-audit.sh`    | Read-only audit for backlog/state drift between `data/backlog.md`, `state/*.meta`, and local adoption signals      |
 | `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
+| `fm-cognee-lookup-gate.sh` | Fail-closed local evidence gate for Cognee lookup modes; automatic lookup is disabled by default and manual verified lookup remains hint-only |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when the primary checkout is tangled, when queued wakes are pending, or when watcher liveness is not proved by a fresh beacon plus a live matching lock |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
