@@ -95,6 +95,169 @@ SH
   pass "fake live search is parsed, verified locally, and redacted in telemetry"
 }
 
+test_live_env_file_loads_allowlisted_names_safely() {
+  local dir source manifest fakebin envfile out code sha telemetry marker complex_secret
+  dir="$TMP_ROOT/live-env-file"
+  mkdir -p "$dir"
+  source="$dir/source.md"
+  manifest="$dir/manifest.tsv"
+  envfile="$dir/cognee.env"
+  fakebin=$(fm_fakebin "$dir")
+  telemetry="$dir/telemetry.jsonl"
+  marker="$dir/should-not-exist"
+  complex_secret='value with spaces @ dollar$ backtick` double" single'\'' semi;colon $(touch '"$marker"')'
+  printf 'local source truth from env-file lookup\n' > "$source"
+  sha=$(sha256sum "$source" | awk '{print $1}')
+  write_manifest "$manifest" env-file-01 "$source" "$sha"
+  {
+    printf '%s\n' '# safe dotenv fixture'
+    printf 'COGNEE_BASE_URL=%s\n' 'https://env-file.invalid'
+    printf 'COGNEE_API_KEY=%s\n' "$complex_secret"
+    printf 'FM_COGNEE_DATASET_ALIAS=%s\n' 'firstmate-curated-memory-0629'
+    printf 'FM_COGNEE_MANIFEST=%s\n' "$manifest"
+    printf 'UNSAFE_UNKNOWN=%s\n' '$(touch '"$marker"')'
+  } > "$envfile"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+out=
+saw_endpoint=false
+saw_key=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -H)
+      [ "$2" = "X-Api-Key: $EXPECTED_COGNEE_API_KEY" ] && saw_key=true
+      shift 2
+      ;;
+    https://env-file.invalid/api/v1/search)
+      saw_endpoint=true
+      shift
+      ;;
+    *) shift ;;
+  esac
+done
+"$saw_endpoint" || exit 41
+"$saw_key" || exit 42
+cat > "$out" <<JSON
+[{"search_result":["SOURCE_ID=env-file-01 SOURCE_PATH=$EXPECTED_SOURCE"]}]
+JSON
+printf '200'
+SH
+  chmod +x "$fakebin/curl"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" EXPECTED_COGNEE_API_KEY="$complex_secret" EXPECTED_SOURCE="$source" \
+    FM_COGNEE_ENV_FILE="$envfile" FM_COGNEE_TELEMETRY_FILE="$telemetry" \
+    "$ROOT/bin/fm-cognee-lookup.sh" --query "env file lookup" 2>&1)
+  code=$?
+  set -e
+  expect_code 0 "$code" "env-file live lookup should verify"
+  assert_contains "$out" "mode=live" "env-file lookup should reach live mode"
+  assert_contains "$out" "label=verified_local_source" "env-file lookup should verify through manifest"
+  assert_contains "$out" "external_action_authorized=false" "env-file lookup cannot authorize action"
+  assert_not_contains "$out" "$complex_secret" "env-file output must not print loaded secret values"
+  assert_present "$telemetry" "env-file lookup should write telemetry"
+  assert_not_contains "$(cat "$telemetry")" "$complex_secret" "env-file telemetry must not print loaded secret values"
+  assert_absent "$marker" "dotenv values and unknown keys must not be executed"
+  pass "FM_COGNEE_ENV_FILE loads allowlisted names without executing or printing values"
+}
+
+test_live_env_file_ignores_unknown_names() {
+  local dir manifest fakebin envfile payload out code marker
+  dir="$TMP_ROOT/live-env-file-unknown"
+  mkdir -p "$dir"
+  manifest="$dir/manifest.tsv"
+  payload="$dir/payload.json"
+  fakebin=$(fm_fakebin "$dir")
+  envfile="$dir/cognee.env"
+  marker="$dir/unknown-executed"
+  : > "$manifest"
+  write_payload_capture_curl "$fakebin" "$payload" 404
+  {
+    printf 'COGNEE_BASE_URL=%s\n' 'https://cognee.invalid'
+    printf 'COGNEE_API_KEY=%s\n' 'safe-test-key'
+    printf 'FM_COGNEE_DATASET_ALIAS=%s\n' 'firstmate-curated-memory-0629'
+    printf 'FM_COGNEE_MANIFEST=%s\n' "$manifest"
+    printf 'FM_COGNEE_TELEMETRY_FILE=%s\n' "$dir/ignored-telemetry.jsonl"
+    printf 'UNKNOWN_NAME=%s\n' '$(touch '"$marker"')'
+    printf '%s\n' "UNKNOWN_QUOTED='ignored"
+  } > "$envfile"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_COGNEE_ENV_FILE="$envfile" \
+    "$ROOT/bin/fm-cognee-lookup.sh" --query "unknown names" 2>&1)
+  code=$?
+  set -e
+  expect_code 2 "$code" "fake HTTP failure should stop after env-file load"
+  assert_json_field "$payload" "datasets" "firstmate-curated-memory-0629" "allowlisted dataset alias should load"
+  assert_absent "$marker" "unknown env names must not execute"
+  assert_absent "$dir/ignored-telemetry.jsonl" "unknown FM_COGNEE_TELEMETRY_FILE must be ignored"
+  assert_not_contains "$out" "safe-test-key" "output must not print env-file API key"
+  pass "FM_COGNEE_ENV_FILE ignores unknown names"
+}
+
+test_live_env_file_malformed_fails_closed_without_values() {
+  local dir envfile out code secret
+  dir="$TMP_ROOT/live-env-file-malformed"
+  mkdir -p "$dir"
+  envfile="$dir/cognee.env"
+  secret="MALFORMED_SECRET_SHOULD_NOT_PRINT"
+  {
+    printf 'COGNEE_BASE_URL=%s\n' 'https://cognee.invalid'
+    printf 'COGNEE_API_KEY=%s\n' "$secret"
+    printf '%s\n' 'this is not dotenv'
+  } > "$envfile"
+
+  set +e
+  out=$(FM_COGNEE_ENV_FILE="$envfile" "$ROOT/bin/fm-cognee-lookup.sh" --query "malformed env" 2>&1)
+  code=$?
+  set -e
+  expect_code 2 "$code" "malformed env file should fail closed"
+  assert_contains "$out" "reason=env_file_malformed" "malformed env file reason is explicit"
+  assert_contains "$out" "external_action_authorized=false" "malformed env file cannot authorize action"
+  assert_not_contains "$out" "$secret" "malformed env failure must not print secret values"
+  pass "malformed FM_COGNEE_ENV_FILE fails closed without values"
+}
+
+test_live_env_file_unreadable_fails_closed_without_values() {
+  local dir envfile out code
+  dir="$TMP_ROOT/live-env-file-unreadable"
+  mkdir -p "$dir"
+  envfile="$dir/missing.env"
+
+  set +e
+  out=$(FM_COGNEE_ENV_FILE="$envfile" "$ROOT/bin/fm-cognee-lookup.sh" --query "unreadable env" 2>&1)
+  code=$?
+  set -e
+  expect_code 2 "$code" "unreadable env file should fail closed"
+  assert_contains "$out" "reason=env_file_unreadable" "unreadable env file reason is explicit"
+  assert_contains "$out" "external_action_authorized=false" "unreadable env file cannot authorize action"
+  assert_not_contains "$out" "$envfile" "unreadable env failure should not print env-file path"
+  pass "unreadable FM_COGNEE_ENV_FILE fails closed without values"
+}
+
+test_live_env_file_missing_required_names_still_fails_closed() {
+  local dir envfile out code secret
+  dir="$TMP_ROOT/live-env-file-missing"
+  mkdir -p "$dir"
+  envfile="$dir/cognee.env"
+  secret="PARTIAL_SECRET_SHOULD_NOT_PRINT"
+  {
+    printf 'COGNEE_API_KEY=%s\n' "$secret"
+    printf 'FM_COGNEE_DATASET_ALIAS=%s\n' 'firstmate-curated-memory-0629'
+  } > "$envfile"
+
+  set +e
+  out=$(FM_COGNEE_ENV_FILE="$envfile" "$ROOT/bin/fm-cognee-lookup.sh" --query "missing required" 2>&1)
+  code=$?
+  set -e
+  expect_code 2 "$code" "env file missing required names should fail closed"
+  assert_contains "$out" "reason=missing_required_env" "missing required env is still explicit"
+  assert_contains "$out" "missing_env=COGNEE_BASE_URL" "missing required name is reported by name only"
+  assert_not_contains "$out" "$secret" "missing required env output must not print loaded secret values"
+  pass "env-file loading does not bypass required env checks"
+}
+
 write_payload_capture_curl() {
   local fakebin=$1 capture=$2 status=${3:-404}
   cat > "$fakebin/curl" <<SH
@@ -435,4 +598,9 @@ test_live_mode_fails_closed_without_dataset_selector
 test_live_payload_uses_dataset_alias_selector_without_uuid
 test_live_payload_uses_dataset_id_selector_when_uuid_is_set
 test_live_fake_search_parses_verifies_and_writes_redacted_telemetry
+test_live_env_file_loads_allowlisted_names_safely
+test_live_env_file_ignores_unknown_names
+test_live_env_file_malformed_fails_closed_without_values
+test_live_env_file_unreadable_fails_closed_without_values
+test_live_env_file_missing_required_names_still_fails_closed
 test_generic_report_seed_file_does_not_verify_by_itself
