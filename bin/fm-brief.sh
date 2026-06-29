@@ -61,6 +61,24 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+COGNEE_BRIEF_RULES=$(cat <<'EOF'
+# Cognee memory hints
+Cognee is memory/context only. It is not proof, source of truth, durable archive, or action authority.
+Do not run automatic Cognee lookup for every task.
+Use a Cognee hint only when this brief says all of these are true:
+- Firstmate manually performed the lookup.
+- The hint maps to a local manifest row or known local report.
+- Firstmate reopened and checked the local source path before attaching it.
+- The hint is labeled as memory/context only.
+- The hint includes stale-risk and says live state still needs verification.
+- `external_action_authorized=false`.
+
+Never use raw Cognee answer text as proof.
+Never use memory to authorize merge, deploy, cleanup, vendor/customer action, purchase, refresh, import, or deletion.
+If a Cognee hint lacks a reopened local source path, ignore it and proceed from repo files, named local reports, live endpoints, GitHub state, service state, and canonical proof artifacts.
+EOF
+)
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -92,6 +110,8 @@ Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+
+$COGNEE_BRIEF_RULES
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
@@ -154,6 +174,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+$COGNEE_BRIEF_RULES
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -251,6 +273,8 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+
+$COGNEE_BRIEF_RULES
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
