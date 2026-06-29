@@ -149,6 +149,9 @@ row_matches_ref() {
       [ -n "$summary_path" ] && [ "$value" = "$summary_path" ] && return 0
       ;;
     SEED_FILE)
+      # A bare "report.md" appears across many imported report rows. It is
+      # useful as hint text, but too generic to prove exact attribution.
+      [ "$value" = "report.md" ] && return 1
       [ "$value" = "$seed_name" ] && return 0
       case "$import_text" in *"SEED_FILE=$value"*|*"SEED_FILE: $value"*) return 0 ;; esac
       ;;
@@ -291,14 +294,32 @@ sanitize_ref() {
 REFS=$(mktemp "${TMPDIR:-/tmp}/fm-cognee-refs.XXXXXX")
 
 if [ -n "$ANSWER_FILE" ]; then
-  {
-    grep -Eoh 'SOURCE_ID[[:space:]]*[:=][[:space:]]*[^[:space:],;)]+' "$ANSWER_FILE" 2>/dev/null \
-      | sed -E 's/^SOURCE_ID[[:space:]]*[:=][[:space:]]*//' | sanitize_ref | awk 'NF {print "SOURCE_ID\t"$0}'
-    grep -Eoh 'SOURCE_PATH[[:space:]]*[:=][[:space:]]*[^[:space:],;)]+' "$ANSWER_FILE" 2>/dev/null \
-      | sed -E 's/^SOURCE_PATH[[:space:]]*[:=][[:space:]]*//' | sanitize_ref | awk 'NF {print "SOURCE_PATH\t"$0}'
-    grep -Eoh 'SEED_FILE[[:space:]]*[:=][[:space:]]*[^[:space:],;)]+' "$ANSWER_FILE" 2>/dev/null \
-      | sed -E 's/^SEED_FILE[[:space:]]*[:=][[:space:]]*//' | sanitize_ref | awk 'NF {print "SEED_FILE\t"$0}'
-  } | sort -u > "$REFS"
+  python3 - "$ANSWER_FILE" > "$REFS" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+
+label_re = re.compile(
+    r"\b(SOURCE_ID|SOURCE_PATH|SEED_FILE)\s*[:=]\s*[*_`\u202f\s]*"
+    r"(?:\"([^\"]*)\"|'([^']*)'|([^\s,;\]\)]+))"
+)
+
+try:
+    text = Path(sys.argv[1]).read_text(encoding="utf-8")
+except Exception:
+    raise SystemExit
+
+refs = set()
+for match in label_re.finditer(text):
+    value = next(group for group in match.groups()[1:] if group is not None).strip()
+    value = value.strip("`\"'[],;.)")
+    if value:
+        refs.add((match.group(1), value))
+
+for kind, value in sorted(refs):
+    print(f"{kind}\t{value}")
+PY
 fi
 
 if "$VALIDATE"; then

@@ -129,8 +129,8 @@ test_checksum_mismatch_fails_closed() {
   [ "$(printf '%s' "$out" | jq -r '.manifest.manifest_checksum_match')" = "false" ] || fail "checksum match must be false"
 }
 
-test_extra_source_id_fails_closed() {
-  local case_dir source manifest answer out code
+test_extra_source_id_is_warning_when_exact_path_verifies() {
+  local case_dir source manifest answer out
   case_dir="$TMP_ROOT/extra-source-id"
   mkdir -p "$case_dir"
   source="$case_dir/redacted-source.md"
@@ -145,13 +145,9 @@ SOURCE_PATH=$source
 SEED_FILE=seed/redacted-07.md
 EOF
 
-  set +e
-  out=$("$VERIFY" --manifest "$manifest" --answer "$answer")
-  code=$?
-  set -e
-  expect_code 2 "$code" "extra source id"
-  [ "$(printf '%s' "$out" | jq -r '.verification_result.status')" = "failed_closed" ] || fail "extra source id must fail closed"
-  [ "$(printf '%s' "$out" | jq -r '.verification_result.outcome')" = "failed_closed_missing_proof" ] || fail "extra source id outcome"
+  out=$("$VERIFY" --manifest "$manifest" --answer "$answer") || fail "exact path should verify despite extra generated source id"
+  [ "$(printf '%s' "$out" | jq -r '.verification_result.status')" = "verified" ] || fail "extra source id with exact path should verify"
+  [ "$(printf '%s' "$out" | jq -r '.verification_result.warnings[]' | grep -c '^extra_source_ids_ignored$')" = "1" ] || fail "extra source id should be warning-only"
 }
 
 test_raw_404_stays_durability_blocker() {
@@ -200,12 +196,37 @@ EOF
   [ "$(printf '%s' "$out" | jq -r '.verification_result.outcome')" = "failed_closed_identifier_mismatch" ] || fail "unknown well formed UUID must fail closed"
 }
 
+test_markdown_source_labels_verify_despite_unlabelled_uuid_noise() {
+  local case_dir source manifest answer out
+  case_dir="$TMP_ROOT/markdown-noise"
+  mkdir -p "$case_dir"
+  source="$case_dir/redacted-source.md"
+  manifest="$case_dir/manifest.jsonl"
+  answer="$case_dir/answer.txt"
+  printf 'Redacted report fixture.\nLocal proof line.\n' > "$source"
+  write_manifest "$manifest" "$source" "$(sha256_file "$source")"
+  cat > "$answer" <<EOF
+**SOURCE_ID:** seed-07
+**SOURCE_PATH:** "$source"
+**SEED_FILE:** "seed/redacted-07.md"
+
+Markdown evidence also mentions generated ids 923e4567-e89b-12d3-a456-426614174009 and 923e4567-e89b-12d3-a456-426614174010.
+EOF
+
+  out=$("$VERIFY" --manifest "$manifest" --answer "$answer") || fail "markdown labels with UUID noise should pass"
+  [ "$(printf '%s' "$out" | jq -r '.verification_result.status')" = "verified" ] || fail "markdown noise status should verify"
+  [ "$(printf '%s' "$out" | jq -r '.verification_result.outcome')" = "verified_local_source" ] || fail "markdown noise outcome should be local source"
+  [ "$(printf '%s' "$out" | jq -r '.source_reference.uuid_mentions | length')" = "2" ] || fail "unlabelled UUID noise should be counted"
+  [ "$(printf '%s' "$out" | jq -r '.verification_result.warnings[0]')" = "unlabelled_uuid_mentions_ignored" ] || fail "unlabelled UUID noise should be warning-only"
+}
+
 test_verified_source_requires_manifest_and_local_reopen
 test_quoted_source_path_with_spaces_verifies
 test_invalid_utf8_answer_fails_closed_without_traceback
 test_unknown_source_id_fails_closed
 test_checksum_mismatch_fails_closed
-test_extra_source_id_fails_closed
+test_extra_source_id_is_warning_when_exact_path_verifies
 test_raw_404_stays_durability_blocker
 test_malformed_uuid_is_ignored_but_unknown_well_formed_uuid_fails
+test_markdown_source_labels_verify_despite_unlabelled_uuid_noise
 pass "cognee source parser and local verification fail closed"

@@ -5,7 +5,9 @@
 # firstmate invokes it by hand. Cognee output is treated as an untrusted hint;
 # only local source files that can be opened are eligible for brief attachment.
 # Configure a read-only lookup backend with:
-#   FM_COGNEE_LOOKUP_CMD=/absolute/path/to/read-only-lookup
+#   FM_COGNEE_LOOKUP_CMD=/absolute/path/to/bin/fm-cognee-lookup.sh
+#   FM_COGNEE_MANIFEST=/absolute/path/to/manifest.tsv
+#   COGNEE_BASE_URL and COGNEE_API_KEY already exported in the process
 # The backend is executed as: "$FM_COGNEE_LOOKUP_CMD" "$query"
 set -eu
 
