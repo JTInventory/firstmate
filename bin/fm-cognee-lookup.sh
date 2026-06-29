@@ -21,6 +21,8 @@ die() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-cognee-telemetry-lib.sh"
+TELEMETRY_START_MS=$(fm_cognee_telemetry_now_ms)
 DRY_RUN=false
 QUERY=
 MANIFEST=
@@ -59,6 +61,10 @@ while [ $# -gt 0 ]; do
 done
 
 if ! "$DRY_RUN"; then
+  fm_cognee_telemetry_log \
+    cognee_lookup live blocked live_cognee_lookup_not_implemented 0 \
+    "$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")" \
+    "" "" not_attempted "" unknown_vendor_cost "" unknown_vendor_cost
   echo "label=blocked_missing_proof reason=live_cognee_lookup_not_implemented external_action_authorized=false" >&2
   exit 2
 fi
@@ -75,6 +81,10 @@ echo "cognee_answer_status=hint_only"
 echo "external_action_authorized=false"
 
 if [ -z "$MANIFEST" ] && [ -z "$ANSWER_FILE" ]; then
+  fm_cognee_telemetry_log \
+    cognee_lookup dry-run hint_only none 0 \
+    "$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")" \
+    "" "" no_manifest_or_answer_fixture 0 known_zero_local "" not_called
   echo "label=hint_only reason=no_manifest_or_answer_fixture external_action_authorized=false"
   exit 0
 fi
@@ -82,4 +92,38 @@ fi
 [ -n "$MANIFEST" ] || die "--manifest is required when --answer-file is used"
 [ -n "$ANSWER_FILE" ] || die "--answer-file is required when --manifest is used"
 
-"$SCRIPT_DIR/fm-cognee-manifest-check.sh" --manifest "$MANIFEST" --answer-file "$ANSWER_FILE"
+TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-cognee-lookup.XXXXXX")
+cleanup_lookup() { rm -f "$TMP_OUT"; }
+trap cleanup_lookup EXIT
+
+set +e
+"$SCRIPT_DIR/fm-cognee-manifest-check.sh" --manifest "$MANIFEST" --answer-file "$ANSWER_FILE" > "$TMP_OUT"
+rc=$?
+set -e
+cat "$TMP_OUT"
+
+source_outcome=$(
+  awk '
+    {
+      label = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^reason=/) { sub(/^reason=/, "", $i); print $i; exit }
+        if ($i ~ /^label=/) { label = $i; sub(/^label=/, "", label) }
+      }
+      if (label != "") { print label; exit }
+    }
+  ' "$TMP_OUT"
+)
+[ -n "$source_outcome" ] || source_outcome=manifest_check_exit_$rc
+if [ "$rc" -eq 0 ]; then
+  tel_status=verified
+  tel_error=none
+else
+  tel_status=blocked
+  tel_error=$source_outcome
+fi
+fm_cognee_telemetry_log \
+  cognee_lookup dry-run "$tel_status" "$tel_error" 0 \
+  "$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")" \
+  "" "" "$source_outcome" 0 known_zero_local "" not_called
+exit "$rc"

@@ -6,6 +6,11 @@
 # Usage: fm-cognee-verify-source.sh --manifest <manifest.jsonl> --answer <answer.txt>
 set -eu
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-cognee-telemetry-lib.sh"
+export FM_COGNEE_TELEMETRY_FILE="${FM_COGNEE_TELEMETRY_FILE:-$(fm_cognee_telemetry_default_path)}"
+export FM_COGNEE_TELEMETRY_START_MS="$(fm_cognee_telemetry_now_ms)"
+
 usage() {
   echo "usage: fm-cognee-verify-source.sh --manifest <manifest.jsonl> --answer <answer.txt>" >&2
 }
@@ -42,8 +47,10 @@ python3 - "$MANIFEST" "$ANSWER" <<'PY'
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 
@@ -111,6 +118,63 @@ def _json(status, outcome, *, row=None, parsed=None, local=None, errors=None, wa
         },
     }
     print(json.dumps(result, sort_keys=True))
+    _telemetry(result, row, local)
+
+
+def _safe_label(value, default="unknown"):
+    value = str(value or default)
+    value = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip())[:120]
+    return value or default
+
+
+def _number_or_none(value):
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def _telemetry(result, row, local):
+    telemetry_file = os.environ.get("FM_COGNEE_TELEMETRY_FILE")
+    if not telemetry_file:
+        return
+    try:
+        start_ms = int(os.environ.get("FM_COGNEE_TELEMETRY_START_MS") or 0)
+    except ValueError:
+        start_ms = 0
+    latency_ms = max(int(time.time() * 1000) - start_ms, 0) if start_ms else 0
+    try:
+        path = Path(telemetry_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = row or {}
+        local = local or {}
+        status = result.get("verification_result", {}).get("status")
+        outcome = result.get("verification_result", {}).get("outcome")
+        event = {
+            "schema_version": "cognee_telemetry.v1",
+            "ts_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "operation_name": "local_source_verify",
+            "mode": "verify",
+            "status": _safe_label(status),
+            "error_class": "none" if status == "verified" else _safe_label(outcome),
+            "retry_count": 0,
+            "latency_ms": latency_ms,
+            "imported_bytes": _number_or_none(local.get("size_bytes") or row.get("size_bytes")),
+            "imported_tokens": _number_or_none(row.get("estimated_tokens")),
+            "source_verification_outcome": _safe_label(outcome),
+            "estimated_cost_usd": 0,
+            "estimated_cost_status": "known_zero_local",
+            "vendor_estimated_cost_usd": None,
+            "vendor_cost_status": "not_called",
+            "currency": "USD",
+        }
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True) + "\n")
+    except Exception:
+        return
 
 
 def _load_manifest():
