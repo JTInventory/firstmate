@@ -15,6 +15,7 @@ usage: fm-cognee-lookup.sh [--dry-run] --query <text> [--manifest <manifest.tsv|
 Live mode uses only already-exported environment variables:
   COGNEE_BASE_URL
   COGNEE_API_KEY
+  COGNEE_DATASET_ID or FM_COGNEE_DATASET_ALIAS
   FM_COGNEE_MANIFEST or --manifest
 
 It can be used through:
@@ -44,13 +45,24 @@ safe_label() {
 }
 
 dataset_alias() {
-  printf '%s' "${FM_COGNEE_DATASET_ALIAS:-${COGNEE_DATASET_ALIAS:-firstmate-curated-memory-0629}}"
+  printf '%s' "${FM_COGNEE_DATASET_ALIAS:-unknown}"
+}
+
+is_uuid() {
+  printf '%s' "${1:-}" | grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
 }
 
 dataset_id_hash() {
-  if [ -n "${COGNEE_DATASET_ID:-}" ]; then
+  if [ -n "${COGNEE_DATASET_ID:-}" ] && is_uuid "$COGNEE_DATASET_ID"; then
     printf 'sha256:%s' "$(printf '%s' "$COGNEE_DATASET_ID" | sha256sum | awk '{print $1}')"
   fi
+}
+
+has_live_dataset_selector() {
+  if [ -n "${COGNEE_DATASET_ID:-}" ] && is_uuid "$COGNEE_DATASET_ID"; then
+    return 0
+  fi
+  [ -n "${FM_COGNEE_DATASET_ALIAS:-}" ]
 }
 
 live_telemetry_log() {
@@ -156,10 +168,15 @@ json_payload() {
   FM_COGNEE_QUERY=$QUERY \
   FM_COGNEE_SEARCH_TYPE=${FM_COGNEE_SEARCH_TYPE:-RAG_COMPLETION} \
   FM_COGNEE_TOP_K=${FM_COGNEE_TOP_K:-8} \
+  COGNEE_DATASET_ID=${COGNEE_DATASET_ID:-} \
+  FM_COGNEE_DATASET_ALIAS=${FM_COGNEE_DATASET_ALIAS:-} \
   python3 - "$output" <<'PY'
 import json
 import os
+import re
 import sys
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 
 try:
     top_k = int(os.environ.get("FM_COGNEE_TOP_K") or 8)
@@ -171,6 +188,12 @@ payload = {
     "topK": top_k,
     "includeReferences": True,
 }
+dataset_id = os.environ.get("COGNEE_DATASET_ID") or ""
+dataset_alias = os.environ.get("FM_COGNEE_DATASET_ALIAS") or ""
+if UUID_RE.match(dataset_id):
+    payload["datasetIds"] = [dataset_id]
+elif dataset_alias:
+    payload["datasets"] = [dataset_alias]
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
@@ -304,6 +327,13 @@ if ! "$DRY_RUN"; then
     exit 2
   fi
   [ -f "$MANIFEST" ] || die "manifest not found: $MANIFEST"
+
+  if ! has_live_dataset_selector; then
+    live_telemetry_log blocked missing_dataset_selector "" false 0 \
+      "$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")" 0 missing_dataset_selector
+    echo "label=blocked_missing_proof reason=missing_dataset_selector external_action_authorized=false" >&2
+    exit 2
+  fi
 
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-cognee-live.XXXXXX")
   cleanup_live() { rm -rf "$TMP_DIR"; }

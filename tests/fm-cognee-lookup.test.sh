@@ -71,6 +71,7 @@ SH
 
   set +e
   out=$(PATH="$fakebin:$PATH" COGNEE_BASE_URL="https://cognee.invalid" COGNEE_API_KEY="$secret" \
+    FM_COGNEE_DATASET_ALIAS="firstmate-curated-memory-0629" \
     FM_COGNEE_TELEMETRY_FILE="$telemetry" "$ROOT/bin/fm-cognee-lookup.sh" \
     --query "which source matters" --manifest "$manifest")
   code=$?
@@ -90,6 +91,146 @@ SH
   assert_contains "$(cat "$telemetry")" '"source_verification_outcome": "verified_local_source"' "telemetry records verification outcome"
   assert_contains "$(cat "$telemetry")" '"external_action_authorized": false' "telemetry never authorizes action"
   pass "fake live search is parsed, verified locally, and redacted in telemetry"
+}
+
+write_payload_capture_curl() {
+  local fakebin=$1 capture=$2 status=${3:-404}
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+out=
+payload=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) out=\$2; shift 2 ;;
+    --data-binary) payload=\${2#@}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "\$out" ] && printf '{}\n' > "\$out"
+[ -n "\$payload" ] && cp "\$payload" "$capture"
+printf '%s' "$status"
+SH
+  chmod +x "$fakebin/curl"
+}
+
+assert_json_field() {
+  local file=$1 expr=$2 expected=$3 msg=$4
+  local actual
+  actual=$(python3 - "$file" "$expr" <<'PY'
+import json
+import sys
+
+path, expr = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as handle:
+    value = json.load(handle)
+for part in expr.split("."):
+    value = value[part]
+if isinstance(value, list):
+    print(",".join(str(item) for item in value))
+else:
+    print(value)
+PY
+)
+  [ "$actual" = "$expected" ] || fail "$msg: expected '$expected', got '$actual'"
+}
+
+assert_json_missing_field() {
+  local file=$1 expr=$2 msg=$3
+  python3 - "$file" "$expr" <<'PY' || return 0
+import json
+import sys
+
+path, expr = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as handle:
+    value = json.load(handle)
+for part in expr.split("."):
+    if not isinstance(value, dict) or part not in value:
+        raise SystemExit(1)
+    value = value[part]
+raise SystemExit(0)
+PY
+  fail "$msg"
+}
+
+test_live_payload_uses_dataset_id_selector_when_uuid_is_set() {
+  local dir manifest fakebin payload out code telemetry uuid hash
+  dir="$TMP_ROOT/live-dataset-id"
+  mkdir -p "$dir"
+  manifest="$dir/manifest.tsv"
+  payload="$dir/payload.json"
+  telemetry="$dir/telemetry.jsonl"
+  fakebin=$(fm_fakebin "$dir")
+  uuid="123e4567-e89b-12d3-a456-426614174000"
+  hash=$(printf '%s' "$uuid" | sha256sum | awk '{print $1}')
+  : > "$manifest"
+  write_payload_capture_curl "$fakebin" "$payload" 404
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" COGNEE_BASE_URL="https://cognee.invalid" COGNEE_API_KEY="secret-value" \
+    COGNEE_DATASET_ID="$uuid" FM_COGNEE_DATASET_ALIAS="alias-should-not-win" \
+    FM_COGNEE_TELEMETRY_FILE="$telemetry" "$ROOT/bin/fm-cognee-lookup.sh" \
+    --query "selector check" --manifest "$manifest" 2>&1)
+  code=$?
+  set -e
+  expect_code 2 "$code" "fake HTTP failure should stop after payload capture"
+  assert_json_field "$payload" "datasetIds" "$uuid" "UUID dataset id should be sent as datasetIds"
+  assert_json_missing_field "$payload" "datasets" "dataset alias should not be sent when UUID dataset id is available"
+  assert_not_contains "$out" "$uuid" "raw dataset id must not be printed"
+  assert_present "$telemetry" "HTTP failure should write telemetry"
+  assert_not_contains "$(cat "$telemetry")" "$uuid" "telemetry must not contain raw dataset id"
+  assert_contains "$(cat "$telemetry")" "\"dataset_id_hash\": \"sha256:$hash\"" "telemetry should keep only dataset id hash"
+  pass "live payload uses datasetIds when COGNEE_DATASET_ID is a UUID"
+}
+
+test_live_payload_uses_dataset_alias_selector_without_uuid() {
+  local dir manifest fakebin payload out code alias
+  dir="$TMP_ROOT/live-dataset-alias"
+  mkdir -p "$dir"
+  manifest="$dir/manifest.tsv"
+  payload="$dir/payload.json"
+  fakebin=$(fm_fakebin "$dir")
+  alias="firstmate-curated-memory-0629"
+  : > "$manifest"
+  write_payload_capture_curl "$fakebin" "$payload" 404
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" COGNEE_BASE_URL="https://cognee.invalid" COGNEE_API_KEY="secret-value" \
+    COGNEE_DATASET_ID="not-a-uuid" FM_COGNEE_DATASET_ALIAS="$alias" \
+    "$ROOT/bin/fm-cognee-lookup.sh" --query "selector check" --manifest "$manifest" 2>&1)
+  code=$?
+  set -e
+  expect_code 2 "$code" "fake HTTP failure should stop after alias payload capture"
+  assert_json_field "$payload" "datasets" "$alias" "dataset alias should be sent as datasets"
+  assert_json_missing_field "$payload" "datasetIds" "invalid dataset id should not be sent"
+  assert_not_contains "$out" "not-a-uuid" "invalid dataset id should not be printed"
+  pass "live payload uses datasets when only FM_COGNEE_DATASET_ALIAS is usable"
+}
+
+test_live_mode_fails_closed_without_dataset_selector() {
+  local dir manifest fakebin payload out code telemetry
+  dir="$TMP_ROOT/live-no-selector"
+  mkdir -p "$dir"
+  manifest="$dir/manifest.tsv"
+  payload="$dir/payload.json"
+  telemetry="$dir/telemetry.jsonl"
+  fakebin=$(fm_fakebin "$dir")
+  : > "$manifest"
+  write_payload_capture_curl "$fakebin" "$payload" 200
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" env -u COGNEE_DATASET_ID -u FM_COGNEE_DATASET_ALIAS \
+    COGNEE_BASE_URL="https://cognee.invalid" COGNEE_API_KEY="secret-value" \
+    FM_COGNEE_TELEMETRY_FILE="$telemetry" "$ROOT/bin/fm-cognee-lookup.sh" \
+    --query "selector check" --manifest "$manifest" 2>&1)
+  code=$?
+  set -e
+  expect_code 2 "$code" "live lookup without dataset selector should fail closed"
+  assert_contains "$out" "reason=missing_dataset_selector" "missing selector reason is explicit"
+  assert_contains "$out" "external_action_authorized=false" "missing selector cannot authorize action"
+  assert_absent "$payload" "curl must not run without a dataset selector"
+  assert_present "$telemetry" "missing selector should write telemetry"
+  assert_contains "$(cat "$telemetry")" '"error_class": "missing_dataset_selector"' "telemetry records missing selector"
+  pass "live mode fails closed before HTTP when no dataset selector is available"
 }
 
 test_dry_run_blocks_live_mode() {
@@ -288,5 +429,8 @@ test_redaction_not_checked_blocks_proof
 test_secret_risk_path_blocks_without_echoing_path
 test_high_stale_risk_warns_after_local_verification
 test_live_missing_env_fails_closed_without_secret_values
+test_live_mode_fails_closed_without_dataset_selector
+test_live_payload_uses_dataset_alias_selector_without_uuid
+test_live_payload_uses_dataset_id_selector_when_uuid_is_set
 test_live_fake_search_parses_verifies_and_writes_redacted_telemetry
 test_generic_report_seed_file_does_not_verify_by_itself
