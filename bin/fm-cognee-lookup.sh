@@ -330,6 +330,17 @@ fi
 
 if ! "$DRY_RUN"; then
   [ -n "$QUERY" ] || die "--query is required in live mode"
+  if ! fm_cognee_load_env_file; then
+    env_error=${FM_COGNEE_ENV_FILE_LOAD_ERROR:-env_file_malformed}
+    live_telemetry_log blocked "$env_error" "" false 0 \
+      "$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")" 0 "$env_error"
+    if [ -n "${FM_COGNEE_ENV_FILE_LOAD_LINE:-}" ]; then
+      echo "label=blocked_missing_proof reason=$env_error line=$FM_COGNEE_ENV_FILE_LOAD_LINE external_action_authorized=false" >&2
+    else
+      echo "label=blocked_missing_proof reason=$env_error external_action_authorized=false" >&2
+    fi
+    exit 2
+  fi
   MANIFEST=${MANIFEST:-${FM_COGNEE_MANIFEST:-}}
 
   missing_env=

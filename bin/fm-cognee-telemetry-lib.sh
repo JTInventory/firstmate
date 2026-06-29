@@ -5,6 +5,94 @@
 # helper never receives prompt text, answer bodies, source bodies, auth headers,
 # API keys, cookies, signed URLs, bearer tokens, or secret values.
 
+fm_cognee_env_trim() {
+  local value=$1
+  value=${value#"${value%%[![:space:]]*}"}
+  value=${value%"${value##*[![:space:]]}"}
+  printf '%s' "$value"
+}
+
+fm_cognee_env_is_allowlisted() {
+  case "$1" in
+    COGNEE_BASE_URL|COGNEE_API_KEY|COGNEE_DATASET_ID|FM_COGNEE_DATASET_ALIAS|FM_COGNEE_MANIFEST)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+fm_cognee_load_env_file() {
+  local env_file=${FM_COGNEE_ENV_FILE:-}
+  local line line_no key value first last
+
+  FM_COGNEE_ENV_FILE_LOAD_ERROR=
+  FM_COGNEE_ENV_FILE_LOAD_LINE=
+  FM_COGNEE_ENV_FILE_LOAD_KEY=
+
+  [ -n "$env_file" ] || return 0
+  if [ ! -r "$env_file" ] || [ -d "$env_file" ]; then
+    FM_COGNEE_ENV_FILE_LOAD_ERROR=env_file_unreadable
+    return 1
+  fi
+
+  line_no=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    line=${line%$'\r'}
+    line=$(fm_cognee_env_trim "$line")
+    [ -z "$line" ] && continue
+    case "$line" in \#*) continue ;; esac
+    case "$line" in
+      export[[:space:]]*)
+        line=$(fm_cognee_env_trim "${line#export}")
+        ;;
+    esac
+    case "$line" in
+      *=*) ;;
+      *)
+        FM_COGNEE_ENV_FILE_LOAD_ERROR=env_file_malformed
+        FM_COGNEE_ENV_FILE_LOAD_LINE=$line_no
+        return 1
+        ;;
+    esac
+
+    key=$(fm_cognee_env_trim "${line%%=*}")
+    value=${line#*=}
+    value=$(fm_cognee_env_trim "$value")
+    case "$key" in
+      ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*)
+        FM_COGNEE_ENV_FILE_LOAD_ERROR=env_file_malformed
+        FM_COGNEE_ENV_FILE_LOAD_LINE=$line_no
+        return 1
+        ;;
+    esac
+
+    fm_cognee_env_is_allowlisted "$key" || continue
+    if [ -n "$value" ]; then
+      first=${value%"${value#?}"}
+      last=${value#"${value%?}"}
+      if [ "$first" = "'" ] || [ "$first" = '"' ]; then
+        if [ "$last" != "$first" ] || [ "${#value}" -lt 2 ]; then
+          FM_COGNEE_ENV_FILE_LOAD_ERROR=env_file_malformed
+          FM_COGNEE_ENV_FILE_LOAD_LINE=$line_no
+          FM_COGNEE_ENV_FILE_LOAD_KEY=$key
+          return 1
+        fi
+        value=${value#?}
+        value=${value%?}
+      fi
+    fi
+
+    if [ -z "${!key+x}" ] || [ -z "${!key}" ]; then
+      printf -v "$key" '%s' "$value"
+      export "$key"
+    fi
+  done < "$env_file"
+  return 0
+}
+
 fm_cognee_telemetry_now_ms() {
   python3 - <<'PY'
 import time
