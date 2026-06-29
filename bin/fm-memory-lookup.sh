@@ -11,6 +11,8 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+. "$SCRIPT_DIR/fm-cognee-telemetry-lib.sh"
+TELEMETRY_START_MS=$(fm_cognee_telemetry_now_ms)
 
 APPEND_BRIEF=
 FROM_FILE=
@@ -158,7 +160,10 @@ WARNINGS="$TMP_DIR/warnings.txt"
 : > "$WARNINGS"
 
 UNAVAILABLE=
+BACKEND_ATTEMPTED=false
+LOOKUP_MODE=unavailable
 if [ -n "$FROM_FILE" ]; then
+  LOOKUP_MODE=from-file
   if [ -r "$FROM_FILE" ]; then
     cat "$FROM_FILE" > "$RAW"
   else
@@ -166,23 +171,30 @@ if [ -n "$FROM_FILE" ]; then
     : > "$RAW"
   fi
 elif [ -z "${FM_COGNEE_LOOKUP_CMD:-}" ]; then
+  LOOKUP_MODE=unavailable
   UNAVAILABLE="FM_COGNEE_LOOKUP_CMD is not set"
   : > "$RAW"
 else
   case "$FM_COGNEE_LOOKUP_CMD" in
     *[[:space:]]*)
+      LOOKUP_MODE=backend_config_invalid
       UNAVAILABLE="FM_COGNEE_LOOKUP_CMD must be an executable path, not a shell command"
       : > "$RAW"
       ;;
     *)
       if [ ! -x "$FM_COGNEE_LOOKUP_CMD" ]; then
+        LOOKUP_MODE=backend_config_invalid
         UNAVAILABLE="lookup command is not executable: $FM_COGNEE_LOOKUP_CMD"
         : > "$RAW"
-      elif "$FM_COGNEE_LOOKUP_CMD" "$QUERY" > "$RAW" 2> "$ERR"; then
-        :
       else
-        UNAVAILABLE="lookup command failed; dispatch continues without memory context"
-        : > "$RAW"
+        LOOKUP_MODE=backend
+        BACKEND_ATTEMPTED=true
+        if "$FM_COGNEE_LOOKUP_CMD" "$QUERY" > "$RAW" 2> "$ERR"; then
+          :
+        else
+          UNAVAILABLE="lookup command failed; dispatch continues without memory context"
+          : > "$RAW"
+        fi
       fi
       ;;
   esac
@@ -230,6 +242,32 @@ else
 fi
 
 append_brief_section "$APPEND_BRIEF" "$UNAVAILABLE" "$VERIFIED" "$WARNINGS"
+
+if [ -n "$UNAVAILABLE" ]; then
+  tel_status=unavailable
+  tel_error=memory_unavailable
+  tel_source=unavailable
+elif [ -s "$VERIFIED" ]; then
+  tel_status=success
+  tel_error=none
+  tel_source=verified_local_source
+else
+  tel_status=success
+  tel_error=none
+  tel_source=unverified_hint
+fi
+
+if "$BACKEND_ATTEMPTED"; then
+  fm_cognee_telemetry_log \
+    memory_lookup "$LOOKUP_MODE" "$tel_status" "$tel_error" 0 \
+    "$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")" \
+    "" "" "$tel_source" "" unknown_vendor_cost "" unknown_vendor_cost
+else
+  fm_cognee_telemetry_log \
+    memory_lookup "$LOOKUP_MODE" "$tel_status" "$tel_error" 0 \
+    "$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")" \
+    "" "" "$tel_source" 0 known_zero_local "" not_called
+fi
 
 # Keep this command fail-closed for authority but non-blocking for dispatch:
 # operational failures are surfaced as warnings and exit 0.
