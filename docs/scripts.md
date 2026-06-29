@@ -23,7 +23,7 @@ Each file also starts with a short header comment.
 | `fm-cognee-manifest-check.sh` | Validate TSV Cognee manifest rows and verify `SOURCE_ID`, `SOURCE_PATH`, or `SEED_FILE` answer references against reopened local files |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker and detector sourced by `fm-send.sh`, `fm-brief.sh`, and tests                 |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
-| `fm-watch-session.sh`    | Home-scoped durable active watcher runner with `--start`, `--status`, `--stop`, `--foreground`, and `--tmux` helpers |
+| `fm-watch-session.sh`    | Durable home-scoped tmux runner that loops through `fm-watch-arm.sh` for harness lanes without reliable tracked background tasks |
 | `fm-watch.sh`            | Singleton-safe always-on watcher; absorbs benign wakes in bash, queues and exits only for actionable wakes, and reverts to daemon-owned one-shot behavior while `state/.afk` exists |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, uses the shared wake classifier, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
 | `fm-crew-state.sh`       | Print one stable current-state line for a crew by reconciling its matching no-mistakes run-step, even when the pane has closed, with pane and status-log fallback |

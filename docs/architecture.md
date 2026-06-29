@@ -127,5 +127,5 @@ Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## Development notes
 
-The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, a self-verifying tracked-child arm wrapper, and a home-scoped durable active-mode session runner.
+The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion that requires both a live lock and fresh beacon, a self-verifying tracked-child arm wrapper, and a home-scoped tmux session runner for harnesses without durable background tasks.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
