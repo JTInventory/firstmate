@@ -90,6 +90,8 @@ SH
   assert_contains "$(cat "$telemetry")" '"parsed_source_count": 2' "telemetry records parsed source count"
   assert_contains "$(cat "$telemetry")" '"source_verification_outcome": "verified_local_source"' "telemetry records verification outcome"
   assert_contains "$(cat "$telemetry")" '"external_action_authorized": false' "telemetry never authorizes action"
+  assert_contains "$(cat "$telemetry")" '"answer_body_logged": false' "search telemetry never logs answer bodies"
+  assert_contains "$(cat "$telemetry")" '"confidence": "unknown"' "search telemetry keeps missing vendor cost unknown"
   pass "fake live search is parsed, verified locally, and redacted in telemetry"
 }
 

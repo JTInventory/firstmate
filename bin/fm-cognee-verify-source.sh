@@ -154,23 +154,66 @@ def _telemetry(result, row, local):
         local = local or {}
         status = result.get("verification_result", {}).get("status")
         outcome = result.get("verification_result", {}).get("outcome")
+        imported_bytes = _number_or_none(local.get("size_bytes") or row.get("size_bytes"))
+        imported_tokens = _number_or_none(row.get("estimated_tokens"))
         event = {
-            "schema_version": "cognee_telemetry.v1",
+            "schema_version": "cognee_telemetry.v2",
             "ts_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "event_type": "source_verification",
             "operation_name": "local_source_verify",
             "mode": "verify",
             "status": _safe_label(status),
             "error_class": "none" if status == "verified" else _safe_label(outcome),
             "retry_count": 0,
             "latency_ms": latency_ms,
-            "imported_bytes": _number_or_none(local.get("size_bytes") or row.get("size_bytes")),
-            "imported_tokens": _number_or_none(row.get("estimated_tokens")),
+            "imported_bytes": imported_bytes,
+            "imported_tokens": imported_tokens,
             "source_verification_outcome": _safe_label(outcome),
             "estimated_cost_usd": 0,
             "estimated_cost_status": "known_zero_local",
             "vendor_estimated_cost_usd": None,
             "vendor_cost_status": "not_called",
             "currency": "USD",
+            "operation": {
+                "operation_name": "local_source_verify",
+                "mode": "verify",
+                "mutates_remote": False,
+            },
+            "status_detail": {
+                "status": _safe_label(status),
+                "success": status == "verified",
+                "error_class": "none" if status == "verified" else _safe_label(outcome),
+            },
+            "attempt": {
+                "retry_count": 0,
+                "attempt_number": 1,
+                "max_attempts": 1,
+                "is_retry": False,
+                "retry_reason": "none",
+            },
+            "latency": {
+                "duration_ms": latency_ms,
+                "timeout_ms": None,
+            },
+            "source_verification": {
+                "verification_status": _safe_label(outcome),
+                "verification_required": True,
+            },
+            "cost_estimate": {
+                "estimated_cost_usd": 0,
+                "currency": "USD",
+                "confidence": "known",
+                "estimate_source": "known_zero_local",
+            },
+            "usage": {
+                "imported_bytes": imported_bytes,
+                "imported_tokens": imported_tokens,
+            },
+            "vendor_usage_present": False,
+            "answer_body_logged": False,
+            "answer_body_redacted": True,
+            "response_content_redacted": True,
+            "external_action_authorized": False,
         }
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")

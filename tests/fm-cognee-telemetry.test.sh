@@ -84,6 +84,8 @@ test_lookup_telemetry_redacts_query_answer_and_secret_values() {
   [ "$(json_field "$telemetry" mode)" = "dry-run" ] || fail "mode should be logged"
   [ "$(json_field "$telemetry" retry_count)" = "0" ] || fail "retry count should default to zero"
   [ "$(json_field "$telemetry" source_verification_outcome)" = "verified_local_source" ] || fail "source verification outcome should be logged"
+  [ "$(json_field "$telemetry" external_action_authorized)" = "false" ] || fail "telemetry must never authorize external action"
+  [ "$(json_field "$telemetry" answer_body_logged)" = "false" ] || fail "telemetry must mark answer bodies unlogged"
   pass "cognee lookup telemetry redacts raw text and records safe fields"
 }
 
@@ -107,7 +109,36 @@ SH
   assert_contains "$out" "memory hint:" "memory output should still render"
   [ "$(json_field "$telemetry" estimated_cost_usd)" = "null" ] || fail "vendor cost should not silently be zero"
   [ "$(json_field "$telemetry" estimated_cost_status)" = "unknown_vendor_cost" ] || fail "unknown vendor cost should be explicit"
+  [ "$(json_field "$telemetry" cost_estimate.confidence)" = "unknown" ] || fail "unknown vendor cost confidence should be explicit"
+  [ "$(json_field "$telemetry" cost_estimate.estimated_cost_usd)" = "null" ] || fail "unknown vendor cost must remain null"
   pass "unknown Cognee vendor cost is explicit"
+}
+
+test_batch_api_attempt_telemetry_is_safe_and_unknown_cost() {
+  local dir telemetry
+  dir="$TMP_ROOT/batch-api-attempt"
+  mkdir -p "$dir"
+  telemetry="$dir/telemetry.jsonl"
+
+  # shellcheck source=bin/fm-cognee-telemetry-lib.sh
+  . "$ROOT/bin/fm-cognee-telemetry-lib.sh"
+  FM_COGNEE_TELEMETRY_FILE="$telemetry" fm_cognee_telemetry_log_api_attempt \
+    search POST /api/v1/search false timeout network_or_timeout 0 true \
+    2 3 true timeout_retry 30039 30000 pending true 0
+
+  assert_present "$telemetry" "batch API attempt should write telemetry"
+  [ "$(json_field "$telemetry" event_type)" = "api_attempt" ] || fail "event type should be api_attempt"
+  [ "$(json_field "$telemetry" operation.operation_name)" = "search" ] || fail "operation name should be normalized"
+  [ "$(json_field "$telemetry" status.http_status)" = "0" ] || fail "HTTP 0 transport failure should be preserved"
+  [ "$(json_field "$telemetry" attempt.is_retry)" = "true" ] || fail "retry flag should be normalized"
+  [ "$(json_field "$telemetry" latency.timeout_ms)" = "30000" ] || fail "timeout budget should be logged"
+  [ "$(json_field "$telemetry" source_verification.verification_status)" = "pending" ] || fail "source verification status should be normalized"
+  [ "$(json_field "$telemetry" external_action_authorized)" = "false" ] || fail "batch attempts must never authorize action"
+  [ "$(json_field "$telemetry" answer_body_logged)" = "false" ] || fail "batch attempts must not log answer bodies"
+  [ "$(json_field "$telemetry" cost_estimate.confidence)" = "unknown" ] || fail "unknown cost should be explicit"
+  [ "$(json_field "$telemetry" cost_estimate.estimated_cost_usd)" = "null" ] || fail "unknown cost must not be recorded as zero"
+  assert_not_contains "$(cat "$telemetry")" "SECRET_ANSWER_BODY" "batch telemetry must not contain answer bodies"
+  pass "batch API attempt telemetry is safe and keeps unknown cost unknown"
 }
 
 test_local_source_verification_telemetry_cost_is_zero() {
@@ -172,6 +203,7 @@ test_telemetry_write_failure_does_not_block_lookup() {
 
 test_lookup_telemetry_redacts_query_answer_and_secret_values
 test_unknown_vendor_cost_is_explicit_for_backend_lookup
+test_batch_api_attempt_telemetry_is_safe_and_unknown_cost
 test_local_source_verification_telemetry_cost_is_zero
 test_raw_404_manifest_check_is_durability_failure_not_proof
 test_telemetry_write_failure_does_not_block_lookup
