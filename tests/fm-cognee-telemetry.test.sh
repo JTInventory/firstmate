@@ -114,29 +114,72 @@ SH
   pass "unknown Cognee vendor cost is explicit"
 }
 
+test_local_correlation_id_helpers_are_safe() {
+  local id hash empty_hash
+  # shellcheck source=bin/fm-cognee-telemetry-lib.sh
+  . "$ROOT/bin/fm-cognee-telemetry-lib.sh"
+
+  id=$(fm_cognee_new_id 'cognee req unsafe/value')
+  case "$id" in
+    cognee_req_unsafe_value-????????T??????Z-*) : ;;
+    *) fail "generated id should use a safe local label and UTC timestamp: $id" ;;
+  esac
+
+  hash=$(fm_cognee_hash_id "vendor-session-secret")
+  case "$hash" in
+    sha256:????????????????????????????????????????????????????????????????) : ;;
+    *) fail "hash helper should return a sha256 label" ;;
+  esac
+  empty_hash=$(fm_cognee_hash_id "")
+  [ -z "$empty_hash" ] || fail "empty raw ids should not produce hashes"
+  pass "local Cognee correlation id helpers are safe"
+}
+
 test_batch_api_attempt_telemetry_is_safe_and_unknown_cost() {
-  local dir telemetry
+  local dir telemetry run_id request_id logical_search_id
   dir="$TMP_ROOT/batch-api-attempt"
   mkdir -p "$dir"
   telemetry="$dir/telemetry.jsonl"
+  run_id="cognee-run-test"
+  request_id="cognee-req-test"
+  logical_search_id="cognee-search-test"
 
   # shellcheck source=bin/fm-cognee-telemetry-lib.sh
   . "$ROOT/bin/fm-cognee-telemetry-lib.sh"
   FM_COGNEE_TELEMETRY_FILE="$telemetry" fm_cognee_telemetry_log_api_attempt \
     search POST /api/v1/search false timeout network_or_timeout 0 true \
-    2 3 true timeout_retry 30039 30000 pending true 0
+    2 3 true timeout_retry 30039 30000 pending true 0 \
+    "" unknown missing_vendor_metadata false "$run_id" "$request_id" "$logical_search_id" \
+    firstmate-curated-memory-0629 "" RAG_COMPLETION 8 true 77 123 0 false
 
   assert_present "$telemetry" "batch API attempt should write telemetry"
   [ "$(json_field "$telemetry" event_type)" = "api_attempt" ] || fail "event type should be api_attempt"
+  [ "$(json_field "$telemetry" run_id)" = "$run_id" ] || fail "run id should be logged"
+  [ "$(json_field "$telemetry" request_id)" = "$request_id" ] || fail "request id should be logged"
+  [ "$(json_field "$telemetry" logical_search_id)" = "$logical_search_id" ] || fail "logical search id should be logged"
+  [ "$(json_field "$telemetry" correlation.wrapper_run_id)" = "$run_id" ] || fail "nested run id should match"
+  [ "$(json_field "$telemetry" correlation.wrapper_request_id)" = "$request_id" ] || fail "nested request id should match"
+  [ "$(json_field "$telemetry" correlation.logical_search_id)" = "$logical_search_id" ] || fail "nested logical search id should match"
   [ "$(json_field "$telemetry" operation.operation_name)" = "search" ] || fail "operation name should be normalized"
+  [ "$(json_field "$telemetry" operation.top_k)" = "8" ] || fail "top_k should be normalized"
+  [ "$(json_field "$telemetry" operation.include_references)" = "true" ] || fail "include_references should be normalized"
   [ "$(json_field "$telemetry" status.http_status)" = "0" ] || fail "HTTP 0 transport failure should be preserved"
   [ "$(json_field "$telemetry" attempt.is_retry)" = "true" ] || fail "retry flag should be normalized"
+  [ "$(json_field "$telemetry" attempt.final_attempt)" = "false" ] || fail "final attempt flag should be normalized"
   [ "$(json_field "$telemetry" latency.timeout_ms)" = "30000" ] || fail "timeout budget should be logged"
+  [ "$(json_field "$telemetry" sizes.request_body_bytes)" = "77" ] || fail "request bytes should be logged"
+  [ "$(json_field "$telemetry" sizes.response_body_bytes)" = "123" ] || fail "response bytes should be logged"
   [ "$(json_field "$telemetry" source_verification.verification_status)" = "pending" ] || fail "source verification status should be normalized"
   [ "$(json_field "$telemetry" external_action_authorized)" = "false" ] || fail "batch attempts must never authorize action"
   [ "$(json_field "$telemetry" answer_body_logged)" = "false" ] || fail "batch attempts must not log answer bodies"
+  [ "$(json_field "$telemetry" results.answer_body_logged)" = "false" ] || fail "nested results must mark answer bodies unlogged"
+  [ "$(json_field "$telemetry" privacy.answer_body_logged)" = "false" ] || fail "nested privacy must mark answer bodies unlogged"
   [ "$(json_field "$telemetry" cost_estimate.confidence)" = "unknown" ] || fail "unknown cost should be explicit"
   [ "$(json_field "$telemetry" cost_estimate.estimated_cost_usd)" = "null" ] || fail "unknown cost must not be recorded as zero"
+  [ "$(json_field "$telemetry" cost_estimate.estimate_source)" = "missing_vendor_metadata" ] || fail "missing vendor metadata should be explicit"
+  [ "$(json_field "$telemetry" vendor_usage.vendor_usage_present)" = "false" ] || fail "nested vendor usage should be absent"
+  [ "$(json_field "$telemetry" vendor_usage.cost_usd)" = "null" ] || fail "unknown vendor cost must stay null"
+  [ "$(json_field "$telemetry" vendor_usage.input_tokens)" = "null" ] || fail "unknown token usage must stay null"
   assert_not_contains "$(cat "$telemetry")" "SECRET_ANSWER_BODY" "batch telemetry must not contain answer bodies"
   pass "batch API attempt telemetry is safe and keeps unknown cost unknown"
 }
@@ -203,6 +246,7 @@ test_telemetry_write_failure_does_not_block_lookup() {
 
 test_lookup_telemetry_redacts_query_answer_and_secret_values
 test_unknown_vendor_cost_is_explicit_for_backend_lookup
+test_local_correlation_id_helpers_are_safe
 test_batch_api_attempt_telemetry_is_safe_and_unknown_cost
 test_local_source_verification_telemetry_cost_is_zero
 test_raw_404_manifest_check_is_durability_failure_not_proof

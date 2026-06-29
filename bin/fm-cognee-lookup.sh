@@ -34,6 +34,8 @@ die() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-cognee-telemetry-lib.sh"
 TELEMETRY_START_MS=$(fm_cognee_telemetry_now_ms)
+FM_COGNEE_RUN_ID=$(fm_cognee_new_id cognee-run)
+FM_COGNEE_LOGICAL_SEARCH_ID=$(fm_cognee_new_id cognee-search)
 DRY_RUN=false
 QUERY=
 MANIFEST=
@@ -67,122 +69,32 @@ has_live_dataset_selector() {
 
 live_telemetry_log() {
   local status=$1 error_class=$2 http_status=$3 retryable=$4 retry_count=$5 latency_ms=$6 parsed_source_count=$7 verification_outcome=$8
-  local telemetry_file dataset_alias_value dataset_id_hash_value
-  telemetry_file=${FM_COGNEE_TELEMETRY_FILE:-$(fm_cognee_telemetry_default_path)}
+  local request_id=${9:-}
+  local attempt_number=${10:-}
+  local final_attempt=${11:-true}
+  local request_body_bytes=${12:-}
+  local response_body_bytes=${13:-}
+  local dataset_alias_value dataset_id_hash_value is_retry retry_reason top_k
+  [ -n "$request_id" ] || request_id=$(fm_cognee_new_id cognee-req)
+  [ -n "$attempt_number" ] || attempt_number=$((retry_count + 1))
+  if [ "$attempt_number" -gt 1 ] 2>/dev/null; then
+    is_retry=true
+    retry_reason=retryable_http_or_transport
+  else
+    is_retry=false
+    retry_reason=none
+  fi
   dataset_alias_value=$(dataset_alias)
   dataset_id_hash_value=$(dataset_id_hash)
-  (
-    set +e
-    mkdir -p "$(dirname "$telemetry_file")" >/dev/null 2>&1 || exit 0
-    FM_COGNEE_LIVE_TELEMETRY_FILE=$telemetry_file \
-    FM_COGNEE_LIVE_STATUS=$(safe_label "$status") \
-    FM_COGNEE_LIVE_ERROR=$(safe_label "$error_class") \
-    FM_COGNEE_LIVE_HTTP_STATUS=$http_status \
-    FM_COGNEE_LIVE_RETRYABLE=$retryable \
-    FM_COGNEE_LIVE_RETRY_COUNT=$retry_count \
-    FM_COGNEE_LIVE_LATENCY_MS=$latency_ms \
-    FM_COGNEE_LIVE_PARSED_SOURCE_COUNT=$parsed_source_count \
-    FM_COGNEE_LIVE_VERIFICATION=$(safe_label "$verification_outcome") \
-    FM_COGNEE_LIVE_DATASET_ALIAS=$(safe_label "$dataset_alias_value") \
-    FM_COGNEE_LIVE_DATASET_ID_HASH=$dataset_id_hash_value \
-    FM_COGNEE_LIVE_SEARCH_TYPE=$(safe_label "${FM_COGNEE_SEARCH_TYPE:-RAG_COMPLETION}") \
-    FM_COGNEE_LIVE_TOP_K=${FM_COGNEE_TOP_K:-8} \
-    FM_COGNEE_LIVE_MAX_ATTEMPTS=${FM_COGNEE_MAX_ATTEMPTS:-3} \
-    FM_COGNEE_LIVE_TIMEOUT_MS=${FM_COGNEE_TIMEOUT_MS:-} \
-    python3 - <<'PY' >/dev/null 2>&1
-import datetime as dt
-import json
-import os
-from pathlib import Path
-
-
-def integer(name, default=0):
-    try:
-        return max(int(os.environ.get(name, "") or default), 0)
-    except ValueError:
-        return default
-
-
-def maybe_int(name):
-    value = os.environ.get(name, "")
-    if value == "":
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def boolean(name):
-    return (os.environ.get(name, "") or "").lower() == "true"
-
-
-now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-event = {
-    "schema_version": "cognee_telemetry.v2",
-    "ts_utc": now,
-    "event_type": "api_attempt",
-    "operation_name": "cognee_lookup",
-    "mode": "live",
-    "dataset": {
-        "dataset_alias": os.environ.get("FM_COGNEE_LIVE_DATASET_ALIAS") or "unknown",
-        "dataset_id_hash": os.environ.get("FM_COGNEE_LIVE_DATASET_ID_HASH") or None,
-    },
-    "operation": {
-        "operation_name": "search",
-        "endpoint_template": "/api/v1/search",
-        "http_method": "POST",
-        "mutates_remote": False,
-        "search_type": os.environ.get("FM_COGNEE_LIVE_SEARCH_TYPE") or "RAG_COMPLETION",
-        "topK": integer("FM_COGNEE_LIVE_TOP_K", 8),
-    },
-    "status": {
-        "status": os.environ.get("FM_COGNEE_LIVE_STATUS") or "unknown",
-        "success": (os.environ.get("FM_COGNEE_LIVE_STATUS") or "") in {"success", "verified"},
-        "error_class": os.environ.get("FM_COGNEE_LIVE_ERROR") or "none",
-        "http_status": maybe_int("FM_COGNEE_LIVE_HTTP_STATUS"),
-        "retryable": boolean("FM_COGNEE_LIVE_RETRYABLE"),
-    },
-    "attempt": {
-        "retry_count": integer("FM_COGNEE_LIVE_RETRY_COUNT", 0),
-        "attempt_number": integer("FM_COGNEE_LIVE_RETRY_COUNT", 0) + 1,
-        "max_attempts": integer("FM_COGNEE_LIVE_MAX_ATTEMPTS", 3),
-        "is_retry": integer("FM_COGNEE_LIVE_RETRY_COUNT", 0) > 0,
-        "retry_reason": "retryable_http_or_transport" if integer("FM_COGNEE_LIVE_RETRY_COUNT", 0) > 0 else "none",
-    },
-    "latency": {
-        "duration_ms": integer("FM_COGNEE_LIVE_LATENCY_MS", 0),
-        "timeout_ms": maybe_int("FM_COGNEE_LIVE_TIMEOUT_MS"),
-    },
-    "results": {
-        "parsed_source_count": integer("FM_COGNEE_LIVE_PARSED_SOURCE_COUNT", 0),
-        "answer_body_logged": False,
-    },
-    "source_verification_outcome": os.environ.get("FM_COGNEE_LIVE_VERIFICATION") or "not_attempted",
-    "source_verification": {
-        "verification_status": os.environ.get("FM_COGNEE_LIVE_VERIFICATION") or "not_attempted",
-        "verification_required": True,
-    },
-    "cost_estimate": {
-        "estimated_cost_usd": None,
-        "currency": "USD",
-        "confidence": "unknown",
-        "estimate_source": "vendor_metadata_missing",
-    },
-    "vendor_usage_present": False,
-    "answer_body_logged": False,
-    "answer_body_redacted": True,
-    "response_content_redacted": True,
-    "external_action_authorized": False,
-}
-try:
-    path = Path(os.environ["FM_COGNEE_LIVE_TELEMETRY_FILE"])
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
-except Exception:
-    pass
-PY
-  ) || true
+  top_k=${FM_COGNEE_TOP_K:-8}
+  case "$top_k" in ''|*[!0-9]*) top_k=8 ;; esac
+  fm_cognee_telemetry_log_api_attempt \
+    search POST /api/v1/search false "$status" "$error_class" "$http_status" "$retryable" \
+    "$attempt_number" "${FM_COGNEE_MAX_ATTEMPTS:-3}" "$is_retry" "$retry_reason" \
+    "$latency_ms" "${FM_COGNEE_TIMEOUT_MS:-}" "$verification_outcome" true "$parsed_source_count" \
+    "" unknown missing_vendor_metadata false "$FM_COGNEE_RUN_ID" "$request_id" "$FM_COGNEE_LOGICAL_SEARCH_ID" \
+    "$dataset_alias_value" "$dataset_id_hash_value" "${FM_COGNEE_SEARCH_TYPE:-RAG_COMPLETION}" "$top_k" true \
+    "$request_body_bytes" "$response_body_bytes" "$parsed_source_count" "$final_attempt"
 }
 
 json_payload() {
@@ -388,9 +300,15 @@ if ! "$DRY_RUN"; then
   http_status=0
   retryable=false
   curl_rc=0
+  request_body_bytes=$(wc -c < "$PAYLOAD" | tr -d ' ')
+  response_body_bytes=0
+  attempt_latency=0
+  request_id=
   while [ "$attempt" -le "$max_attempts" ]; do
     : > "$BODY"
     : > "$CURL_ERR"
+    request_id=$(fm_cognee_new_id cognee-req)
+    attempt_start_ms=$(fm_cognee_telemetry_now_ms)
     set +e
     http_status=$(curl -sS -o "$BODY" -w '%{http_code}' \
       -X POST "$endpoint" \
@@ -408,16 +326,20 @@ if ! "$DRY_RUN"; then
         429|500|502|503|504) retryable=true ;;
       esac
     fi
+    attempt_latency=$(fm_cognee_telemetry_latency_ms "$attempt_start_ms")
+    response_body_bytes=$(wc -c < "$BODY" | tr -d ' ')
     if ! "$retryable" || [ "$attempt" -ge "$max_attempts" ]; then
       break
     fi
+    live_telemetry_log blocked http_or_transport_failure "$http_status" true "$((attempt - 1))" \
+      "$attempt_latency" 0 pending "$request_id" "$attempt" false "$request_body_bytes" "$response_body_bytes"
     attempt=$((attempt + 1))
   done
 
   retry_count=$((attempt - 1))
-  latency=$(fm_cognee_telemetry_latency_ms "$TELEMETRY_START_MS")
   if [ "$curl_rc" -ne 0 ] || [ "$http_status" -lt 200 ] 2>/dev/null || [ "$http_status" -ge 300 ] 2>/dev/null; then
-    live_telemetry_log blocked http_or_transport_failure "$http_status" "$retryable" "$retry_count" "$latency" 0 http_or_transport_failure
+    live_telemetry_log blocked http_or_transport_failure "$http_status" "$retryable" "$retry_count" \
+      "$attempt_latency" 0 http_or_transport_failure "$request_id" "$attempt" true "$request_body_bytes" "$response_body_bytes"
     echo "label=blocked_missing_proof reason=http_or_transport_failure http_status=$http_status retry_count=$retry_count retryable=$retryable external_action_authorized=false" >&2
     exit 2
   fi
@@ -444,7 +366,8 @@ if ! "$DRY_RUN"; then
     tel_status=blocked
     tel_error=$source_outcome
   fi
-  live_telemetry_log "$tel_status" "$tel_error" "$http_status" false "$retry_count" "$latency" "$parsed_source_count" "$source_outcome"
+  live_telemetry_log "$tel_status" "$tel_error" "$http_status" false "$retry_count" "$attempt_latency" \
+    "$parsed_source_count" "$source_outcome" "$request_id" "$attempt" true "$request_body_bytes" "$response_body_bytes"
   echo "mode=live"
   echo "dataset_alias=$(safe_label "$(dataset_alias)")"
   echo "endpoint=/api/v1/search"

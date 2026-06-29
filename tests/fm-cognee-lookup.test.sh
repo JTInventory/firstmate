@@ -87,12 +87,116 @@ SH
   assert_not_contains "$(cat "$telemetry")" "$secret" "live telemetry must not contain API key"
   assert_contains "$(cat "$telemetry")" '"endpoint_template": "/api/v1/search"' "telemetry records read-only search endpoint"
   assert_contains "$(cat "$telemetry")" '"http_status": 200' "telemetry records HTTP status"
-  assert_contains "$(cat "$telemetry")" '"parsed_source_count": 2' "telemetry records parsed source count"
+  assert_contains "$(cat "$telemetry")" '"parsed_source_id_count": 2' "telemetry records parsed source count"
   assert_contains "$(cat "$telemetry")" '"source_verification_outcome": "verified_local_source"' "telemetry records verification outcome"
   assert_contains "$(cat "$telemetry")" '"external_action_authorized": false' "telemetry never authorizes action"
   assert_contains "$(cat "$telemetry")" '"answer_body_logged": false' "search telemetry never logs answer bodies"
   assert_contains "$(cat "$telemetry")" '"confidence": "unknown"' "search telemetry keeps missing vendor cost unknown"
   pass "fake live search is parsed, verified locally, and redacted in telemetry"
+}
+
+test_live_retry_attempts_keep_logical_id_and_rotate_request_id() {
+  local dir source manifest fakebin out code sha telemetry count_file payload secret
+  dir="$TMP_ROOT/live-retry-correlation"
+  mkdir -p "$dir"
+  source="$dir/source.md"
+  manifest="$dir/manifest.tsv"
+  fakebin=$(fm_fakebin "$dir")
+  telemetry="$dir/telemetry.jsonl"
+  count_file="$dir/curl-count"
+  payload="$dir/payload.json"
+  secret="SECRET_RETRY_ANSWER_BODY_DO_NOT_LOG"
+  printf 'local source truth from retry search\n' > "$source"
+  sha=$(sha256sum "$source" | awk '{print $1}')
+  write_manifest "$manifest" retry-live-01 "$source" "$sha"
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+out=
+payload=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) out=\$2; shift 2 ;;
+    --data-binary) payload=\${2#@}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "\$payload" ] && cp "\$payload" "$payload"
+count=0
+[ -f "$count_file" ] && count=\$(cat "$count_file")
+count=\$((count + 1))
+printf '%s\n' "\$count" > "$count_file"
+if [ "\$count" -eq 1 ]; then
+  printf '{"error":"temporary %s"}\n' "$secret" > "\$out"
+  printf '503'
+  exit 0
+fi
+cat > "\$out" <<JSON
+[{"search_result":["SOURCE_ID=retry-live-01 SOURCE_PATH=$source $secret"]}]
+JSON
+printf '200'
+SH
+  chmod +x "$fakebin/curl"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" COGNEE_BASE_URL="https://cognee.invalid" COGNEE_API_KEY="secret-value" \
+    FM_COGNEE_DATASET_ALIAS="firstmate-curated-memory-0629" FM_COGNEE_MAX_ATTEMPTS=2 \
+    FM_COGNEE_TELEMETRY_FILE="$telemetry" "$ROOT/bin/fm-cognee-lookup.sh" \
+    --query "retry correlation" --manifest "$manifest" 2>&1)
+  code=$?
+  set -e
+  expect_code 0 "$code" "retrying fake live lookup should verify"
+  assert_contains "$out" "retry_count=1" "retry count should be visible"
+  assert_not_contains "$out" "$secret" "retry output must not print answer body"
+  assert_present "$telemetry" "retry lookup should write telemetry"
+  assert_not_contains "$(cat "$telemetry")" "$secret" "retry telemetry must not contain response body text"
+  assert_json_missing_field "$payload" "run_id" "local run id must not be sent to Cognee"
+  assert_json_missing_field "$payload" "request_id" "local request id must not be sent to Cognee"
+  assert_json_missing_field "$payload" "logical_search_id" "local logical search id must not be sent to Cognee"
+  python3 - "$telemetry" <<'PY' || fail "retry telemetry correlation assertions failed"
+import json
+import sys
+from pathlib import Path
+
+events = [
+    json.loads(line)
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+attempts = [event for event in events if event.get("event_type") == "api_attempt"]
+if len(attempts) != 2:
+    raise SystemExit(f"expected 2 api attempts, got {len(attempts)}")
+first, second = attempts
+if not all(event.get("run_id") and event.get("request_id") and event.get("logical_search_id") for event in attempts):
+    raise SystemExit("missing top-level correlation ids")
+if first["logical_search_id"] != second["logical_search_id"]:
+    raise SystemExit("logical search id changed across retry")
+if first["request_id"] == second["request_id"]:
+    raise SystemExit("request id did not rotate per attempt")
+if first["correlation"]["logical_search_id"] != first["logical_search_id"]:
+    raise SystemExit("nested logical id mismatch")
+if second["correlation"]["wrapper_request_id"] != second["request_id"]:
+    raise SystemExit("nested request id mismatch")
+if first["attempt"]["attempt_number"] != 1 or second["attempt"]["attempt_number"] != 2:
+    raise SystemExit("attempt numbers were not logged")
+if first["attempt"]["final_attempt"] is not False or second["attempt"]["final_attempt"] is not True:
+    raise SystemExit("final attempt flags were not logged")
+if first["status"]["http_status"] != 503 or second["status"]["http_status"] != 200:
+    raise SystemExit("HTTP statuses were not logged per attempt")
+for event in attempts:
+    if event["privacy"]["answer_body_logged"] is not False:
+        raise SystemExit("privacy answer_body_logged must be false")
+    if event["results"]["answer_body_logged"] is not False:
+        raise SystemExit("results answer_body_logged must be false")
+    if event["vendor_usage"]["vendor_usage_present"] is not False:
+        raise SystemExit("vendor usage should be absent")
+    if event["vendor_usage"]["cost_usd"] is not None:
+        raise SystemExit("unknown vendor cost should be null")
+    if event["cost_estimate"]["estimated_cost_usd"] is not None:
+        raise SystemExit("unknown estimated cost should be null")
+    if event["cost_estimate"]["estimate_source"] != "missing_vendor_metadata":
+        raise SystemExit("missing vendor metadata source should be explicit")
+PY
+  pass "retry attempts share logical search id and rotate request id"
 }
 
 test_live_env_file_loads_allowlisted_names_safely() {
@@ -598,6 +702,7 @@ test_live_mode_fails_closed_without_dataset_selector
 test_live_payload_uses_dataset_alias_selector_without_uuid
 test_live_payload_uses_dataset_id_selector_when_uuid_is_set
 test_live_fake_search_parses_verifies_and_writes_redacted_telemetry
+test_live_retry_attempts_keep_logical_id_and_rotate_request_id
 test_live_env_file_loads_allowlisted_names_safely
 test_live_env_file_ignores_unknown_names
 test_live_env_file_malformed_fails_closed_without_values
