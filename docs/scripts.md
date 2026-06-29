@@ -13,6 +13,7 @@ Each file also starts with a short header comment.
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when the primary checkout is tangled, when queued wakes are pending, or when watcher liveness is not proved by a fresh beacon plus a live matching lock |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
+| `fm-memory-lookup.sh`    | Manual read-only Cognee memory lookup for optional pre-dispatch hints; opens local source paths before brief attachment and stays non-blocking when unavailable |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`; ship/scout spawns require an isolated treehouse worktree; secondmate spawns locally sync the home before launch |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-route.sh`            | Classify a task into a deterministic route profile, harness, model, effort, reason, override, and risk flags without changing spawn behavior |
