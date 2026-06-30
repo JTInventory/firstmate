@@ -365,7 +365,7 @@ if not runs:
     print("unknown\t{}".format(total if total is not None else "unknown"))
     raise SystemExit(0)
 
-failure_conclusions = {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}
+failure_conclusions = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 pending = False
 for run in runs:
     status = str(run.get("status") or "").lower()

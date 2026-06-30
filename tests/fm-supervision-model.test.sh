@@ -60,6 +60,9 @@ case "$3" in
   /repos/o/r/pulls/6)
     printf 'state: open\nmerged: false\nmergeable_state: clean\nhead:\n  sha: sh-actions-failure\n'
     ;;
+  /repos/o/r/pulls/7)
+    printf 'state: open\nmerged: false\nmergeable_state: clean\nhead:\n  sha: sh-actions-stale\n'
+    ;;
   /repos/o/r/commits/sh-merged/status|/repos/o/r/commits/sh-success/status)
     printf 'state: success\ntotal_count: 1\n'
     ;;
@@ -72,10 +75,13 @@ case "$3" in
   /repos/o/r/commits/sh-actions-failure/check-runs)
     printf 'total_count: 1\ncheck_runs:\n- status: completed\n  conclusion: failure\n'
     ;;
+  /repos/o/r/commits/sh-actions-stale/check-runs)
+    printf 'total_count: 1\ncheck_runs:\n- status: completed\n  conclusion: stale\n'
+    ;;
   */check-runs)
     printf 'total_count: 0\ncheck_runs: []\n'
     ;;
-  /repos/o/r/commits/sh-none/status|/repos/JTInventory/firstmate/commits/sh-none/status)
+  /repos/o/r/commits/sh-none/status|/repos/o/r/commits/sh-actions-stale/status|/repos/JTInventory/firstmate/commits/sh-none/status)
     printf 'state: pending\ntotal_count: 0\n'
     ;;
   *)
@@ -143,6 +149,8 @@ test_task_classifications_and_route_metadata() {
     "project=demo" "window=live" "mode=direct-PR" "pr=https://github.com/o/r/pull/4"
   write_meta "$home" actionsfail 'done: PR https://github.com/o/r/pull/6' \
     "project=demo" "window=live" "mode=direct-PR" "pr=https://github.com/o/r/pull/6"
+  write_meta "$home" actionsstale 'done: PR https://github.com/o/r/pull/7' \
+    "project=demo" "window=live" "mode=direct-PR" "pr=https://github.com/o/r/pull/7"
   out=$(run_json "$home" "$fakebin") || fail "task json failed"
   assert_json_valid "$out" "task output"
   assert_contains "$out" '"classification": "running"' "live worker should be running"
@@ -154,6 +162,7 @@ test_task_classifications_and_route_metadata() {
   assert_contains "$out" 'pr_open_ci_failing' "failing PR not classified"
   assert_contains "$out" 'direct_pr_open_no_ci_ready' "direct-PR no-CI PR should be ready for review"
   assert_contains "$out" '"url": "https://github.com/o/r/pull/6", "state": "open", "ci_state": "failure"' "Actions check-runs should affect CI state"
+  assert_contains "$out" '"url": "https://github.com/o/r/pull/7", "state": "open", "ci_state": "failure"' "stale Actions check-runs should not be green"
   pass "task classifications preserve current route metadata"
 }
 
