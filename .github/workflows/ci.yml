@@ -36,7 +36,7 @@ jobs:
       - run: |
           set -eu
           for test_script in tests/*.test.sh; do
-            "$test_script"
+            bash "$test_script"
           done
 
   invariants:
