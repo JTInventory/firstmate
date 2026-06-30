@@ -199,6 +199,54 @@ PY
   pass "retry attempts share logical search id and rotate request id"
 }
 
+test_live_request_applies_transport_timeout() {
+  local dir source manifest fakebin out code sha telemetry secret
+  dir="$TMP_ROOT/live-timeout"
+  mkdir -p "$dir"
+  source="$dir/source.md"
+  manifest="$dir/manifest.tsv"
+  fakebin=$(fm_fakebin "$dir")
+  telemetry="$dir/telemetry.jsonl"
+  secret="SECRET_TIMEOUT_API_KEY_DO_NOT_LOG"
+  printf 'local source truth from timeout search\n' > "$source"
+  sha=$(sha256sum "$source" | awk '{print $1}')
+  write_manifest "$manifest" timeout-live-01 "$source" "$sha"
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+out=
+saw_max_time=false
+saw_connect_timeout=false
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) out=\$2; shift 2 ;;
+    --max-time) [ "\$2" = "2.500" ] && saw_max_time=true; shift 2 ;;
+    --connect-timeout) [ "\$2" = "2.500" ] && saw_connect_timeout=true; shift 2 ;;
+    *) shift ;;
+  esac
+done
+"\$saw_max_time" || exit 43
+"\$saw_connect_timeout" || exit 44
+cat > "\$out" <<JSON
+[{"search_result":["SOURCE_ID=timeout-live-01 SOURCE_PATH=$source"]}]
+JSON
+printf '200'
+SH
+  chmod +x "$fakebin/curl"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" COGNEE_BASE_URL="https://cognee.invalid" COGNEE_API_KEY="$secret" \
+    FM_COGNEE_DATASET_ALIAS="firstmate-curated-memory-0629" FM_COGNEE_TIMEOUT_MS=2500 \
+    FM_COGNEE_TELEMETRY_FILE="$telemetry" "$ROOT/bin/fm-cognee-lookup.sh" \
+    --query "timeout coverage" --manifest "$manifest" 2>&1)
+  code=$?
+  set -e
+  expect_code 0 "$code" "live lookup should pass timeout options to curl"
+  assert_contains "$out" "label=verified_local_source" "timeout lookup should still verify"
+  assert_not_contains "$out" "$secret" "timeout output must not print API key"
+  assert_contains "$(cat "$telemetry")" '"timeout_ms": 2500' "telemetry should keep timeout budget"
+  pass "live request applies transport timeout"
+}
+
 test_live_env_file_loads_allowlisted_names_safely() {
   local dir source manifest fakebin envfile out code sha telemetry marker complex_secret
   dir="$TMP_ROOT/live-env-file"
@@ -706,6 +754,7 @@ test_live_payload_uses_dataset_alias_selector_without_uuid
 test_live_payload_uses_dataset_id_selector_when_uuid_is_set
 test_live_fake_search_parses_verifies_and_writes_redacted_telemetry
 test_live_retry_attempts_keep_logical_id_and_rotate_request_id
+test_live_request_applies_transport_timeout
 test_live_env_file_loads_allowlisted_names_safely
 test_live_env_file_ignores_unknown_names
 test_live_env_file_malformed_fails_closed_without_values

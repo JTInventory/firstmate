@@ -57,11 +57,23 @@ case "$3" in
   /repos/o/r/pulls/5)
     printf 'not parseable\n'
     ;;
+  /repos/o/r/pulls/6)
+    printf 'state: open\nmerged: false\nmergeable_state: clean\nhead:\n  sha: sh-actions-failure\n'
+    ;;
   /repos/o/r/commits/sh-merged/status|/repos/o/r/commits/sh-success/status)
     printf 'state: success\ntotal_count: 1\n'
     ;;
   /repos/o/r/commits/sh-failure/status)
     printf 'state: failure\ntotal_count: 1\n'
+    ;;
+  /repos/o/r/commits/sh-actions-failure/status)
+    printf 'state: pending\ntotal_count: 0\n'
+    ;;
+  /repos/o/r/commits/sh-actions-failure/check-runs)
+    printf 'total_count: 1\ncheck_runs:\n- status: completed\n  conclusion: failure\n'
+    ;;
+  */check-runs)
+    printf 'total_count: 0\ncheck_runs: []\n'
     ;;
   /repos/o/r/commits/sh-none/status|/repos/JTInventory/firstmate/commits/sh-none/status)
     printf 'state: pending\ntotal_count: 0\n'
@@ -129,6 +141,8 @@ test_task_classifications_and_route_metadata() {
     "project=demo" "window=live" "pr=https://github.com/o/r/pull/3"
   write_meta "$home" directnoci 'done: PR https://github.com/o/r/pull/4' \
     "project=demo" "window=live" "mode=direct-PR" "pr=https://github.com/o/r/pull/4"
+  write_meta "$home" actionsfail 'done: PR https://github.com/o/r/pull/6' \
+    "project=demo" "window=live" "mode=direct-PR" "pr=https://github.com/o/r/pull/6"
   out=$(run_json "$home" "$fakebin") || fail "task json failed"
   assert_json_valid "$out" "task output"
   assert_contains "$out" '"classification": "running"' "live worker should be running"
@@ -139,6 +153,7 @@ test_task_classifications_and_route_metadata() {
   assert_contains "$out" 'pr_open_ci_green' "green PR not classified"
   assert_contains "$out" 'pr_open_ci_failing' "failing PR not classified"
   assert_contains "$out" 'direct_pr_open_no_ci_ready' "direct-PR no-CI PR should be ready for review"
+  assert_contains "$out" '"url": "https://github.com/o/r/pull/6", "state": "open", "ci_state": "failure"' "Actions check-runs should affect CI state"
   pass "task classifications preserve current route metadata"
 }
 
@@ -156,6 +171,20 @@ test_local_failure_paths_degrade_to_actions_or_unknown() {
   assert_contains "$out" '"github_state": "partial"' "invalid GitHub output should be partial"
   assert_contains "$out" '"state": "unknown"' "invalid GitHub output should become unknown"
   pass "local failure paths are surfaced without crashing"
+}
+
+test_absolute_project_meta_runs_treehouse_status() {
+  local home fakebin out project
+  home=$(make_home absolute-project)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  project="$home/projects/demo"
+  mkdir -p "$project"
+  write_meta "$home" absolute 'working: still running' "project=$project" "window=live"
+  out=$(PATH="$fakebin:$PATH" TREEHOUSE_FAIL=1 FM_HOME="$home" "$CLI" --json --no-default-reminders) \
+    || fail "absolute project json failed"
+  assert_contains "$out" 'stale_treehouse_state' "absolute project meta should run treehouse status"
+  pass "absolute project meta runs treehouse status"
 }
 
 test_github_missing_and_external_reminders_do_not_fail() {
@@ -195,6 +224,7 @@ test_model_is_sourceable_and_schema_is_json
 test_empty_home_is_read_only_valid_json
 test_task_classifications_and_route_metadata
 test_local_failure_paths_degrade_to_actions_or_unknown
+test_absolute_project_meta_runs_treehouse_status
 test_github_missing_and_external_reminders_do_not_fail
 test_text_output_and_watcher_source
 
