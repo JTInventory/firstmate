@@ -48,3 +48,5 @@ Each file also starts with a short header comment.
 | `fm-x-lib.sh`            | Shared X-mode `.env`, alternate env-file, relay, dry-run config, and reply-thread splitting helpers sourced by the poll and reply clients |
 | `fm-x-poll.sh`           | Do one bounded X relay poll; without `FMX_PAIRING_TOKEN` it is silent, with a pending mention it stashes the full inbox JSON, including `in_reply_to`, and prints `x-mention <request_id>` |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed public-safe X reply, auto-splitting long text into `{request_id,text,texts}` threads; reads text from an argument, stdin, or `--text-file` |
+
+Cognee automatic lookup needs per-wrapper-call cost evidence: `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call`. Current `session_window_only` evidence is accepted only as trial monitoring evidence and still blocks automatic promotion because there is no safe per-wrapper-call cost/request/session/QA id bridge. Manual verified lookup remains read-only, hint-only, fail-closed, and local-source-verified.
