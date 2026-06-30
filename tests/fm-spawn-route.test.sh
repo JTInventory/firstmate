@@ -123,6 +123,29 @@ EOF
   pass "raw launch command is not blocked and records raw route evidence"
 }
 
+test_unsafe_task_ids_are_rejected_before_spawn() {
+  local home proj wt fakebin id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case unsafe-id)
+EOF
+
+  id='bad;touch pwn'
+  mkdir -p "$home/data/$id"
+  printf '%s\n' 'Unsafe id should not launch.' > "$home/data/$id/brief.md"
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 2 "$status" "spawn unsafe metachar id should fail"
+  assert_contains "$out" "unsafe task id" "spawn did not explain metachar id rejection"
+  assert_absent "$home/state/$id.meta" "unsafe metachar id must not record meta"
+
+  id='../evil'
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 2 "$status" "spawn path-traversal id should fail"
+  assert_contains "$out" "unsafe task id" "spawn did not explain path traversal id rejection"
+
+  pass "unsafe task ids are rejected before spawn side effects"
+}
+
 test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
+test_unsafe_task_ids_are_rejected_before_spawn

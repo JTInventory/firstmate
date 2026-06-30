@@ -146,7 +146,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
-ID=${POS[0]}
+ID=${POS[0]:-}
+case "$ID" in
+  ''|.*|*[!A-Za-z0-9._-]*) echo "error: unsafe task id: $ID" >&2; exit 2 ;;
+esac
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -780,7 +783,8 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-tmux send-keys -t "$T" "export GOTMPDIR=$TASK_TMP/gotmp" Enter
+sq_gotmpdir=$(shell_quote "$TASK_TMP/gotmp")
+tmux send-keys -t "$T" "export GOTMPDIR=$sq_gotmpdir" Enter
 sleep 0.3
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
