@@ -23,6 +23,9 @@ Each file also starts with a short header comment.
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-cognee-lookup.sh`    | Read-only Cognee lookup wrapper with dry-run fixtures and guarded live `POST /api/v1/search`; treats answers as hints and delegates source proof to local manifest/source verification |
 | `fm-cognee-manifest-check.sh` | Validate TSV Cognee manifest rows and verify `SOURCE_ID`, `SOURCE_PATH`, or `SEED_FILE` answer references against reopened local files |
+| `fm-cognee-session-cost-probe.sh` | Disabled metadata-only planner for approved future Cognee session/cost probes; validates GET-only endpoint templates and writes redacted local JSONL probe-plan events without network calls |
+| `fm-cognee-telemetry-lib.sh` | Secret-safe JSONL telemetry helper for Cognee wrappers; records labels, timings, counts, cost classifications, and hashed identifiers without raw prompts, answers, headers, URLs, or secrets |
+| `fm-cognee-verify-source.sh` | Local-only verifier for Cognee hint text against JSONL manifests; reopens referenced source files and emits source-verification JSON plus secret-safe telemetry |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker and detector sourced by `fm-send.sh`, `fm-brief.sh`, and tests                 |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
 | `fm-watch-session.sh`    | Durable home-scoped tmux runner that loops through `fm-watch-arm.sh` for harness lanes without reliable tracked background tasks |
@@ -33,6 +36,7 @@ Each file also starts with a short header comment.
 | `fm-crew-state.sh`       | Print one stable current-state line for a crew by reconciling its matching no-mistakes run-step, even when the pane has closed, with pane and status-log fallback |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification sourced by bootstrap and guard         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for `/updatefirstmate` origin pulls and no-fetch local secondmate syncs         |
+| `fm-task-identity-lib.sh` | Shared branch/meta identity guard for helpers that must refuse when a ship task's worktree is not on `fm/<task-id>` |
 | `fm-tasks-axi-lib.sh`    | Shared `tasks-axi` compatibility probe sourced by bootstrap and teardown                                            |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work, then run the watcher-liveness guard         |
 | `fm-wake-lib.sh`         | Shared durable wake queue and portable lock helpers sourced by the watcher, drain, arm, guard, and daemon          |
@@ -49,4 +53,6 @@ Each file also starts with a short header comment.
 | `fm-x-poll.sh`           | Do one bounded X relay poll; without `FMX_PAIRING_TOKEN` it is silent, with a pending mention it stashes the full inbox JSON, including `in_reply_to`, and prints `x-mention <request_id>` |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed public-safe X reply, auto-splitting long text into `{request_id,text,texts}` threads; reads text from an argument, stdin, or `--text-file` |
 
-Cognee automatic lookup needs per-wrapper-call cost evidence: `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call`. Current `session_window_only` evidence is accepted only as trial monitoring evidence and still blocks automatic promotion because there is no safe per-wrapper-call cost/request/session/QA id bridge. Manual verified lookup remains read-only, hint-only, fail-closed, and local-source-verified.
+Cognee policy lives in [cognee-policy.md](cognee-policy.md). Automatic lookup needs per-wrapper-call cost evidence: `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call`. Current `session_window_only` evidence is accepted only as trial monitoring evidence and still blocks automatic promotion because there is no safe per-wrapper-call cost/request/session/QA id bridge. Manual verified lookup remains read-only, hint-only, fail-closed, and local-source-verified.
+
+The official docs now show raw data readback and session/model cost surfaces. That does not satisfy Firstmate's production gates by itself: raw retention/source-authority guarantees and safe per-wrapper-call cost correlation remain unproven.

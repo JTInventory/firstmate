@@ -122,11 +122,13 @@ test_env_file_values_load_safely_without_source_or_eval() {
   output="$dir/probe.jsonl"
   envfile="$dir/cognee.env"
   marker="$dir/should-not-exist"
+  # shellcheck disable=SC2016 # Command substitution text must stay literal for env-loader safety coverage.
   secret='safe value with spaces $(touch '"$marker"')'
   : > "$telemetry"
   {
     printf 'COGNEE_BASE_URL=%s\n' 'https://env-file.invalid'
     printf 'COGNEE_API_KEY=%s\n' "$secret"
+    # shellcheck disable=SC2016 # Command substitution text must stay literal for env-loader safety coverage.
     printf 'UNSAFE_UNKNOWN=%s\n' '$(touch '"$marker"')'
   } > "$envfile"
 

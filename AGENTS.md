@@ -511,7 +511,7 @@ On wake, in order of cheapness:
 5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: read each crewmate's current state with `bin/fm-crew-state.sh <id>` (the cheap first read - it reconciles the authoritative run-step over a possibly-stale status-log line, so a crewmate whose gate you already resolved no longer reads as still parked), peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    Do not report that the fleet is unchanged.
 
-When the picture is unclear or a display surface needs the shared decision model, run `bin/fm-supervise.sh` for a read-only checklist or `bin/fm-supervise.sh --json` for the `firstmate.supervision.v1` model. The command may report watcher proof as `unknown` when the current sandbox cannot see the watcher process; prove liveness with `bin/fm-watch-arm.sh` or `bin/fm-watch-session.sh --status` before treating that as an actual down watcher.
+When the picture is unclear or a display surface needs the shared decision model, run `bin/fm-supervise.sh` for a read-only checklist or `bin/fm-supervise.sh --json` for the `firstmate.supervision.v1` model. For PRs, its `ci_state` combines GitHub commit status and check-runs; failing, cancelled, timed-out, action-required, startup-failure, or stale check-runs are not green. The command may report watcher proof as `unknown` when the current sandbox cannot see the watcher process; prove liveness with `bin/fm-watch-arm.sh` or `bin/fm-watch-session.sh --status` before treating that as an actual down watcher.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
@@ -632,6 +632,7 @@ Map firstmate's real backlog operations to the approved commands:
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
   This is a dependency check only; future-dated items still stay queued until their date arrives.
 - Read an item's full notes: `tasks-axi show <id> --full`.
+- Do not invent undocumented flags such as `tasks-axi list --json` or `tasks-axi ready --json`; use each command's `--help` before adding flags, because not every verb supports JSON output.
 - Hand a task off to a secondmate home: keep using `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`; do not call bare `tasks-axi mv` for this path, because the helper resolves and validates the secondmate home before moving anything.
 - Normalize the file: `tasks-axi render` rewrites every id'd task in canonical form and leaves free-form lines untouched.
 

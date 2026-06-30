@@ -112,7 +112,7 @@ for field in $required_fields; do
 done
 
 field_value() {
-  local name=$1 idx=${IDX[$1]}
+  local idx=${IDX[$1]}
   printf '%s' "${COLS[$idx]:-}"
 }
 
@@ -176,7 +176,7 @@ validate_current_row() {
   source_path=$(field_value source_path)
   source_path_lc=$(printf '%s' "$source_path" | tr '[:upper:]' '[:lower:]')
   case "$source_path_lc" in
-    *secret*|*token*|*api_key*|*password*|*credential*|*auth*|*bearer*|*cookie*|*private_key*|*.env*|*session*|*oauth*|*signed*)
+    *secret*|*token*|*api_key*|*password*|*credential*|*auth*|*bearer*|*cookie*|*private_key*|*.env*|*session*|*signed*)
       TELEMETRY_STATUS=blocked
       TELEMETRY_ERROR_CLASS=path_risk_scan_failed
       TELEMETRY_SOURCE_OUTCOME=path_risk_scan_failed

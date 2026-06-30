@@ -114,7 +114,9 @@ done
 [ -n "$WINDOW_START_UTC" ] || die missing_required_args
 [ -n "$WINDOW_END_UTC" ] || die missing_required_args
 [ -n "$OUTPUT_JSONL" ] || die missing_required_args
-[ -r "$TELEMETRY" ] && [ ! -d "$TELEMETRY" ] || die telemetry_unreadable
+if [ ! -r "$TELEMETRY" ] || [ -d "$TELEMETRY" ]; then
+  die telemetry_unreadable
+fi
 
 case "$MAX_SESSIONS" in
   ''|*[!0-9]*) die invalid_max_sessions ;;
@@ -151,7 +153,7 @@ validate_endpoint() {
   fi
   [ "$method" = GET ] || return 1
   case "$path" in
-    /health|/openapi.json|/api/v1/sessions|/api/v1/sessions/{session_id}|/api/v1/sessions/cost-by-model)
+    /health|/openapi.json|/api/v1/sessions|"/api/v1/sessions/{session_id}"|/api/v1/sessions/cost-by-model)
       ;;
     *)
       return 1

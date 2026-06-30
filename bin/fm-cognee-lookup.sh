@@ -12,11 +12,13 @@ usage() {
 usage: fm-cognee-lookup.sh [--dry-run] --query <text> [--manifest <manifest.tsv|manifest.jsonl> --answer-file <answer.txt>]
        fm-cognee-lookup.sh <query text>
 
-Live mode uses only already-exported environment variables:
+Live mode uses already-exported environment variables, plus allowlisted names
+from FM_COGNEE_ENV_FILE when set:
   COGNEE_BASE_URL
   COGNEE_API_KEY
   COGNEE_DATASET_ID or FM_COGNEE_DATASET_ALIAS
   FM_COGNEE_MANIFEST or --manifest
+  FM_COGNEE_TIMEOUT_MS defaults to 30000 and sets connect/request timeouts
 
 It can be used through:
   FM_COGNEE_LOOKUP_CMD=/absolute/path/to/bin/fm-cognee-lookup.sh
@@ -60,6 +62,17 @@ dataset_id_hash() {
   fi
 }
 
+fm_cognee_timeout_ms() {
+  local value=${FM_COGNEE_TIMEOUT_MS:-30000}
+  case "$value" in ''|*[!0-9]*) value=30000 ;; esac
+  [ "$value" -ge 1 ] || value=30000
+  printf '%s' "$value"
+}
+
+fm_cognee_timeout_seconds() {
+  awk -v ms="$(fm_cognee_timeout_ms)" 'BEGIN { printf "%.3f", ms / 1000 }'
+}
+
 has_live_dataset_selector() {
   if [ -n "${COGNEE_DATASET_ID:-}" ] && is_uuid "$COGNEE_DATASET_ID"; then
     return 0
@@ -91,7 +104,7 @@ live_telemetry_log() {
   fm_cognee_telemetry_log_api_attempt \
     search POST /api/v1/search false "$status" "$error_class" "$http_status" "$retryable" \
     "$attempt_number" "${FM_COGNEE_MAX_ATTEMPTS:-3}" "$is_retry" "$retry_reason" \
-    "$latency_ms" "${FM_COGNEE_TIMEOUT_MS:-}" "$verification_outcome" true "$parsed_source_count" \
+    "$latency_ms" "$(fm_cognee_timeout_ms)" "$verification_outcome" true "$parsed_source_count" \
     "" unknown missing_vendor_metadata false "$FM_COGNEE_RUN_ID" "$request_id" "$FM_COGNEE_LOGICAL_SEARCH_ID" \
     "$dataset_alias_value" "$dataset_id_hash_value" "${FM_COGNEE_SEARCH_TYPE:-RAG_COMPLETION}" "$top_k" true \
     "$request_body_bytes" "$response_body_bytes" "$parsed_source_count" "$final_attempt"
@@ -281,6 +294,7 @@ if ! "$DRY_RUN"; then
   fi
 
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-cognee-live.XXXXXX")
+  # shellcheck disable=SC2317 # Invoked by trap.
   cleanup_live() { rm -rf "$TMP_DIR"; }
   trap cleanup_live EXIT
   PAYLOAD="$TMP_DIR/search.json"
@@ -300,6 +314,7 @@ if ! "$DRY_RUN"; then
   http_status=0
   retryable=false
   curl_rc=0
+  timeout_seconds=$(fm_cognee_timeout_seconds)
   request_body_bytes=$(wc -c < "$PAYLOAD" | tr -d ' ')
   response_body_bytes=0
   attempt_latency=0
@@ -311,6 +326,8 @@ if ! "$DRY_RUN"; then
     attempt_start_ms=$(fm_cognee_telemetry_now_ms)
     set +e
     http_status=$(curl -sS -o "$BODY" -w '%{http_code}' \
+      --connect-timeout "$timeout_seconds" \
+      --max-time "$timeout_seconds" \
       -X POST "$endpoint" \
       -H "X-Api-Key: $COGNEE_API_KEY" \
       -H "Content-Type: application/json" \
@@ -405,6 +422,7 @@ fi
 [ -n "$ANSWER_FILE" ] || die "--answer-file is required when --manifest is used"
 
 TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-cognee-lookup.XXXXXX")
+# shellcheck disable=SC2317 # Invoked by trap.
 cleanup_lookup() { rm -f "$TMP_OUT"; }
 trap cleanup_lookup EXIT
 

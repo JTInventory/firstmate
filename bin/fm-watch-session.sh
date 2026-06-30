@@ -19,7 +19,7 @@ SESSION_DIR="$STATE/.watch-session"
 ENV_FILE="$SESSION_DIR/env.sh"
 RUNNER_FILE="$SESSION_DIR/runner.sh"
 STOP_FILE="$SESSION_DIR/stop"
-RETRY_DELAY=${FM_WATCH_SESSION_RETRY_DELAY:-5}
+RETRY_DELAY=${FM_WATCH_SESSION_REARM_DELAY:-${FM_WATCH_SESSION_RETRY_DELAY:-1}}
 AFK_DELAY=${FM_WATCH_SESSION_AFK_DELAY:-15}
 
 usage() {
@@ -52,10 +52,12 @@ write_runner_files() {
     printf 'rm -f %s\n' "$(shell_quote "$STOP_FILE")"
     printf 'while :; do\n'
     printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
+    # shellcheck disable=SC2016 # Generated runner expands FM_STATE_OVERRIDE at runtime.
     printf '  if [ -e "$FM_STATE_OVERRIDE/.afk" ]; then sleep %s; continue; fi\n' "$AFK_DELAY"
     printf '  %s/fm-watch-arm.sh\n' "$(shell_quote "$SCRIPT_DIR")"
     printf '  rc=$?\n'
     printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
+    # shellcheck disable=SC2016 # Generated runner expands rc at runtime.
     printf '  if [ "$rc" -ne 0 ]; then sleep %s; else sleep 1; fi\n' "$RETRY_DELAY"
     printf 'done\n'
   } > "$RUNNER_FILE"

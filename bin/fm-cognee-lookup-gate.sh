@@ -25,6 +25,11 @@ Evidence reports must contain these exact gate markers:
 
 Trial-only evidence is recognized but still blocks automatic lookup:
   FM_COGNEE_GATE_COST_USAGE_EVIDENCE=session_window_only
+
+Official Cognee docs expose raw readback and session/model cost surfaces. Those
+surfaces are not enough for automatic lookup unless the local evidence set also
+proves production raw source-authority guarantees and safe per-wrapper-call
+cost correlation.
 EOF
 }
 

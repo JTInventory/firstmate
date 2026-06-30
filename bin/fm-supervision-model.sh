@@ -322,8 +322,93 @@ fm_supervision_gh_api_get() {
   fi
 }
 
+fm_supervision_check_runs_state() {
+  local text
+  text=$(cat)
+  FM_SUPERVISION_CHECK_RUNS_TEXT=$text \
+  python3 - <<'PY'
+import json
+import os
+import re
+import sys
+
+text = os.environ.get("FM_SUPERVISION_CHECK_RUNS_TEXT", "")
+if not text.strip():
+    print("unknown\tunknown")
+    raise SystemExit(0)
+
+runs = []
+total_count = None
+try:
+    data = json.loads(text)
+    total_count = data.get("total_count")
+    runs = data.get("check_runs") or []
+except json.JSONDecodeError:
+    match = re.search(r"(?m)^\s*total_count:\s*([0-9]+)\s*$", text)
+    if match:
+      total_count = int(match.group(1))
+    statuses = re.findall(r"(?m)^\s*-?\s*status:\s*(\S+)\s*$", text)
+    conclusions = re.findall(r"(?m)^\s*-?\s*conclusion:\s*(\S+)\s*$", text)
+    for index, status in enumerate(statuses):
+      conclusion = conclusions[index] if index < len(conclusions) else ""
+      runs.append({"status": status, "conclusion": conclusion})
+
+try:
+    total = int(total_count)
+except (TypeError, ValueError):
+    total = len(runs) if runs else None
+
+if total == 0:
+    print("none\t0")
+    raise SystemExit(0)
+if not runs:
+    print("unknown\t{}".format(total if total is not None else "unknown"))
+    raise SystemExit(0)
+
+failure_conclusions = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
+pending = False
+for run in runs:
+    status = str(run.get("status") or "").lower()
+    conclusion = run.get("conclusion")
+    conclusion = "" if conclusion is None else str(conclusion).lower()
+    if conclusion in failure_conclusions:
+        print("failure\t{}".format(total if total is not None else len(runs)))
+        raise SystemExit(0)
+    if status != "completed" or conclusion in {"", "null"}:
+        pending = True
+
+if pending:
+    print("pending\t{}".format(total if total is not None else len(runs)))
+else:
+    print("success\t{}".format(total if total is not None else len(runs)))
+PY
+}
+
+fm_supervision_merge_ci_state() {
+  local status_state=$1 status_count=$2 check_state=$3 check_count=$4 total
+  if printf '%s\n%s\n' "$status_state" "$check_state" | grep -Eq '^(failure|error)$'; then
+    printf 'failure\t%s' "$(fm_supervision_ci_total "$status_count" "$check_count")"
+  elif printf '%s\n%s\n' "$status_state" "$check_state" | grep -Eq '^pending$'; then
+    printf 'pending\t%s' "$(fm_supervision_ci_total "$status_count" "$check_count")"
+  elif printf '%s\n%s\n' "$status_state" "$check_state" | grep -Eq '^unknown$'; then
+    printf 'unknown\t%s' "$(fm_supervision_ci_total "$status_count" "$check_count")"
+  elif printf '%s\n%s\n' "$status_state" "$check_state" | grep -Eq '^success$'; then
+    printf 'success\t%s' "$(fm_supervision_ci_total "$status_count" "$check_count")"
+  else
+    total=$(fm_supervision_ci_total "$status_count" "$check_count")
+    [ "$total" = 0 ] && printf 'none\t0' || printf 'unknown\t%s' "$total"
+  fi
+}
+
+fm_supervision_ci_total() {
+  local a=$1 b=$2 total=0 saw=false
+  case "$a" in ''|unknown) : ;; *[!0-9]*) : ;; *) total=$((total + a)); saw=true ;; esac
+  case "$b" in ''|unknown) : ;; *[!0-9]*) : ;; *) total=$((total + b)); saw=true ;; esac
+  "$saw" && printf '%s' "$total" || printf 'unknown'
+}
+
 fm_supervision_gh_pr() {
-  local url=$1 parsed repo number out state merged mergeable_state sha status_out ci_state total_count
+  local url=$1 parsed repo number out state merged mergeable_state sha status_out checks_out checks_data ci_data ci_state total_count status_state status_count check_state check_count
   parsed=$(fm_supervision_pr_from_url "$url") || return 1
   [ -n "$parsed" ] || return 1
   repo=${parsed% *}
@@ -339,15 +424,45 @@ fm_supervision_gh_pr() {
   ci_state=unknown
   total_count=unknown
   if [ -n "$sha" ]; then
+    status_state=unknown
+    status_count=unknown
     status_out=$(fm_supervision_gh_api_get "/repos/$repo/commits/$sha/status") || status_out=
     if [ -n "$status_out" ]; then
-      ci_state=$(printf '%s\n' "$status_out" | fm_supervision_yaml_value state)
-      total_count=$(printf '%s\n' "$status_out" | fm_supervision_yaml_value total_count)
-      [ -n "$ci_state" ] || ci_state=unknown
-      [ "$total_count" = 0 ] && ci_state=none
+      status_state=$(printf '%s\n' "$status_out" | fm_supervision_yaml_value state)
+      status_count=$(printf '%s\n' "$status_out" | fm_supervision_yaml_value total_count)
+      [ -n "$status_state" ] || status_state=unknown
+      [ -n "$status_count" ] || status_count=unknown
+      [ "$status_count" = 0 ] && status_state=none
     fi
+    check_state=unknown
+    check_count=unknown
+    checks_out=$(fm_supervision_gh_api_get "/repos/$repo/commits/$sha/check-runs") || checks_out=
+    if [ -n "$checks_out" ]; then
+      checks_data=$(printf '%s\n' "$checks_out" | fm_supervision_check_runs_state)
+      check_state=$(printf '%s' "$checks_data" | awk -F '\t' '{ print $1 }')
+      check_count=$(printf '%s' "$checks_data" | awk -F '\t' '{ print $2 }')
+    fi
+    ci_data=$(fm_supervision_merge_ci_state "$status_state" "$status_count" "$check_state" "$check_count")
+    ci_state=$(printf '%s' "$ci_data" | awk -F '\t' '{ print $1 }')
+    total_count=$(printf '%s' "$ci_data" | awk -F '\t' '{ print $2 }')
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$state" "$ci_state" "${mergeable_state:-unknown}" "$repo" "${sha:-unknown}" "$total_count"
+}
+
+fm_supervision_project_path() {
+  local project=$1 candidate
+  [ -n "$project" ] || return 1
+  case "$project" in
+    /*)
+      [ -d "$project" ] || return 1
+      printf '%s' "$project"
+      ;;
+    *)
+      candidate="$FM_SUPERVISION_PROJECTS/$project"
+      [ -d "$candidate" ] || return 1
+      printf '%s' "$candidate"
+      ;;
+  esac
 }
 
 fm_supervision_path_age() {
@@ -526,11 +641,11 @@ fm_supervision_checklist_record() {
 
 fm_supervision_collect() {
   fm_supervision_paths
-  local records= source_records= checklist_records= task_records= worktree_records= external_records=
+  local records="" source_records="" checklist_records="" task_records="" worktree_records="" external_records=""
   local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
-  local meta id project kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status turn_ended pr_url pr_data pr_state ci_state mergeable_state
+  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status turn_ended pr_url pr_data pr_state ci_state mergeable_state
   local class_data classification severity owner action why evidence line status_pr window_live treehouse_failed=false
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
@@ -588,8 +703,9 @@ fm_supervision_collect() {
           github_detail="one or more PR reads failed; affected PR states unknown"
         fi
       fi
-      if [ -n "$project" ] && [ -d "$FM_SUPERVISION_PROJECTS/$project" ]; then
-        if ! fm_supervision_treehouse_status "$FM_SUPERVISION_PROJECTS/$project"; then
+      project_status_path=$(fm_supervision_project_path "$project" 2>/dev/null || true)
+      if [ -n "$project_status_path" ]; then
+        if ! fm_supervision_treehouse_status "$project_status_path"; then
           treehouse_failed=true
           treehouse_ok=false
         fi
@@ -608,7 +724,7 @@ fm_supervision_collect() {
         why="treehouse status failed for the project."
       fi
       evidence="meta=$(basename "$meta"); status=${last_status:-none}; window_live=$window_live; pr_state=$pr_state; ci_state=$ci_state; mergeable_state=$mergeable_state"
-      line=$(printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      line=$(printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
         "$(fm_supervision_field "$id")" "$(fm_supervision_field "$project")" "$(fm_supervision_field "$kind")" \
         "$(fm_supervision_field "$mode")" "$(fm_supervision_field "$yolo")" "$(fm_supervision_field "$harness")" \
         "$(fm_supervision_field "$route_profile")" "$(fm_supervision_field "$route_harness")" "$(fm_supervision_field "$route_model")" "$(fm_supervision_field "$route_effort")" \
@@ -744,7 +860,7 @@ EOF
 
 fm_supervision_emit_json() {
   fm_supervision_paths
-  local generated_at source_lines= task_lines= worktree_lines= external_lines= checklist_lines= summary_line= line kind
+  local generated_at source_lines="" task_lines="" worktree_lines="" external_lines="" checklist_lines="" summary_line="" line kind
   generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -850,7 +966,7 @@ EOF
 }
 
 fm_supervision_emit_text() {
-  local generated_at include_ok checklist_lines= source_lines= task_lines= summary_line= line kind
+  local generated_at include_ok checklist_lines="" source_lines="" task_lines="" summary_line="" line kind
   generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   include_ok=${FM_SUPERVISE_INCLUDE_OK:-0}
   while IFS= read -r line; do
@@ -886,7 +1002,7 @@ EOF
     printf 'No immediate action items.\n\n'
   fi
 
-  local gh_ok=true gh_detail= watcher_ok=true watcher_detail=
+  local gh_ok=true gh_detail="" watcher_ok=true watcher_detail=""
   while IFS=$'\t' read -r _ name ok detail; do
     case "$name" in
       github) gh_ok=$ok; gh_detail=$detail ;;

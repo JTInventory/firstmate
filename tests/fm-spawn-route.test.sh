@@ -58,7 +58,7 @@ run_spawn_case() {
 }
 
 test_ordinary_spawn_records_route_fields() {
-  local setup home proj wt fakebin id out status meta brief
+  local home proj wt fakebin id out status meta brief
   IFS='|' read -r home proj wt fakebin <<EOF
 $(make_case ordinary)
 EOF
@@ -83,7 +83,7 @@ EOF
 }
 
 test_manual_harness_override_records_manual_route() {
-  local setup home proj wt fakebin id out status meta
+  local home proj wt fakebin id out status meta
   IFS='|' read -r home proj wt fakebin <<EOF
 $(make_case manual)
 EOF
@@ -104,7 +104,7 @@ EOF
 }
 
 test_raw_launch_command_records_raw_route() {
-  local setup home proj wt fakebin id out status meta
+  local home proj wt fakebin id out status meta
   IFS='|' read -r home proj wt fakebin <<EOF
 $(make_case raw)
 EOF
