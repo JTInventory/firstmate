@@ -12,7 +12,6 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 . "$SCRIPT_DIR/fm-cognee-telemetry-lib.sh"
 TELEMETRY_START_MS=$(fm_cognee_telemetry_now_ms)
 
@@ -150,6 +149,7 @@ append_brief_section() {
 }
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-memory-lookup.XXXXXX")
+# shellcheck disable=SC2317 # Invoked by trap.
 cleanup() { rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 

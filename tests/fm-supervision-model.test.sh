@@ -91,6 +91,7 @@ test_model_is_sourceable_and_schema_is_json() {
   . "$MODEL" || fail "model should be sourceable"
   local out
   out=$("$CLI" --schema) || fail "schema command failed"
+  # shellcheck disable=SC2016 # Dollar sign is literal JSON schema text.
   assert_contains "$out" '"$id": "firstmate.supervision.v1"' "schema id missing"
   assert_json_valid "$out" "schema"
   pass "model is sourceable and schema is valid JSON"

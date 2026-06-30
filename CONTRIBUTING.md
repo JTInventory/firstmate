@@ -41,7 +41,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
+  `shellcheck -x -P SCRIPTDIR bin/*.sh tests/*.sh` must pass, and CI enforces it.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 
@@ -57,7 +57,7 @@ Check and test the toolbelt before pushing:
 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
-shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
+shellcheck -x -P SCRIPTDIR bin/*.sh tests/*.sh # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests

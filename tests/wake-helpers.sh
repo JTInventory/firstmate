@@ -231,7 +231,9 @@ dead_pid() {
 fm_test_cleanup_watch_processes() {
   local d f pid pgid
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && [ -d "$d" ] || continue
+    if [ -z "$d" ] || [ ! -d "$d" ]; then
+      continue
+    fi
     while IFS= read -r f; do
       pid=$(cat "$f" 2>/dev/null || true)
       case "$pid" in
@@ -246,7 +248,9 @@ EOF
   done
   sleep 0.2
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && [ -d "$d" ] || continue
+    if [ -z "$d" ] || [ ! -d "$d" ]; then
+      continue
+    fi
     while IFS= read -r f; do
       pid=$(cat "$f" 2>/dev/null || true)
       case "$pid" in

@@ -77,7 +77,7 @@ contains_git_danger() {
 }
 
 join_reasons() {
-  local result= part
+  local result="" part
   for part in "$@"; do
     [ -n "$part" ] || continue
     if [ -z "$result" ]; then

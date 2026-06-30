@@ -22,6 +22,7 @@ assert_cognee_rules() {
     "brief does not require reopening the local source path"
   assert_grep 'The hint includes stale-risk and says live state still needs verification.' "$brief" \
     "brief does not require stale-risk and live verification wording"
+  # shellcheck disable=SC2016 # Backticks are literal expected brief text.
   assert_grep '`external_action_authorized=false`.' "$brief" \
     "brief does not pin external_action_authorized=false"
   assert_grep 'Never use raw Cognee answer text as proof.' "$brief" \

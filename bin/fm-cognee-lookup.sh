@@ -281,6 +281,7 @@ if ! "$DRY_RUN"; then
   fi
 
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-cognee-live.XXXXXX")
+  # shellcheck disable=SC2317 # Invoked by trap.
   cleanup_live() { rm -rf "$TMP_DIR"; }
   trap cleanup_live EXIT
   PAYLOAD="$TMP_DIR/search.json"
@@ -405,6 +406,7 @@ fi
 [ -n "$ANSWER_FILE" ] || die "--answer-file is required when --manifest is used"
 
 TMP_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-cognee-lookup.XXXXXX")
+# shellcheck disable=SC2317 # Invoked by trap.
 cleanup_lookup() { rm -f "$TMP_OUT"; }
 trap cleanup_lookup EXIT
 

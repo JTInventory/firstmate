@@ -63,7 +63,9 @@ fm_cognee_load_env_file() {
     value=$(fm_cognee_env_trim "$value")
     case "$key" in
       ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*)
+        # shellcheck disable=SC2034 # Read by callers after fm_cognee_load_env_file returns.
         FM_COGNEE_ENV_FILE_LOAD_ERROR=env_file_malformed
+        # shellcheck disable=SC2034 # Read by callers after fm_cognee_load_env_file returns.
         FM_COGNEE_ENV_FILE_LOAD_LINE=$line_no
         return 1
         ;;
@@ -75,8 +77,11 @@ fm_cognee_load_env_file() {
       last=${value#"${value%?}"}
       if [ "$first" = "'" ] || [ "$first" = '"' ]; then
         if [ "$last" != "$first" ] || [ "${#value}" -lt 2 ]; then
+          # shellcheck disable=SC2034 # Read by callers after fm_cognee_load_env_file returns.
           FM_COGNEE_ENV_FILE_LOAD_ERROR=env_file_malformed
+          # shellcheck disable=SC2034 # Read by callers after fm_cognee_load_env_file returns.
           FM_COGNEE_ENV_FILE_LOAD_LINE=$line_no
+          # shellcheck disable=SC2034 # Read by callers after fm_cognee_load_env_file returns.
           FM_COGNEE_ENV_FILE_LOAD_KEY=$key
           return 1
         fi
@@ -87,7 +92,7 @@ fm_cognee_load_env_file() {
 
     if [ -z "${!key+x}" ] || [ -z "${!key}" ]; then
       printf -v "$key" '%s' "$value"
-      export "$key"
+      export "${key?}"
     fi
   done < "$env_file"
   return 0

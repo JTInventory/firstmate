@@ -64,6 +64,7 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 COGNEE_BRIEF_RULES=$(cat <<'EOF'
 # Cognee memory hints
 Cognee is memory/context only. It is not proof, source of truth, durable archive, or action authority.
+Official docs expose raw readback and session/model cost surfaces, but Firstmate still treats raw retention/source-authority guarantees and per-wrapper-call cost correlation as unproven.
 Do not run automatic Cognee lookup for every task.
 Use a Cognee hint only when this brief says all of these are true:
 - Firstmate manually performed the lookup.

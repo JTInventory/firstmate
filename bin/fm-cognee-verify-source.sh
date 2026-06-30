@@ -9,7 +9,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-cognee-telemetry-lib.sh"
 export FM_COGNEE_TELEMETRY_FILE="${FM_COGNEE_TELEMETRY_FILE:-$(fm_cognee_telemetry_default_path)}"
-export FM_COGNEE_TELEMETRY_START_MS="$(fm_cognee_telemetry_now_ms)"
+FM_COGNEE_TELEMETRY_START_MS=$(fm_cognee_telemetry_now_ms)
+export FM_COGNEE_TELEMETRY_START_MS
 
 usage() {
   echo "usage: fm-cognee-verify-source.sh --manifest <manifest.jsonl> --answer <answer.txt>" >&2

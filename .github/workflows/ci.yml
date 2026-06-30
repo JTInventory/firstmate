@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: shellcheck bin/*.sh tests/*.sh
+      - run: shellcheck -x -P SCRIPTDIR bin/*.sh tests/*.sh
 
   tests:
     name: Behavior tests

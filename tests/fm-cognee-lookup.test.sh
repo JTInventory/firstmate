@@ -209,6 +209,7 @@ test_live_env_file_loads_allowlisted_names_safely() {
   fakebin=$(fm_fakebin "$dir")
   telemetry="$dir/telemetry.jsonl"
   marker="$dir/should-not-exist"
+  # shellcheck disable=SC2016 # Command substitution text must stay literal for env-loader safety coverage.
   complex_secret='value with spaces @ dollar$ backtick` double" single'\'' semi;colon $(touch '"$marker"')'
   printf 'local source truth from env-file lookup\n' > "$source"
   sha=$(sha256sum "$source" | awk '{print $1}')
@@ -219,6 +220,7 @@ test_live_env_file_loads_allowlisted_names_safely() {
     printf 'COGNEE_API_KEY=%s\n' "$complex_secret"
     printf 'FM_COGNEE_DATASET_ALIAS=%s\n' 'firstmate-curated-memory-0629'
     printf 'FM_COGNEE_MANIFEST=%s\n' "$manifest"
+    # shellcheck disable=SC2016 # Command substitution text must stay literal for env-loader safety coverage.
     printf 'UNSAFE_UNKNOWN=%s\n' '$(touch '"$marker"')'
   } > "$envfile"
   cat > "$fakebin/curl" <<'SH'
@@ -283,6 +285,7 @@ test_live_env_file_ignores_unknown_names() {
     printf 'FM_COGNEE_DATASET_ALIAS=%s\n' 'firstmate-curated-memory-0629'
     printf 'FM_COGNEE_MANIFEST=%s\n' "$manifest"
     printf 'FM_COGNEE_TELEMETRY_FILE=%s\n' "$dir/ignored-telemetry.jsonl"
+    # shellcheck disable=SC2016 # Command substitution text must stay literal for env-loader safety coverage.
     printf 'UNKNOWN_NAME=%s\n' '$(touch '"$marker"')'
     printf '%s\n' "UNKNOWN_QUOTED='ignored"
   } > "$envfile"

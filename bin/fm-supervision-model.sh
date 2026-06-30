@@ -526,7 +526,7 @@ fm_supervision_checklist_record() {
 
 fm_supervision_collect() {
   fm_supervision_paths
-  local records= source_records= checklist_records= task_records= worktree_records= external_records=
+  local records="" source_records="" checklist_records="" task_records="" worktree_records="" external_records=""
   local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
@@ -608,7 +608,7 @@ fm_supervision_collect() {
         why="treehouse status failed for the project."
       fi
       evidence="meta=$(basename "$meta"); status=${last_status:-none}; window_live=$window_live; pr_state=$pr_state; ci_state=$ci_state; mergeable_state=$mergeable_state"
-      line=$(printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      line=$(printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
         "$(fm_supervision_field "$id")" "$(fm_supervision_field "$project")" "$(fm_supervision_field "$kind")" \
         "$(fm_supervision_field "$mode")" "$(fm_supervision_field "$yolo")" "$(fm_supervision_field "$harness")" \
         "$(fm_supervision_field "$route_profile")" "$(fm_supervision_field "$route_harness")" "$(fm_supervision_field "$route_model")" "$(fm_supervision_field "$route_effort")" \
@@ -744,7 +744,7 @@ EOF
 
 fm_supervision_emit_json() {
   fm_supervision_paths
-  local generated_at source_lines= task_lines= worktree_lines= external_lines= checklist_lines= summary_line= line kind
+  local generated_at source_lines="" task_lines="" worktree_lines="" external_lines="" checklist_lines="" summary_line="" line kind
   generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -850,7 +850,7 @@ EOF
 }
 
 fm_supervision_emit_text() {
-  local generated_at include_ok checklist_lines= source_lines= task_lines= summary_line= line kind
+  local generated_at include_ok checklist_lines="" source_lines="" task_lines="" summary_line="" line kind
   generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   include_ok=${FM_SUPERVISE_INCLUDE_OK:-0}
   while IFS= read -r line; do
@@ -886,7 +886,7 @@ EOF
     printf 'No immediate action items.\n\n'
   fi
 
-  local gh_ok=true gh_detail= watcher_ok=true watcher_detail=
+  local gh_ok=true gh_detail="" watcher_ok=true watcher_detail=""
   while IFS=$'\t' read -r _ name ok detail; do
     case "$name" in
       github) gh_ok=$ok; gh_detail=$detail ;;
