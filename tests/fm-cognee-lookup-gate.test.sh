@@ -27,7 +27,7 @@ write_all_passing_reports() {
   write_report cognee-usage-rollup-real-telemetry-0629/report.md \
     "FM_COGNEE_GATE_TELEMETRY_ROLLUP_THRESHOLD=pass"
   write_report cognee-cost-usage-metadata-check-0629/report.md \
-    "FM_COGNEE_GATE_COST_USAGE_EVIDENCE=acceptable"
+    "FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call"
   write_report cognee-vendor-raw-durability-escalation-0629/report.md \
     "FM_COGNEE_GATE_RAW_DURABILITY_SOURCE_AUTHORITY=pass"
 }
@@ -86,8 +86,62 @@ test_unknown_cost_blocks_enablement() {
   rc=$?
 
   expect_code 1 "$rc" "unknown cost evidence"
-  assert_contains "$out" "missing acceptable cost/usage evidence" "unknown cost blocks with clear reason"
+  assert_contains "$out" "missing cost/usage evidence" "unknown cost blocks with clear reason"
   pass "missing or unknown cost evidence blocks automatic enablement"
+}
+
+test_missing_cost_evidence_blocks_enablement() {
+  local out rc
+  rm -rf "$EVIDENCE"
+  mkdir -p "$EVIDENCE"
+  write_all_passing_reports
+  rm "$EVIDENCE/cognee-cost-usage-metadata-check-0629/report.md"
+
+  out=$(FM_COGNEE_AUTO_LOOKUP=1 run_gate automatic)
+  rc=$?
+
+  expect_code 1 "$rc" "missing cost evidence"
+  assert_contains "$out" "missing cost/usage evidence" "missing cost evidence blocks with clear reason"
+  assert_contains "$out" "external_action_authorized=false" "missing cost evidence authorizes no action"
+  pass "missing cost evidence blocks automatic enablement"
+}
+
+test_session_window_only_cost_blocks_automatic_promotion() {
+  local out rc
+  rm -rf "$EVIDENCE"
+  mkdir -p "$EVIDENCE"
+  write_all_passing_reports
+  write_report cognee-cost-usage-metadata-check-0629/report.md \
+    "FM_COGNEE_GATE_COST_USAGE_EVIDENCE=session_window_only"
+
+  out=$(FM_COGNEE_AUTO_LOOKUP=1 run_gate automatic)
+  rc=$?
+
+  expect_code 1 "$rc" "session-window-only cost evidence"
+  assert_contains "$out" "cost_usage_evidence=session_window_only" "session-window-only evidence should be reported"
+  assert_contains "$out" "no safe per-wrapper-call cost/request/session/QA id bridge exists today" \
+    "session-window-only evidence blocks with the bridge reason"
+  assert_contains "$out" "external_action_authorized=false" "session-window-only evidence authorizes no action"
+  pass "session-window-only cost evidence is trial-only and blocks automatic promotion"
+}
+
+test_unsafe_logging_evidence_blocks_enablement() {
+  local out rc
+  rm -rf "$EVIDENCE"
+  mkdir -p "$EVIDENCE"
+  write_all_passing_reports
+  write_report cognee-usage-rollup-real-telemetry-0629/report.md \
+    "FM_COGNEE_GATE_TELEMETRY_ROLLUP_THRESHOLD=pass" \
+    "answer_body_logged=true"
+
+  out=$(FM_COGNEE_AUTO_LOOKUP=1 run_gate automatic)
+  rc=$?
+
+  expect_code 1 "$rc" "unsafe logging evidence"
+  assert_contains "$out" "unsafe Cognee logging evidence" "unsafe logging marker blocks with clear reason"
+  assert_contains "$out" "answer_body_logged=true" "blocked reason names unsafe marker"
+  assert_contains "$out" "external_action_authorized=false" "unsafe logging evidence authorizes no action"
+  pass "unsafe answer/session body logging evidence blocks automatic enablement"
 }
 
 test_no_external_action_is_authorized() {
@@ -118,6 +172,10 @@ test_manual_verified_lookup_remains_allowed() {
   assert_contains "$out" "manual_verified_lookup_allowed=true" "manual verified lookup allowed"
   assert_contains "$out" "automatic_lookup_allowed=false" "manual verified lookup does not enable automatic lookup"
   assert_contains "$out" "external_action_authorized=false" "manual lookup authorizes no external action"
+  assert_contains "$out" "read_only=true" "manual lookup remains read-only"
+  assert_contains "$out" "hint_only=true" "manual lookup remains hint-only"
+  assert_contains "$out" "fail_closed=true" "manual lookup remains fail-closed"
+  assert_contains "$out" "source_authority=local_source_required" "manual lookup still requires local source proof"
   pass "manual verified lookup remains allowed"
 }
 
@@ -125,5 +183,8 @@ test_default_automatic_lookup_disabled
 test_missing_benchmark_blocks_enablement
 test_missing_telemetry_rollup_blocks_enablement
 test_unknown_cost_blocks_enablement
+test_missing_cost_evidence_blocks_enablement
+test_session_window_only_cost_blocks_automatic_promotion
+test_unsafe_logging_evidence_blocks_enablement
 test_no_external_action_is_authorized
 test_manual_verified_lookup_remains_allowed
