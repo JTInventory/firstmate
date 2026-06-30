@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Secret-safe local JSONL telemetry helpers for Cognee wrapper operations.
 #
-# Callers pass only labels, counters, timings, and cost classifications. This
-# helper never receives prompt text, answer bodies, source bodies, auth headers,
-# API keys, cookies, signed URLs, bearer tokens, or secret values.
+# Telemetry callers pass only labels, counters, timings, and cost classifications.
+# This helper's safe env-file loader may read allowlisted Cognee connection names,
+# but telemetry events never receive or write prompt text, answer bodies, source
+# bodies, auth headers, API keys, cookies, signed URLs, bearer tokens, base URLs,
+# or secret values.
 
 fm_cognee_env_trim() {
   local value=$1

@@ -23,6 +23,7 @@ Routine re-arms go through `bin/fm-watch-arm.sh`, which forks the watcher as a t
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
 For harnesses where a tracked background call is not durable enough, `bin/fm-watch-session.sh` provides a home-scoped tmux runner that repeatedly arms the normal watcher from a persistent process, reports status from the derived `firstmate-watch:fm-watch-<home/state hash>` window, and stops only that current-home runner window.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, queued wakes are waiting to be drained, or tasks are in flight and watcher liveness is not proved by both a fresh beacon and a live `state/.watch.lock` for this same home/path.
+The read-only supervision model combines GitHub commit status and check-runs when classifying PR CI, so Actions failures such as stale or failed check-runs are not treated as green just because legacy commit status is empty.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 

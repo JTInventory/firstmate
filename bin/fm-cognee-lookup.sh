@@ -12,11 +12,13 @@ usage() {
 usage: fm-cognee-lookup.sh [--dry-run] --query <text> [--manifest <manifest.tsv|manifest.jsonl> --answer-file <answer.txt>]
        fm-cognee-lookup.sh <query text>
 
-Live mode uses only already-exported environment variables:
+Live mode uses already-exported environment variables, plus allowlisted names
+from FM_COGNEE_ENV_FILE when set:
   COGNEE_BASE_URL
   COGNEE_API_KEY
   COGNEE_DATASET_ID or FM_COGNEE_DATASET_ALIAS
   FM_COGNEE_MANIFEST or --manifest
+  FM_COGNEE_TIMEOUT_MS defaults to 30000 and sets connect/request timeouts
 
 It can be used through:
   FM_COGNEE_LOOKUP_CMD=/absolute/path/to/bin/fm-cognee-lookup.sh
