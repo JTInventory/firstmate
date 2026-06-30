@@ -7,7 +7,7 @@
 # Usage:
 #   fm-route.sh <task-id> <project-or-path> [--kind ship|scout|secondmate]
 #     [--task-file <path>] [--profile cheap|standard|deep|critical]
-#     [--harness claude|codex|opencode|pi] [--model <model>]
+#     [--harness claude|codex|opencode|pi|grok] [--model <model>]
 #     [--effort <effort>] [--captain-downgrade-ok] [--explain]
 set -eu
 
@@ -27,7 +27,7 @@ is_profile() {
 }
 
 is_harness() {
-  case "$1" in claude|codex|opencode|pi) return 0 ;; *) return 1 ;; esac
+  case "$1" in claude|codex|opencode|pi|grok) return 0 ;; *) return 1 ;; esac
 }
 
 rank_profile() {
