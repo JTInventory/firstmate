@@ -87,6 +87,22 @@ Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an expl
 In dry-run, `fm-x-reply.sh` records the full would-be payload to `state/x-outbox/<request_id>.json`, including `texts` for a thread, prints a `DRY RUN` summary to stderr, echoes the `request_id`, and exits 0.
 This path needs `jq` to build the JSON payload, but it runs before token and network checks, so it needs neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Cognee trial memory
+
+Cognee is trial-only memory context for Firstmate.
+It is not a source of truth, durable archive, proof system, or action authority; [cognee-policy.md](cognee-policy.md) owns the operating policy.
+
+Manual lookup is configured with `FM_COGNEE_LOOKUP_CMD`, `FM_COGNEE_MANIFEST`, and the already-exported Cognee read-only credentials.
+`fm-memory-lookup.sh` runs the backend only when invoked by hand, treats output as a hint, and attaches only local source paths it can reopen.
+Without `FM_COGNEE_LOOKUP_CMD`, it exits 0 with a memory-unavailable note so dispatch continues without Cognee.
+
+Live lookup through `fm-cognee-lookup.sh` requires `COGNEE_BASE_URL`, `COGNEE_API_KEY`, a dataset selector (`COGNEE_DATASET_ID` or `FM_COGNEE_DATASET_ALIAS`), and a manifest path (`FM_COGNEE_MANIFEST` or `--manifest`).
+`FM_COGNEE_ENV_FILE` may load only the allowlisted Cognee names from an env-style file; malformed or unreadable files fail closed without shell-sourcing the file.
+The live wrapper calls only `POST /api/v1/search`, records secret-safe telemetry, and still delegates proof to local manifest/source verification.
+
+Automatic lookup remains disabled unless `FM_COGNEE_AUTO_LOOKUP=1` and the local evidence under `FM_COGNEE_EVIDENCE_ROOT` proves every gate marker, including `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call` and `FM_COGNEE_GATE_RAW_DURABILITY_SOURCE_AUTHORITY=pass`.
+`session_window_only` cost evidence is accepted only as trial monitoring evidence and still blocks automatic promotion.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -115,6 +131,10 @@ FM_GUARD_GRACE=300      # seconds before guard warnings and arm health checks tr
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_WATCH_SESSION_REARM_DELAY=1   # seconds the durable watch-session runner waits before re-arming after a watcher exit
+FM_WATCH_SESSION_RETRY_DELAY=    # legacy alias for FM_WATCH_SESSION_REARM_DELAY
+FM_WATCH_SESSION_AFK_DELAY=15    # seconds watch-session sleeps while the AFK daemon owns supervision
+FM_WATCH_SESSION_TMUX_SESSION=firstmate-watch   # tmux session name for durable watch-session runner windows
+FM_WATCH_SESSION_TMUX_WINDOW=   # optional tmux window name; default is fm-watch-<home/state hash>
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # status regex that makes watcher and daemon signal/stale/scan output captain-relevant
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a non-terminal stale pane escalates as a possible wedge
@@ -126,6 +146,25 @@ FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+# read-only supervision view (bin/fm-supervise.sh)
+FM_SUPERVISE_TREEHOUSE_TIMEOUT=5   # seconds allowed per treehouse status read
+FM_SUPERVISE_GH_TIMEOUT=5          # seconds allowed per gh-axi GitHub read
+# Cognee trial memory and local verification
+FM_COGNEE_LOOKUP_CMD=      # executable backend path for manual memory lookup, usually bin/fm-cognee-lookup.sh
+FM_MEMORY_LOOKUP_MAX_HINT_LINES=40   # maximum hint lines printed from a manual memory lookup
+COGNEE_BASE_URL=           # Cognee Cloud/API base URL for explicit live lookup
+COGNEE_API_KEY=            # Cognee API key for explicit live lookup
+COGNEE_DATASET_ID=         # UUID dataset selector; logged only as a sha256 hash
+FM_COGNEE_DATASET_ALIAS=   # alternate dataset selector when COGNEE_DATASET_ID is absent
+FM_COGNEE_MANIFEST=        # local manifest used for Cognee answer/source verification
+FM_COGNEE_ENV_FILE=        # optional env-style file; only allowlisted Cognee names are loaded
+FM_COGNEE_SEARCH_TYPE=RAG_COMPLETION   # searchType sent to POST /api/v1/search
+FM_COGNEE_TOP_K=8          # topK sent to POST /api/v1/search
+FM_COGNEE_MAX_ATTEMPTS=3   # live lookup attempts before fail-closed exit
+FM_COGNEE_TIMEOUT_MS=30000 # connect and request timeout budget for live lookup
+FM_COGNEE_TELEMETRY_FILE=  # default: $FM_HOME/data/cognee/telemetry.jsonl
+FM_COGNEE_EVIDENCE_ROOT=/root/firstmate/data   # local evidence root for fm-cognee-lookup-gate.sh
+FM_COGNEE_AUTO_LOOKUP=0    # must be 1 plus all evidence markers before automatic lookup is allowed
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

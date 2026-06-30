@@ -21,7 +21,7 @@ Optional X mode rides the same check path: bootstrap drops a local `state/x-watc
 
 Routine re-arms go through `bin/fm-watch-arm.sh`, which forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `healthy` / `FAILED`, the last exiting non-zero) - never a false `already running` off a dying process.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
-For harnesses where a tracked background call is not durable enough, `bin/fm-watch-session.sh` provides a home-scoped runner that repeatedly arms the normal watcher from a persistent process, reports status from `state/.watch-session.lock`, and stops only the runner recorded for the current `FM_HOME`.
+For harnesses where a tracked background call is not durable enough, `bin/fm-watch-session.sh` provides a home-scoped tmux runner that repeatedly arms the normal watcher from a persistent process, reports status from the derived `firstmate-watch:fm-watch-<home/state hash>` window, and stops only that current-home runner window.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, queued wakes are waiting to be drained, or tasks are in flight and watcher liveness is not proved by both a fresh beacon and a live `state/.watch.lock` for this same home/path.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.

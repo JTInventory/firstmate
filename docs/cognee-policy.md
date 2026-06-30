@@ -48,3 +48,22 @@ Cognee v1.0 presents `remember`, `recall`, `improve`, and `forget` as the main
 memory lifecycle. Firstmate currently uses the documented lower-level
 `POST /api/v1/search` path intentionally because the pilot needs explicit,
 read-only search control and local source verification.
+
+## Operational Helpers
+
+- `fm-cognee-lookup-gate.sh manual-verified` prints the manual contract:
+  read-only, hint-only, fail-closed, local-source-required, and no external
+  action authority.
+- `fm-cognee-lookup-gate.sh automatic` fails closed unless
+  `FM_COGNEE_AUTO_LOOKUP=1` and the local evidence set proves every gate marker,
+  including `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call` and
+  `FM_COGNEE_GATE_RAW_DURABILITY_SOURCE_AUTHORITY=pass`.
+- `fm-memory-lookup.sh` is the manual pre-dispatch helper.
+  It is not wired into automatic dispatch, and missing or failing lookup does
+  not block work.
+- `fm-cognee-lookup.sh`, `fm-cognee-manifest-check.sh`, and
+  `fm-cognee-verify-source.sh` keep Cognee answers advisory by reopening local
+  source references before any hint can be attached.
+- `fm-cognee-session-cost-probe.sh` is disabled-by-design planning support for
+  a separately approved live probe lane; it writes redacted local JSONL probe
+  plans and makes no network calls itself.
