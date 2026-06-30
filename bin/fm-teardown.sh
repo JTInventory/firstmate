@@ -61,10 +61,28 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 
+validated_task_tmp_cleanup_path() {
+  local recorded=$1 expected
+  [ -n "$recorded" ] || return 0
+  case "$ID" in
+    ''|*[!A-Za-z0-9._-]*)
+      echo "REFUSED: unsafe task id $ID for task temp cleanup" >&2
+      return 1
+      ;;
+  esac
+  expected="/tmp/fm-$ID"
+  if [ "$recorded" != "$expected" ]; then
+    echo "REFUSED: unsafe tasktmp $recorded for task $ID (expected $expected)" >&2
+    return 1
+  fi
+  printf '%s\n' "$expected"
+}
+
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+TASK_TMP_CLEANUP=$(validated_task_tmp_cleanup_path "$TASK_TMP") || exit 1
 
 if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ]; then
   fm_assert_task_branch_matches_meta "$ID" "$META" "REFUSED" || exit 1
@@ -664,7 +682,7 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+[ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

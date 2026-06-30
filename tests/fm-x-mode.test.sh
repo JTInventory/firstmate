@@ -880,6 +880,28 @@ test_reply_image_path_errors_are_clear() {
   pass "fm-x-reply --image rejects missing and unsupported image paths clearly"
 }
 
+test_reply_image_rejects_oversize_before_encoding() {
+  local home fakebin log out rc err img
+  home="$TMP_ROOT/reply-image-too-large"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
+  img="$home/too-large.png"
+  make_sample_image "$img"
+  printf 'extra bytes\n' >> "$img"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 FMX_IMAGE_MAX_BYTES=8 \
+    FAKE_CURL_LOG="$log" \
+    "$ROOT/bin/fm-x-reply.sh" "req-img-too-large" --image "$img" "text" 2>"$err"); rc=$?
+
+  [ "$rc" -ne 0 ] || fail "oversize image must fail"
+  [ -z "$out" ] || fail "oversize image must not echo the request_id (got: $out)"
+  assert_grep "image file is too large" "$err" "oversize image must explain the limit"
+  assert_absent "$home/state/x-outbox/req-img-too-large.json" "oversize image must not create a dry-run preview"
+  [ ! -f "$log" ] || fail "oversize image must fail before posting"
+  pass "fm-x-reply --image rejects oversized files before encoding"
+}
+
 # --- follow-up reply mode (--followup -> /connector/followup) ----------------
 
 test_reply_followup_live_posts_to_followup_endpoint() {
@@ -1399,6 +1421,7 @@ test_reply_image_live_streams_payload_file
 test_reply_image_thread_dry_run_records_compact_marker
 test_reply_image_dry_run_cleans_payload_temp_files
 test_reply_image_path_errors_are_clear
+test_reply_image_rejects_oversize_before_encoding
 test_reply_followup_live_posts_to_followup_endpoint
 test_reply_followup_image_live_posts_image_object
 test_reply_followup_flag_position_is_flexible

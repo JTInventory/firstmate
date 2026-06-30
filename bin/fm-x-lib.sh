@@ -162,7 +162,7 @@ fmx_image_media_type_from_path() {
 # a local outbound image. The relay payload object is written to <payload-file>.
 # The compact preview object is printed for FMX_DRY_RUN outbox records.
 fmx_image_payload_file() {
-  local path=$1 client=${2:-fm-x-reply} payload_file=${3:-} media_type bytes
+  local path=$1 client=${2:-fm-x-reply} payload_file=${3:-} media_type bytes max_bytes
   if [ -z "$payload_file" ]; then
     echo "$client: missing image payload destination" >&2
     return 1
@@ -193,6 +193,13 @@ fmx_image_payload_file() {
   }
   if [ "$bytes" = 0 ]; then
     echo "$client: image file is empty: $path" >&2
+    return 1
+  fi
+  max_bytes=${FMX_IMAGE_MAX_BYTES:-5242880}
+  case "$max_bytes" in ''|*[!0-9]*) max_bytes=5242880 ;; esac
+  [ "$max_bytes" -ge 1 ] 2>/dev/null || max_bytes=5242880
+  if [ "$bytes" -gt "$max_bytes" ]; then
+    echo "$client: image file is too large: $path ($bytes bytes; max $max_bytes)" >&2
     return 1
   fi
   if ! (set -o pipefail; base64 < "$path" | tr -d '\n\r' \

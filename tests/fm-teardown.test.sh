@@ -639,9 +639,30 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_teardown_refuses_unsafe_tasktmp() {
+  local case_dir rc victim
+  case_dir=$(make_case unsafe-tasktmp)
+  write_meta "$case_dir" no-mistakes ship
+  victim="$case_dir/victim"
+  mkdir -p "$victim"
+  printf 'keep\n' > "$victim/keep.txt"
+  printf 'tasktmp=%s\n' "$victim" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unsafe-tasktmp: teardown should refuse unsafe tasktmp metadata"
+  assert_present "$victim/keep.txt" "unsafe-tasktmp: teardown must not delete meta-provided arbitrary paths"
+  grep -q "unsafe tasktmp" "$case_dir/stderr" || fail "unsafe-tasktmp: refusal did not cite unsafe tasktmp"
+  pass "teardown refuses arbitrary tasktmp cleanup targets from meta"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+test_teardown_refuses_unsafe_tasktmp
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

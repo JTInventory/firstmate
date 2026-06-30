@@ -25,10 +25,14 @@ pass() {
 }
 
 TMP_ROOT=
+TASK_TMP_ROOT=
 
 cleanup() {
   if [ -n "${TMP_ROOT:-}" ]; then
     rm -rf "$TMP_ROOT"
+  fi
+  if [ -n "${TASK_TMP_ROOT:-}" ]; then
+    rm -rf -- "$TASK_TMP_ROOT"
   fi
 }
 trap cleanup EXIT
@@ -87,6 +91,8 @@ test_spawn_contract_and_mkdir_pattern() {
   # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
   grep -F 'mkdir -p "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: mkdir of gotmp under TASK_TMP"
+  grep -F "TASK_TMP=\"/tmp/fm-\$ID\"" "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: deterministic /tmp/fm-<id> task root"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
@@ -117,7 +123,9 @@ test_spawn_contract_and_mkdir_pattern() {
 
 test_teardown_removes_tasktmp_dir() {
   local id=td-rm-z2
-  local task_tmp="$TMP_ROOT/fm-$id"
+  local task_tmp="/tmp/fm-$id"
+  TASK_TMP_ROOT="$task_tmp"
+  rm -rf -- "$task_tmp"
   mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
   local fake
@@ -173,7 +181,9 @@ META
 test_teardown_skips_gracefully_when_dir_missing() {
   # tasktmp= points to a path that does not exist. Teardown must not error.
   local id=td-missing-z4
-  local task_tmp="$TMP_ROOT/never-created-fm-$id"
+  local task_tmp="/tmp/fm-$id"
+  TASK_TMP_ROOT="$task_tmp"
+  rm -rf -- "$task_tmp"
   # Intentionally do NOT create $task_tmp.
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
