@@ -27,6 +27,8 @@ Each file also starts with a short header comment.
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
 | `fm-watch-session.sh`    | Durable home-scoped tmux runner that loops through `fm-watch-arm.sh` for harness lanes without reliable tracked background tasks |
 | `fm-watch.sh`            | Singleton-safe always-on watcher; absorbs benign wakes in bash, queues and exits only for actionable wakes, and reverts to daemon-owned one-shot behavior while `state/.afk` exists |
+| `fm-supervise.sh`        | Read-only current-work checklist, plus `--json` / `--schema` for the shared `firstmate.supervision.v1` model |
+| `fm-supervision-model.sh` | Sourceable read-only model library used by `fm-supervise.sh` and future display consumers |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, uses the shared wake classifier, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
 | `fm-crew-state.sh`       | Print one stable current-state line for a crew by reconciling its matching no-mistakes run-step, even when the pane has closed, with pane and status-log fallback |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification sourced by bootstrap and guard         |

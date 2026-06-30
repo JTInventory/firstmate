@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# Tests for the read-only fm-supervise model and CLI.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+MODEL="$ROOT/bin/fm-supervision-model.sh"
+CLI="$ROOT/bin/fm-supervise.sh"
+TMP_ROOT=$(fm_test_tmproot fm-supervision-model-tests)
+
+assert_json_valid() {
+  local json=$1 label=$2
+  printf '%s\n' "$json" | python3 -m json.tool >/dev/null || fail "$label is not valid JSON"
+}
+
+make_home() {
+  local name=$1 home
+  home="$TMP_ROOT/$name"
+  mkdir -p "$home/state" "$home/data" "$home/projects"
+  printf '# backlog\n' > "$home/data/backlog.md"
+  printf '%s\n' "$home"
+}
+
+write_fakebin() {
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *missing*) exit 1 ;;
+  *list-panes*) exit 0 ;;
+  *) printf 'fm-window\n' ;;
+esac
+SH
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
+printf 'ok\n'
+SH
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = api ] && [ "$2" = GET ] || exit 2
+case "$3" in
+  /repos/o/r/pulls/1)
+    printf 'state: closed\nmerged: true\nmergeable_state: clean\nhead:\n  sha: sh-merged\n'
+    ;;
+  /repos/o/r/pulls/2)
+    printf 'state: open\nmerged: false\nmergeable_state: clean\nhead:\n  sha: sh-success\n'
+    ;;
+  /repos/o/r/pulls/3)
+    printf 'state: open\nmerged: false\nmergeable_state: dirty\nhead:\n  sha: sh-failure\n'
+    ;;
+  /repos/o/r/pulls/4|/repos/JTInventory/firstmate/pulls/76)
+    printf 'state: open\nmerged: false\nmergeable_state: unstable\nhead:\n  sha: sh-none\n'
+    ;;
+  /repos/o/r/pulls/5)
+    printf 'not parseable\n'
+    ;;
+  /repos/o/r/commits/sh-merged/status|/repos/o/r/commits/sh-success/status)
+    printf 'state: success\ntotal_count: 1\n'
+    ;;
+  /repos/o/r/commits/sh-failure/status)
+    printf 'state: failure\ntotal_count: 1\n'
+    ;;
+  /repos/o/r/commits/sh-none/status|/repos/JTInventory/firstmate/commits/sh-none/status)
+    printf 'state: pending\ntotal_count: 0\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/gh-axi"
+}
+
+write_meta() {
+  local home=$1 id=$2 status=${3:-}
+  shift 3 || true
+  fm_write_meta "$home/state/$id.meta" "$@"
+  [ -n "$status" ] && printf '%s\n' "$status" > "$home/state/$id.status"
+}
+
+run_json() {
+  local home=$1 fakebin=$2
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --json --no-default-reminders
+}
+
+test_model_is_sourceable_and_schema_is_json() {
+  # shellcheck source=bin/fm-supervision-model.sh
+  . "$MODEL" || fail "model should be sourceable"
+  local out
+  out=$("$CLI" --schema) || fail "schema command failed"
+  assert_contains "$out" '"$id": "firstmate.supervision.v1"' "schema id missing"
+  assert_json_valid "$out" "schema"
+  pass "model is sourceable and schema is valid JSON"
+}
+
+test_empty_home_is_read_only_valid_json() {
+  local home fakebin before after out
+  home=$(make_home empty)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  before=$(find "$home/state" "$home/data" -type f -print0 | sort -z | xargs -0 sha256sum)
+  out=$(run_json "$home" "$fakebin") || fail "empty home json failed"
+  after=$(find "$home/state" "$home/data" -type f -print0 | sort -z | xargs -0 sha256sum)
+  [ "$before" = "$after" ] || fail "supervise wrote state or data files"
+  assert_json_valid "$out" "empty home output"
+  assert_contains "$out" '"read_only": true' "json should mark read-only"
+  assert_contains "$out" '"actions_total": 0' "empty home should have no actions"
+  pass "empty home produces valid read-only JSON"
+}
+
+test_task_classifications_and_route_metadata() {
+  local home fakebin out
+  home=$(make_home tasks)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" live 'working: still running' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR" "yolo=off" \
+    "harness=codex" "route_profile=critical" "route_harness=codex" "route_model=gpt-5.5" "route_effort=medium" \
+    "branch=fm/live"
+  write_meta "$home" merged 'done: PR https://github.com/o/r/pull/1 checks green' \
+    "project=demo" "window=live" "pr=https://github.com/o/r/pull/1"
+  write_meta "$home" green 'done: PR https://github.com/o/r/pull/2 checks green' \
+    "project=demo" "window=live" "pr=https://github.com/o/r/pull/2"
+  write_meta "$home" failci 'working: fixing' \
+    "project=demo" "window=live" "pr=https://github.com/o/r/pull/3"
+  write_meta "$home" directnoci 'done: PR https://github.com/o/r/pull/4' \
+    "project=demo" "window=live" "mode=direct-PR" "pr=https://github.com/o/r/pull/4"
+  out=$(run_json "$home" "$fakebin") || fail "task json failed"
+  assert_json_valid "$out" "task output"
+  assert_contains "$out" '"classification": "running"' "live worker should be running"
+  assert_contains "$out" '"route_profile": "critical"' "route profile should be preserved"
+  assert_contains "$out" '"route_model": "gpt-5.5"' "route model should be preserved"
+  assert_contains "$out" '"recorded_branch": "fm/live"' "recorded branch should be preserved"
+  assert_contains "$out" 'merged_pr_live_worker' "merged PR live worker not classified"
+  assert_contains "$out" 'pr_open_ci_green' "green PR not classified"
+  assert_contains "$out" 'pr_open_ci_failing' "failing PR not classified"
+  assert_contains "$out" 'direct_pr_open_no_ci_ready' "direct-PR no-CI PR should be ready for review"
+  pass "task classifications preserve current route metadata"
+}
+
+test_local_failure_paths_degrade_to_actions_or_unknown() {
+  local home fakebin out
+  home=$(make_home failures)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" missing 'working: vanished' "project=demo" "window=missing"
+  write_meta "$home" stale 'working: started' "project=demo" "window=live" "worktree=/tmp/definitely-missing-firstmate-worktree"
+  write_meta "$home" invalid 'working: started' "project=demo" "window=live" "pr=https://github.com/o/r/pull/5"
+  out=$(run_json "$home" "$fakebin") || fail "failure path json failed"
+  assert_contains "$out" 'missing_window_existing_meta' "missing tmux window not classified"
+  assert_contains "$out" 'stale_treehouse_state' "missing recorded worktree not classified"
+  assert_contains "$out" '"github_state": "partial"' "invalid GitHub output should be partial"
+  assert_contains "$out" '"state": "unknown"' "invalid GitHub output should become unknown"
+  pass "local failure paths are surfaced without crashing"
+}
+
+test_github_missing_and_external_reminders_do_not_fail() {
+  local home fakebin out
+  home=$(make_home github-missing)
+  write_meta "$home" ghmiss 'working: started' "project=demo" "window=live" "pr=https://github.com/o/r/pull/2"
+  out=$(PATH="/usr/bin:/bin" FM_HOME="$home" "$CLI" --json --no-default-reminders) || fail "missing gh-axi should not fail"
+  assert_contains "$out" '"github": { "ok": false' "missing gh-axi should mark GitHub false"
+  assert_contains "$out" '"state": "unknown"' "missing gh-axi should make PR unknown"
+
+  home=$(make_home external)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --json --no-default-reminders --external-pr https://github.com/JTInventory/firstmate/pull/76) || fail "external reminder json failed"
+  assert_contains "$out" 'external_open_ci_none' "external no-CI PR should be classified"
+  pass "GitHub failures degrade to unknown and external reminders work"
+}
+
+test_text_output_and_watcher_source() {
+  local home fakebin out
+  home=$(make_home text)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" live 'working: still running' "project=demo" "window=live"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --text --include-ok --no-default-reminders) || fail "text output failed"
+  assert_contains "$out" 'Firstmate supervision - read-only' "text should show read-only posture"
+  assert_contains "$out" 'worker(s) are running normally' "include-ok should show routine workers"
+  assert_contains "$out" 'No changes made.' "text should end with no changes made"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --json --no-default-reminders) || fail "watcher source json failed"
+  assert_contains "$out" '"watcher_state": "unknown"' "watcher state should be explicit when sandbox/process visibility is incomplete"
+  assert_contains "$out" '"watcher": { "ok": false' "watcher source should be false without proof"
+  pass "text output and watcher source are explicit"
+}
+
+test_model_is_sourceable_and_schema_is_json
+test_empty_home_is_read_only_valid_json
+test_task_classifications_and_route_metadata
+test_local_failure_paths_degrade_to_actions_or_unknown
+test_github_missing_and_external_reminders_do_not_fail
+test_text_output_and_watcher_source
+
+printf 'all fm-supervision-model tests passed\n'

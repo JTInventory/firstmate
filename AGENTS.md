@@ -495,6 +495,7 @@ bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch-session.sh start   # durable home-scoped tmux runner for lanes without reliable tracked background tasks
 bin/fm-watch-session.sh --status  # report whether this home's runner window is live
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
+bin/fm-supervise.sh        # read-only checklist/JSON view of current work; never mutates state, tmux, git, treehouse, or GitHub
 bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
 bin/fm-crew-state.sh <id>  # one-line current-state read; reconciles matching run-step, pane, and status log
 ```
@@ -509,6 +510,8 @@ On wake, in order of cheapness:
 4. `check:` a per-task poll fired (usually a merge, or X mode when enabled); act on it.
 5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: read each crewmate's current state with `bin/fm-crew-state.sh <id>` (the cheap first read - it reconciles the authoritative run-step over a possibly-stale status-log line, so a crewmate whose gate you already resolved no longer reads as still parked), peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    Do not report that the fleet is unchanged.
+
+When the picture is unclear or a display surface needs the shared decision model, run `bin/fm-supervise.sh` for a read-only checklist or `bin/fm-supervise.sh --json` for the `firstmate.supervision.v1` model. The command may report watcher proof as `unknown` when the current sandbox cannot see the watcher process; prove liveness with `bin/fm-watch-arm.sh` or `bin/fm-watch-session.sh --status` before treating that as an actual down watcher.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
