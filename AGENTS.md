@@ -839,6 +839,7 @@ Like `bin/fm-x-reply.sh`, the dismiss honors `FMX_DRY_RUN` (recording the would-
 The reply is **public on a shared bot**, so the skill enforces a strict version of section 9: no task ids, internal vocabulary, captain-private material, or secrets - outcomes only.
 Because public mention text can influence the composed reply, the skill never inlines it into a shell command; it passes the reply via `bin/fm-x-reply.sh <request_id> --text-file <path>` (or stdin), not as an interpolated argument.
 When the reply needs one outbound image, pass `--image <path>` to `bin/fm-x-reply.sh`; the helper reads one local PNG, JPEG, GIF, WebP, BMP, or TIFF, detects the media type, base64-encodes the raw bytes, and sends the relay's optional `image` object without inlining image bytes into the shell command.
+It rejects images larger than `FMX_IMAGE_MAX_BYTES` before base64 encoding; the default cap is 5242880 bytes.
 
 **Completion follow-up.**
 When an actionable mention spawns a real task rather than completing in the answering turn, the immediate reply is an acknowledgement and the **outcome** is delivered later as a single follow-up reply.
@@ -864,6 +865,7 @@ Those reply limits are optional environment or `.env` values, with explicit envi
 A single tweet sends `{request_id, text}`; a thread additionally sends `texts` - the ordered chunks - which the relay posts as chained replies (`text` stays the first chunk so a relay that only reads `text` still posts the opener).
 Do not use an image for prose; image attachments are only for actual visual artifacts such as generated illustrations, screenshots, or diagrams.
 When `--image <path>` accompanies a reply that auto-splits into a thread, the client includes `image` alongside `text` and `texts`, and the relay attaches that image to the first/opener tweet only while later chunks remain text-only.
+The image-size cap is `FMX_IMAGE_MAX_BYTES` in the environment, defaulting to 5242880 bytes, and is enforced before base64 encoding.
 
 **Preview / dry-run.**
 Setting `FMX_DRY_RUN` (truthy, in the environment or `.env`) makes `bin/fm-x-reply.sh` compose and surface a reply without posting it: it records the would-be POST body to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one tweet, or `{request_id, text, texts}` for a thread; a `--followup` preview additionally carries an `endpoint` marker so it is self-describing, while the live body stays unchanged), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.

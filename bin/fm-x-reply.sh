@@ -13,8 +13,9 @@
 #
 # Optional --image <path> attaches one local image file to the answer or followup
 # POST body as {media_type,data_base64}. Supported extension mapping includes
-# PNG, JPEG, GIF, WebP, BMP, and TIFF. If long text becomes a thread, the relay
-# attaches that image to the first/opener tweet only.
+# PNG, JPEG, GIF, WebP, BMP, and TIFF. The client rejects files larger than
+# FMX_IMAGE_MAX_BYTES (default 5 MiB) before base64 encoding. If long text becomes
+# a thread, the relay attaches that image to the first/opener tweet only.
 #
 # Two endpoints, one client. By default the reply is the single answer to a
 # mention, POSTed to $RELAY/connector/answer. With --followup it is instead the

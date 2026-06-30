@@ -126,6 +126,7 @@ Dismiss sends `POST /connector/dismiss` with `{request_id}`, posts no text, and 
 Relay auth or config problems are reported once as `x-mode-error ...` until recovery.
 Live replies are posted by `bin/fm-x-reply.sh`, which sends `POST /connector/answer` with `{request_id,text}` for one-tweet replies.
 Add `--image <path>` to attach one local PNG, JPEG, GIF, WebP, BMP, or TIFF as `{media_type,data_base64}` in the relay's optional `image` object.
+The client rejects image files larger than `FMX_IMAGE_MAX_BYTES` before base64 encoding; the default is 5242880 bytes.
 Completion follow-ups use `bin/fm-x-followup.sh`, which checks the local `state/<id>.meta` link and sends the same payload shape through `POST /connector/followup` by calling `bin/fm-x-reply.sh --followup`.
 Add `--image <path>` there too when the completion follow-up should carry an image.
 The follow-up helper clears the link after a successful post or after the 24h window has elapsed; a failed post leaves the link in place so it can be retried.
@@ -182,7 +183,9 @@ FMX_ENV_FILE=           # optional alternate .env file for direct X client invoc
 FMX_DRY_RUN=            # truthy previews X replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-tweet split budget; values below 50 clamp to 50
 FMX_X_THREAD_MAX=25     # maximum tweets in one auto-split X reply thread
+FMX_IMAGE_MAX_BYTES=5242880 # maximum outbound image attachment size before base64 encoding
 FMX_FOLLOWUP_MAX_AGE_SECS=86400   # local window for posting one X completion follow-up
+FMX_NOW_OVERRIDE=       # test-only epoch override for X task-link and follow-up window checks
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings and arm health checks treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED

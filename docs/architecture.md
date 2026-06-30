@@ -122,6 +122,7 @@ On bootstrap, that token creates two local artifacts: `state/x-watch.check.sh`, 
 Without the token, bootstrap removes those artifacts on opt-out and otherwise stays silent, so non-X users see no behavior change.
 Pending mentions are stored as `state/x-inbox/<request_id>.json`; the `fmx-respond` agent-only skill drains that inbox, uses `in_reply_to` parent-tweet context for conversational continuity, classifies each mention as an actionable request, question, or pure acknowledgment, and submits public-safe replies through `bin/fm-x-reply.sh`.
 When a reply has a real visual artifact, `--image <path>` attaches one local PNG, JPEG, GIF, WebP, BMP, or TIFF to the relay's optional `{media_type,data_base64}` image object.
+The client checks `FMX_IMAGE_MAX_BYTES` before base64 encoding, defaulting to 5242880 bytes, so oversized local artifacts are rejected before the payload expands.
 Actionable reversible requests run through firstmate's normal intake, backlog, dispatch, investigation, or ship lifecycle.
 Work that completes in the answering turn gets one outcome reply.
 Work that spawns a longer-running task gets an acknowledgement reply first; `bin/fm-x-link.sh` records `x_request=` and `x_request_ts=` in that task's `state/<id>.meta`, and the terminal completion wake later uses `bin/fm-x-followup.sh` to post one public-safe follow-up through the relay's `connector/followup` endpoint.
