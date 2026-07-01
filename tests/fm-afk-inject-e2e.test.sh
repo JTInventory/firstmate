@@ -235,6 +235,27 @@ wait_for_event() {
   fail "timed out waiting for $desc"
 }
 
+wait_for_stable_event() {
+  local desc=$1 ticks=$2 stable_ticks=$3 i=0 stable=0
+  shift 3
+  while [ "$i" -lt "$ticks" ]; do
+    if "$@"; then
+      stable=$((stable + 1))
+      [ "$stable" -ge "$stable_ticks" ] && return 0
+    else
+      stable=0
+    fi
+    if [ -n "${DAEMON_PID:-}" ] && ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+      dump_wait_diagnostics "$desc"
+      fail "daemon exited while waiting for $desc"
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  dump_wait_diagnostics "$desc"
+  fail "timed out waiting for stable $desc"
+}
+
 digest_count() {
   grep -c 'Supervisor escalate' "$LOG_FILE" 2>/dev/null || true
 }
@@ -256,13 +277,13 @@ scenario_a_delivered_after_idle() {
 }
 
 scenario_b_delivered_once_after_swallowed_enter() {
-  [ "$(digest_count)" -ge 1 ] || return 1
+  [ "$(digest_count)" -eq 1 ] || return 1
   [ ! -e "$STATE_DIR/.swallow-enter" ] || return 1
   escalation_buffer_empty
 }
 
 scenario_c_delivered_once() {
-  [ "$(digest_count)" -ge 1 ] || return 1
+  [ "$(digest_count)" -eq 1 ] || return 1
   escalation_buffer_empty
 }
 
@@ -384,7 +405,7 @@ test_scenario_b() {
 
   # Wait for the daemon to process the escalation and attempt inject (with the
   # swallowed Enter, the retry path fires).
-  wait_for_event "Scenario B one digest after swallowed Enter" 80 scenario_b_delivered_once_after_swallowed_enter
+  wait_for_stable_event "Scenario B one digest after swallowed Enter" 90 12 scenario_b_delivered_once_after_swallowed_enter
 
   # Assert: exactly ONE digest in the log (no duplicate, no loss).
   local digest_count
@@ -431,7 +452,7 @@ test_scenario_c() {
   start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
-  wait_for_event "Scenario C one digest" 60 scenario_c_delivered_once
+  wait_for_stable_event "Scenario C one digest" 70 12 scenario_c_delivered_once
 
   # Exactly one digest line in the submitted log (no duplicate, no loss).
   local digest_count
