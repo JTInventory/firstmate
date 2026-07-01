@@ -14,7 +14,10 @@
 # bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, codex `$...` skill invocations resolved through harness meta,
 # and marked codex secondmate text get a longer pre-Enter settle so completion or
-# input timing does not swallow Enter.
+# input timing does not swallow Enter. If that marked Codex secondmate path still
+# comes back pending after the generic retries, fm-send waits once more and sends
+# one final Enter, matching the observed manual recovery without widening the
+# shared tmux submit core used by the daemon.
 #
 # From-firstmate marker: when the resolved target is a bare `fm-<id>` whose meta
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
@@ -125,6 +128,13 @@ else
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
   verdict=$(fm_tmux_submit_core "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle")
+  if [ "$verdict" = pending ] && [ -n "$MARK_PREFIX" ] && [ "$TARGET_HARNESS" = codex ]; then
+    # Live Codex secondmate panes have accepted a later manual Enter after the
+    # normal retry loop left the marked request in the composer. Do exactly that
+    # once, and only on the marked Codex secondmate path.
+    sleep "$settle"
+    verdict=$(fm_tmux_submit_enter_core "$T" 1 "$sleep_s")
+  fi
   case "$verdict" in
     pending)
       echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2

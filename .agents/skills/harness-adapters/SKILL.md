@@ -105,6 +105,7 @@ A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard 
 That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`), so a universal `$` rule would needlessly slow plain steers to claude/opencode/pi; only a codex target receiving a `$...` message gets the popup-settle.
 An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
 This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
+Marked ordinary text to a Codex secondmate gets one extra delayed Enter if the generic retries still leave the request pending in the composer; that retry is not used for Codex crewmates or non-Codex secondmates.
 
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
 Accept with Enter.
