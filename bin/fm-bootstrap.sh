@@ -7,6 +7,7 @@
 #                 "CREW_HARNESS_OVERRIDE: <name>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
+#                 "SECONDMATE_PROFILE: invalid config/secondmate-profile.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -317,7 +318,7 @@ crew_dispatch_validate() {
     echo "MISSING: jq (install: $(install_cmd jq))"
     return 0
   fi
-  if ! jq -e . "$file" >/dev/null 2>&1; then
+  if ! jq . "$file" >/dev/null 2>&1; then
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
@@ -375,6 +376,31 @@ crew_dispatch_validate() {
   ' "$file"
 }
 
+secondmate_profile_validate() {
+  local file err
+  file="$CONFIG/secondmate-profile.json"
+  [ -f "$file" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
+  if ! jq . "$file" >/dev/null 2>&1; then
+    echo "SECONDMATE_PROFILE: invalid config/secondmate-profile.json - malformed JSON"
+    return 0
+  fi
+  err=$(jq -r '
+    if type != "object" then "top-level value must be an object"
+    elif has("model") and ((.model | type) != "string" or (.model | length) == 0) then "model must be a non-empty string"
+    elif has("effort") and ((.effort | type) != "string") then "effort must be a string"
+    elif has("effort") and (.effort as $e | (["default","low","medium","high","xhigh","max"] | index($e) | not)) then "invalid effort: " + (.effort | tostring)
+    else empty
+    end
+  ' "$file" 2>/dev/null || true)
+  if [ -n "$err" ]; then
+    echo "SECONDMATE_PROFILE: invalid config/secondmate-profile.json - $err"
+  fi
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -412,6 +438,7 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 crew_dispatch_validate
+secondmate_profile_validate
 if ! fm_backlog_backend_manual "$CONFIG"; then
   if fm_tasks_axi_compatible; then
     echo "TASKS_AXI: available"

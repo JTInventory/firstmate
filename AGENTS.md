@@ -76,6 +76,7 @@ bin/                 helper scripts, committed; read each script's header before
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited: the primary pushes this into every secondmate home's config/ (section 4), so a secondmate's own crewmates use the primary's value
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents; LOCAL, gitignored; absent or "default" falls back to config/crew-harness then firstmate's own (section 4). The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
+config/secondmate-profile.json  model/effort axes the PRIMARY uses when launching SECONDMATE agents; LOCAL, gitignored; example `{"model":"gpt-5.5","effort":"high"}`. Missing file, omitted keys, or `"default"` values preserve default model/effort behavior. Explicit `--model` or `--effort` on `fm-spawn.sh --secondmate` wins. NOT inherited into secondmate homes; use inherited `config/crew-dispatch.json` for a secondmate home's own future crewmate/scout defaults
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force hand-editing; inherited by secondmate homes (section 10)
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -243,17 +244,21 @@ Bootstrap reports this as a `CREW_DISPATCH` diagnostic when it can see the inval
 Secondmates can run on a different harness than crewmates.
 `config/secondmate-harness` (a single adapter name; local, gitignored) is the harness the primary uses to launch SECONDMATE agents; resolve it with `bin/fm-harness.sh secondmate`, which follows the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> your own harness.
 So an absent or `default` `config/secondmate-harness` behaves exactly as before this knob existed - secondmates launch on the crew harness - and setting it splits the two: e.g. primary `config/crew-harness=codex` with `config/secondmate-harness=claude` runs the secondmate AGENTS on claude while all crewmates (the primary's and the secondmates' own) run on codex.
+`config/secondmate-profile.json` is the primary-local model/effort companion for that launch harness, for example `{"model":"gpt-5.5","effort":"high"}`.
+It contains only `model` and `effort` axes; harness selection stays in `config/secondmate-harness`.
+Missing file, omitted keys, or `"default"` values preserve the old `model=default` and `effort=default` behavior, and explicit `--model` or `--effort` on `bin/fm-spawn.sh --secondmate` wins for that spawn.
+Invalid JSON, a non-object top level, non-string axes, an empty model, or an effort outside `default|low|medium|high|xhigh|max` is diagnosed by bootstrap and refused at spawn.
 `bin/fm-spawn.sh` resolves a `--secondmate` launch through `secondmate` mode and a crewmate/scout launch through `crew` mode; an explicit per-spawn `--harness` flag or positional harness arg still overrides either kind.
-The split is durable: every secondmate respawn (recovery, `/updatefirstmate`, restart) re-resolves from `config/secondmate-harness`, so it survives restarts without being recorded per-task.
+The split is durable: every secondmate respawn (recovery, `/updatefirstmate`, restart) re-resolves from `config/secondmate-harness` and re-reads `config/secondmate-profile.json`, so it survives restarts without relying on operator memory.
 
-`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited; `config/secondmate-harness` is not.
+`config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited; `config/secondmate-harness` and `config/secondmate-profile.json` are not.
 The primary pushes its declared inheritable config down into each secondmate home's `config/` - at secondmate spawn, on the bootstrap secondmate sweep, and through `bin/fm-config-push.sh` (section 3) - so a secondmate's OWN crewmates, dispatch profiles, and backlog backend use the primary's settings (primary `config/crew-harness=codex` makes a secondmate's crewmates spawn on codex too).
 Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
 If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
-Inheritance copies `config/crew-dispatch.json`, so secondmates apply the same best-fit dispatch profile behavior for their own crewmates.
+Inheritance copies `config/crew-dispatch.json`, so secondmates apply the same best-fit dispatch profile behavior for their own crewmates; use that inherited file for a secondmate home's own future crewmate/scout default model and effort, including Codex `gpt-5.5` `high` unless firstmate explicitly routes a cheaper profile.
 Inheritance also copies `config/backlog-backend`, so a primary opt-out with `manual` makes secondmates hand-edit too.
 When the file is absent, every home uses the default tasks-axi backend path independently.
-The mechanism is generic over a single declared list (`fm-config-inherit-lib.sh`), primary-authoritative (re-pushed every convergence, mirroring absence), and easy to extend; `config/secondmate-harness` is deliberately excluded because secondmates never spawn secondmates.
+The mechanism is generic over a single declared list (`fm-config-inherit-lib.sh`), primary-authoritative (re-pushed every convergence, mirroring absence), and easy to extend; `config/secondmate-harness` is deliberately excluded because secondmates never spawn secondmates, and `config/secondmate-profile.json` is excluded because it controls only primary-to-secondmate launches.
 When changing inherited config mid-session, prefer `bin/fm-config-push.sh` over a full bootstrap if tracked-file sync and reread nudges are not needed.
 It reports `pushed`, `unchanged`, `skipped`, or `error` for each declared item in each live secondmate home; skipped non-ignored items are warnings and real copy/remove errors make the command exit non-zero.
 

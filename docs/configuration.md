@@ -57,10 +57,15 @@ Launch mechanics, including the verified command templates, live in [`bin/fm-spa
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents.
 When it is absent or contains `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, preserving the previous behavior.
-An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
+`config/secondmate-profile.json` is the separate local, gitignored model/effort profile for those primary-to-secondmate launches, for example `{"model":"gpt-5.5","effort":"high"}`.
+It never chooses the harness; `config/secondmate-harness` keeps that job.
+Missing file, omitted keys, and explicit `"default"` values preserve `model=default` and `effort=default`.
+Explicit `--model` or `--effort` on `fm-spawn.sh --secondmate` overrides the file for that one launch.
+An explicit harness argument to `fm-spawn.sh` still overrides either harness config file for that spawn only.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+`config/secondmate-profile.json` is not inherited either; use inherited `config/crew-dispatch.json` for a secondmate home's own future crewmate and scout defaults.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
@@ -82,7 +87,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Toolchain
 
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh with `gh pr checks --json` support, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
-When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When `config/crew-dispatch.json` or `config/secondmate-profile.json` exists, bootstrap also requires `jq` for JSON validation.
+Malformed `config/secondmate-profile.json`, a non-object top level, non-string axes, an empty model, or an effort outside `default|low|medium|high|xhigh|max` is reported as `SECONDMATE_PROFILE: invalid config/secondmate-profile.json - ...`.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.
 If compatible `tasks-axi` is already on `PATH`, bootstrap records it as `TASKS_AXI: available` and firstmate uses its verbs for routine backlog mutations.

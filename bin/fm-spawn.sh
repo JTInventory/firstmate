@@ -13,12 +13,13 @@
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
-#   harness (config/secondmate-harness -> config/crew-harness -> own), so the
-#   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   harness (config/secondmate-harness -> config/crew-harness -> own), then fills
+#   any omitted --model/--effort axes from primary-local config/secondmate-profile.json.
+#   That keeps the secondmate-vs-crewmate launch profile DURABLE across every
+#   respawn (recovery, /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|grok) overrides the harness for this spawn (either
+#   kind). A non-flag string containing whitespace is treated as a RAW launch
+#   command - the escape hatch for verifying new adapters.
 #   A --secondmate spawn also propagates the primary's declared inheritable config
 #   into the secondmate home's config/, so the secondmate's OWN crewmates,
 #   dispatch profiles, and backlog backend inherit the primary's settings
@@ -268,6 +269,41 @@ parse_route_output() {
       risk_flags) ROUTE_RISK_FLAGS=$value ;;
     esac
   done
+}
+
+apply_secondmate_profile_config() {
+  local file err model effort
+  [ "$KIND" = secondmate ] || return 0
+  file="$CONFIG/secondmate-profile.json"
+  [ -f "$file" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: config/secondmate-profile.json requires jq to read model/effort defaults" >&2
+    exit 1
+  fi
+  if ! jq . "$file" >/dev/null 2>&1; then
+    echo "error: invalid config/secondmate-profile.json - malformed JSON" >&2
+    exit 1
+  fi
+  err=$(jq -r '
+    if type != "object" then "top-level value must be an object"
+    elif has("model") and ((.model | type) != "string" or (.model | length) == 0) then "model must be a non-empty string"
+    elif has("effort") and ((.effort | type) != "string") then "effort must be a string"
+    elif has("effort") and (.effort as $e | (["default","low","medium","high","xhigh","max"] | index($e) | not)) then "invalid effort: " + (.effort | tostring)
+    else empty
+    end
+  ' "$file" 2>/dev/null || true)
+  if [ -n "$err" ]; then
+    echo "error: invalid config/secondmate-profile.json - $err" >&2
+    exit 1
+  fi
+  if [ "$MODEL_SET" -eq 0 ]; then
+    model=$(jq -r '.model // "default"' "$file")
+    MODEL=$model
+  fi
+  if [ "$EFFORT_SET" -eq 0 ]; then
+    effort=$(jq -r '.effort // "default"' "$file")
+    EFFORT=$effort
+  fi
 }
 
 append_route_block() {
@@ -551,6 +587,12 @@ EOF
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from route profile '$ROUTE_PROFILE'); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
   fi
+fi
+
+if [ "$KIND" = secondmate ]; then
+  apply_secondmate_profile_config
+  ROUTE_MODEL=${MODEL:-default}
+  ROUTE_EFFORT=${EFFORT:-default}
 fi
 
 # Same session when firstmate already runs inside tmux; dedicated session otherwise.

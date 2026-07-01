@@ -212,19 +212,25 @@ make_seeded_home() {
   printf 'charter\n' > "$home/data/charter.md"
 }
 
-# spawn_secondmate <world> <id> <home> [explicit-harness]
+# spawn_secondmate <world> <id> <home> [explicit-harness] [extra fm-spawn args...]
 # Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
 # resolves), the primary config dir is <world>/home/config, and CLAUDECODE pins
 # detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
 # non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
+  shift 3
+  if [ $# -gt 0 ]; then
+    harness=$1
+    shift
+  fi
   mkdir -p "$world/home/state" "$world/home/data"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
   local spawn_args=("$id" "$home")
   [ -n "$harness" ] && spawn_args+=("$harness")
+  spawn_args+=("$@")
   spawn_args+=(--secondmate)
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
@@ -235,6 +241,8 @@ spawn_secondmate() {
 }
 
 meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
+meta_model() { grep '^model=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
+meta_effort() { grep '^effort=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
 # Split active: crew-harness=claude + secondmate-harness=codex. The secondmate
 # AGENT launches on codex; its own crewmates inherit claude; secondmate-harness
@@ -322,6 +330,76 @@ test_spawn_explicit_harness_wins() {
   [ "$(meta_harness "$meta")" = claude ] \
     || fail "explicit: launched on '$(meta_harness "$meta")', expected explicit claude over config codex"
   pass "B5 spawn: an explicit per-spawn harness arg overrides config/secondmate-harness"
+}
+
+test_spawn_secondmate_profile_sets_model_effort_only() {
+  local w sm meta
+  w="$TMP_ROOT/spawn-profile"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  printf '{"model":"gpt-5.5","effort":"high"}\n' > "$w/home/config/secondmate-profile.json"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate "$w" sm "$sm"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_harness "$meta")" = codex ] || fail "profile: secondmate harness changed unexpectedly"
+  [ "$(meta_model "$meta")" = gpt-5.5 ] || fail "profile: model was '$(meta_model "$meta")', expected gpt-5.5"
+  [ "$(meta_effort "$meta")" = high ] || fail "profile: effort was '$(meta_effort "$meta")', expected high"
+  assert_contains "$(cat "$meta")" "route_model=gpt-5.5" "profile: route_model did not record resolved profile"
+  assert_contains "$(cat "$meta")" "route_effort=high" "profile: route_effort did not record resolved profile"
+  [ -e "$sm/config/secondmate-profile.json" ] \
+    && fail "profile: secondmate-profile.json leaked into the secondmate home"
+  pass "B5a spawn: secondmate-profile.json fills model/effort and is not inherited"
+}
+
+test_spawn_secondmate_profile_reread_and_explicit_axes_win() {
+  local w sm meta
+  w="$TMP_ROOT/spawn-profile-reread"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  printf '{"model":"gpt-5.5","effort":"medium"}\n' > "$w/home/config/secondmate-profile.json"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate "$w" sm "$sm"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_effort "$meta")" = medium ] || fail "profile reread: first effort was not medium"
+
+  printf '{"model":"gpt-5.5","effort":"high"}\n' > "$w/home/config/secondmate-profile.json"
+  spawn_secondmate "$w" sm "$sm"
+  [ "$(meta_effort "$meta")" = high ] || fail "profile reread: respawn did not read changed effort"
+
+  spawn_secondmate "$w" sm "$sm" "" --model explicit-model --effort low
+  [ "$(meta_model "$meta")" = explicit-model ] || fail "profile override: explicit model did not win"
+  [ "$(meta_effort "$meta")" = low ] || fail "profile override: explicit effort did not win"
+  pass "B5b spawn: secondmate profile is re-read on respawn and explicit axes win"
+}
+
+test_spawn_invalid_secondmate_profile_refused() {
+  local w sm fakebin err rc
+  w="$TMP_ROOT/spawn-profile-invalid"
+  sm="$w/sm"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  printf '{"model":"gpt-5.5","effort":"turbo"}\n' > "$w/home/config/secondmate-profile.json"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux")
+  err="$w/spawn.err"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "invalid profile: spawn should have failed"
+  assert_contains "$(cat "$err")" "invalid config/secondmate-profile.json - invalid effort: turbo" \
+    "invalid profile: error did not explain the bad effort"
+  [ -e "$w/home/state/sm.meta" ] && fail "invalid profile: a meta was written despite the abort"
+  pass "B5c spawn: invalid secondmate-profile.json is refused before launch"
 }
 
 # The unverified-adapter guard holds on the resolved secondmate path: an unknown
@@ -698,6 +776,9 @@ test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
+test_spawn_secondmate_profile_sets_model_effort_only
+test_spawn_secondmate_profile_reread_and_explicit_axes_win
+test_spawn_invalid_secondmate_profile_refused
 test_spawn_unverified_secondmate_harness_refused
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current

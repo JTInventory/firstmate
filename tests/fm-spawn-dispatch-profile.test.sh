@@ -361,7 +361,31 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  [ "$(cat "$sm/config/crew-dispatch.json" 2>/dev/null)" = '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' ] \
+    || fail "secondmate launch did not inherit crew-dispatch.json for future crewmate/scout spawns"
   pass "active crew-dispatch profile does not block secondmate launches"
+}
+
+test_secondmate_profile_threads_codex_model_and_effort() {
+  local rec id sm out status launch
+  id=profile-secondmate-config-z17
+  rec=$(make_spawn_case profile-secondmate-config codex "$id")
+  read_case_record "$rec"
+  printf 'codex\n' > "$HOME_DIR/config/secondmate-harness"
+  printf '{"model":"gpt-5.5","effort":"high"}\n' > "$HOME_DIR/config/secondmate-profile.json"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn should accept a valid secondmate profile"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use codex"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "secondmate profile did not thread codex model and reasoning effort into launch"
+  [ ! -e "$sm/config/secondmate-profile.json" ] || fail "secondmate-profile.json must stay primary-local"
+  pass "secondmate-profile.json threads Codex model and effort for secondmate launch"
 }
 
 test_no_profile_keeps_claude_launch_unchanged
@@ -379,5 +403,6 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_secondmate_profile_threads_codex_model_and_effort
 
 echo "# all fm-spawn-dispatch-profile tests passed"
