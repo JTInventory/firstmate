@@ -129,6 +129,7 @@ Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem or capability fact; handle each:
 
 - `MISSING: <tool> (install: <command>)` - list the missing tools to the captain with a one-line purpose each plus the printed install commands, wait for consent (one approval may cover the list), then run `bin/fm-bootstrap.sh install <approved tools...>`.
+  For `gh`, this also covers an installed version whose `gh pr checks` lacks `--json`, because no-mistakes uses that command while monitoring PR CI and older GitHub CLI builds can loop on `exit status 1` after the PR is already green.
   For `treehouse`, this also covers an installed version whose `treehouse get` lacks `--lease`; treat it as an upgrade request.
   For `no-mistakes`, this also covers an installed version older than 1.31.2, because crewmate validation briefs delegate gate mechanics to no-mistakes' version-matched guidance.
   For `tasks-axi`, this appears only when `config/backlog-backend` is absent or set to `tasks-axi`; hand-edit fallback continues until the captain approves installation.

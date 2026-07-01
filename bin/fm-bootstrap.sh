@@ -27,6 +27,9 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
+#          gh is also MISSING when its installed version lacks
+#          "gh pr checks --json" support, which no-mistakes uses while
+#          monitoring PR CI.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          tasks-axi is the default backlog-management backend. It is reported
@@ -180,6 +183,10 @@ NO_MISTAKES_MIN_PATCH=2
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+}
+
+gh_supports_pr_checks_json() {
+  gh pr checks --help 2>&1 | grep -Eq '(^|[[:space:]])--json([[:space:]]|$)'
 }
 
 no_mistakes_version_parts() {
@@ -385,6 +392,9 @@ for t in $TOOLS; do
 done
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+fi
+if command -v gh >/dev/null 2>&1 && ! gh_supports_pr_checks_json; then
+  echo "MISSING: gh (install: $(install_cmd gh))"
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
