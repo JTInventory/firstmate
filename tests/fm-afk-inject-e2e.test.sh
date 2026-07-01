@@ -236,13 +236,18 @@ wait_for_event() {
 }
 
 wait_for_stable_event() {
-  local desc=$1 ticks=$2 stable_ticks=$3 i=0 stable=0
+  local desc=$1 ticks=$2 stable_ticks=$3 i=0 stable=0 observed=0
   shift 3
-  while [ "$i" -lt "$ticks" ]; do
+  while [ "$i" -lt "$ticks" ] || [ "$observed" -eq 1 ]; do
     if "$@"; then
+      observed=1
       stable=$((stable + 1))
       [ "$stable" -ge "$stable_ticks" ] && return 0
     else
+      if [ "$observed" -eq 1 ]; then
+        dump_wait_diagnostics "$desc"
+        fail "event became unstable while waiting for $desc"
+      fi
       stable=0
     fi
     if [ -n "${DAEMON_PID:-}" ] && ! kill -0 "$DAEMON_PID" 2>/dev/null; then
@@ -250,7 +255,9 @@ wait_for_stable_event() {
       fail "daemon exited while waiting for $desc"
     fi
     sleep 0.1
-    i=$((i + 1))
+    if [ "$observed" -eq 0 ]; then
+      i=$((i + 1))
+    fi
   done
   dump_wait_diagnostics "$desc"
   fail "timed out waiting for stable $desc"
