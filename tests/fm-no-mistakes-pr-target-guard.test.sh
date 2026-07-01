@@ -117,6 +117,20 @@ test_rejects_parent_second_no_mistakes_gate_target() {
   pass "PR target guard rejects parent second no-mistakes gate target"
 }
 
+test_rejects_local_no_mistakes_gate_without_target() {
+  local repo="$TMP_ROOT/gate-without-target" gate="$TMP_ROOT/gate-without-target.git" out="$TMP_ROOT/gate-without-target.out" err="$TMP_ROOT/gate-without-target.err"
+  make_repo "$repo" "https://github.com/JTInventory/firstmate"
+  git init --bare -q "$gate"
+  git -C "$repo" remote add no-mistakes "$gate"
+
+  if run_guard "$repo" "$out" "$err"; then
+    fail "guard accepted local no-mistakes gate without target"
+  fi
+  assert_grep "blocked: cannot verify PR target no-mistakes gate=$gate because remote.origin.url and remote.origin.pushurl are missing" "$err" \
+    "guard did not explain missing local no-mistakes gate target"
+  pass "PR target guard rejects local no-mistakes gate without target"
+}
+
 test_accepts_captain_fork_nonlocal_no_mistakes_remote() {
   local repo="$TMP_ROOT/pass-nonlocal-no-mistakes" out="$TMP_ROOT/pass-nonlocal-no-mistakes.out" err="$TMP_ROOT/pass-nonlocal-no-mistakes.err"
   make_repo "$repo" "https://github.com/JTInventory/firstmate"
@@ -170,6 +184,7 @@ test_rejects_parent_pushurl_target
 test_rejects_parent_second_pushurl_target
 test_rejects_parent_no_mistakes_gate_target
 test_rejects_parent_second_no_mistakes_gate_target
+test_rejects_local_no_mistakes_gate_without_target
 test_accepts_captain_fork_nonlocal_no_mistakes_remote
 test_rejects_parent_nonlocal_no_mistakes_remote
 test_rejects_parent_no_mistakes_status_target

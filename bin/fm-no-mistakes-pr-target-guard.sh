@@ -57,6 +57,14 @@ check_urls() {
   done <<< "$urls"
 }
 
+has_url() {
+  local urls=$1 url
+  while IFS= read -r url; do
+    [ -n "$url" ] && return 0
+  done <<< "$urls"
+  return 1
+}
+
 EXPECTED_NORM=$(normalize_github_repo "$EXPECTED_REPO") || {
   printf 'error: invalid expected GitHub repo: %s\n' "$EXPECTED_REPO" >&2
   exit 2
@@ -77,8 +85,12 @@ while IFS= read -r gate; do
   [ -n "$gate" ] || continue
   if [ -d "$gate" ]; then
     gate_origins=$(git --git-dir="$gate" config --get-all remote.origin.url 2>/dev/null || true)
-    check_urls "no-mistakes gate remote.origin.url" "$gate_origins"
     gate_pushes=$(git --git-dir="$gate" config --get-all remote.origin.pushurl 2>/dev/null || true)
+    has_url "$(printf '%s\n%s\n' "$gate_origins" "$gate_pushes")" || {
+      printf 'blocked: cannot verify PR target no-mistakes gate=%s because remote.origin.url and remote.origin.pushurl are missing, expected %s\n' "$gate" "$EXPECTED_NORM" >&2
+      exit 1
+    }
+    check_urls "no-mistakes gate remote.origin.url" "$gate_origins"
     check_urls "no-mistakes gate remote.origin.pushurl" "$gate_pushes"
   else
     check_url "remote.no-mistakes.url" "$gate"
