@@ -12,8 +12,9 @@
 # instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
 # The composer/submit logic is shared with the away-mode daemon via
 # bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
-# Slash commands, and codex `$...` skill invocations resolved through harness
-# meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
+# Slash commands, codex `$...` skill invocations resolved through harness meta,
+# and marked codex secondmate text get a longer pre-Enter settle so completion or
+# input timing does not swallow Enter.
 #
 # From-firstmate marker: when the resolved target is a bare `fm-<id>` whose meta
 # records kind=secondmate, the text is prefixed with the from-firstmate marker
@@ -102,13 +103,22 @@ else
   # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
   # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
   # needlessly slow plain text to claude/opencode/pi. The retried Enter in
-  # fm_tmux_submit_core still backs the settle up either way.
+  # fm_tmux_submit_core still backs the settle up either way. A marked ordinary
+  # message to a codex secondmate also uses the longer settle: live Codex panes
+  # have swallowed Enter on that path while leaving the already-typed request in
+  # the composer, and the marker is present only for bare kind=secondmate targets.
   case "$*" in
     /*) settle=1.2 ;;
     \$*)
       if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
       ;;
-    *) settle=0.3 ;;
+    *)
+      if [ -n "$MARK_PREFIX" ] && [ "$TARGET_HARNESS" = codex ]; then
+        settle=1.2
+      else
+        settle=0.3
+      fi
+      ;;
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
