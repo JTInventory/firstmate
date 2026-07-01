@@ -68,6 +68,7 @@ tests/fm-watch-triage.test.sh             # always-on watcher triage: benign abs
 tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, max-defer, composer, and fm-send submit tests
 tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands, codex $skill invocations, and marked codex secondmate text
+tests/fm-send-codex-secondmate-submit-retry.test.sh # fm-send delayed final Enter for marked Codex secondmate text after generic retries report pending
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
