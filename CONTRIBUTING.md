@@ -14,9 +14,9 @@ Dependency bots are exempt so their automation keeps working, but regular contri
 
 ## Workflow
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
+1. For this captain-owned delivery lane, clone `JTInventory/firstmate` or set your local `origin` to `git@github.com:JTInventory/firstmate.git`.
 2. Create a branch and make your changes.
-3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (firstmate expects **no-mistakes v1.31.2+** and a GitHub CLI whose `gh pr checks` supports `--json`; without a fork, plain `no-mistakes init` still works for maintainers with push access).
+3. Initialize the gate so its target is `JTInventory/firstmate` (firstmate expects **no-mistakes v1.31.2+** and a GitHub CLI whose `gh pr checks` supports `--json`).
 4. Commit your changes.
 5. Push through the gate instead of pushing to `origin`:
 
@@ -26,7 +26,7 @@ Dependency bots are exempt so their automation keeps working, but regular contri
 
 6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
+7. Once the pipeline passes, it pushes the branch and opens the PR against `JTInventory/firstmate` for you.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
@@ -53,6 +53,8 @@ When supervising live crewmates, keep firstmate's own long validation or build c
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
 Firstmate's wrapper still matters: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's test command to the same bash behavior suite as CI.
+In this captain-owned delivery lane, no-mistakes PRs must target `JTInventory/firstmate`.
+`bin/fm-no-mistakes-pr-target-guard.sh` checks local `origin`, all `origin` push URLs, all no-mistakes fetch and push targets, and `no-mistakes status` before the test suite runs, so stale gate state cannot open or update a PR on `kunchenguid/firstmate`.
 
 Check and test the toolbelt before pushing:
 
@@ -71,6 +73,7 @@ tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: res
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, and crew-dispatch reporting tests
+tests/fm-no-mistakes-pr-target-guard.test.sh # captain-fork no-mistakes PR target guard for origin, push URLs, gate remotes, and status output
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
 tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings and no-change contract
