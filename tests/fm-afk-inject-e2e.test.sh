@@ -22,6 +22,10 @@
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
 # appearance — terminal line-wrapping looks like newlines but isn't.
+#
+# The scenario waits are bounded and event-driven: each poll checks the specific
+# daemon/log condition under test, fails quickly if the daemon exits, and prints
+# the relevant submitted-log and daemon-state diagnostics on timeout.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -219,6 +223,8 @@ dump_wait_diagnostics() {
   } >&2
 }
 
+# Wait until a condition becomes true. The tick count is a hard timeout, not a
+# fixed delay after the event has already happened.
 wait_for_event() {
   local desc=$1 ticks=$2 i=0
   shift 2
@@ -235,6 +241,8 @@ wait_for_event() {
   fail "timed out waiting for $desc"
 }
 
+# Wait until a condition becomes true and then remains true long enough to prove
+# the daemon did not add a duplicate or leave an escalation buffered.
 wait_for_stable_event() {
   local desc=$1 ticks=$2 stable_ticks=$3 i=0 stable=0 observed=0
   shift 3
