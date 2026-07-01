@@ -204,6 +204,68 @@ reset_state() {
   : > "$LOG_FILE"
 }
 
+dump_wait_diagnostics() {
+  local desc=$1
+  echo "timed out waiting for: $desc" >&2
+  echo "submitted log:" >&2
+  sed 's/^/  /' "$LOG_FILE" >&2
+  echo "daemon log tail:" >&2
+  tail -40 "$STATE_DIR/.supervise-daemon.log" 2>/dev/null | sed 's/^/  /' >&2 || true
+  echo "daemon state:" >&2
+  {
+    printf '  pid_alive=%s\n' "$(kill -0 "${DAEMON_PID:-0}" 2>/dev/null && echo yes || echo no)"
+    printf '  buffer_bytes=%s\n' "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null || echo 0)"
+    printf '  swallow_enter=%s\n' "$([ -e "$STATE_DIR/.swallow-enter" ] && echo present || echo absent)"
+  } >&2
+}
+
+wait_for_event() {
+  local desc=$1 ticks=$2 i=0
+  shift 2
+  while [ "$i" -lt "$ticks" ]; do
+    "$@" && return 0
+    if [ -n "${DAEMON_PID:-}" ] && ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+      dump_wait_diagnostics "$desc"
+      fail "daemon exited while waiting for $desc"
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  dump_wait_diagnostics "$desc"
+  fail "timed out waiting for $desc"
+}
+
+digest_count() {
+  grep -c 'Supervisor escalate' "$LOG_FILE" 2>/dev/null || true
+}
+
+escalation_buffer_empty() {
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ]
+}
+
+scenario_a_deferred_with_pending_input() {
+  grep -q 'inject deferred: supervisor pane has pending input' "$STATE_DIR/.supervise-daemon.log" 2>/dev/null || return 1
+  [ -s "$STATE_DIR/.subsuper-escalations" ] || return 1
+  ! grep -q 'Supervisor escalate' "$LOG_FILE" 2>/dev/null
+}
+
+scenario_a_delivered_after_idle() {
+  grep -q 'human draft text' "$LOG_FILE" 2>/dev/null || return 1
+  grep -q 'Supervisor escalate' "$LOG_FILE" 2>/dev/null || return 1
+  escalation_buffer_empty
+}
+
+scenario_b_delivered_once_after_swallowed_enter() {
+  [ "$(digest_count)" -ge 1 ] || return 1
+  [ ! -e "$STATE_DIR/.swallow-enter" ] || return 1
+  escalation_buffer_empty
+}
+
+scenario_c_delivered_once() {
+  [ "$(digest_count)" -ge 1 ] || return 1
+  escalation_buffer_empty
+}
+
 # --- pane_input_pending environment self-check ------------------------------
 # Verify that pane_input_pending (which uses cursor_y + capture-pane) can detect
 # typed text in this tmux environment. If it can't, the e2e cannot prove the
@@ -250,8 +312,9 @@ test_scenario_a() {
   # real watcher child.
   echo "done: PR https://example.test/pr/100" > "$STATE_DIR/fake-c1.status"
 
-  # Wait for the watcher to detect the change and the daemon to attempt inject.
-  sleep 6
+  # Wait for the watcher to detect the change and the daemon to defer delivery
+  # while the pane has pending human input.
+  wait_for_event "Scenario A pending-input defer" 60 scenario_a_deferred_with_pending_input
 
   # Assert: the digest was NOT injected while the pane had pending input.
   if grep -q 'Supervisor escalate' "$LOG_FILE"; then
@@ -269,7 +332,7 @@ test_scenario_a() {
   sleep 0.5
 
   # Wait for the daemon to retry injection (housekeeping tick = 1s).
-  sleep 6
+  wait_for_event "Scenario A digest after idle" 60 scenario_a_delivered_after_idle
 
   # Assert: human text was submitted alone (as a user message).
   grep -q 'human draft text' "$LOG_FILE" \
@@ -321,7 +384,7 @@ test_scenario_b() {
 
   # Wait for the daemon to process the escalation and attempt inject (with the
   # swallowed Enter, the retry path fires).
-  sleep 8
+  wait_for_event "Scenario B one digest after swallowed Enter" 80 scenario_b_delivered_once_after_swallowed_enter
 
   # Assert: exactly ONE digest in the log (no duplicate, no loss).
   local digest_count
@@ -368,7 +431,7 @@ test_scenario_c() {
   start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
-  sleep 6
+  wait_for_event "Scenario C one digest" 60 scenario_c_delivered_once
 
   # Exactly one digest line in the submitted log (no duplicate, no loss).
   local digest_count
