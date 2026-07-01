@@ -3,7 +3,7 @@
 # Usage: fm-no-mistakes-pr-target-guard.sh [OWNER/REPO]
 #
 # The default is the captain fork for this Firstmate checkout:
-# JTInventory/firstmate. The guard checks the visible git origin, its push URL,
+# JTInventory/firstmate. The guard checks the visible git origin, its push URLs,
 # any local no-mistakes gate remote, and the no-mistakes status remote when
 # available. It exits non-zero before the no-mistakes push/PR step if any path
 # points at the upstream owner repo.
@@ -49,26 +49,38 @@ check_url() {
   [ "$actual" = "$EXPECTED_NORM" ] || fail_target "$label" "$url" "$actual" "$EXPECTED_NORM"
 }
 
+check_urls() {
+  local label=$1 urls=$2 url
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    check_url "$label" "$url"
+  done <<< "$urls"
+}
+
 EXPECTED_NORM=$(normalize_github_repo "$EXPECTED_REPO") || {
   printf 'error: invalid expected GitHub repo: %s\n' "$EXPECTED_REPO" >&2
   exit 2
 }
 
-origin_fetch=$(git remote get-url origin 2>/dev/null || true)
-[ -n "$origin_fetch" ] || {
+origin_fetches=$(git remote get-url --all origin 2>/dev/null || true)
+[ -n "$origin_fetches" ] || {
   printf 'blocked: cannot verify PR target because remote.origin.url is missing, expected %s\n' "$EXPECTED_NORM" >&2
   exit 1
 }
-check_url "remote.origin.url" "$origin_fetch"
+check_urls "remote.origin.url" "$origin_fetches"
 
-origin_push=$(git remote get-url --push origin 2>/dev/null || true)
-check_url "remote.origin.pushurl" "$origin_push"
+origin_pushes=$(git remote get-url --push --all origin 2>/dev/null || true)
+check_urls "remote.origin.pushurl" "$origin_pushes"
 
-gate=$(git remote get-url no-mistakes 2>/dev/null || true)
-if [ -n "$gate" ] && [ -d "$gate" ]; then
-  gate_origin=$(git --git-dir="$gate" config --get remote.origin.url 2>/dev/null || true)
-  check_url "no-mistakes gate remote.origin.url" "$gate_origin"
-fi
+gate_urls=$(git remote get-url --all no-mistakes 2>/dev/null || true)
+while IFS= read -r gate; do
+  [ -n "$gate" ] || continue
+  [ -d "$gate" ] || continue
+  gate_origins=$(git --git-dir="$gate" config --get-all remote.origin.url 2>/dev/null || true)
+  check_urls "no-mistakes gate remote.origin.url" "$gate_origins"
+  gate_pushes=$(git --git-dir="$gate" config --get-all remote.origin.pushurl 2>/dev/null || true)
+  check_urls "no-mistakes gate remote.origin.pushurl" "$gate_pushes"
+done <<< "$gate_urls"
 
 if command -v no-mistakes >/dev/null 2>&1; then
   status_out=$(no-mistakes status 2>/dev/null || true)

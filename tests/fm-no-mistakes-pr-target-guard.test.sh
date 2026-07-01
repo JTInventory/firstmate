@@ -49,6 +49,19 @@ test_rejects_parent_origin_target() {
   pass "PR target guard rejects parent origin target"
 }
 
+test_rejects_parent_second_origin_target() {
+  local repo="$TMP_ROOT/parent-second-origin" out="$TMP_ROOT/parent-second-origin.out" err="$TMP_ROOT/parent-second-origin.err"
+  make_repo "$repo" "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote set-url --add origin "https://github.com/kunchenguid/firstmate"
+
+  if run_guard "$repo" "$out" "$err"; then
+    fail "guard accepted parent second origin target"
+  fi
+  assert_grep "blocked: would target upstream remote.origin.url=https://github.com/kunchenguid/firstmate" "$err" \
+    "guard did not explain parent second origin target"
+  pass "PR target guard rejects parent second origin target"
+}
+
 test_rejects_parent_pushurl_target() {
   local repo="$TMP_ROOT/parent-pushurl" out="$TMP_ROOT/parent-pushurl.out" err="$TMP_ROOT/parent-pushurl.err"
   make_repo "$repo" "https://github.com/JTInventory/firstmate"
@@ -62,6 +75,20 @@ test_rejects_parent_pushurl_target() {
   pass "PR target guard rejects parent origin push URL target"
 }
 
+test_rejects_parent_second_pushurl_target() {
+  local repo="$TMP_ROOT/parent-second-pushurl" out="$TMP_ROOT/parent-second-pushurl.out" err="$TMP_ROOT/parent-second-pushurl.err"
+  make_repo "$repo" "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote set-url --push origin "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote set-url --add --push origin "https://github.com/kunchenguid/firstmate"
+
+  if run_guard "$repo" "$out" "$err"; then
+    fail "guard accepted parent second push URL target"
+  fi
+  assert_grep "blocked: would target upstream remote.origin.pushurl=https://github.com/kunchenguid/firstmate" "$err" \
+    "guard did not explain parent second push URL target"
+  pass "PR target guard rejects parent second origin push URL target"
+}
+
 test_rejects_parent_no_mistakes_gate_target() {
   local repo="$TMP_ROOT/parent-gate" out="$TMP_ROOT/parent-gate.out" err="$TMP_ROOT/parent-gate.err"
   make_repo "$repo" "https://github.com/JTInventory/firstmate"
@@ -73,6 +100,21 @@ test_rejects_parent_no_mistakes_gate_target() {
   assert_grep "blocked: would target upstream no-mistakes gate remote.origin.url=https://github.com/kunchenguid/firstmate" "$err" \
     "guard did not explain parent no-mistakes gate target"
   pass "PR target guard rejects parent no-mistakes gate target"
+}
+
+test_rejects_parent_second_no_mistakes_gate_target() {
+  local repo="$TMP_ROOT/parent-second-gate" out="$TMP_ROOT/parent-second-gate.out" err="$TMP_ROOT/parent-second-gate.err" gate
+  make_repo "$repo" "https://github.com/JTInventory/firstmate"
+  add_gate_remote "$repo" "https://github.com/JTInventory/firstmate"
+  gate=$(git -C "$repo" remote get-url no-mistakes)
+  git --git-dir="$gate" config --add remote.origin.url "https://github.com/kunchenguid/firstmate"
+
+  if run_guard "$repo" "$out" "$err"; then
+    fail "guard accepted parent second no-mistakes gate target"
+  fi
+  assert_grep "blocked: would target upstream no-mistakes gate remote.origin.url=https://github.com/kunchenguid/firstmate" "$err" \
+    "guard did not explain parent second no-mistakes gate target"
+  pass "PR target guard rejects parent second no-mistakes gate target"
 }
 
 test_rejects_parent_no_mistakes_status_target() {
@@ -100,6 +142,9 @@ SH
 
 test_accepts_captain_fork_origin_and_gate
 test_rejects_parent_origin_target
+test_rejects_parent_second_origin_target
 test_rejects_parent_pushurl_target
+test_rejects_parent_second_pushurl_target
 test_rejects_parent_no_mistakes_gate_target
+test_rejects_parent_second_no_mistakes_gate_target
 test_rejects_parent_no_mistakes_status_target

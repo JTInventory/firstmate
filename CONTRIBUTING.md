@@ -54,7 +54,7 @@ Crewmate validation follows the installed no-mistakes version's SKILL.md and liv
 Firstmate's wrapper still matters: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's test command to the same bash behavior suite as CI.
 In this captain-owned delivery lane, no-mistakes PRs must target `JTInventory/firstmate`.
-`bin/fm-no-mistakes-pr-target-guard.sh` checks local `origin`, the `origin` push URL, the local no-mistakes gate, and `no-mistakes status` before the test suite runs, so stale gate state cannot open or update a PR on `kunchenguid/firstmate`.
+`bin/fm-no-mistakes-pr-target-guard.sh` checks local `origin`, all `origin` push URLs, the local no-mistakes gate, and `no-mistakes status` before the test suite runs, so stale gate state cannot open or update a PR on `kunchenguid/firstmate`.
 
 Check and test the toolbelt before pushing:
 
