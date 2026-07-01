@@ -404,6 +404,7 @@ If a secondmate's scope fits, steer that secondmate with one concise instruction
 The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
 A secondmate is itself a firstmate, so a request reaches it in its own chat, which you never read - the return channel that wakes you is its status file.
 So `fm-send` to a bare `fm-<id>` whose meta is `kind=secondmate` automatically prepends a from-firstmate marker (`bin/fm-marker-lib.sh`); the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
+For codex secondmates, that marked ordinary-text path also uses the longer pre-Enter settle so the already-typed request is not left unsubmitted by input timing.
 Expect and read that response on the status/doc path the same way you read any other status signal; do not peek the secondmate's chat for the answer.
 A captain typing directly into the secondmate's window is unmarked and stays a conversational captain intervention, so do not relay captain-destined chat through this path; the marker is applied only by `fm-send` to a `kind=secondmate` target.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.

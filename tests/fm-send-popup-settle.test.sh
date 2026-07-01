@@ -15,6 +15,7 @@
 #   $... explicit   -> 0.3  (session:window target has no meta -> harness unknown
 #                            -> non-codex safe default)
 #   plain text      -> 0.3  (fast path)
+#   marked codex secondmate plain text -> 1.2 (long settle before submit)
 #
 # The popup-settle is the FIRST sleep recorded: fm_tmux_submit_core types the text,
 # then `sleep "$settle"`, then the Enter-retry loop (sleep 0.4 each) and finally
@@ -67,16 +68,16 @@ SH
   printf '%s\n' "$fb"
 }
 
-# first_settle <expected> <label> <harness|--explicit> <message>: build a fresh
-# home, send <message> to a target whose meta records <harness> (or to a bare
-# session:window with NO meta when --explicit), and assert the FIRST recorded sleep
-# (the popup-settle) equals <expected>. FM_SEND_SETTLE=0 strips the trailing
-# post-submit pause so the log holds only the popup-settle plus the 0.4 Enter wait,
-# keeping the head assertion crisp. FM_ROOT_OVERRIDE points at a non-repo dir so
-# fm-guard's tangle check stays silent; its watcher-liveness note goes to stderr
-# (discarded).
-first_settle() {  # <expected> <label> <harness|--explicit> <message>
-  local expected=$1 label=$2 harness=$3 msg=$4
+# first_settle_for_kind <expected> <label> <harness|--explicit> <kind> <message>:
+# build a fresh home, send <message> to a target whose meta records <harness> and
+# <kind> (or to a bare session:window with NO meta when --explicit), and assert
+# the FIRST recorded sleep (the popup-settle) equals <expected>. FM_SEND_SETTLE=0
+# strips the trailing post-submit pause so the log holds only the popup-settle
+# plus the 0.4 Enter wait, keeping the head assertion crisp. FM_ROOT_OVERRIDE
+# points at a non-repo dir so fm-guard's tangle check stays silent; its
+# watcher-liveness note goes to stderr (discarded).
+first_settle_for_kind() {  # <expected> <label> <harness|--explicit> <kind> <message>
+  local expected=$1 label=$2 harness=$3 kind=$4 msg=$5
   local dir fb log home target rc first
   dir="$TMP_ROOT/case-$RANDOM"; mkdir -p "$dir/state"
   fb=$(make_stubs "$dir"); log="$dir/sleep.log"; home="$dir"
@@ -84,7 +85,7 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message>
     target="sess:win"
   else
     target="fm-popupcase"
-    fm_write_meta "$home/state/popupcase.meta" "window=sess:win" "harness=$harness"
+    fm_write_meta "$home/state/popupcase.meta" "window=sess:win" "harness=$harness" "kind=$kind"
   fi
   : > "$log"
   env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
@@ -94,6 +95,18 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message>
   first=$(head -1 "$log")
   [ "$first" = "$expected" ] || fail "$label: expected popup-settle $expected, got '$first'"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"
   pass "fm-send popup-settle: $label -> ${expected}s"
+}
+
+# first_settle <expected> <label> <harness|--explicit> <message>: build a fresh
+# home, send <message> to a target whose meta records <harness> (or to a bare
+# session:window with NO meta when --explicit), and assert the FIRST recorded sleep
+# (the popup-settle) equals <expected>. FM_SEND_SETTLE=0 strips the trailing
+# post-submit pause so the log holds only the popup-settle plus the 0.4 Enter wait,
+# keeping the head assertion crisp. FM_ROOT_OVERRIDE points at a non-repo dir so
+# fm-guard's tangle check stays silent; its watcher-liveness note goes to stderr
+# (discarded).
+first_settle() {  # <expected> <label> <harness|--explicit> <message>
+  first_settle_for_kind "$1" "$2" "$3" ship "$4"
 }
 
 # Codex `$<skill>` gets the long settle so its `$` popup clears (the fix).
@@ -117,5 +130,15 @@ first_settle 1.2 'claude /command -> long settle (slash unchanged)' claude '/no-
 # A `/` to codex is likewise still the long settle (slash path untouched).
 first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
-# Plain text to codex takes the fast path - the codex scope is `$`-prefixed only.
-first_settle 0.3 'codex plain text -> fast path' codex 'just a normal steer'
+# Plain text to a codex crewmate takes the fast path - the long ordinary-text
+# settle is only for marked secondmate requests.
+first_settle 0.3 'codex crewmate plain text -> fast path' codex 'just a normal steer'
+
+# A marked ordinary request to a codex secondmate gets the longer settle before
+# Enter. This protects the from-firstmate message path where live Codex panes have
+# swallowed Enter while the already-typed text remained in the composer.
+first_settle_for_kind 1.2 'codex secondmate marked plain text -> long settle' codex secondmate 'route this work'
+
+# A non-codex secondmate still keeps the ordinary text fast path; the timing
+# workaround is intentionally scoped to Codex.
+first_settle_for_kind 0.3 'claude secondmate marked plain text -> fast path' claude secondmate 'route this work'
