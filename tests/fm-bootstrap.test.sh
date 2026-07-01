@@ -27,6 +27,14 @@ make_fake_toolchain() {
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
   exit 0
 fi
+if [ "${1:-}" = pr ] && [ "${2:-}" = checks ] && [ "${3:-}" = --help ]; then
+  if [ "${FM_FAKE_GH_PR_CHECKS_JSON:-1}" = 1 ]; then
+    printf '%s\n' '  --json fields   Output JSON with the specified fields'
+  else
+    printf '%s\n' '  --required      Only show checks that are required'
+  fi
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
@@ -125,6 +133,21 @@ ROWS
   pass "bootstrap reports treehouse lease + tasks-axi default/backend contracts"
 }
 
+test_gh_pr_checks_json_compatibility() {
+  local case_dir fakebin out missing
+  missing='MISSING: gh (install: brew install gh  # or the platform'\''s package manager)'
+  case_dir="$TMP_ROOT/gh-pr-checks-json"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_PR_CHECKS_JSON=0 "$ROOT/bin/fm-bootstrap.sh")
+
+  [ "$out" = "$missing" ] || fail "gh without pr checks --json should report upgrade; got: $out"
+  pass "bootstrap requires gh pr checks --json for no-mistakes CI monitoring"
+}
+
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
@@ -204,6 +227,7 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
