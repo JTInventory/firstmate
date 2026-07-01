@@ -51,6 +51,8 @@ This repo is a shared template, not the captain's personal project.
 The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (.env, data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
 This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+For this captain-owned Firstmate checkout, the no-mistakes PR target is `JTInventory/firstmate`.
+Run `bin/fm-no-mistakes-pr-target-guard.sh` before any no-mistakes push or PR creation path; it fails closed if local git or the no-mistakes gate would target `kunchenguid/firstmate`.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
