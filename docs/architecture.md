@@ -34,7 +34,7 @@ The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant statu
 The always-on watcher also uses that library's provably-working predicate on no-verb signal and non-terminal-stale paths, while the daemon keeps its away-mode stale recheck unchanged.
 The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
 Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
-`fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using the target's recorded `harness=` meta, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+`fm-send.sh` selects a pre-Enter popup-settle for slash commands, codex `$...` skill invocations, and marked ordinary text sent to codex secondmates using the target's recorded `harness=` and `kind=` meta, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 ## Worktrees, not branches in your checkout
 
