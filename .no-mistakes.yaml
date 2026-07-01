@@ -1,8 +1,10 @@
 # Per-repo no-mistakes overrides.
 
-# Run the firstmate bash behavior suite deterministically as the test-step
-# baseline, instead of delegating to an agent (an agent-driven test step has
-# crashed the daemon). Mirrors .github/workflows/ci.yml: iterate every
+# Run the firstmate PR-target guard and bash behavior suite deterministically
+# as the test-step baseline, instead of delegating to an agent (an agent-driven
+# test step has crashed the daemon). Mirrors .github/workflows/ci.yml after
+# first failing closed if local git or the no-mistakes gate would target
+# kunchenguid/firstmate instead of JTInventory/firstmate. Then iterate every
 # tests/*.test.sh, run each, and fail the step if any one exits non-zero. The
 # e2e tests need tmux on PATH, which the firstmate environment provides.
 commands:

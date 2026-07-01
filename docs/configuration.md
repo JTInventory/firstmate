@@ -18,8 +18,9 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes first runs `bin/fm-no-mistakes-pr-target-guard.sh`, then runs firstmate's bash behavior suite directly.
+The guard fails closed if local git or the no-mistakes gate would target `kunchenguid/firstmate`; this captain-owned lane must target `JTInventory/firstmate`.
+After the guard passes, that command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
 It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
 
 ## Captain preferences (data/captain.md)
