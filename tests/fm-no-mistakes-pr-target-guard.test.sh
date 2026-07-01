@@ -117,6 +117,29 @@ test_rejects_parent_second_no_mistakes_gate_target() {
   pass "PR target guard rejects parent second no-mistakes gate target"
 }
 
+test_accepts_captain_fork_nonlocal_no_mistakes_remote() {
+  local repo="$TMP_ROOT/pass-nonlocal-no-mistakes" out="$TMP_ROOT/pass-nonlocal-no-mistakes.out" err="$TMP_ROOT/pass-nonlocal-no-mistakes.err"
+  make_repo "$repo" "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote add no-mistakes "git@github.com:JTInventory/firstmate.git"
+
+  run_guard "$repo" "$out" "$err" || fail "guard rejected captain fork no-mistakes remote: $(cat "$err")"
+  assert_grep "ok: PR target repo jtinventory/firstmate verified" "$out" "guard did not report verified nonlocal no-mistakes target"
+  pass "PR target guard accepts captain fork nonlocal no-mistakes remote"
+}
+
+test_rejects_parent_nonlocal_no_mistakes_remote() {
+  local repo="$TMP_ROOT/parent-nonlocal-no-mistakes" out="$TMP_ROOT/parent-nonlocal-no-mistakes.out" err="$TMP_ROOT/parent-nonlocal-no-mistakes.err"
+  make_repo "$repo" "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote add no-mistakes "https://github.com/kunchenguid/firstmate"
+
+  if run_guard "$repo" "$out" "$err"; then
+    fail "guard accepted parent nonlocal no-mistakes remote"
+  fi
+  assert_grep "blocked: would target upstream remote.no-mistakes.url=https://github.com/kunchenguid/firstmate" "$err" \
+    "guard did not explain parent nonlocal no-mistakes remote"
+  pass "PR target guard rejects parent nonlocal no-mistakes remote"
+}
+
 test_rejects_parent_no_mistakes_status_target() {
   local repo="$TMP_ROOT/parent-status" fakebin out="$TMP_ROOT/parent-status.out" err="$TMP_ROOT/parent-status.err"
   make_repo "$repo" "https://github.com/JTInventory/firstmate"
@@ -147,4 +170,6 @@ test_rejects_parent_pushurl_target
 test_rejects_parent_second_pushurl_target
 test_rejects_parent_no_mistakes_gate_target
 test_rejects_parent_second_no_mistakes_gate_target
+test_accepts_captain_fork_nonlocal_no_mistakes_remote
+test_rejects_parent_nonlocal_no_mistakes_remote
 test_rejects_parent_no_mistakes_status_target

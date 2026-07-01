@@ -4,7 +4,7 @@
 #
 # The default is the captain fork for this Firstmate checkout:
 # JTInventory/firstmate. The guard checks the visible git origin, its push URLs,
-# any local no-mistakes gate remote, and the no-mistakes status remote when
+# any no-mistakes remote target, and the no-mistakes status remote when
 # available. It exits non-zero before the no-mistakes push/PR step if any path
 # points at the upstream owner repo.
 set -u
@@ -75,11 +75,14 @@ check_urls "remote.origin.pushurl" "$origin_pushes"
 gate_urls=$(git remote get-url --all no-mistakes 2>/dev/null || true)
 while IFS= read -r gate; do
   [ -n "$gate" ] || continue
-  [ -d "$gate" ] || continue
-  gate_origins=$(git --git-dir="$gate" config --get-all remote.origin.url 2>/dev/null || true)
-  check_urls "no-mistakes gate remote.origin.url" "$gate_origins"
-  gate_pushes=$(git --git-dir="$gate" config --get-all remote.origin.pushurl 2>/dev/null || true)
-  check_urls "no-mistakes gate remote.origin.pushurl" "$gate_pushes"
+  if [ -d "$gate" ]; then
+    gate_origins=$(git --git-dir="$gate" config --get-all remote.origin.url 2>/dev/null || true)
+    check_urls "no-mistakes gate remote.origin.url" "$gate_origins"
+    gate_pushes=$(git --git-dir="$gate" config --get-all remote.origin.pushurl 2>/dev/null || true)
+    check_urls "no-mistakes gate remote.origin.pushurl" "$gate_pushes"
+  else
+    check_url "remote.no-mistakes.url" "$gate"
+  fi
 done <<< "$gate_urls"
 
 if command -v no-mistakes >/dev/null 2>&1; then
