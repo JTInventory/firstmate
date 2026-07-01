@@ -154,6 +154,45 @@ test_rejects_parent_nonlocal_no_mistakes_remote() {
   pass "PR target guard rejects parent nonlocal no-mistakes remote"
 }
 
+test_rejects_parent_nonlocal_no_mistakes_pushurl() {
+  local repo="$TMP_ROOT/parent-nonlocal-no-mistakes-pushurl" out="$TMP_ROOT/parent-nonlocal-no-mistakes-pushurl.out" err="$TMP_ROOT/parent-nonlocal-no-mistakes-pushurl.err"
+  make_repo "$repo" "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote add no-mistakes "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote set-url --push no-mistakes "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote set-url --add --push no-mistakes "https://github.com/kunchenguid/firstmate"
+
+  if run_guard "$repo" "$out" "$err"; then
+    fail "guard accepted parent nonlocal no-mistakes push URL"
+  fi
+  assert_grep "blocked: would target upstream remote.no-mistakes.pushurl=https://github.com/kunchenguid/firstmate" "$err" \
+    "guard did not explain parent nonlocal no-mistakes push URL"
+  pass "PR target guard rejects parent nonlocal no-mistakes push URL"
+}
+
+test_rejects_expected_target_override_to_parent() {
+  local repo="$TMP_ROOT/parent-expected-override" out="$TMP_ROOT/parent-expected-override.out" err="$TMP_ROOT/parent-expected-override.err"
+  make_repo "$repo" "https://github.com/kunchenguid/firstmate"
+
+  if (cd "$repo" && FM_FIRSTMATE_PR_TARGET_REPO="kunchenguid/firstmate" "$ROOT/bin/fm-no-mistakes-pr-target-guard.sh" >"$out" 2>"$err"); then
+    fail "guard accepted parent target through expected repo override"
+  fi
+  assert_grep "blocked: unsupported expected PR target kunchenguid/firstmate, only jtinventory/firstmate is allowed" "$err" \
+    "guard did not explain expected target override"
+  pass "PR target guard rejects parent expected target override"
+}
+
+test_rejects_expected_target_argument_to_parent() {
+  local repo="$TMP_ROOT/parent-expected-argument" out="$TMP_ROOT/parent-expected-argument.out" err="$TMP_ROOT/parent-expected-argument.err"
+  make_repo "$repo" "https://github.com/kunchenguid/firstmate"
+
+  if (cd "$repo" && "$ROOT/bin/fm-no-mistakes-pr-target-guard.sh" "kunchenguid/firstmate" >"$out" 2>"$err"); then
+    fail "guard accepted parent target through expected repo argument"
+  fi
+  assert_grep "blocked: unsupported expected PR target kunchenguid/firstmate, only jtinventory/firstmate is allowed" "$err" \
+    "guard did not explain expected target argument"
+  pass "PR target guard rejects parent expected target argument"
+}
+
 test_rejects_parent_no_mistakes_status_target() {
   local repo="$TMP_ROOT/parent-status" fakebin out="$TMP_ROOT/parent-status.out" err="$TMP_ROOT/parent-status.err"
   make_repo "$repo" "https://github.com/JTInventory/firstmate"
@@ -187,4 +226,7 @@ test_rejects_parent_second_no_mistakes_gate_target
 test_rejects_local_no_mistakes_gate_without_target
 test_accepts_captain_fork_nonlocal_no_mistakes_remote
 test_rejects_parent_nonlocal_no_mistakes_remote
+test_rejects_parent_nonlocal_no_mistakes_pushurl
+test_rejects_expected_target_override_to_parent
+test_rejects_expected_target_argument_to_parent
 test_rejects_parent_no_mistakes_status_target

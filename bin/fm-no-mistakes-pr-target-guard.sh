@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Guard this repo's no-mistakes PR target before a push can open a PR.
-# Usage: fm-no-mistakes-pr-target-guard.sh [OWNER/REPO]
+# Usage: fm-no-mistakes-pr-target-guard.sh
 #
 # The default is the captain fork for this Firstmate checkout:
 # JTInventory/firstmate. The guard checks the visible git origin, its push URLs,
@@ -9,7 +9,8 @@
 # points at the upstream owner repo.
 set -u
 
-EXPECTED_REPO=${1:-${FM_FIRSTMATE_PR_TARGET_REPO:-JTInventory/firstmate}}
+ALLOWED_REPO=JTInventory/firstmate
+EXPECTED_REPO=${1:-${FM_FIRSTMATE_PR_TARGET_REPO:-$ALLOWED_REPO}}
 
 normalize_github_repo() {
   local raw=$1 path
@@ -69,6 +70,31 @@ EXPECTED_NORM=$(normalize_github_repo "$EXPECTED_REPO") || {
   printf 'error: invalid expected GitHub repo: %s\n' "$EXPECTED_REPO" >&2
   exit 2
 }
+ALLOWED_NORM=$(normalize_github_repo "$ALLOWED_REPO") || {
+  printf 'error: invalid allowed GitHub repo: %s\n' "$ALLOWED_REPO" >&2
+  exit 2
+}
+[ "$EXPECTED_NORM" = "$ALLOWED_NORM" ] || {
+  printf 'blocked: unsupported expected PR target %s, only %s is allowed\n' "$EXPECTED_NORM" "$ALLOWED_NORM" >&2
+  exit 1
+}
+
+check_no_mistakes_target() {
+  local label=$1 gate=$2 gate_origins gate_pushes
+  [ -n "$gate" ] || return 0
+  if [ -d "$gate" ]; then
+    gate_origins=$(git --git-dir="$gate" config --get-all remote.origin.url 2>/dev/null || true)
+    gate_pushes=$(git --git-dir="$gate" config --get-all remote.origin.pushurl 2>/dev/null || true)
+    has_url "$(printf '%s\n%s\n' "$gate_origins" "$gate_pushes")" || {
+      printf 'blocked: cannot verify PR target no-mistakes gate=%s because remote.origin.url and remote.origin.pushurl are missing, expected %s\n' "$gate" "$EXPECTED_NORM" >&2
+      exit 1
+    }
+    check_urls "no-mistakes gate remote.origin.url" "$gate_origins"
+    check_urls "no-mistakes gate remote.origin.pushurl" "$gate_pushes"
+  else
+    check_url "$label" "$gate"
+  fi
+}
 
 origin_fetches=$(git remote get-url --all origin 2>/dev/null || true)
 [ -n "$origin_fetches" ] || {
@@ -82,20 +108,13 @@ check_urls "remote.origin.pushurl" "$origin_pushes"
 
 gate_urls=$(git remote get-url --all no-mistakes 2>/dev/null || true)
 while IFS= read -r gate; do
-  [ -n "$gate" ] || continue
-  if [ -d "$gate" ]; then
-    gate_origins=$(git --git-dir="$gate" config --get-all remote.origin.url 2>/dev/null || true)
-    gate_pushes=$(git --git-dir="$gate" config --get-all remote.origin.pushurl 2>/dev/null || true)
-    has_url "$(printf '%s\n%s\n' "$gate_origins" "$gate_pushes")" || {
-      printf 'blocked: cannot verify PR target no-mistakes gate=%s because remote.origin.url and remote.origin.pushurl are missing, expected %s\n' "$gate" "$EXPECTED_NORM" >&2
-      exit 1
-    }
-    check_urls "no-mistakes gate remote.origin.url" "$gate_origins"
-    check_urls "no-mistakes gate remote.origin.pushurl" "$gate_pushes"
-  else
-    check_url "remote.no-mistakes.url" "$gate"
-  fi
+  check_no_mistakes_target "remote.no-mistakes.url" "$gate"
 done <<< "$gate_urls"
+
+gate_push_urls=$(git remote get-url --push --all no-mistakes 2>/dev/null || true)
+while IFS= read -r gate; do
+  check_no_mistakes_target "remote.no-mistakes.pushurl" "$gate"
+done <<< "$gate_push_urls"
 
 if command -v no-mistakes >/dev/null 2>&1; then
   status_out=$(no-mistakes status 2>/dev/null || true)
