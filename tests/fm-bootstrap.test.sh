@@ -226,8 +226,42 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_secondmate_profile_validation() {
+  local label body expect mode case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label body mode expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/secondmate-profile-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' "$body" > "$case_dir/home/config/secondmate-profile.json"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      exact)
+        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+    esac
+  done <<'ROWS'
+valid profile is silent^{"model":"gpt-5.5","effort":"high"}^empty^
+default values are silent^{"model":"default","effort":"default"}^empty^
+malformed profile config is flagged^{"model":^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - malformed JSON
+non-object profile is flagged^[]^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - top-level value must be an object
+boolean profile is flagged^false^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - top-level value must be an object
+non-string model is flagged^{"model":55,"effort":"high"}^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - model must be a non-empty string
+non-string effort is flagged^{"model":"gpt-5.5","effort":55}^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - effort must be a string
+invalid effort is flagged^{"model":"gpt-5.5","effort":"turbo"}^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - invalid effort: turbo
+ROWS
+  pass "bootstrap validates secondmate-profile.json and reports malformed or invalid configs"
+}
+
 test_bootstrap_reporting
 test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
+test_secondmate_profile_validation

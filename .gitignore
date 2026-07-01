@@ -8,5 +8,6 @@ data/
 config/crew-harness
 config/crew-dispatch.json
 config/secondmate-harness
+config/secondmate-profile.json
 config/backlog-backend
 config/x-mode.env

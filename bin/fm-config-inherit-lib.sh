@@ -21,13 +21,15 @@
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
 # convergence point inherits it - no other change needed. config/secondmate-harness
-# is deliberately NOT in the list: it is the primary's own setting for launching
-# secondmates, and a secondmate never spawns secondmates, so it must not flow
-# downstream.
+# and config/secondmate-profile.json are deliberately NOT in the list: they are
+# the primary's own settings for launching secondmates, and a secondmate never
+# spawns secondmates, so they must not flow downstream.
 
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
-# environment only in tests. Items must not contain whitespace.
+# environment only in tests. Primary-to-secondmate launch settings such as
+# secondmate-harness and secondmate-profile.json stay deliberately excluded.
+# Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend}"
 
 copy_inheritable_file() {
