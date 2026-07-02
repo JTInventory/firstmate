@@ -1062,8 +1062,10 @@ EOF
     printf '%s\n' "- Watcher liveness not proved from this environment. $watcher_detail"
   fi
   local running=0
-  while IFS=$'\t' read -r _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ class _ _ _ _; do
-    [ "$class" = running ] && running=$((running + 1))
+  while IFS=$'\t' read -r _ _id _project _kind _mode _yolo _harness _route_profile _route_harness _route_model _route_effort _window _window_live _worktree _branch _recorded_branch _dirty_count _last_status _turn_ended _pr_url _pr_state _ci_state _mergeable_state class _severity _owner _action _evidence; do
+    case "$class" in
+      running|persistent_secondmate_idle) running=$((running + 1)) ;;
+    esac
   done <<EOF
 $task_lines
 EOF

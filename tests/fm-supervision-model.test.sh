@@ -338,9 +338,10 @@ test_text_output_and_watcher_source() {
   fakebin="$home/fakebin"
   write_fakebin "$fakebin"
   write_meta "$home" live 'working: still running' "project=demo" "window=live"
+  write_meta "$home" secondmate-idle 'working: idle' "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --text --include-ok --no-default-reminders) || fail "text output failed"
   assert_contains "$out" 'Firstmate supervision - read-only' "text should show read-only posture"
-  assert_contains "$out" 'worker(s) are running normally' "include-ok should show routine workers"
+  assert_contains "$out" '2 worker(s) are running normally' "include-ok should show routine workers and persistent secondmates"
   assert_contains "$out" 'No changes made.' "text should end with no changes made"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --json --no-default-reminders) || fail "watcher source json failed"
