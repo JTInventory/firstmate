@@ -518,7 +518,7 @@ fm_supervision_watcher_status() {
 }
 
 fm_supervision_classify_task() {
-  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10}
+  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} turn_ended=${12:-false}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
   if [ -n "$worktree" ] && [ ! -e "$worktree" ]; then
     classification=stale_treehouse_state
@@ -532,12 +532,42 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Respawn or retire the secondmate only after checking its home."
     why="Task meta exists but the recorded tmux window is missing."
+  elif [ "$kind" = scout ] && [ "$scout_report_exists" = true ] && { [ "$turn_ended" = true ] || printf '%s\n' "$last_status" | grep -q '^done:'; }; then
+    classification=scout_report_ready
+    severity=medium
+    owner=firstmate
+    action="Tear down the scout; its report exists."
+    why="Scout report exists at data/$id/report.md."
   elif [ "$window_live" = false ] && [ -n "$id" ]; then
     classification=missing_window_existing_meta
     severity=high
     owner=firstmate
     action="Reconcile task from meta, status, treehouse, and git before taking next action."
     why="Task meta exists but the recorded tmux window is missing."
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && printf '%s\n' "$last_status" | grep -q '^blocked:'; then
+    classification=worker_blocked
+    severity=high
+    owner=captain
+    action="Resolve the worker blocker."
+    why="$last_status"
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && printf '%s\n' "$last_status" | grep -q '^needs-decision:'; then
+    classification=worker_needs_decision
+    severity=high
+    owner=captain
+    action="Make the requested decision."
+    why="$last_status"
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && printf '%s\n' "$last_status" | grep -q '^failed:'; then
+    classification=worker_failed
+    severity=high
+    owner=firstmate
+    action="Inspect the worker failure and decide the next step."
+    why="$last_status"
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ]; then
+    classification=persistent_secondmate_idle
+    severity=info
+    owner=firstmate
+    action="Keep the persistent secondmate live."
+    why="Secondmate meta represents a persistent direct report, not a PR worker."
   elif [ "$pr_state" = merged ] && [ "$window_live" = true ]; then
     classification=merged_pr_live_worker
     severity=high
@@ -646,7 +676,7 @@ fm_supervision_collect() {
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
   local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status turn_ended pr_url pr_data pr_state ci_state mergeable_state
-  local class_data classification severity owner action why evidence line status_pr window_live treehouse_failed=false
+  local class_data classification severity owner action why evidence line status_pr window_live scout_report_exists treehouse_failed=false
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
   [ -f "$FM_SUPERVISION_DATA/backlog.md" ] || backlog_ok=false
@@ -684,6 +714,8 @@ fm_supervision_collect() {
       status_pr=$(fm_supervision_status_pr_url "$last_status")
       [ -n "$pr_url" ] || pr_url=$status_pr
       if fm_supervision_window_live "$window"; then window_live=true; else window_live=false; fi
+      scout_report_exists=false
+      [ "$kind" = scout ] && [ -f "$FM_SUPERVISION_DATA/$id/report.md" ] && scout_report_exists=true
       branch=$(fm_supervision_branch "$worktree" 2>/dev/null) || branch=unknown
       dirty_count=$(fm_supervision_worktree_dirty_count "$worktree" 2>/dev/null) || dirty_count=0
       pr_state=none
@@ -710,7 +742,7 @@ fm_supervision_collect() {
           treehouse_ok=false
         fi
       fi
-      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$last_status" "$pr_url" "$pr_state" "$ci_state")
+      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$last_status" "$pr_url" "$pr_state" "$ci_state" "$scout_report_exists" "$turn_ended")
       classification=$(printf '%s' "$class_data" | awk -F '\t' '{ print $1 }')
       severity=$(printf '%s' "$class_data" | awk -F '\t' '{ print $2 }')
       owner=$(printf '%s' "$class_data" | awk -F '\t' '{ print $3 }')
