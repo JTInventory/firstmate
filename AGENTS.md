@@ -808,6 +808,11 @@ firstmate is its own repo behind the no-mistakes gate, so improvements to `AGENT
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs only fast-forward self-updates of firstmate and registered secondmate homes, re-reads `AGENTS.md` when needed, nudges updated live secondmates, and never touches anything under `projects/`.
 
+### Session stow
+
+When the captain invokes `/stow`, asks to stow what you learned, or asks to preserve session memory before reset, load the `/stow` skill.
+It owns the sweep for durable knowledge that still exists only in conversation, routes each finding through section 6's knowledge-routing table, files undone next steps to the backlog, and reports whether the session is safe to reset.
+
 ## 13. Agent-only reference skills
 
 These skills are not captain-invocable; they are conditional operating references you must load at the trigger points below.

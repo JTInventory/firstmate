@@ -48,6 +48,7 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
 - **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1` JSON without changing anything.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
+- **Operational memory stow** - `/stow` sweeps the current session for durable knowledge, routes it to the right local or project home, and tells you when the session is safe to reset.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind your merge approval.
 - **Restart-proof** - all state lives on disk and in tmux; kill the session anytime and the next one reconciles and carries on.
 
@@ -129,7 +130,7 @@ It preserves parent-tweet context for conversational replies and dismisses pure 
 Replies can attach one local image with `--image <path>` when there is a visual artifact; long replies split into bounded numbered threads when needed, with the image attached only to the opener tweet.
 When firstmate works on itself, spawn-time isolation checks and a primary-checkout tangle alarm keep the operating checkout on its default branch and stop a crewmate that did not land in a separate worktree.
 
-Full architecture - the supervision engine, worktree isolation, secondmates, project modes, optional X mode, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
+Full architecture - the supervision engine, worktree isolation, secondmates, project modes, optional X mode, fleet sync, operational memory, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
 ## Built-in skills
 
