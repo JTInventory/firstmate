@@ -520,6 +520,9 @@ fm_supervision_watcher_status() {
 fm_supervision_classify_task() {
   local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} turn_ended=${12:-false}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
+  # Classification order is part of the public supervision contract: completed
+  # scout reports are teardown work, and live secondmates are persistent direct reports
+  # unless they have a fresh captain-relevant status.
   if [ "$kind" = scout ] && [ "$scout_report_exists" = true ] && { [ "$turn_ended" = true ] || printf '%s\n' "$last_status" | grep -q '^done:'; }; then
     classification=scout_report_ready
     severity=medium
