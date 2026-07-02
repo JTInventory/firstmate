@@ -14,6 +14,26 @@ assert_json_valid() {
   printf '%s\n' "$json" | python3 -m json.tool >/dev/null || fail "$label is not valid JSON"
 }
 
+assert_task_classification() {
+  local json=$1 id=$2 expected=$3 label=$4
+  FM_TEST_JSON=$json python3 - "$id" "$expected" <<'PY' || fail "$label"
+import json
+import os
+import sys
+
+task_id = sys.argv[1]
+expected = sys.argv[2]
+data = json.loads(os.environ["FM_TEST_JSON"])
+for task in data["tasks"]:
+    if task["id"] == task_id:
+        actual = task["classification"]
+        if actual != expected:
+            raise SystemExit(f"{task_id}: expected {expected}, got {actual}")
+        raise SystemExit(0)
+raise SystemExit(f"{task_id}: task not found")
+PY
+}
+
 make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
@@ -63,6 +83,9 @@ case "$3" in
   /repos/o/r/pulls/7)
     printf 'state: open\nmerged: false\nmergeable_state: clean\nhead:\n  sha: sh-actions-stale\n'
     ;;
+  /repos/o/r/pulls/8)
+    printf 'state: closed\nmerged: false\nmergeable_state: clean\nhead:\n  sha: sh-closed\n'
+    ;;
   /repos/o/r/commits/sh-merged/status|/repos/o/r/commits/sh-success/status)
     printf 'state: success\ntotal_count: 1\n'
     ;;
@@ -81,7 +104,7 @@ case "$3" in
   */check-runs)
     printf 'total_count: 0\ncheck_runs: []\n'
     ;;
-  /repos/o/r/commits/sh-none/status|/repos/o/r/commits/sh-actions-stale/status|/repos/JTInventory/firstmate/commits/sh-none/status)
+  /repos/o/r/commits/sh-none/status|/repos/o/r/commits/sh-actions-stale/status|/repos/o/r/commits/sh-closed/status|/repos/JTInventory/firstmate/commits/sh-none/status)
     printf 'state: pending\ntotal_count: 0\n'
     ;;
   *)
@@ -166,6 +189,103 @@ test_task_classifications_and_route_metadata() {
   pass "task classifications preserve current route metadata"
 }
 
+test_live_secondmates_ignore_seed_pr_terminal_state() {
+  local home fakebin out
+  home=$(make_home secondmate-pr-history)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" secondmate-merged 'working: idle' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate" \
+    "pr=https://github.com/o/r/pull/1"
+  write_meta "$home" secondmate-closed 'working: idle' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate" \
+    "pr=https://github.com/o/r/pull/8"
+  out=$(run_json "$home" "$fakebin") || fail "secondmate seed PR json failed"
+  assert_json_valid "$out" "secondmate seed PR output"
+  assert_task_classification "$out" secondmate-merged persistent_secondmate_idle "merged seed PR should not close a live secondmate"
+  assert_task_classification "$out" secondmate-closed persistent_secondmate_idle "closed seed PR should not close a live secondmate"
+  assert_not_contains "$out" 'secondmate-merged:merged_pr_live_worker' "merged seed PR should not create a close recommendation"
+  assert_not_contains "$out" 'Close the worker after confirming the PR is merged.' "secondmate seed PR should not use ordinary PR-worker close action"
+  pass "live idle secondmates ignore terminal seed PR history"
+}
+
+test_live_secondmate_done_status_surfaces_response() {
+  local home fakebin out
+  home=$(make_home secondmate-done)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" secondmate-answer 'done: report written to data/answer.md' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate" \
+    "pr=https://github.com/o/r/pull/1"
+  out=$(run_json "$home" "$fakebin") || fail "secondmate done json failed"
+  assert_json_valid "$out" "secondmate done output"
+  assert_task_classification "$out" secondmate-answer secondmate_response_ready "live secondmate done status should surface response"
+  assert_contains "$out" 'secondmate-answer:secondmate_response_ready' "secondmate done response should create a checklist item"
+  assert_contains "$out" 'Read or relay the secondmate response; keep the secondmate live.' "secondmate done response should not ask to close the secondmate"
+  assert_not_contains "$out" 'secondmate-answer:persistent_secondmate_idle' "secondmate done response should not be hidden as idle"
+  pass "live secondmate done statuses surface without retiring the secondmate"
+}
+
+test_completed_scout_with_report_is_not_pr_worker() {
+  local home fakebin out
+  home=$(make_home scout-report)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  mkdir -p "$home/data/scout-done" "$home/data/scout-closed-pr" "$home/data/scout-missing-worktree"
+  printf 'findings\n' > "$home/data/scout-done/report.md"
+  printf 'findings\n' > "$home/data/scout-closed-pr/report.md"
+  printf 'findings\n' > "$home/data/scout-missing-worktree/report.md"
+  write_meta "$home" scout-done 'done: report written' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes" \
+    "branch=fm/scout-done"
+  write_meta "$home" scout-closed-pr 'done: report written' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes" \
+    "branch=fm/scout-closed-pr" "pr=https://github.com/o/r/pull/8"
+  write_meta "$home" scout-missing-worktree 'done: report written' \
+    "project=demo" "window=missing" "kind=scout" "mode=no-mistakes" \
+    "branch=fm/scout-missing-worktree" "worktree=$home/projects/demo/.treehouse/scout-missing-worktree"
+  out=$(run_json "$home" "$fakebin") || fail "scout report json failed"
+  assert_json_valid "$out" "scout report output"
+  assert_task_classification "$out" scout-done scout_report_ready "completed scout with no PR should classify by report"
+  assert_task_classification "$out" scout-closed-pr scout_report_ready "completed scout with closed PR metadata should classify by report"
+  assert_task_classification "$out" scout-missing-worktree scout_report_ready "completed scout with missing worktree should classify by report"
+  assert_not_contains "$out" 'scout-done:worker_done_no_pr' "completed scout report should not be a no-PR worker"
+  assert_not_contains "$out" 'scout-closed-pr:merged_pr_live_worker' "completed scout report should not be a PR worker"
+  assert_not_contains "$out" 'scout-missing-worktree:stale_treehouse_state' "completed scout report should not be stale treehouse state"
+  pass "completed scouts with reports classify as scout teardown work"
+}
+
+test_scout_report_requires_done_status() {
+  local home fakebin out kind
+  home=$(make_home scout-report-not-terminal)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  for kind in working blocked decision failed; do
+    mkdir -p "$home/data/scout-$kind"
+    printf 'findings\n' > "$home/data/scout-$kind/report.md"
+  done
+  write_meta "$home" scout-working 'working: still investigating' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  write_meta "$home" scout-blocked 'blocked: needs source fixture' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  write_meta "$home" scout-decision 'needs-decision: choose scope' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  write_meta "$home" scout-failed 'failed: repro broke' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  : > "$home/state/scout-working.turn-ended"
+  out=$(run_json "$home" "$fakebin") || fail "scout non-terminal report json failed"
+  assert_json_valid "$out" "scout non-terminal report output"
+  assert_task_classification "$out" scout-working running "working scout with report and turn-ended should not be ready"
+  assert_task_classification "$out" scout-blocked worker_blocked "blocked scout with report should not be ready"
+  assert_task_classification "$out" scout-decision worker_needs_decision "needs-decision scout with report should not be ready"
+  assert_task_classification "$out" scout-failed worker_failed "failed scout with report should not be ready"
+  assert_not_contains "$out" 'scout-working:scout_report_ready' "working scout report should not produce teardown action"
+  assert_not_contains "$out" 'scout-blocked:scout_report_ready' "blocked scout report should not produce teardown action"
+  assert_not_contains "$out" 'scout-decision:scout_report_ready' "needs-decision scout report should not produce teardown action"
+  assert_not_contains "$out" 'scout-failed:scout_report_ready' "failed scout report should not produce teardown action"
+  pass "scout reports require an explicit done status before teardown classification"
+}
+
 test_local_failure_paths_degrade_to_actions_or_unknown() {
   local home fakebin out
   home=$(make_home failures)
@@ -218,9 +338,10 @@ test_text_output_and_watcher_source() {
   fakebin="$home/fakebin"
   write_fakebin "$fakebin"
   write_meta "$home" live 'working: still running' "project=demo" "window=live"
+  write_meta "$home" secondmate-idle 'working: idle' "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --text --include-ok --no-default-reminders) || fail "text output failed"
   assert_contains "$out" 'Firstmate supervision - read-only' "text should show read-only posture"
-  assert_contains "$out" 'worker(s) are running normally' "include-ok should show routine workers"
+  assert_contains "$out" '2 worker(s) are running normally' "include-ok should show routine workers and persistent secondmates"
   assert_contains "$out" 'No changes made.' "text should end with no changes made"
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" --json --no-default-reminders) || fail "watcher source json failed"
@@ -232,6 +353,10 @@ test_text_output_and_watcher_source() {
 test_model_is_sourceable_and_schema_is_json
 test_empty_home_is_read_only_valid_json
 test_task_classifications_and_route_metadata
+test_live_secondmates_ignore_seed_pr_terminal_state
+test_live_secondmate_done_status_surfaces_response
+test_completed_scout_with_report_is_not_pr_worker
+test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown
 test_absolute_project_meta_runs_treehouse_status
 test_github_missing_and_external_reminders_do_not_fail
