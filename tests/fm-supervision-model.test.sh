@@ -209,6 +209,23 @@ test_live_secondmates_ignore_seed_pr_terminal_state() {
   pass "live idle secondmates ignore terminal seed PR history"
 }
 
+test_live_secondmate_done_status_surfaces_response() {
+  local home fakebin out
+  home=$(make_home secondmate-done)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" secondmate-answer 'done: report written to data/answer.md' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate" \
+    "pr=https://github.com/o/r/pull/1"
+  out=$(run_json "$home" "$fakebin") || fail "secondmate done json failed"
+  assert_json_valid "$out" "secondmate done output"
+  assert_task_classification "$out" secondmate-answer secondmate_response_ready "live secondmate done status should surface response"
+  assert_contains "$out" 'secondmate-answer:secondmate_response_ready' "secondmate done response should create a checklist item"
+  assert_contains "$out" 'Read or relay the secondmate response; keep the secondmate live.' "secondmate done response should not ask to close the secondmate"
+  assert_not_contains "$out" 'secondmate-answer:persistent_secondmate_idle' "secondmate done response should not be hidden as idle"
+  pass "live secondmate done statuses surface without retiring the secondmate"
+}
+
 test_completed_scout_with_report_is_not_pr_worker() {
   local home fakebin out
   home=$(make_home scout-report)
@@ -236,6 +253,37 @@ test_completed_scout_with_report_is_not_pr_worker() {
   assert_not_contains "$out" 'scout-closed-pr:merged_pr_live_worker' "completed scout report should not be a PR worker"
   assert_not_contains "$out" 'scout-missing-worktree:stale_treehouse_state' "completed scout report should not be stale treehouse state"
   pass "completed scouts with reports classify as scout teardown work"
+}
+
+test_scout_report_requires_done_status() {
+  local home fakebin out kind
+  home=$(make_home scout-report-not-terminal)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  for kind in working blocked decision failed; do
+    mkdir -p "$home/data/scout-$kind"
+    printf 'findings\n' > "$home/data/scout-$kind/report.md"
+  done
+  write_meta "$home" scout-working 'working: still investigating' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  write_meta "$home" scout-blocked 'blocked: needs source fixture' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  write_meta "$home" scout-decision 'needs-decision: choose scope' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  write_meta "$home" scout-failed 'failed: repro broke' \
+    "project=demo" "window=live" "kind=scout" "mode=no-mistakes"
+  : > "$home/state/scout-working.turn-ended"
+  out=$(run_json "$home" "$fakebin") || fail "scout non-terminal report json failed"
+  assert_json_valid "$out" "scout non-terminal report output"
+  assert_task_classification "$out" scout-working running "working scout with report and turn-ended should not be ready"
+  assert_task_classification "$out" scout-blocked worker_blocked "blocked scout with report should not be ready"
+  assert_task_classification "$out" scout-decision worker_needs_decision "needs-decision scout with report should not be ready"
+  assert_task_classification "$out" scout-failed worker_failed "failed scout with report should not be ready"
+  assert_not_contains "$out" 'scout-working:scout_report_ready' "working scout report should not produce teardown action"
+  assert_not_contains "$out" 'scout-blocked:scout_report_ready' "blocked scout report should not produce teardown action"
+  assert_not_contains "$out" 'scout-decision:scout_report_ready' "needs-decision scout report should not produce teardown action"
+  assert_not_contains "$out" 'scout-failed:scout_report_ready' "failed scout report should not produce teardown action"
+  pass "scout reports require an explicit done status before teardown classification"
 }
 
 test_local_failure_paths_degrade_to_actions_or_unknown() {
@@ -305,7 +353,9 @@ test_model_is_sourceable_and_schema_is_json
 test_empty_home_is_read_only_valid_json
 test_task_classifications_and_route_metadata
 test_live_secondmates_ignore_seed_pr_terminal_state
+test_live_secondmate_done_status_surfaces_response
 test_completed_scout_with_report_is_not_pr_worker
+test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown
 test_absolute_project_meta_runs_treehouse_status
 test_github_missing_and_external_reminders_do_not_fail

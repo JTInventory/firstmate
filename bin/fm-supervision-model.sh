@@ -518,12 +518,12 @@ fm_supervision_watcher_status() {
 }
 
 fm_supervision_classify_task() {
-  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} turn_ended=${12:-false}
+  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
   # Classification order is part of the public supervision contract: completed
-  # scout reports are teardown work, and live secondmates are persistent direct reports
-  # unless they have a fresh captain-relevant status.
-  if [ "$kind" = scout ] && [ "$scout_report_exists" = true ] && { [ "$turn_ended" = true ] || printf '%s\n' "$last_status" | grep -q '^done:'; }; then
+  # scout reports require a done status, and live secondmates are persistent
+  # direct reports unless they have a fresh captain-relevant status.
+  if [ "$kind" = scout ] && [ "$scout_report_exists" = true ] && printf '%s\n' "$last_status" | grep -q '^done:'; then
     classification=scout_report_ready
     severity=medium
     owner=firstmate
@@ -564,6 +564,12 @@ fm_supervision_classify_task() {
     severity=high
     owner=firstmate
     action="Inspect the worker failure and decide the next step."
+    why="$last_status"
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && printf '%s\n' "$last_status" | grep -q '^done:'; then
+    classification=secondmate_response_ready
+    severity=medium
+    owner=firstmate
+    action="Read or relay the secondmate response; keep the secondmate live."
     why="$last_status"
   elif [ "$kind" = secondmate ] && [ "$window_live" = true ]; then
     classification=persistent_secondmate_idle
@@ -745,7 +751,7 @@ fm_supervision_collect() {
           treehouse_ok=false
         fi
       fi
-      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$last_status" "$pr_url" "$pr_state" "$ci_state" "$scout_report_exists" "$turn_ended")
+      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$last_status" "$pr_url" "$pr_state" "$ci_state" "$scout_report_exists")
       classification=$(printf '%s' "$class_data" | awk -F '\t' '{ print $1 }')
       severity=$(printf '%s' "$class_data" | awk -F '\t' '{ print $2 }')
       owner=$(printf '%s' "$class_data" | awk -F '\t' '{ print $3 }')
