@@ -112,7 +112,7 @@ You chat with the first mate.
 It routes each request to a crewmate in its own tmux window and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 When the current fleet state is unclear, `bin/fm-supervise.sh` gives a passive read-only checklist, and `bin/fm-supervise.sh --json` exposes the same shared model for display tools such as Radar.
 For PRs, that model combines GitHub commit status and check-runs before deciding whether CI is green, pending, failed, absent, or unknown.
-It treats completed scout reports as teardown work instead of PR-worker work, and treats live secondmates as persistent direct reports unless they have a fresh done, blocked, decision, or failed status.
+It treats scout reports with a fresh `done:` status as teardown work instead of PR-worker work, and treats live secondmates as persistent direct reports unless they have a fresh `done:`, `blocked:`, `needs-decision:`, or `failed:` status.
 Persistent secondmate homes are linked firstmate worktrees; startup syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
 Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
 When that profile file exists, crewmate and scout spawns must pass the resolved harness explicitly so `config/crew-harness` is not used as an unnoticed bypass.
