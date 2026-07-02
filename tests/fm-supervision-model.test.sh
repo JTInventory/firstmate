@@ -214,21 +214,27 @@ test_completed_scout_with_report_is_not_pr_worker() {
   home=$(make_home scout-report)
   fakebin="$home/fakebin"
   write_fakebin "$fakebin"
-  mkdir -p "$home/data/scout-done" "$home/data/scout-closed-pr"
+  mkdir -p "$home/data/scout-done" "$home/data/scout-closed-pr" "$home/data/scout-missing-worktree"
   printf 'findings\n' > "$home/data/scout-done/report.md"
   printf 'findings\n' > "$home/data/scout-closed-pr/report.md"
+  printf 'findings\n' > "$home/data/scout-missing-worktree/report.md"
   write_meta "$home" scout-done 'done: report written' \
     "project=demo" "window=live" "kind=scout" "mode=no-mistakes" \
     "branch=fm/scout-done"
   write_meta "$home" scout-closed-pr 'done: report written' \
     "project=demo" "window=live" "kind=scout" "mode=no-mistakes" \
     "branch=fm/scout-closed-pr" "pr=https://github.com/o/r/pull/8"
+  write_meta "$home" scout-missing-worktree 'done: report written' \
+    "project=demo" "window=missing" "kind=scout" "mode=no-mistakes" \
+    "branch=fm/scout-missing-worktree" "worktree=$home/projects/demo/.treehouse/scout-missing-worktree"
   out=$(run_json "$home" "$fakebin") || fail "scout report json failed"
   assert_json_valid "$out" "scout report output"
   assert_task_classification "$out" scout-done scout_report_ready "completed scout with no PR should classify by report"
   assert_task_classification "$out" scout-closed-pr scout_report_ready "completed scout with closed PR metadata should classify by report"
+  assert_task_classification "$out" scout-missing-worktree scout_report_ready "completed scout with missing worktree should classify by report"
   assert_not_contains "$out" 'scout-done:worker_done_no_pr' "completed scout report should not be a no-PR worker"
   assert_not_contains "$out" 'scout-closed-pr:merged_pr_live_worker' "completed scout report should not be a PR worker"
+  assert_not_contains "$out" 'scout-missing-worktree:stale_treehouse_state' "completed scout report should not be stale treehouse state"
   pass "completed scouts with reports classify as scout teardown work"
 }
 

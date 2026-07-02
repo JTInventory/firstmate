@@ -520,7 +520,13 @@ fm_supervision_watcher_status() {
 fm_supervision_classify_task() {
   local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} turn_ended=${12:-false}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
-  if [ -n "$worktree" ] && [ ! -e "$worktree" ]; then
+  if [ "$kind" = scout ] && [ "$scout_report_exists" = true ] && { [ "$turn_ended" = true ] || printf '%s\n' "$last_status" | grep -q '^done:'; }; then
+    classification=scout_report_ready
+    severity=medium
+    owner=firstmate
+    action="Tear down the scout; its report exists."
+    why="Scout report exists at data/$id/report.md."
+  elif [ -n "$worktree" ] && [ ! -e "$worktree" ]; then
     classification=stale_treehouse_state
     severity=high
     owner=firstmate
@@ -532,12 +538,6 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Respawn or retire the secondmate only after checking its home."
     why="Task meta exists but the recorded tmux window is missing."
-  elif [ "$kind" = scout ] && [ "$scout_report_exists" = true ] && { [ "$turn_ended" = true ] || printf '%s\n' "$last_status" | grep -q '^done:'; }; then
-    classification=scout_report_ready
-    severity=medium
-    owner=firstmate
-    action="Tear down the scout; its report exists."
-    why="Scout report exists at data/$id/report.md."
   elif [ "$window_live" = false ] && [ -n "$id" ]; then
     classification=missing_window_existing_meta
     severity=high
