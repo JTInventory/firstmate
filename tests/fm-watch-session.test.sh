@@ -130,7 +130,7 @@ test_watch_session_start_status_stop_are_home_scoped() {
   pass "watch-session start/status/stop are scoped to one FM_HOME and never use broad pkill"
 }
 
-test_watch_session_uses_documented_rearm_delay() {
+test_watch_session_delays_only_after_failed_rearm() {
   local dir fakebin state out runner
   dir=$(make_case session-rearm-delay)
   fakebin=$(install_fake_tmux "$dir")
@@ -143,9 +143,10 @@ test_watch_session_uses_documented_rearm_delay() {
     || fail "watch-session did not start with documented rearm delay"
   runner="$state/.watch-session/runner.sh"
   assert_present "$runner" "watch-session should write runner file"
-  assert_grep 'then sleep 9; else sleep 1; fi' "$runner" "runner should use documented rearm delay"
-  pass "watch-session uses documented rearm delay"
+  assert_grep 'if [ "$rc" -ne 0 ]; then sleep 9; fi' "$runner" "runner should delay after failed re-arm attempts"
+  ! grep -F 'else sleep 1' "$runner" >/dev/null || fail "runner should re-arm immediately after a successful watcher wake"
+  pass "watch-session delays failed re-arms but immediately re-arms after successful wakes"
 }
 
 test_watch_session_start_status_stop_are_home_scoped
-test_watch_session_uses_documented_rearm_delay
+test_watch_session_delays_only_after_failed_rearm
