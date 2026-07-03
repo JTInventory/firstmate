@@ -30,7 +30,7 @@ Each file also starts with a short header comment.
 | `fm-cognee-verify-source.sh` | Local-only verifier for Cognee hint text against JSONL manifests; reopens referenced source files and emits source-verification JSON plus secret-safe telemetry |
 | `fm-marker-lib.sh`       | Shared from-firstmate request marker and detector sourced by `fm-send.sh`, `fm-brief.sh`, and tests                 |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
-| `fm-watch-session.sh`    | Durable home-scoped tmux runner that loops through `fm-watch-arm.sh` for harness lanes without reliable tracked background tasks |
+| `fm-watch-session.sh`    | Durable home-scoped tmux runner that loops through `fm-watch-arm.sh` for harness lanes without reliable tracked background tasks, re-arming immediately after wake output |
 | `fm-watch.sh`            | Singleton-safe always-on watcher; absorbs no-verb signal and stale wakes only when the crew is provably working, queues and exits for actionable wakes, and reverts to daemon-owned one-shot behavior while `state/.afk` exists |
 | `fm-supervise.sh`        | Read-only current-work checklist, plus `--json` / `--schema` for the shared `firstmate.supervision.v1` model; keeps scout reports with latest `done:` status on the report-teardown path and idle live secondmates on the persistent-direct-report path while still surfacing fresh secondmate follow-up statuses |
 | `fm-supervision-model.sh` | Sourceable read-only model library used by `fm-supervise.sh` and future display consumers; owns task classification ordering for PRs, scouts, and secondmates |

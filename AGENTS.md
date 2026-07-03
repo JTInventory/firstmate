@@ -591,7 +591,7 @@ From there the task is an ordinary ship task through its mode-specific validatio
 
 The watcher is the backbone.
 Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through a harness-tracked `bin/fm-watch-arm.sh` background task.
-In a harness lane where tracked background tasks are not durable enough, run `bin/fm-watch-session.sh start` instead; it keeps a home-scoped tmux runner alive and re-arms through the same verified `fm-watch-arm.sh` path.
+In a harness lane where tracked background tasks are not durable enough, run `bin/fm-watch-session.sh start` instead; it keeps a home-scoped tmux runner alive and re-arms through the same verified `fm-watch-arm.sh` path, immediately after wake output and with the retry delay only after failed or quiet healthy no-op arms.
 It costs zero tokens while running.
 **Always-on wake triage (absorb only when provably working).**
 The watcher classifies every wake it detects in bash and absorbs the benign majority without ever waking you, but it never absorbs a crewmate that has stopped.
@@ -632,7 +632,7 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 ```sh
 bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
-bin/fm-watch-session.sh start   # durable home-scoped tmux runner for lanes without reliable tracked background tasks
+bin/fm-watch-session.sh start   # durable home-scoped tmux runner; immediate re-arm after wake output
 bin/fm-watch-session.sh --status  # report whether this home's runner window is live
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
 bin/fm-supervise.sh        # read-only checklist/JSON view of current work; never mutates state, tmux, git, treehouse, or GitHub

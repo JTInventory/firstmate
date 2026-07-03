@@ -23,7 +23,7 @@ Optional X mode rides the same check path: bootstrap drops a local `state/x-watc
 
 Routine re-arms go through `bin/fm-watch-arm.sh`, which forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `healthy` / `FAILED`, the last exiting non-zero) - never a false `already running` off a dying process.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
-For harnesses where a tracked background call is not durable enough, `bin/fm-watch-session.sh` provides a home-scoped tmux runner that repeatedly arms the normal watcher from a persistent process, reports status from the derived `firstmate-watch:fm-watch-<home/state hash>` window, and stops only that current-home runner window.
+For harnesses where a tracked background call is not durable enough, `bin/fm-watch-session.sh` provides a home-scoped tmux runner that repeatedly arms the normal watcher from a persistent process, re-arms immediately after wake output, reports status from the derived `firstmate-watch:fm-watch-<home/state hash>` window, and stops only that current-home runner window.
 A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, queued wakes are waiting to be drained, or tasks are in flight and watcher liveness is not proved by both a fresh beacon and a live `state/.watch.lock` for this same home/path.
 The read-only supervision model combines GitHub commit status and check-runs when classifying PR CI, so Actions failures such as stale or failed check-runs are not treated as green just because legacy commit status is empty.
 It also classifies a scout report as teardown work before PR or missing-worktree checks only when the latest status is `done:`, and a live `kind=secondmate` record as a persistent direct report unless the latest status is `done:`, `blocked:`, `needs-decision:`, or `failed:`.
@@ -176,5 +176,5 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 
 ## Development notes
 
-The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion that requires both a live lock and fresh beacon, a self-verifying tracked-child arm wrapper, and a home-scoped tmux session runner for harnesses without durable background tasks.
+The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion that requires both a live lock and fresh beacon, a self-verifying tracked-child arm wrapper, and a home-scoped tmux session runner that immediately re-arms after wake output for harnesses without durable background tasks.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
