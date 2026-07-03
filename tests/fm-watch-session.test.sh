@@ -143,9 +143,11 @@ test_watch_session_delays_only_after_failed_rearm() {
     || fail "watch-session did not start with documented rearm delay"
   runner="$state/.watch-session/runner.sh"
   assert_present "$runner" "watch-session should write runner file"
-  assert_grep 'if [ "$rc" -ne 0 ]; then sleep 9; fi' "$runner" "runner should delay after failed re-arm attempts"
+  assert_grep 'grep -Eq '\''^(signal:|stale:|check:|heartbeat($|:))'\'' "$arm_out"' "$runner" "runner should distinguish wake output from healthy no-op output"
+  assert_grep 'if [ "$rc" -ne 0 ]; then rm -f "$arm_out"; sleep 9; continue; fi' "$runner" "runner should delay after failed re-arm attempts"
+  assert_grep '  sleep 9' "$runner" "runner should delay after healthy no-op re-arm attempts"
   ! grep -F 'else sleep 1' "$runner" >/dev/null || fail "runner should re-arm immediately after a successful watcher wake"
-  pass "watch-session delays failed re-arms but immediately re-arms after successful wakes"
+  pass "watch-session delays failed and no-op re-arms but immediately re-arms after successful wakes"
 }
 
 test_watch_session_start_status_stop_are_home_scoped

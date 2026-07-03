@@ -54,11 +54,17 @@ write_runner_files() {
     printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
     # shellcheck disable=SC2016 # Generated runner expands FM_STATE_OVERRIDE at runtime.
     printf '  if [ -e "$FM_STATE_OVERRIDE/.afk" ]; then sleep %s; continue; fi\n' "$AFK_DELAY"
-    printf '  %s/fm-watch-arm.sh\n' "$(shell_quote "$SCRIPT_DIR")"
+    printf '  arm_out=%s\n' "$(shell_quote "$SESSION_DIR/arm.out")"
+    printf '  rm -f "$arm_out"\n'
+    printf '  %s/fm-watch-arm.sh >"$arm_out"\n' "$(shell_quote "$SCRIPT_DIR")"
     printf '  rc=$?\n'
-    printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
+    printf '  [ -s "$arm_out" ] && cat "$arm_out"\n'
+    printf '  [ -e %s ] && { rm -f "$arm_out"; exit 0; }\n' "$(shell_quote "$STOP_FILE")"
     # shellcheck disable=SC2016 # Generated runner expands rc at runtime.
-    printf '  if [ "$rc" -ne 0 ]; then sleep %s; fi\n' "$RETRY_DELAY"
+    printf '  if [ "$rc" -ne 0 ]; then rm -f "$arm_out"; sleep %s; continue; fi\n' "$RETRY_DELAY"
+    printf '  if grep -Eq '\''^(signal:|stale:|check:|heartbeat($|:))'\'' "$arm_out"; then rm -f "$arm_out"; continue; fi\n'
+    printf '  rm -f "$arm_out"\n'
+    printf '  sleep %s\n' "$RETRY_DELAY"
     printf 'done\n'
   } > "$RUNNER_FILE"
   chmod +x "$RUNNER_FILE"
