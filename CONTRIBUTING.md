@@ -99,7 +99,7 @@ tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter
 tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, PR-head metadata, tasks-axi/manual backlog reminder, --force override
 tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
 tests/fm-task-identity.test.sh            # task branch/meta identity guard for PR check, diff review, and teardown helpers
-tests/fm-watch-session.test.sh            # durable home-scoped watcher tmux runner start, status, stop, restart, and AFK behavior
+tests/fm-watch-session.test.sh            # durable home-scoped watcher tmux runner start/status/stop and re-arm delay behavior
 tests/fm-supervision-model.test.sh        # read-only supervision checklist, secondmate/scout classification boundaries, and `firstmate.supervision.v1` JSON/schema output
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]

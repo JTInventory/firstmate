@@ -4,7 +4,8 @@
 # Use this in harnesses where a tracked background task is not durable enough.
 # It creates one tmux window per FM_HOME/STATE pair and runs fm-watch-arm.sh in a
 # loop there. The watcher itself remains the same singleton: it is still scoped by
-# this home's state/.watch.lock, and no broad process matching is used.
+# this home's state/.watch.lock, and no broad process matching is used. Wake output
+# re-arms immediately; failed and quiet healthy no-op arms keep the retry delay.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,11 +55,23 @@ write_runner_files() {
     printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
     # shellcheck disable=SC2016 # Generated runner expands FM_STATE_OVERRIDE at runtime.
     printf '  if [ -e "$FM_STATE_OVERRIDE/.afk" ]; then sleep %s; continue; fi\n' "$AFK_DELAY"
-    printf '  %s/fm-watch-arm.sh\n' "$(shell_quote "$SCRIPT_DIR")"
+    printf '  arm_out=%s\n' "$(shell_quote "$SESSION_DIR/arm.out")"
+    # shellcheck disable=SC2016 # Generated runner expands arm_out at runtime.
+    printf '  rm -f "$arm_out"\n'
+    # shellcheck disable=SC2016 # Generated runner expands arm_out at runtime.
+    printf '  %s/fm-watch-arm.sh >"$arm_out"\n' "$(shell_quote "$SCRIPT_DIR")"
     printf '  rc=$?\n'
-    printf '  [ -e %s ] && exit 0\n' "$(shell_quote "$STOP_FILE")"
+    # shellcheck disable=SC2016 # Generated runner expands arm_out at runtime.
+    printf '  [ -s "$arm_out" ] && cat "$arm_out"\n'
+    # shellcheck disable=SC2016 # Generated runner expands arm_out at runtime.
+    printf '  [ -e %s ] && { rm -f "$arm_out"; exit 0; }\n' "$(shell_quote "$STOP_FILE")"
     # shellcheck disable=SC2016 # Generated runner expands rc at runtime.
-    printf '  if [ "$rc" -ne 0 ]; then sleep %s; else sleep 1; fi\n' "$RETRY_DELAY"
+    printf '  if [ "$rc" -ne 0 ]; then rm -f "$arm_out"; sleep %s; continue; fi\n' "$RETRY_DELAY"
+    # shellcheck disable=SC2016 # Generated runner expands arm_out at runtime.
+    printf '  if grep -Eq '\''^(signal:|stale:|check:|heartbeat($|:))'\'' "$arm_out"; then rm -f "$arm_out"; continue; fi\n'
+    # shellcheck disable=SC2016 # Generated runner expands arm_out at runtime.
+    printf '  rm -f "$arm_out"\n'
+    printf '  sleep %s\n' "$RETRY_DELAY"
     printf 'done\n'
   } > "$RUNNER_FILE"
   chmod +x "$RUNNER_FILE"
