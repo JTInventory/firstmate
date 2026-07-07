@@ -198,6 +198,9 @@ fm_lock_mid_acquire_is_fresh() {
   return 1
 }
 
+# Live PIDs normally block steals. The only exception is a lock that recorded a
+# non-empty pid-identity for an older process and the current live PID no longer
+# matches it, which means the OS reused the PID after the real owner died.
 fm_lock_live_pid_has_mismatched_identity() {
   local lockdir=$1 pid=$2 stored_identity current_identity
   fm_pid_alive "$pid" || return 1

@@ -22,11 +22,12 @@
 #   watcher: healthy pid=<N> (beacon <age>s)             - a genuinely live+fresh watcher already held the lock
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 # It NEVER reports started/healthy off a stale beacon or a dead/reused pid: a
-# stale-beacon or dead-pid holder either self-heals (the fresh child steals the
-# dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started/healthy it exits zero; on FAILED it exits
-# non-zero so the failure is loud and a caller can react. A healthy line means a
-# live cycle already exists; do not churn extra no-op arms until that cycle fires.
+# dead holder, or a reused PID whose current process no longer matches the stored
+# watcher identity, self-heals through the singleton steal path and is confirmed;
+# a live holder with no stale-identity proof returns the FAILED line. On
+# started/healthy it exits zero; on FAILED it exits non-zero so the failure is
+# loud and a caller can react. A healthy line means a live cycle already exists;
+# do not churn extra no-op arms until that cycle fires.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and start a fresh one. It resolves and signals exactly that
@@ -118,8 +119,8 @@ if [ "$mode" = restart ]; then
     if watch_lock_matches_pid "$lock_pid"; then
       kill -TERM "$lock_pid" 2>/dev/null || true
       # Wait for it to actually exit before relaunching, so the fresh watcher
-      # either takes a released lock or reclaims a now-dead-pid stale lock instead
-      # of seeing the dying one as a live holder and no-opping.
+      # either takes a released lock or reclaims a stale dead-pid/reused-pid lock
+      # instead of seeing the dying one as a live holder and no-opping.
       i=0
       while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
         sleep 0.1
