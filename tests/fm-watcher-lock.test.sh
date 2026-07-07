@@ -371,6 +371,94 @@ test_lock_does_not_steal_live_lock() {
   pass "live-held lock is not stolen"
 }
 
+test_lock_does_not_steal_live_lock_with_matching_pid_identity() {
+  local dir state lockdir live identity out lockpid
+  dir=$(make_case lock-live-matching-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") || fail "could not identify live lock holder"
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "live lock with matching pid identity was acquired instead of refused: $out" ;;
+  esac
+  case "$out" in
+    *"held=$live"*) ;;
+    *) fail "matching live holder pid not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$live" ] || fail "matching live holder's lock pid was clobbered (got '$lockpid')"
+  pass "live-held lock with matching pid identity is not stolen"
+}
+
+test_lock_reclaims_live_lock_with_mismatched_pid_identity() {
+  local dir state lockdir live out lockpid
+  dir=$(make_case lock-live-mismatched-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "stale identity for a previous process" > "$lockdir/pid-identity"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s lockpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)"
+    [ "$rc" -eq 0 ] && fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir")
+  lockpid=${out#*lockpid=}; lockpid=${lockpid%% *}
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "live lock with mismatched pid identity was not reclaimed: $out" ;;
+  esac
+  [ -n "$lockpid" ] || fail "reclaimed mismatched-identity lock recorded no new pid: $out"
+  [ "$lockpid" != "$live" ] || fail "mismatched-identity lock kept the reused live pid: $out"
+  pass "live-held lock with mismatched pid identity is reclaimed"
+}
+
+test_lock_without_pid_identity_keeps_existing_live_held_behavior() {
+  local dir state lockdir live out lockpid
+  dir=$(make_case lock-live-no-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "live lock without pid identity was acquired instead of preserving old behavior: $out" ;;
+  esac
+  case "$out" in
+    *"held=$live"*) ;;
+    *) fail "identity-less live holder pid not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$live" ] || fail "identity-less live holder's lock pid was clobbered (got '$lockpid')"
+  pass "live-held lock without pid identity remains live-held"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -487,6 +575,38 @@ test_watch_restart_rejects_reused_pid() {
   wait "$pid" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   pass "watch restart refuses to signal a reused pid"
+}
+
+test_arm_reclaims_reused_pid_lock_on_plain_arm() {
+  local dir state fakebin armout live armpid i lock_pid
+  dir=$(make_case arm-reused-pid-plain)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  sleep 300 &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
+    || fail "plain arm did not replace stale reused-pid lock with a live watcher (got '$lock_pid')"
+  grep -F "watcher: started pid=$lock_pid" "$armout" >/dev/null || fail "plain arm did not report the fresh watcher it confirmed"
+  is_live_non_zombie "$live" || fail "plain arm killed a reused unrelated pid"
+  kill "$armpid" "$lock_pid" "$live" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "plain arm recovers from a reused-pid stale watcher lock"
 }
 
 test_watcher_self_evicts_on_lock_takeover() {
@@ -709,10 +829,14 @@ test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_does_not_steal_live_lock_with_matching_pid_identity
+test_lock_reclaims_live_lock_with_mismatched_pid_identity
+test_lock_without_pid_identity_keeps_existing_live_held_behavior
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
+test_arm_reclaims_reused_pid_lock_on_plain_arm
 test_watcher_self_evicts_on_lock_takeover
 test_arm_reports_healthy_for_live_fresh_watcher
 test_arm_starts_and_self_heals
