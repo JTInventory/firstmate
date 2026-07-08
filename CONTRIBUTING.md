@@ -77,6 +77,7 @@ tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only comp
 tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for afk injection: partial-input deferral, swallowed-Enter retry, and single clean digest
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
+tests/fm-understand-anything.test.sh      # Understand Anything dashboard PID identity, cache isolation, token redaction, and OpenClaw graph caveat tests
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
 tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings and no-change contract

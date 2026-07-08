@@ -60,6 +60,25 @@ Each file also starts with a short header comment.
 | `fm-x-link.sh`           | Link a spawned task to its originating X mention by recording `x_request=` and `x_request_ts=` in `state/<id>.meta` |
 | `fm-x-followup.sh`       | Detect, post, and clear the single completion follow-up for an X-linked task, forwarding optional `--image <path>`, enforcing the local 24h window, and retrying only when the relay post fails |
 
+## Understand Anything orientation
+
+`bin/fm-understand-anything.sh` is a narrow wrapper around Understand Anything graph and dashboard flows.
+It is for orientation, not proof.
+
+`dashboard-start` launches the dashboard with writable temp, XDG, npm, and Vite cache directories under `FM_UNDERSTAND_CACHE_DIR` or a temp default.
+For the built-in Vite launch, it writes a generated config wrapper whose `cacheDir` points at that writable cache root instead of the plugin install tree.
+In background mode it waits for a current tokenized dashboard URL before reporting success.
+If no URL is confirmed, it stops the child process and removes the PID, identity, and URL files so stale state is not mistaken for a live dashboard.
+Normal output redacts `token=` and `access_token=` values; the local URL file keeps the usable dashboard URL for operators who need to open it.
+
+`dashboard-status` reports `running` only when the PID file, dashboard working directory, and saved start-time process identity all match the live process.
+A missing, malformed, reused, or identity-mismatched PID reports stopped or stale instead of running.
+When a stale live PID is found, the helper writes redacted evidence under `FM_UNDERSTAND_EVIDENCE_DIR` or its temp default.
+
+`graph-status --metadata-file <path>` prints graph status, counts, root, and HEAD from Understand Anything metadata JSON or simple `key=value` metadata.
+When the metadata root is `/root/.openclaw`, it also prints `orientation_only=true` and `workers_must_prove_own_worktree_head=true`.
+That means a canonical OpenClaw graph or packet HEAD can help a worker orient, but the worker must still prove branch and HEAD in its own worktree before using it as current truth.
+
 Cognee policy lives in [cognee-policy.md](cognee-policy.md). Automatic lookup needs per-wrapper-call cost evidence: `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call`. Current `session_window_only` evidence is accepted only as trial monitoring evidence and still blocks automatic promotion because there is no safe per-wrapper-call cost/request/session/QA id bridge. Manual verified lookup remains read-only, hint-only, fail-closed, and local-source-verified.
 
 The official docs now show raw data readback and session/model cost surfaces. That does not satisfy Firstmate's production gates by itself: raw retention/source-authority guarantees and safe per-wrapper-call cost correlation remain unproven.

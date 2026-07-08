@@ -172,6 +172,23 @@ The live wrapper calls only `POST /api/v1/search`, records secret-safe telemetry
 Automatic lookup remains disabled unless `FM_COGNEE_AUTO_LOOKUP=1` and the local evidence under `FM_COGNEE_EVIDENCE_ROOT` proves every gate marker, including `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call` and `FM_COGNEE_GATE_RAW_DURABILITY_SOURCE_AUTHORITY=pass`.
 `session_window_only` cost evidence is accepted only as trial monitoring evidence and still blocks automatic promotion.
 
+## Understand Anything orientation
+
+`fm-understand-anything.sh` wraps Understand Anything dashboard and graph checks for JT/OpenClaw orientation.
+The dashboard commands use temp defaults under `TMPDIR`, but each state path has an `FM_UNDERSTAND_*` override when an operator wants durable files.
+`FM_UNDERSTAND_DASHBOARD_DIR` can point at a dashboard checkout directly; otherwise the helper probes the known plugin install locations, including `CLAUDE_PLUGIN_ROOT/packages/dashboard` when `CLAUDE_PLUGIN_ROOT` is set.
+`FM_UNDERSTAND_CACHE_DIR` controls the writable root used for temp, XDG, npm, Vite cache, and Vite temp files during dashboard start.
+`dashboard-start` also writes a generated Vite config wrapper under that cache root so Vite's real `cacheDir` stays outside the plugin install directory.
+`FM_UNDERSTAND_DASHBOARD_URL_WAIT_SECONDS` controls how long a background start waits for the current dashboard URL before failing closed and stopping the child.
+
+The PID, URL, and identity files work together.
+`dashboard-status` accepts a PID as running only when the live process still has the expected dashboard working directory and the saved start-time identity matches.
+Stale PID evidence is written under `FM_UNDERSTAND_EVIDENCE_DIR`.
+Status and start output redact dashboard tokens, but `FM_UNDERSTAND_DASHBOARD_URL_FILE` intentionally stores the usable tokenized URL locally.
+
+`graph-status` reads metadata from an explicit `--metadata-file`.
+When that metadata describes canonical `/root/.openclaw`, the helper marks the graph as orientation-only and prints that workers must prove their own worktree branch and HEAD before treating the graph HEAD as current truth.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -239,6 +256,16 @@ FM_COGNEE_TIMEOUT_MS=30000 # connect and request timeout budget for live lookup
 FM_COGNEE_TELEMETRY_FILE=  # default: $FM_HOME/data/cognee/telemetry.jsonl
 FM_COGNEE_EVIDENCE_ROOT=/root/firstmate/data   # local evidence root for fm-cognee-lookup-gate.sh
 FM_COGNEE_AUTO_LOOKUP=0    # must be 1 plus all evidence markers before automatic lookup is allowed
+# Understand Anything orientation helper
+FM_UNDERSTAND_CACHE_DIR=        # default: ${TMPDIR:-/tmp}/fm-understand-cache
+FM_UNDERSTAND_DASHBOARD_DIR=    # optional dashboard checkout; otherwise known plugin locations are probed
+FM_UNDERSTAND_DASHBOARD_LOG_FILE=   # default: ${TMPDIR:-/tmp}/fm-understand-dashboard.log
+FM_UNDERSTAND_DASHBOARD_PID_FILE=   # default: ${TMPDIR:-/tmp}/fm-understand-dashboard.pid
+FM_UNDERSTAND_DASHBOARD_URL_FILE=   # default: ${TMPDIR:-/tmp}/fm-understand-dashboard.url; stores the usable tokenized URL locally
+FM_UNDERSTAND_DASHBOARD_IDENTITY_FILE=   # default: $FM_UNDERSTAND_DASHBOARD_PID_FILE.identity
+FM_UNDERSTAND_DASHBOARD_URL_WAIT_SECONDS=2   # seconds a background start waits for a current dashboard URL before failing closed
+FM_UNDERSTAND_EVIDENCE_DIR=     # default: ${TMPDIR:-/tmp}/fm-understand-evidence
+FM_UNDERSTAND_PROJECT_DIR=      # default: current working directory; passed to the dashboard as GRAPH_DIR
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
