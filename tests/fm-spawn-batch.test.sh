@@ -14,6 +14,8 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+TEST_CONFIG="$TMP_ROOT/config"
+mkdir -p "$TEST_CONFIG"
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
 run_spawn() {
@@ -22,7 +24,7 @@ run_spawn() {
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$TEST_CONFIG" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }
