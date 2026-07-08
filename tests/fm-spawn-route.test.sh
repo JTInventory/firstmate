@@ -33,9 +33,10 @@ SH
 }
 
 make_case() {
-  local label=$1 home proj wt fakebin
+  local label=$1 project_basename home proj wt fakebin
+  project_basename=${2:-$label-alpha}
   home="$TMP_ROOT/$label-home"
-  proj="$TMP_ROOT/$label-alpha"
+  proj="$TMP_ROOT/$label-project/$project_basename"
   wt="$TMP_ROOT/$label-wt"
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/$label-fake")
   mkdir -p "$home/data" "$home/state" "$home/projects" "$home/config"
@@ -148,6 +149,24 @@ EOF
   pass "JT direct-PR spawns receive the PR Intake Governor brief gate"
 }
 
+test_jt_openclaw_operator_route_brief_appends_pr_intake_governor() {
+  local home proj wt fakebin id out status brief
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case jt-operator-route .openclaw)
+EOF
+  id=copy-fix-ee5
+  mkdir -p "$home/data/$id"
+  brief="$home/data/$id/brief.md"
+  printf '%s\n' 'Fix Control Room operator route copy before opening another PR.' > "$brief"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "JT operator-route direct-PR spawn should succeed"
+  assert_contains "$out" "spawned $id harness=codex" "JT operator-route spawn did not launch"
+  assert_grep "<!-- firstmate:jt-pr-intake-governor:start -->" "$brief" \
+    "plain operator-route JT brief missing intake-governor marker"
+  pass "JT operator-route briefs receive the PR Intake Governor brief gate"
+}
+
 test_unsafe_task_ids_are_rejected_before_spawn() {
   local home proj wt fakebin id out status
   IFS='|' read -r home proj wt fakebin <<EOF
@@ -174,4 +193,5 @@ test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
 test_jt_direct_pr_spawn_appends_pr_intake_governor
+test_jt_openclaw_operator_route_brief_appends_pr_intake_governor
 test_unsafe_task_ids_are_rejected_before_spawn

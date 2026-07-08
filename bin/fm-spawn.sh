@@ -334,7 +334,7 @@ is_jt_pr_intake_context() {
   lower_project=$(basename "$PROJ_ABS" | tr '[:upper:]' '[:lower:]')
   case "$lower_project" in
     .openclaw|jt-control-room)
-      if grep -Eiq 'jt control room|jt-control-room|replenishment|donnees|automation cockpit|ppc|sellersnap|refresh:doctor|replenishment-workflow-board|4187' "$BRIEF" 2>/dev/null; then
+      if grep -Eiq 'jt control room|jt-control-room|control room|operator|routes?|replenishment|donnees|trust cockpit|automation cockpit|ppc|sellersnap|runtime|served data|refresh:doctor|replenishment-workflow-board|4187' "$BRIEF" 2>/dev/null; then
         return 0
       fi
       ;;
