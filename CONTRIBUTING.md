@@ -14,7 +14,8 @@ Dependency bots are exempt so their automation keeps working, but regular contri
 
 ## Workflow
 
-1. For this captain-owned delivery lane, clone `JTInventory/firstmate` or set your local `origin` to `git@github.com:JTInventory/firstmate.git`.
+1. For this captain-owned delivery lane, clone `JTInventory/firstmate` or set your local delivery target to `git@github.com:JTInventory/firstmate.git`.
+   A checkout whose `origin` fetches from upstream `kunchenguid/firstmate` is accepted only when `fork/main`, no-mistakes status, the no-mistakes gate, and the resolved `origin` push target all prove delivery to `JTInventory/firstmate`.
 2. Create a branch and make your changes.
 3. Initialize the gate so its target is `JTInventory/firstmate` (firstmate expects **no-mistakes v1.31.2+** and a GitHub CLI whose `gh pr checks` supports `--json`).
 4. Commit your changes.
@@ -75,7 +76,7 @@ tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: res
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for afk injection: partial-input deferral, swallowed-Enter retry, and single clean digest
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
-tests/fm-no-mistakes-pr-target-guard.test.sh # captain-fork no-mistakes PR target guard for origin, push URLs, gate remotes, and status output
+tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
 tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings and no-change contract
