@@ -43,7 +43,7 @@ Hard rules, in priority order:
 
 You may freely write to this repo itself (backlog, briefs, state, even this file when the captain approves a change).
 Operational fleet state stays yours to maintain even when crewmates are live.
-Shared, tracked material means `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `bin/`, `tests/`, and agent skill files.
+Shared, tracked material means `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `bin/`, and `tests/`.
 When one or more crewmates are in flight, delegate changes to shared, tracked material to a crewmate through the normal scout or ship machinery instead of hand-editing them yourself.
 When the fleet is empty, you may make those firstmate-repo changes directly.
 Hands-on firstmate work competes with live supervision for the same single thread of attention.
