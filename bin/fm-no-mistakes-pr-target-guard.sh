@@ -164,11 +164,13 @@ delivery_branch_tracks_fork_main() {
 }
 
 controlled_fork_proven() {
-  local origin_url=$1 fork_fetches origin_pushes
+  local origin_url=$1 fork_fetches fork_pushes origin_pushes
 
   fork_fetches=$(git remote get-url --all fork 2>/dev/null || true)
   has_url "$fork_fetches" || fail_origin_fetch_proof "remote.origin.url" "$origin_url" "remote.fork.url is missing"
   check_urls "remote.fork.url" "$fork_fetches"
+  fork_pushes=$(git config --get-all remote.fork.pushurl 2>/dev/null || true)
+  check_urls "remote.fork.pushurl" "$fork_pushes"
 
   delivery_branch_tracks_fork_main || fail_origin_fetch_proof "remote.origin.url" "$origin_url" "delivery branch does not track fork/main"
 

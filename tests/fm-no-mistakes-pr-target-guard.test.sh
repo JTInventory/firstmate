@@ -95,6 +95,24 @@ test_rejects_controlled_fork_origin_fetch_without_safe_origin_push() {
   pass "PR target guard rejects controlled fork without safe origin push target"
 }
 
+test_rejects_controlled_fork_with_parent_fork_pushurl() {
+  local repo="$TMP_ROOT/controlled-parent-fork-pushurl" fakebin out="$TMP_ROOT/controlled-parent-fork-pushurl.out" err="$TMP_ROOT/controlled-parent-fork-pushurl.err"
+  make_repo "$repo" "https://github.com/kunchenguid/firstmate"
+  git -C "$repo" remote add fork "https://github.com/JTInventory/firstmate"
+  git -C "$repo" remote set-url --push fork "https://github.com/kunchenguid/firstmate"
+  git -C "$repo" remote set-url --push origin "https://github.com/JTInventory/firstmate"
+  set_branch_tracking "$repo" main fork refs/heads/main
+  add_gate_remote "$repo" "git@github.com:JTInventory/firstmate.git"
+  fakebin=$(status_fakebin controlled-parent-fork-pushurl "https://github.com/JTInventory/firstmate")
+
+  if run_guard_with_fakebin "$repo" "$fakebin" "$out" "$err"; then
+    fail "guard accepted controlled-fork shape with unsafe fork push URL"
+  fi
+  assert_grep "blocked: would target upstream remote.fork.pushurl=https://github.com/kunchenguid/firstmate" "$err" \
+    "guard did not explain unsafe fork push URL"
+  pass "PR target guard rejects controlled fork with unsafe fork push URL"
+}
+
 test_rejects_parent_origin_target() {
   local repo="$TMP_ROOT/parent-origin" out="$TMP_ROOT/parent-origin.out" err="$TMP_ROOT/parent-origin.err"
   make_repo "$repo" "https://github.com/kunchenguid/firstmate"
@@ -311,6 +329,7 @@ test_rejects_parent_no_mistakes_status_in_controlled_fork() {
 test_accepts_captain_fork_origin_and_gate
 test_accepts_controlled_fork_origin_fetch_with_safe_delivery_proof
 test_rejects_controlled_fork_origin_fetch_without_safe_origin_push
+test_rejects_controlled_fork_with_parent_fork_pushurl
 test_rejects_parent_origin_target
 test_rejects_parent_origin_target_when_branch_tracks_upstream
 test_rejects_parent_second_origin_target
