@@ -52,7 +52,8 @@ The tracking principle: shared, tracked material is tracked under git; anything 
 Commit durable changes to the shared, tracked material with terse messages.
 This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 For this captain-owned Firstmate checkout, the no-mistakes PR target is `JTInventory/firstmate`.
-Run `bin/fm-no-mistakes-pr-target-guard.sh` before any no-mistakes push or PR creation path; it fails closed if local git or the no-mistakes gate would target `kunchenguid/firstmate`.
+Run `bin/fm-no-mistakes-pr-target-guard.sh` before any no-mistakes push or PR creation path; it fails closed if direct push resolution, the no-mistakes gate, or no-mistakes status would target `kunchenguid/firstmate`.
+An upstream-owner `origin` fetch URL is allowed only when controlled-fork proof shows delivery through `fork/main`, no-mistakes status, the no-mistakes gate, and a safe resolved `origin` push target.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
