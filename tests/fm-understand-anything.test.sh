@@ -81,6 +81,39 @@ test_dashboard_status_accepts_pid_only_when_cwd_matches_dashboard_dir() {
   pass "understand dashboard status verifies pid cwd before reporting running"
 }
 
+test_dashboard_status_accepts_custom_identity_file() {
+  local dir dashboard_dir pid_file url_file identity_file out rc pid identity
+  dir="$TMP_ROOT/running-custom-identity"
+  dashboard_dir="$dir/dashboard"
+  pid_file="$dir/dashboard.pid"
+  url_file="$dir/dashboard.url"
+  identity_file="$dir/custom/dashboard.identity"
+  mkdir -p "$dashboard_dir" "$(dirname "$identity_file")"
+  ( cd "$dashboard_dir" && sleep 30 ) &
+  pid=$!
+  printf '%s\n' "$pid" > "$pid_file"
+  printf 'http://127.0.0.1:5174/?token=custom-identity-token\n' > "$url_file"
+  identity=$(ps -p "$pid" -o lstart= -o command= | head -n 1)
+  printf '%s\n' "$identity" > "$identity_file"
+
+  set +e
+  out=$("$UNDERSTAND" dashboard-status \
+    --pid-file "$pid_file" \
+    --url-file "$url_file" \
+    --identity-file "$identity_file" \
+    --dashboard-dir "$dashboard_dir" 2>&1)
+  rc=$?
+  set -e
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "running dashboard pid with custom identity file"
+  assert_contains "$out" "dashboard_status=running" "custom identity file should be honored"
+  assert_contains "$out" "pid=$pid" "running pid should be surfaced"
+  assert_not_contains "$out" "custom-identity-token" "status must redact saved token"
+  pass "understand dashboard status honors custom identity file"
+}
+
 test_dashboard_status_rejects_matching_cwd_without_identity() {
   local dir dashboard_dir pid_file url_file out rc pid
   dir="$TMP_ROOT/reused-cwd-no-identity"
@@ -294,6 +327,7 @@ SH
 
   expect_code 1 "$rc" "background start without current url"
   assert_contains "$out" "dashboard_start=failed" "missing URL should fail background start"
+  assert_not_contains "$out" "dashboard_start=background" "failed start must not report background success"
   assert_contains "$out" "reason=dashboard_url_not_confirmed" "failure should name URL confirmation"
   assert_absent "$pid_file" "failed background start should not leave pid file"
   assert_absent "$url_file" "failed background start should not leave URL file"
@@ -329,6 +363,7 @@ SH
 
   expect_code 1 "$rc" "live child without current url"
   assert_contains "$out" "dashboard_start=failed" "unconfirmed live child should fail"
+  assert_not_contains "$out" "dashboard_start=background" "unconfirmed child must not report background success"
   [ -n "$pid" ] || fail "failed start should still report the launched pid"
   ! kill -0 "$pid" 2>/dev/null || fail "unconfirmed dashboard child was left running"
   assert_absent "$pid_file" "unconfirmed child should not leave pid file"
@@ -447,8 +482,35 @@ JSON
   pass "understand graph status warns that canonical OpenClaw HEAD is orientation only"
 }
 
+test_real_meta_graph_status_infers_root_and_git_commit_hash() {
+  local project_dir metadata out rc
+  project_dir="$TMP_ROOT/real-meta-project"
+  mkdir -p "$project_dir/.understand-anything"
+  metadata="$project_dir/.understand-anything/meta.json"
+  cat > "$metadata" <<'JSON'
+{
+  "status": "success",
+  "analyzedFiles": 12,
+  "gitCommitHash": "def5678"
+}
+JSON
+
+  set +e
+  out=$("$UNDERSTAND" graph-status --metadata-file "$metadata" 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "real meta graph status"
+  assert_contains "$out" "graph_status=success" "real meta status should be printed"
+  assert_contains "$out" "analyzed_files=12" "real meta analyzedFiles should be printed"
+  assert_contains "$out" "graph_head=def5678" "real meta gitCommitHash should be printed"
+  assert_contains "$out" "graph_root=$project_dir" "real meta root should be inferred from metadata path"
+  pass "understand graph status reads real meta.json shape"
+}
+
 test_stale_dashboard_pid_does_not_report_running
 test_dashboard_status_accepts_pid_only_when_cwd_matches_dashboard_dir
+test_dashboard_status_accepts_custom_identity_file
 test_dashboard_status_rejects_matching_cwd_without_identity
 test_dashboard_status_rejects_understand_command_without_dashboard_cwd
 test_dashboard_start_uses_writable_cache_env_and_redacts_tokens
@@ -459,3 +521,4 @@ test_background_dashboard_start_kills_child_without_current_url
 test_background_dashboard_start_creates_identity_parent
 test_background_dashboard_start_replaces_stale_url_file
 test_openclaw_graph_status_prints_orientation_caveat
+test_real_meta_graph_status_infers_root_and_git_commit_hash

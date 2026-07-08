@@ -14,8 +14,8 @@ redact_tokens() {
 
 usage() {
   cat >&2 <<'EOF'
-usage: fm-understand-anything.sh dashboard-status [--pid-file path] [--url-file path] [--evidence-dir path] [--dashboard-dir path]
-       fm-understand-anything.sh dashboard-start [--foreground] [--cache-dir path] [--log-file path] [--pid-file path] [--url-file path] [--project-dir path] [--dashboard-dir path] [-- command ...]
+usage: fm-understand-anything.sh dashboard-status [--pid-file path] [--url-file path] [--identity-file path] [--evidence-dir path] [--dashboard-dir path]
+       fm-understand-anything.sh dashboard-start [--foreground] [--cache-dir path] [--log-file path] [--pid-file path] [--url-file path] [--identity-file path] [--project-dir path] [--dashboard-dir path] [-- command ...]
        fm-understand-anything.sh graph-status --metadata-file path
 EOF
 }
@@ -158,6 +158,11 @@ case "$cmd" in
         --url-file)
           [ $# -ge 2 ] || { usage; exit 2; }
           URL_FILE=$2
+          shift 2
+          ;;
+        --identity-file)
+          [ $# -ge 2 ] || { usage; exit 2; }
+          IDENTITY_FILE=$2
           shift 2
           ;;
         --evidence-dir)
@@ -353,14 +358,14 @@ case "$cmd" in
     dashboard_pid=$!
     printf '%s\n' "$dashboard_pid" > "$PID_FILE"
     process_identity "$dashboard_pid" > "$IDENTITY_FILE"
-    printf '%s\n' 'dashboard_start=background'
+    printf '%s\n' 'dashboard_start=starting'
     printf 'pid=%s\n' "$dashboard_pid"
     printf 'log_file=%s\n' "$LOG_FILE"
     printf 'cache_dir=%s\n' "$CACHE_DIR"
     printf '%s\n' 'token_policy=redacted_in_status_output'
+    redacted_url=
     if wait_for_dashboard_url "$LOG_FILE" "$URL_FILE"; then
       redacted_url=$(redacted_dashboard_url_from_log "$LOG_FILE" || true)
-      [ -n "$redacted_url" ] && printf 'dashboard_url=%s\n' "$redacted_url"
     else
       stop_dashboard_child "$dashboard_pid"
       rm -f "$PID_FILE" "$IDENTITY_FILE" "$URL_FILE"
@@ -377,6 +382,8 @@ case "$cmd" in
       printf 'log_file=%s\n' "$LOG_FILE"
       exit 1
     fi
+    printf '%s\n' 'dashboard_start=background'
+    [ -n "$redacted_url" ] && printf 'dashboard_url=%s\n' "$redacted_url"
     exit 0
     ;;
   graph-status)
@@ -437,8 +444,12 @@ status = get("status", "graph.status") or "unknown"
 nodes = get("nodes", "nodeCount", "graph.nodes", "graph.nodeCount")
 edges = get("edges", "edgeCount", "graph.edges", "graph.edgeCount")
 analyzed = get("analyzedFiles", "analyzed_files", "filesAnalyzed", "graph.analyzedFiles")
-head = get("head", "gitHead", "git_head", "graphHead", "packetHead")
+head = get("head", "gitCommitHash", "gitHead", "git_head", "graphHead", "packetHead")
 root = get("root", "projectRoot", "project_path", "workspace", "repositoryPath")
+if root == "":
+    resolved = path.expanduser().resolve(strict=False)
+    if resolved.parent.name == ".understand-anything":
+        root = str(resolved.parent.parent)
 
 def emit(key, value):
     if value != "":
