@@ -198,6 +198,18 @@ fm_lock_mid_acquire_is_fresh() {
   return 1
 }
 
+# Live PIDs normally block steals. The only exception is a lock that recorded a
+# non-empty pid-identity for an older process and the current live PID no longer
+# matches it, which means the OS reused the PID after the real owner died.
+fm_lock_live_pid_has_mismatched_identity() {
+  local lockdir=$1 pid=$2 stored_identity current_identity
+  fm_pid_alive "$pid" || return 1
+  stored_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ -n "$stored_identity" ] || return 1
+  current_identity=$(fm_pid_identity "$pid") || return 1
+  [ "$current_identity" != "$stored_identity" ]
+}
+
 fm_lock_recheck_stale_owner() {
   local lockdir=$1 expected_owner=$2 expected_pid=$3 actual_pid
   if [ -n "$expected_owner" ]; then
@@ -208,7 +220,7 @@ fm_lock_recheck_stale_owner() {
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
   if fm_pid_alive "$actual_pid"; then
-    return 1
+    fm_lock_live_pid_has_mismatched_identity "$lockdir" "$actual_pid" || return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
     return 1
@@ -227,8 +239,12 @@ fm_lock_try_acquire() {
 
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$pid"; then
-    FM_LOCK_HELD_PID=$pid
-    return 1
+    if fm_lock_live_pid_has_mismatched_identity "$lockdir" "$pid"; then
+      :
+    else
+      FM_LOCK_HELD_PID=$pid
+      return 1
+    fi
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
@@ -245,10 +261,14 @@ fm_lock_try_acquire() {
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$cur"; then
-    fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$cur
-    FM_LOCK_OWNER_DIR=
-    return 1
+    if fm_lock_live_pid_has_mismatched_identity "$lockdir" "$cur"; then
+      :
+    else
+      fm_lock_release "$steal"
+      FM_LOCK_HELD_PID=$cur
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$cur"; then
     fm_lock_release "$steal"
