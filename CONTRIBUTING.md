@@ -94,7 +94,7 @@ tests/fm-cognee-telemetry.test.sh         # secret-safe Cognee telemetry schema,
 tests/fm-cognee-brief-rules.test.sh       # generated briefs include the trial-only, hint-only Cognee memory rules
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection and spawn/brief isolation tests
 tests/fm-spawn-batch.test.sh              # batch dispatch, local-config isolation, and FM_HOME project-path scoping tests
-tests/fm-spawn-route.test.sh              # spawn records route profile/model/effort metadata without changing launch behavior
+tests/fm-spawn-route.test.sh              # spawn records route profile/model/effort metadata and appends the JT PR Intake Governor for matching PR-mode ship briefs without changing launch behavior
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, secondmate exemption, and secondmate launch profile threading
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, and spawn hook tests

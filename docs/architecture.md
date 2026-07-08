@@ -57,6 +57,8 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+Matching JT Control Room ship tasks in `.openclaw` or `jt-control-room` get an extra `JT PR Intake Governor` block when their mode can open a PR (`no-mistakes` or `direct-PR`).
+That brief gate makes the crewmate classify the problem, priority, authority, expected proof, verification gate, duplicate/superseded context, and runtime-data policy before implementation or PR creation.
 
 ## Dispatch profiles
 
