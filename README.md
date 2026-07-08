@@ -35,7 +35,7 @@ For larger fleets, you can opt in to persistent secondmates: domain supervisors 
 There is no app to install; the orchestrator is `AGENTS.md`, bundled skills, and helper scripts that any terminal coding agent can follow.
 
 This is not an agent harness. This is not a single skill. This is not a CLI.
-This is.. a directory that turns any agent into your firstmate, and you the captain.
+This is a directory that turns any agent into your firstmate, and you the captain.
 
 ## Features
 

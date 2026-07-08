@@ -35,8 +35,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 - This repo is a template for running a firstmate orchestrator agent.
   `AGENTS.md` is the agent's main job description and names when to load bundled skills; `CLAUDE.md` is a symlink to it, and `.claude/skills` is a symlink to `.agents/skills`.
-- Only shared material is tracked: `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and `.agents/skills/`.
+- Only shared material is tracked: `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `bin/`, and `tests/`.
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
+  Local report or preservation folders such as `reports/` and `backups/` are not canonical tracked surfaces; leave them out of PRs unless a specific artifact is intentionally promoted into shared documentation.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations.
   A local `config/backlog-backend=manual` opt-out forces hand-editing and stays gitignored.
   It does not make `data/` tracked.
@@ -49,7 +50,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself - `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `bin/`, and `tests/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
 Firstmate's wrapper still matters: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
@@ -78,6 +79,7 @@ tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for 
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
 tests/fm-understand-anything.test.sh      # Understand Anything dashboard PID identity, cache isolation, token redaction, and OpenClaw graph caveat tests
+tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
 tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings and no-change contract
@@ -91,7 +93,7 @@ tests/fm-cognee-source-verify.test.sh     # Cognee answer reference parsing, man
 tests/fm-cognee-telemetry.test.sh         # secret-safe Cognee telemetry schema, redaction flags, IDs, and env-file loading
 tests/fm-cognee-brief-rules.test.sh       # generated briefs include the trial-only, hint-only Cognee memory rules
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection and spawn/brief isolation tests
-tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
+tests/fm-spawn-batch.test.sh              # batch dispatch, local-config isolation, and FM_HOME project-path scoping tests
 tests/fm-spawn-route.test.sh              # spawn records route profile/model/effort metadata without changing launch behavior
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, secondmate exemption, and secondmate launch profile threading
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
