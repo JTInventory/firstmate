@@ -123,6 +123,31 @@ EOF
   pass "raw launch command is not blocked and records raw route evidence"
 }
 
+test_jt_direct_pr_spawn_appends_pr_intake_governor() {
+  local home proj wt fakebin id out status brief
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case jt-pr-intake)
+EOF
+  id=jt-replenishment-proof-loop-dd4
+  mkdir -p "$home/data/$id"
+  brief="$home/data/$id/brief.md"
+  printf '%s\n' 'Fix the JT Control Room Replenishment proof loop before opening another PR.' > "$brief"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "JT direct-PR spawn should succeed"
+  assert_contains "$out" "spawned $id harness=codex" "JT direct-PR spawn did not launch"
+  assert_grep "<!-- firstmate:jt-pr-intake-governor:start -->" "$brief" \
+    "JT direct-PR brief missing intake-governor marker"
+  assert_grep "# JT PR Intake Governor" "$brief" \
+    "JT direct-PR brief missing intake-governor heading"
+  assert_grep "- Problem category:" "$brief" "JT intake missing problem category field"
+  assert_grep "- Priority (P0-P4):" "$brief" "JT intake missing priority field"
+  assert_grep "- Verification gate:" "$brief" "JT intake missing verification gate field"
+  assert_grep "Do not open a PR until this intake is answered." "$brief" \
+    "JT intake missing direct PR stop rule"
+  pass "JT direct-PR spawns receive the PR Intake Governor brief gate"
+}
+
 test_unsafe_task_ids_are_rejected_before_spawn() {
   local home proj wt fakebin id out status
   IFS='|' read -r home proj wt fakebin <<EOF
@@ -148,4 +173,5 @@ EOF
 test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
+test_jt_direct_pr_spawn_appends_pr_intake_governor
 test_unsafe_task_ids_are_rejected_before_spawn

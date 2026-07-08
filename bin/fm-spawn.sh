@@ -324,6 +324,53 @@ Do not downgrade this route without an explicit firstmate override.
 EOF
 }
 
+is_jt_pr_intake_context() {
+  local lower_id lower_project
+  lower_id=$(printf '%s' "$ID" | tr '[:upper:]' '[:lower:]')
+  case "$lower_id" in
+    jt-*|*jt-control-room*|*replenishment*|*donnees*|*automation*) return 0 ;;
+  esac
+
+  lower_project=$(basename "$PROJ_ABS" | tr '[:upper:]' '[:lower:]')
+  case "$lower_project" in
+    .openclaw|jt-control-room)
+      if grep -Eiq 'jt control room|jt-control-room|replenishment|donnees|automation cockpit|ppc|sellersnap|refresh:doctor|replenishment-workflow-board|4187' "$BRIEF" 2>/dev/null; then
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+append_jt_pr_intake_governor() {
+  [ "$KIND" = ship ] || return 0
+  case "$MODE" in
+    direct-PR|no-mistakes) ;;
+    *) return 0 ;;
+  esac
+  grep -qxF '<!-- firstmate:jt-pr-intake-governor:start -->' "$BRIEF" 2>/dev/null && return 0
+  is_jt_pr_intake_context || return 0
+  cat >> "$BRIEF" <<'EOF'
+
+<!-- firstmate:jt-pr-intake-governor:start -->
+# JT PR Intake Governor
+
+Before implementation, write a short intake note in your working notes or report, and carry the same answers into the PR body. Answer every field:
+
+- Problem category: Replenishment/supplier proof, Automation/PPC proof, runtime/served data, operator UX/routes, Donnees/trust cockpit, tests/contracts, docs/knowledge, OpenClaw/Firstmate tooling, or other.
+- Priority (P0-P4): classify operator impact, data-risk, money-risk, and whether the problem blocks a daily decision.
+- Affected surface: page, endpoint, script, source file, generated artifact, or runtime service.
+- Authoritative source: exact repo file, live endpoint, report, merged PR, source CSV/export, or runtime command that proves the truth.
+- Expected proof: what the operator should see after the fix, including safe_to_buy/external_action_authorized when relevant.
+- Verification gate: focused test, npm script, Python test, browser/live JSON proof, or CI check required before PR.
+- Duplicate/superseded check: name any earlier PR/report/problem this replaces, confirms, or intentionally leaves alone.
+- Runtime data policy: source-only PR, generated-data PR, runtime-local adoption, or no runtime mutation.
+
+If any field cannot be answered from the brief and live/repo evidence, append `needs-decision:` or `blocked:` and stop. Do not open a PR until this intake is answered.
+<!-- firstmate:jt-pr-intake-governor:end -->
+EOF
+}
+
 secondmate_registry_value() {
   local id=$1 key=$2 reg line value
   reg="$DATA/secondmates.md"
@@ -784,6 +831,7 @@ EOF
 fi
 
 append_route_block
+append_jt_pr_intake_governor
 
 mkdir -p "$STATE"
 {
