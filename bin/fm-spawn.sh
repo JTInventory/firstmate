@@ -326,19 +326,20 @@ EOF
 
 is_jt_pr_intake_context() {
   local lower_id lower_project
+  lower_project=$(basename "$PROJ_ABS" | tr '[:upper:]' '[:lower:]')
+  case "$lower_project" in
+    .openclaw|jt-control-room) ;;
+    *) return 1 ;;
+  esac
+
   lower_id=$(printf '%s' "$ID" | tr '[:upper:]' '[:lower:]')
   case "$lower_id" in
     jt-*|*jt-control-room*|*replenishment*|*donnees*|*automation*) return 0 ;;
   esac
 
-  lower_project=$(basename "$PROJ_ABS" | tr '[:upper:]' '[:lower:]')
-  case "$lower_project" in
-    .openclaw|jt-control-room)
-      if grep -Eiq 'jt control room|jt-control-room|control room|operator|routes?|replenishment|donnees|trust cockpit|automation cockpit|ppc|sellersnap|runtime|served data|refresh:doctor|replenishment-workflow-board|4187' "$BRIEF" 2>/dev/null; then
-        return 0
-      fi
-      ;;
-  esac
+  if grep -Eiq 'jt control room|jt-control-room|control room|operator|routes?|replenishment|donnees|trust cockpit|automation cockpit|ppc|sellersnap|runtime|served data|refresh:doctor|replenishment-workflow-board|4187' "$BRIEF" 2>/dev/null; then
+    return 0
+  fi
   return 1
 }
 

@@ -127,7 +127,7 @@ EOF
 test_jt_direct_pr_spawn_appends_pr_intake_governor() {
   local home proj wt fakebin id out status brief
   IFS='|' read -r home proj wt fakebin <<EOF
-$(make_case jt-pr-intake)
+$(make_case jt-pr-intake jt-control-room)
 EOF
   id=jt-replenishment-proof-loop-dd4
   mkdir -p "$home/data/$id"
@@ -147,6 +147,24 @@ EOF
   assert_grep "Do not open a PR until this intake is answered." "$brief" \
     "JT intake missing direct PR stop rule"
   pass "JT direct-PR spawns receive the PR Intake Governor brief gate"
+}
+
+test_jt_keyword_id_in_unrelated_project_skips_pr_intake_governor() {
+  local home proj wt fakebin id out status brief
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case unrelated-jt-id accounting-tools)
+EOF
+  id=jt-replenishment-proof-loop-ff6
+  mkdir -p "$home/data/$id"
+  brief="$home/data/$id/brief.md"
+  printf '%s\n' 'Fix an unrelated project task with a JT-looking id.' > "$brief"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "unrelated JT-looking direct-PR spawn should succeed"
+  assert_contains "$out" "spawned $id harness=codex" "unrelated JT-looking spawn did not launch"
+  assert_no_grep "<!-- firstmate:jt-pr-intake-governor:start -->" "$brief" \
+    "unrelated project must not receive the JT intake-governor marker"
+  pass "JT-looking task ids in unrelated projects skip the PR Intake Governor"
 }
 
 test_jt_openclaw_operator_route_brief_appends_pr_intake_governor() {
@@ -193,5 +211,6 @@ test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
 test_jt_direct_pr_spawn_appends_pr_intake_governor
+test_jt_keyword_id_in_unrelated_project_skips_pr_intake_governor
 test_jt_openclaw_operator_route_brief_appends_pr_intake_governor
 test_unsafe_task_ids_are_rejected_before_spawn
