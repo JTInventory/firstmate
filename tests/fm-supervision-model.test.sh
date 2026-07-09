@@ -413,6 +413,20 @@ test_github_missing_and_external_reminders_do_not_fail() {
   pass "GitHub failures degrade to unknown and external reminders work"
 }
 
+test_noninteractive_path_discovers_home_nvm_axi() {
+  local home nodebin out
+  home=$(make_home noninteractive-nvm)
+  nodebin="$home/.nvm/versions/node/v22.22.2/bin"
+  write_fakebin "$nodebin"
+
+  out=$(HOME="$home" PATH="/usr/bin:/bin" FM_HOME="$home" "$CLI" --json --no-default-reminders) \
+    || fail "non-interactive NVM discovery failed"
+  assert_contains "$out" '"github": { "ok": true' "HOME NVM gh-axi should be discovered"
+  assert_contains "$out" '"github_state": "ok"' "non-interactive GitHub state should be ok"
+  assert_not_contains "$out" 'gh-axi missing' "non-interactive PATH should be normalized"
+  pass "non-interactive PATH discovers HOME NVM Axi tools"
+}
+
 test_text_output_and_watcher_source() {
   local home fakebin out
   home=$(make_home text)
@@ -443,6 +457,7 @@ test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown
 test_absolute_project_meta_runs_treehouse_status
 test_github_missing_and_external_reminders_do_not_fail
+test_noninteractive_path_discovers_home_nvm_axi
 test_text_output_and_watcher_source
 
 printf 'all fm-supervision-model tests passed\n'
