@@ -748,6 +748,9 @@ Update it on every dispatch, completion, and decision.
 ## Queued
 - [ ] <id> - <one line> (repo: <name>) blocked-by: <id> - <reason>
 
+## Secondmate Backlogs
+- <secondmate-id> - <charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
+
 ## Done
 - [x] <id> - <one line> - <https://github.com/owner/repo/pull/number> (merged <date>)
 - [x] <id> - <one line> - local main (merged <date>)
@@ -763,7 +766,9 @@ Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1
 When the default backend is selected and compatible `tasks-axi` is on PATH, firstmate mutates the backlog through its verbs instead of hand-editing, with secondmate handoffs still going through the validated helper described in section 6.
 When the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap suggests `npm install -g tasks-axi` through the normal consent flow, and every firstmate home falls back to hand-editing `data/backlog.md` exactly as this section describes until it is installed.
 When `config/backlog-backend=manual`, every firstmate home hand-edits and bootstrap does not suggest installing `tasks-axi`.
-The `## In flight` / `## Queued` / `## Done` format above stays the contract: the verbs edit `data/backlog.md` in place, byte-exact, preserving whatever item forms the file already uses - the bold in-flight `- **<id>**` form, the `- [ ]`/`- [x]` queued and done forms, and `blocked-by: <id> - <reason>` - rather than reformatting them.
+The `## In flight` / `## Queued` / `## Done` task format above stays the contract: the verbs edit `data/backlog.md` in place, byte-exact, preserving whatever item forms the file already uses - the bold in-flight `- **<id>**` form, the `- [ ]`/`- [x]` queued and done forms, and `blocked-by: <id> - <reason>` - rather than reformatting them.
+`## Secondmate Backlogs` is persistent secondmate inventory, not ordinary task work; `fm-backlog-audit.sh` treats ids listed there or in `data/secondmates.md` as registered secondmates that may have live `kind=secondmate` meta outside main `## In flight`.
+Unregistered `kind=secondmate` meta stays loud as drift.
 Secondmates inherit `config/backlog-backend` from the primary.
 If the primary leaves the file absent, each home uses the default tasks-axi backend path with its own `.tasks.toml`; if the primary opts out with `manual`, secondmate homes hand-edit too.
 Keep Done to the 10 most recent entries.

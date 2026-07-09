@@ -9,7 +9,7 @@ Each file also starts with a short header comment.
 | `fm-fleet-sync.sh`       | Fetch clones, fast-forward safe default-branch states, self-heal clean detached ancestor drift, report unsafe drift as `STUCK:`, and safely prune branches whose remote is gone |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
-| `fm-backlog-audit.sh`    | Read-only audit for backlog/state drift between `data/backlog.md`, `state/*.meta`, and local adoption signals      |
+| `fm-backlog-audit.sh`    | Read-only audit for backlog/state drift between `data/backlog.md`, `data/secondmates.md`, `state/*.meta`, and local adoption signals; registered secondmate meta is persistent inventory, while unregistered secondmate meta stays loud |
 | `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
 | `fm-cognee-lookup-gate.sh` | Fail-closed local evidence gate for Cognee lookup modes; automatic lookup is disabled by default and manual verified lookup remains hint-only |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |

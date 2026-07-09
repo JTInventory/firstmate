@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: no-mistakes-required-${{ github.event.pull_request.number }}
@@ -26,13 +27,30 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
+          has_marker() {
+            printf '%s' "$1" | grep -qF -- "$marker"
+          }
+          if has_marker "${PR_BODY:-}"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0
           fi
+          # no-mistakes can push the branch and write the pipeline body close
+          # together; the pull_request payload can briefly lag the live body.
+          deadline=$(( $(date +%s) + 90 ))
+          while :; do
+            live_body=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .body 2>/dev/null || true)
+            if has_marker "$live_body"; then
+              echo "Found no-mistakes signature in live PR #${PR_NUMBER} body."
+              exit 0
+            fi
+            now=$(date +%s)
+            [ "$now" -lt "$deadline" ] || break
+            sleep 5
+          done
           {
             echo "::error::This PR was not raised through no-mistakes."
             echo

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Read-only consistency audit for firstmate backlog/state drift.
 #
-# Checks data/backlog.md against state/*.meta for common supervision drift:
-# duplicate In flight/Done entries, orphan meta files, In flight items without
-# meta, PR-ready/merged work still parked In flight, and Watchlist items that
-# already have local adoption signals.
+# Checks data/backlog.md and data/secondmates.md against state/*.meta for common
+# supervision drift: duplicate In flight/Done entries, orphan ordinary meta
+# files, unregistered secondmate meta files, In flight items without meta,
+# PR-ready/merged work still parked In flight, and Watchlist items that already
+# have local adoption signals.
 # Usage: fm-backlog-audit.sh
 set -eu
 
@@ -18,6 +19,8 @@ BACKLOG="$DATA/backlog.md"
 declare -A IN_FLIGHT_LINES=()
 declare -A DONE_LINES=()
 declare -A WATCHLIST_LINES=()
+declare -A SECONDMATE_BACKLOG_LINES=()
+declare -A SECONDMATE_REGISTRY_LINES=()
 FINDINGS=()
 
 add_finding() {
@@ -64,6 +67,35 @@ looks_pr_ready_or_merged() {
   return 1
 }
 
+meta_kind() {
+  local meta=$1
+  awk -F= '$1 == "kind" { print $2; exit }' "$meta"
+}
+
+parse_secondmate_registry() {
+  local registry=$1
+  awk '
+    function secondmate_id(line, rest, id) {
+      rest = line
+      sub(/^[[:space:]]*-[[:space:]]+/, "", rest)
+      id = rest
+      sub(/[[:space:]].*/, "", id)
+      return id
+    }
+    /^[[:space:]]*-[[:space:]]+/ {
+      id = secondmate_id($0)
+      if (id != "") {
+        print id "\t" $0
+      }
+    }
+  ' "$registry"
+}
+
+is_registered_secondmate() {
+  local id=$1
+  [ -n "${SECONDMATE_BACKLOG_LINES[$id]+set}" ] || [ -n "${SECONDMATE_REGISTRY_LINES[$id]+set}" ]
+}
+
 if [ ! -f "$BACKLOG" ]; then
   echo "backlog-audit: missing backlog at $BACKLOG" >&2
   exit 1
@@ -80,8 +112,17 @@ while IFS=$'\t' read -r section id line; do
     "Watchlist")
       WATCHLIST_LINES["$id"]=$line
       ;;
+    "Secondmate Backlogs")
+      SECONDMATE_BACKLOG_LINES["$id"]=$line
+      ;;
   esac
 done < <(parse_backlog)
+
+if [ -f "$DATA/secondmates.md" ]; then
+  while IFS=$'\t' read -r id line; do
+    SECONDMATE_REGISTRY_LINES["$id"]=$line
+  done < <(parse_secondmate_registry "$DATA/secondmates.md")
+fi
 
 for id in "${!IN_FLIGHT_LINES[@]}"; do
   if [ -n "${DONE_LINES[$id]+set}" ]; then
@@ -100,7 +141,13 @@ if [ -d "$STATE" ]; then
   for meta in "$STATE"/*.meta; do
     id=$(basename "$meta" .meta)
     if [ -z "${IN_FLIGHT_LINES[$id]+set}" ]; then
-      add_finding "meta-without-inflight: $id has state meta but is not in In flight"
+      if [ "$(meta_kind "$meta")" = "secondmate" ]; then
+        if ! is_registered_secondmate "$id"; then
+          add_finding "meta-without-inflight: $id has unregistered secondmate state meta and is not in In flight"
+        fi
+      else
+        add_finding "meta-without-inflight: $id has state meta but is not in In flight"
+      fi
     fi
   done
   shopt -u nullglob

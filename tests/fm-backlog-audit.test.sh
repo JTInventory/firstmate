@@ -30,6 +30,17 @@ write_meta() {
     "mode=direct-PR"
 }
 
+write_secondmate_meta() {
+  local home=$1 id=$2 sm_home=$3
+  fm_write_meta "$home/state/$id.meta" \
+    "window=fm-$id" \
+    "worktree=$sm_home" \
+    "home=$sm_home" \
+    "project=firstmate" \
+    "kind=secondmate" \
+    "mode=direct-PR"
+}
+
 run_audit() {
   local home=$1 out=$2 rc
   set +e
@@ -113,6 +124,55 @@ MD
   pass "backlog audit is read-only"
 }
 
+test_registered_secondmate_meta_is_not_ordinary_drift() {
+  local home secondmate_home out rc
+  home=$(make_home secondmate-valid)
+  secondmate_home="$home/secondmate-home"
+  mkdir -p "$secondmate_home"
+  write_backlog "$home" <<MD
+## In flight
+- [ ] active-task - Active work (repo: demo, since 2026-07-09)
+
+## Secondmate Backlogs
+- secondmate-ops - ops tooling (home: $secondmate_home; scope: firstmate ops; projects: firstmate; added 2026-07-09)
+
+## Done
+MD
+  printf -- '- secondmate-ops - ops tooling (home: %s; scope: firstmate ops; projects: firstmate; added 2026-07-09)\n' "$secondmate_home" > "$home/data/secondmates.md"
+  write_meta "$home" active-task
+  write_secondmate_meta "$home" secondmate-ops "$secondmate_home"
+  out="$home/out.txt"
+  rc=$(run_audit "$home" "$out")
+  expect_code 0 "$rc" "registered secondmate should not be ordinary drift"
+  assert_not_contains "$(cat "$out")" "meta-without-inflight: secondmate-ops" "registered secondmate meta should be expected outside In flight"
+  assert_contains "$(cat "$out")" "No backlog/state drift found." "registered secondmate audit should remain clean"
+  pass "registered secondmate meta is accepted outside main In flight"
+}
+
+test_meta_without_inflight_still_reports_non_secondmate_and_unregistered_secondmate() {
+  local home secondmate_home out rc
+  home=$(make_home secondmate-drift)
+  secondmate_home="$home/unregistered-secondmate-home"
+  mkdir -p "$secondmate_home"
+  write_backlog "$home" <<'MD'
+## In flight
+- [ ] active-task - Active work (repo: demo, since 2026-07-09)
+
+## Done
+MD
+  write_meta "$home" active-task
+  write_meta "$home" stale-ship
+  write_secondmate_meta "$home" unregistered-secondmate "$secondmate_home"
+  out="$home/out.txt"
+  rc=$(run_audit "$home" "$out")
+  expect_code 1 "$rc" "meta without inflight should still report real drift"
+  assert_contains "$(cat "$out")" "meta-without-inflight: stale-ship has state meta but is not in In flight" "ordinary meta drift must still be reported"
+  assert_contains "$(cat "$out")" "meta-without-inflight: unregistered-secondmate has unregistered secondmate state meta and is not in In flight" "unregistered secondmate meta must stay loud"
+  pass "ordinary and unregistered secondmate meta without In flight are reported"
+}
+
 test_clean_backlog_passes
 test_detects_required_drift_cases
 test_audit_is_read_only
+test_registered_secondmate_meta_is_not_ordinary_drift
+test_meta_without_inflight_still_reports_non_secondmate_and_unregistered_secondmate
