@@ -152,5 +152,32 @@ test_watch_session_delays_only_after_failed_rearm() {
   pass "watch-session delays failed and no-op re-arms but immediately re-arms after successful wakes"
 }
 
+test_watch_session_status_reports_runner_not_inner_arm_health() {
+  local dir fakebin state out status arm_out
+  dir=$(make_case session-status-runner-contract)
+  fakebin=$(install_fake_tmux "$dir")
+  state="$dir/home/state"
+  mkdir -p "$state"
+  out="$dir/start.out"
+  status="$dir/status.out"
+  arm_out="$state/.watch-session/arm.out"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" "$WATCH_SESSION" start > "$out" \
+    || fail "watch-session did not start for runner-status contract"
+  mkdir -p "$(dirname "$arm_out")"
+  printf '%s\n' 'watcher: FAILED - no live watcher with a fresh beacon' > "$arm_out"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" "$WATCH_SESSION" --status > "$status" \
+    || fail "watch-session status should report live runner even when last arm output failed"
+  grep -F 'watch-session: running target=' "$status" >/dev/null \
+    || fail "watch-session status did not report runner window as running"
+  ! grep -F 'FAILED' "$status" >/dev/null \
+    || fail "watch-session status should not report inner arm health"
+  pass "watch-session status reports runner-window liveness, not inner arm health"
+}
+
 test_watch_session_start_status_stop_are_home_scoped
 test_watch_session_delays_only_after_failed_rearm
+test_watch_session_status_reports_runner_not_inner_arm_health

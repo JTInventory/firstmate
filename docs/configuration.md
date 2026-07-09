@@ -191,6 +191,10 @@ Status and start output redact dashboard tokens, but `FM_UNDERSTAND_DASHBOARD_UR
 `graph-status` reads metadata from an explicit `--metadata-file`.
 When that metadata describes canonical `/root/.openclaw`, the helper marks the graph as orientation-only and prints that workers must prove their own worktree branch and HEAD before treating the graph HEAD as current truth.
 
+The JT-specific helpers use `JT_REPO` as the graph source checkout, `UA_NODE_BIN` for the Node runtime, `UA_PLUGIN_ROOT` for the dashboard package, and `FM_UNDERSTAND_DASHBOARD_PORT` for the local Vite port.
+`fm-understand-jt-reference` uses `FM_UNDERSTAND_REFRESH_BIN` when a caller wants a non-default refresh helper, and `FM_UNDERSTAND_JT_AUTO_REFRESH=0` disables its best-effort stale-summary refresh before it appends a brief packet.
+These helpers keep firstmate status, summary, reference, dashboard PID, and redacted dashboard status artifacts under `$FM_HOME/state`; `fm-understand-jt-refresh --refresh` also regenerates the local graph inside `JT_REPO/.understand-anything` under its preflight and lock checks.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -268,6 +272,13 @@ FM_UNDERSTAND_DASHBOARD_IDENTITY_FILE=   # default: $FM_UNDERSTAND_DASHBOARD_PID
 FM_UNDERSTAND_DASHBOARD_URL_WAIT_SECONDS=2   # seconds a background start waits for a current dashboard URL before failing closed
 FM_UNDERSTAND_EVIDENCE_DIR=     # default: ${TMPDIR:-/tmp}/fm-understand-evidence
 FM_UNDERSTAND_PROJECT_DIR=      # default: current working directory; passed to the dashboard as GRAPH_DIR
+# JT Understand Anything helpers
+FM_UNDERSTAND_REFRESH_BIN=      # default: $FM_ROOT/bin/fm-understand-jt-refresh; used by fm-understand-jt-reference
+FM_UNDERSTAND_DASHBOARD_PORT=5173 # local Vite dashboard port for fm-understand-jt-dashboard
+FM_UNDERSTAND_JT_AUTO_REFRESH=1 # brief helper may try a best-effort refresh when the summary is stale
+UA_PLUGIN_ROOT=/root/.understand-anything-plugin # dashboard plugin checkout root
+UA_NODE_BIN=/root/.nvm/versions/node/v22.22.2/bin/node # Node runtime for JT helpers
+JT_REPO=/root/.openclaw/workspace/projects/active/JT-Control-Room # graph source repo for JT helpers
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

@@ -79,6 +79,9 @@ tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for 
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
 tests/fm-understand-anything.test.sh      # Understand Anything dashboard PID identity, cache isolation, token redaction, and OpenClaw graph caveat tests
+tests/fm-understand-jt-dashboard.test.sh  # JT Understand Anything dashboard PID identity, stale process rejection, stop safety, and token redaction tests
+tests/fm-understand-jt-refresh.test.sh    # JT Understand Anything graph refresh, worktree checkout, and external FM_HOME command-reference tests
+tests/fm-understand-jt-reference.test.sh  # JT Understand Anything brief reference context detection, idempotent append, skip, and fallback behavior
 tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
@@ -105,7 +108,7 @@ tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety an
 tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
 tests/fm-task-identity.test.sh            # task branch/meta identity guard for PR check, diff review, and teardown helpers
 tests/fm-watch-session.test.sh            # durable home-scoped watcher tmux runner start/status/stop and re-arm delay behavior
-tests/fm-supervision-model.test.sh        # read-only supervision checklist, secondmate/scout classification boundaries, and `firstmate.supervision.v1` JSON/schema output
+tests/fm-supervision-model.test.sh        # read-only supervision checklist, secondmate/scout classification boundaries, and `firstmate.supervision.v1.1` JSON/schema output
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)

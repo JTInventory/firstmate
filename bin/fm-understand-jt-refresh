@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+# Firstmate bridge for the JT Control Room Understand Anything graph.
+# Refreshes the deterministic graph under lock and emits small status/summary
+# artifacts for agents. The graph is orientation only, not source of truth.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-$FM_ROOT}"
+JT_REPO="${JT_REPO:-/root/.openclaw/workspace/projects/active/JT-Control-Room}"
+UA_DIR="$JT_REPO/.understand-anything"
+GRAPH="$UA_DIR/knowledge-graph.json"
+META="$UA_DIR/meta.json"
+CONFIG="$UA_DIR/config.json"
+IGNORE="$UA_DIR/.understandignore"
+RUNNER="$UA_DIR/tmp/ua-deterministic-understand.mjs"
+REVIEW="$UA_DIR/intermediate/review.json"
+UA_SUMMARY="$UA_DIR/intermediate/summary.json"
+STATE_DIR="$FM_HOME/state"
+STATUS_PATH="$STATE_DIR/jt-understand-graph.status"
+SUMMARY_PATH="$STATE_DIR/jt-understand-graph.summary.json"
+REFERENCE_PATH="$STATE_DIR/jt-understand-graph.reference.md"
+DASHBOARD_STATUS_PATH="$STATE_DIR/jt-understand-dashboard.status"
+REFRESH_LOG="$STATE_DIR/jt-understand-graph.refresh.log"
+LOCK_PATH="/tmp/fm-understand-jt-refresh.lock"
+NODE_BIN="${UA_NODE_BIN:-/root/.nvm/versions/node/v22.22.2/bin/node}"
+if [ ! -x "$NODE_BIN" ]; then
+  NODE_BIN="$(command -v node || true)"
+fi
+
+usage() {
+  cat <<'USAGE'
+usage: fm-understand-jt-refresh [--status|--refresh|--summary|--reference]
+
+  --status     update and print Firstmate graph status JSON
+  --refresh    regenerate the deterministic graph under lock, then validate
+  --summary    update status and print compact summary JSON
+  --reference  update status and print the Markdown reference packet
+USAGE
+}
+
+utc_now() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+die() {
+  printf 'fm-understand-jt-refresh: %s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+scope_preflight() {
+  if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+    die "Node runtime not found; expected Node 22 at /root/.nvm/versions/node/v22.22.2/bin/node" 2
+  fi
+  git -C "$JT_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "JT repo not found at $JT_REPO" 2
+  [ -f "$CONFIG" ] || die "missing $CONFIG" 2
+  [ -f "$IGNORE" ] || die "missing $IGNORE" 2
+  [ -f "$RUNNER" ] || die "missing deterministic generator $RUNNER" 2
+
+  grep -Eq '^[[:space:]]*\*[[:space:]]*$' "$IGNORE" || die "$IGNORE must start from a closed scope using '*'" 2
+  for required in '!app/**' '!components/**' '!lib/**' '!scripts/lib/**'; do
+    grep -Fqx "$required" "$IGNORE" || die "$IGNORE missing required include: $required" 2
+  done
+  for required in 'public/data/' 'docs/' 'state/' 'reports/' '.next/' 'node_modules/' '*.sqlite' '*.csv' '*.xlsx' '*.pdf' '*.zip'; do
+    grep -Fqx "$required" "$IGNORE" || die "$IGNORE missing required exclusion: $required" 2
+  done
+  if grep -Eq '^[[:space:]]*!((public|public/data|docs|state|reports|node_modules|\.next)(/|$)|.*\.(env|sqlite|csv|xlsx|pdf|zip)$)' "$IGNORE"; then
+    die "$IGNORE includes a forbidden generated/secret-heavy path" 2
+  fi
+}
+
+write_status() {
+  local refresh_status="${1:-}"
+  local error_summary="${2:-}"
+  local started_at="${3:-}"
+  local finished_at="${4:-}"
+  mkdir -p "$STATE_DIR"
+  export FM_ROOT FM_HOME JT_REPO GRAPH META CONFIG IGNORE REVIEW UA_SUMMARY STATUS_PATH SUMMARY_PATH REFERENCE_PATH
+  export DASHBOARD_STATUS_PATH REFRESH_STATUS="$refresh_status" ERROR_SUMMARY="$error_summary"
+  export REFRESH_STARTED_AT="$started_at" REFRESH_FINISHED_AT="$finished_at"
+  export GENERATOR_KIND="deterministic-node"
+  export GENERATOR_COMMAND="$NODE_BIN $RUNNER"
+  "$NODE_BIN" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const { spawnSync } = require("child_process");
+
+const env = process.env;
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function run(cmd, args) {
+  const result = spawnSync(cmd, args, { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
+function hashFiles(files) {
+  const hash = crypto.createHash("sha256");
+  for (const file of files) {
+    if (!fs.existsSync(file)) {
+      hash.update(`${file}\0missing\0`);
+      continue;
+    }
+    hash.update(`${file}\0`);
+    hash.update(fs.readFileSync(file));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+function short(value) {
+  return value ? String(value).slice(0, 12) : "";
+}
+
+function layerName(layer) {
+  if (typeof layer === "string") return layer;
+  return layer?.name || layer?.title || layer?.id || "";
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+const statusPath = env.STATUS_PATH;
+const summaryPath = env.SUMMARY_PATH;
+const referencePath = env.REFERENCE_PATH;
+const previous = readJson(statusPath) || {};
+const graph = readJson(env.GRAPH);
+const meta = readJson(env.META);
+const review = readJson(env.REVIEW);
+const uaSummary = readJson(env.UA_SUMMARY);
+const dashboard = readJson(env.DASHBOARD_STATUS_PATH) || {};
+const currentHead = run("git", ["-C", env.JT_REPO, "rev-parse", "HEAD"]);
+const analyzedHead = meta?.gitCommitHash || uaSummary?.project?.gitCommitHash || "";
+const scopeFingerprint = hashFiles([env.CONFIG, env.IGNORE]);
+const refreshStatus = env.REFRESH_STATUS || previous.lastRefreshStatus || "status";
+let analyzedScopeFingerprint = previous.analyzedScopeFingerprint || "";
+if (refreshStatus === "success") analyzedScopeFingerprint = scopeFingerprint;
+if (!analyzedScopeFingerprint && analyzedHead && currentHead && analyzedHead === currentHead) {
+  analyzedScopeFingerprint = scopeFingerprint;
+}
+
+const nodes = asArray(graph?.nodes);
+const edges = asArray(graph?.edges);
+const layers = asArray(graph?.layers).map(layerName).filter(Boolean);
+const tour = asArray(graph?.tour);
+const reviewIssues = Array.isArray(review?.issues) ? review.issues.length : null;
+const reviewWarnings = Array.isArray(review?.warnings) ? review.warnings : [];
+const reasons = [];
+if (!graph) reasons.push("missing_graph");
+if (!meta) reasons.push("missing_meta");
+if (graph && nodes.length === 0) reasons.push("empty_nodes");
+if (graph && edges.length === 0) reasons.push("empty_edges");
+if (currentHead && analyzedHead && currentHead !== analyzedHead) reasons.push("head_mismatch");
+if (scopeFingerprint && analyzedScopeFingerprint && scopeFingerprint !== analyzedScopeFingerprint) reasons.push("scope_changed");
+if (reviewIssues && reviewIssues > 0) reasons.push("review_issues");
+if (env.ERROR_SUMMARY) reasons.push("last_refresh_error");
+
+const fresh = graph && meta && nodes.length > 0 && edges.length > 0 &&
+  currentHead && analyzedHead && currentHead === analyzedHead &&
+  scopeFingerprint === analyzedScopeFingerprint &&
+  (!reviewIssues || reviewIssues === 0);
+
+const fileNodes = nodes
+  .map((node) => node.filePath || "")
+  .filter(Boolean);
+const topModules = [...new Set(fileNodes.map((file) => file.split("/")[0]).filter(Boolean))]
+  .slice(0, 12);
+
+const finishedAt = env.REFRESH_FINISHED_AT || previous.lastRefreshFinishedAt || null;
+const startedAt = env.REFRESH_STARTED_AT || previous.lastRefreshStartedAt || null;
+const lastRefreshError = env.ERROR_SUMMARY || (refreshStatus === "success" ? "" : previous.lastRefreshError || "");
+const status = {
+  name: "jt-understand-anything",
+  purpose: "Orientation and dependency map for JT Control Room work.",
+  repoPath: env.JT_REPO,
+  graphPath: env.GRAPH,
+  metaPath: env.META,
+  summaryPath,
+  referencePath,
+  currentHead,
+  analyzedHead,
+  currentHeadShort: short(currentHead),
+  analyzedHeadShort: short(analyzedHead),
+  scopeFingerprint,
+  analyzedScopeFingerprint,
+  fresh: Boolean(fresh),
+  staleReasons: fresh ? [] : reasons,
+  generatorKind: env.GENERATOR_KIND,
+  generatorCommand: env.GENERATOR_COMMAND,
+  artifactPolicy: "runtime-local-untracked",
+  lastRefreshStatus: refreshStatus,
+  lastRefreshStartedAt: startedAt,
+  lastRefreshFinishedAt: finishedAt,
+  lastRefreshError,
+  dashboardStatus: dashboard.state || "unknown",
+  dashboardPid: dashboard.pid || null,
+  dashboardUrlRedacted: dashboard.urlRedacted || "",
+  counts: {
+    analyzedFiles: meta?.analyzedFiles ?? uaSummary?.files?.total ?? null,
+    filteredByIgnore: uaSummary?.files?.filteredByIgnore ?? null,
+    nodes: nodes.length,
+    edges: edges.length,
+    layers: layers.length,
+    tourSteps: tour.length,
+    reviewIssues,
+  },
+  warnings: reviewWarnings,
+  checkedAt: new Date().toISOString(),
+};
+
+const compactSummary = {
+  name: status.name,
+  purpose: status.purpose,
+  fresh: status.fresh,
+  staleReasons: status.staleReasons,
+  repoPath: status.repoPath,
+  graphPath: status.graphPath,
+  statusPath,
+  summaryPath,
+  referencePath,
+  currentHead: status.currentHead,
+  analyzedHead: status.analyzedHead,
+  currentHeadShort: status.currentHeadShort,
+  analyzedHeadShort: status.analyzedHeadShort,
+  counts: status.counts,
+  layers,
+  topModules,
+  refreshCommand: `${env.FM_ROOT}/bin/fm-understand-jt-refresh --refresh`,
+  statusCommand: `${env.FM_ROOT}/bin/fm-understand-jt-refresh --status`,
+  dashboardCommand: `${env.FM_ROOT}/bin/fm-understand-jt-dashboard status`,
+  agentInstruction: "Use this graph to orient, identify likely modules, and reason about impact. Do not treat it as source of truth; open files directly and verify tests/runtime before claiming a fix.",
+};
+
+const markerStart = "<!-- firstmate:jt-understand-anything:start -->";
+const markerEnd = "<!-- firstmate:jt-understand-anything:end -->";
+const reference = `${markerStart}
+
+# JT Control Room structure reference
+
+- Status: ${statusPath}
+- Summary: ${summaryPath}
+- Full graph: ${env.GRAPH}
+- Fresh: ${status.fresh ? "yes" : "no"}${status.staleReasons.length ? ` (${status.staleReasons.join(", ")})` : ""}
+- Current HEAD: ${status.currentHeadShort || "unknown"}
+- Analyzed HEAD: ${status.analyzedHeadShort || "unknown"}
+- Refresh: ${env.FM_ROOT}/bin/fm-understand-jt-refresh --refresh
+- Dashboard: ${env.FM_ROOT}/bin/fm-understand-jt-dashboard status
+
+Use this graph for orientation, dependency lookup, and likely impact areas.
+Do not treat it as source of truth. Open files directly and verify code, tests, runtime state, and JT data freshness before making claims.
+
+${markerEnd}
+`;
+
+fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + "\n");
+fs.writeFileSync(summaryPath, JSON.stringify(compactSummary, null, 2) + "\n");
+fs.writeFileSync(referencePath, reference);
+if (env.PRINT_STATUS === "1") {
+  console.log(JSON.stringify(status, null, 2));
+}
+NODE
+}
+
+validate_graph() {
+  export JT_REPO GRAPH META REVIEW UA_SUMMARY
+  "$NODE_BIN" <<'NODE'
+const fs = require("fs");
+const { spawnSync } = require("child_process");
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+const graph = readJson(process.env.GRAPH);
+const meta = readJson(process.env.META);
+const review = fs.existsSync(process.env.REVIEW) ? readJson(process.env.REVIEW) : {};
+const head = spawnSync("git", ["-C", process.env.JT_REPO, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+const nodes = Array.isArray(graph.nodes) ? graph.nodes.length : 0;
+const edges = Array.isArray(graph.edges) ? graph.edges.length : 0;
+const layers = Array.isArray(graph.layers) ? graph.layers.length : 0;
+const tour = Array.isArray(graph.tour) ? graph.tour.length : 0;
+const issues = Array.isArray(review.issues) ? review.issues.length : 0;
+const failures = [];
+if (!head) failures.push("missing current HEAD");
+if (!meta.gitCommitHash) failures.push("missing meta gitCommitHash");
+if (head && meta.gitCommitHash && head !== meta.gitCommitHash) failures.push(`HEAD mismatch ${head} != ${meta.gitCommitHash}`);
+if (nodes <= 0) failures.push("graph has no nodes");
+if (edges <= 0) failures.push("graph has no edges");
+if (layers <= 0) failures.push("graph has no layers");
+if (tour <= 0) failures.push("graph has no tour steps");
+if (issues > 0) failures.push(`review has ${issues} issues`);
+if (failures.length) {
+  console.error(failures.join("; "));
+  process.exit(1);
+}
+console.log(JSON.stringify({ head, nodes, edges, layers, tour, issues }));
+NODE
+}
+
+restore_backup() {
+  local backup_dir=$1
+  for name in knowledge-graph.json meta.json fingerprints.json; do
+    if [ -f "$backup_dir/$name" ]; then
+      cp -p "$backup_dir/$name" "$UA_DIR/$name"
+    fi
+  done
+}
+
+do_refresh() {
+  scope_preflight
+  mkdir -p "$STATE_DIR" "$UA_DIR/tmp"
+  local started_at finished_at backup_dir rc validation_out
+  started_at="$(utc_now)"
+  exec 9>"$LOCK_PATH"
+  if ! flock -n 9; then
+    finished_at="$(utc_now)"
+    PRINT_STATUS=1 write_status "locked" "another refresh is already running" "$started_at" "$finished_at"
+    exit 75
+  fi
+
+  backup_dir="$(mktemp -d "$UA_DIR/tmp/fm-refresh-backup.XXXXXX")"
+  for name in knowledge-graph.json meta.json fingerprints.json; do
+    [ ! -f "$UA_DIR/$name" ] || cp -p "$UA_DIR/$name" "$backup_dir/$name"
+  done
+
+  set +e
+  "$NODE_BIN" "$RUNNER" >"$REFRESH_LOG" 2>&1
+  rc=$?
+  set -e
+  finished_at="$(utc_now)"
+  if [ "$rc" -ne 0 ]; then
+    restore_backup "$backup_dir"
+    rm -rf "$backup_dir"
+    PRINT_STATUS=1 write_status "failed" "generator exited with status $rc; see $REFRESH_LOG" "$started_at" "$finished_at"
+    exit "$rc"
+  fi
+
+  if ! validation_out="$(validate_graph 2>&1)"; then
+    restore_backup "$backup_dir"
+    rm -rf "$backup_dir"
+    PRINT_STATUS=1 write_status "failed" "validation failed: $validation_out" "$started_at" "$finished_at"
+    exit 1
+  fi
+
+  rm -rf "$backup_dir"
+  PRINT_STATUS=1 write_status "success" "" "$started_at" "$finished_at"
+}
+
+do_status() {
+  PRINT_STATUS=1 write_status "" "" "" ""
+}
+
+case "${1:---status}" in
+  --status|status)
+    do_status
+    ;;
+  --refresh|refresh)
+    do_refresh
+    ;;
+  --summary|summary)
+    write_status "" "" "" ""
+    cat "$SUMMARY_PATH"
+    ;;
+  --reference|reference|brief-block)
+    write_status "" "" "" ""
+    cat "$REFERENCE_PATH"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

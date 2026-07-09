@@ -46,7 +46,7 @@ This is a directory that turns any agent into your firstmate, and you the captai
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
-- **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1` JSON without changing anything.
+- **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, backlog drift, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1.1` JSON without changing anything.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Operational memory stow** - `/stow` sweeps the current session for durable knowledge, routes it to the right local or project home, and tells you when the session is safe to reset.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind your merge approval.
@@ -112,12 +112,15 @@ Outside tmux, crewmates land in a detached `firstmate` session you can attach to
 You chat with the first mate.
 It routes each request to a crewmate in its own tmux window and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 When the current fleet state is unclear, `bin/fm-supervise.sh` gives a passive read-only checklist, and `bin/fm-supervise.sh --json` exposes the same shared model for display tools such as Radar.
+For an end-to-end navigation map of the request-to-teardown lifecycle, see [docs/operating-map.md](docs/operating-map.md).
 For PRs, that model combines GitHub commit status and check-runs before deciding whether CI is green, pending, failed, absent, or unknown.
+It also exposes backlog/state drift through `backlog_consistency`, using the same audit vocabulary as `bin/fm-backlog-audit.sh`.
 It treats scout reports with a fresh `done:` status as teardown work instead of PR-worker work, and treats live secondmates as persistent direct reports unless they have a fresh `done:`, `blocked:`, `needs-decision:`, or `failed:` status.
 Persistent secondmate homes are linked firstmate worktrees; startup syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
 Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
 When that profile file exists, crewmate and scout spawns must pass the resolved harness explicitly so `config/crew-harness` is not used as an unnoticed bypass.
 For matching JT Control Room PR-mode ship work in `.openclaw` or `jt-control-room`, spawn also adds a `JT PR Intake Governor` brief gate so the worker classifies priority, proof, authority, duplicates, and runtime-data policy before implementation or PR creation.
+Matching JT briefs may also get a best-effort Understand Anything structure reference after routing; it is orientation only, and workers still verify files, tests, runtime state, and data freshness directly.
 Secondmate launch can use a separate local `config/secondmate-harness`, plus a primary-local `config/secondmate-profile.json` for durable model and effort defaults.
 Secondmate homes inherit the primary's declared local config, including `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, at launch, bootstrap, or an explicit `bin/fm-config-push.sh` run, so their own crewmates, dispatch profiles, and backlog backend use the primary settings.
 When a routed request goes to a secondmate, firstmate marks it so the answer returns through status or a document pointer; direct typing into that secondmate window stays conversational.
@@ -149,6 +152,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
+- [docs/operating-map.md](docs/operating-map.md) - end-to-end lifecycle map from request intake through teardown and backlog closeout.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, optional X mode, the files you set, and harness support.
 - [docs/cognee-policy.md](docs/cognee-policy.md) - the trial-only, hint-only Cognee memory policy and production gates.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
