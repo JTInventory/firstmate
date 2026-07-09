@@ -106,7 +106,20 @@ test_brief_block_falls_back_when_refresh_unavailable() {
   pass "JT reference helper falls back when graph reference is unavailable"
 }
 
+test_jt_understand_helpers_default_home_to_repo_root() {
+  local helper
+  for helper in \
+    "$ROOT/bin/fm-understand-jt-reference" \
+    "$ROOT/bin/fm-understand-jt-refresh" \
+    "$ROOT/bin/fm-understand-jt-dashboard"; do
+    assert_no_grep 'FM_HOME="${FM_HOME:-/root/firstmate}"' "$helper" "$(basename "$helper") should not hardcode /root/firstmate"
+    assert_grep 'FM_HOME="${FM_HOME:-$FM_ROOT}"' "$helper" "$(basename "$helper") should default FM_HOME to its repo root"
+  done
+  pass "JT Understand helpers derive default FM_HOME from their repo root"
+}
+
 test_should_attach_detects_jt_context
 test_append_brief_is_idempotent_and_uses_reference_packet
 test_append_skips_non_jt_context
 test_brief_block_falls_back_when_refresh_unavailable
+test_jt_understand_helpers_default_home_to_repo_root
