@@ -10,6 +10,7 @@ Each file also starts with a short header comment.
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
 | `fm-backlog-audit.sh`    | Read-only audit for backlog/state drift between `data/backlog.md`, `data/secondmates.md`, `state/*.meta`, and local adoption signals; registered secondmate meta is persistent inventory, while unregistered secondmate meta stays loud |
+| `fm-backlog-audit-lib.sh` | Sourceable read-only audit collector shared by `fm-backlog-audit.sh` and the supervision JSON model; emits structured findings and expected secondmate exceptions |
 | `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
 | `fm-cognee-lookup-gate.sh` | Fail-closed local evidence gate for Cognee lookup modes; automatic lookup is disabled by default and manual verified lookup remains hint-only |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
@@ -18,7 +19,7 @@ Each file also starts with a short header comment.
 | `fm-memory-lookup.sh`    | Manual read-only Cognee memory lookup for optional pre-dispatch hints; opens local source paths before brief attachment and stays non-blocking when unavailable |
 | `fm-no-mistakes-pr-target-guard.sh` | Fail closed before no-mistakes test/push/PR work if direct push resolution, the no-mistakes gate, or no-mistakes status would target `kunchenguid/firstmate` instead of `JTInventory/firstmate`; allow upstream-owner `origin` fetch only with controlled-fork proof |
 | `fm-understand-anything.sh` | Understand Anything orientation helper for JT/OpenClaw: fail-closed dashboard PID checks, writable Vite/cache env for dashboard start, token-redacted status, and canonical `/root/.openclaw` graph HEAD caveats |
-| `fm-understand-jt-refresh` | Refresh or summarize the local JT Control Room Understand Anything graph under guard; writes status, summary, and reference packets under `state/` only |
+| `fm-understand-jt-refresh` | Refresh or summarize the local JT Control Room Understand Anything graph under guard; status, summary, reference, and logs stay under `$FM_HOME/state`, while `--refresh` regenerates the graph in `JT_REPO/.understand-anything` |
 | `fm-understand-jt-dashboard` | Start, stop, or inspect the local JT Understand Anything dashboard with token-redacted status and PID/URL artifacts under `state/jt-understand-dashboard/` |
 | `fm-understand-jt-reference` | Emit or append the compact JT Control Room structure reference packet to matching task briefs; falls back safely when the graph is unavailable |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`; accepts concrete `--harness`, `--model`, and `--effort` profile axes; ship/scout spawns require an explicit resolved harness when dispatch profiles are active and an isolated treehouse worktree; matching JT Control Room PR-mode ship spawns append the `JT PR Intake Governor`, and matching JT briefs get a best-effort Understand Anything structure reference after routing; installs per-harness turn-end signaling; and secondmate spawns resolve the secondmate harness, apply primary-local secondmate model/effort defaults, locally sync the home, and propagate declared inheritable config before launch |
@@ -68,7 +69,7 @@ Each file also starts with a short header comment.
 `bin/fm-understand-anything.sh` is a narrow wrapper around Understand Anything graph and dashboard flows.
 It is for orientation, not proof.
 
-The JT-specific companion scripts are narrower still: `fm-understand-jt-refresh` updates local JT graph status and reference artifacts under `state/`, `fm-understand-jt-dashboard` manages the local dashboard process with token-redacted status, and `fm-understand-jt-reference` appends the compact structure packet to matching JT briefs after spawn routing has already been selected.
+The JT-specific companion scripts are narrower still: `fm-understand-jt-refresh` updates local JT graph status and reference artifacts under `$FM_HOME/state` and regenerates `JT_REPO/.understand-anything` only for `--refresh`, `fm-understand-jt-dashboard` manages the local dashboard process with token-redacted status, and `fm-understand-jt-reference` appends the compact structure packet to matching JT briefs after spawn routing has already been selected.
 If the graph is missing or stale, the brief helper emits a fallback block and task launch continues.
 
 `dashboard-start` launches the dashboard with writable temp, XDG, npm, and Vite cache directories under `FM_UNDERSTAND_CACHE_DIR` or a temp default.

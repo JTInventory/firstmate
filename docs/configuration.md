@@ -191,6 +191,10 @@ Status and start output redact dashboard tokens, but `FM_UNDERSTAND_DASHBOARD_UR
 `graph-status` reads metadata from an explicit `--metadata-file`.
 When that metadata describes canonical `/root/.openclaw`, the helper marks the graph as orientation-only and prints that workers must prove their own worktree branch and HEAD before treating the graph HEAD as current truth.
 
+The JT-specific helpers use `JT_REPO` as the graph source checkout, `UA_NODE_BIN` for the Node runtime, `UA_PLUGIN_ROOT` for the dashboard package, and `FM_UNDERSTAND_DASHBOARD_PORT` for the local Vite port.
+`fm-understand-jt-reference` uses `FM_UNDERSTAND_REFRESH_BIN` when a caller wants a non-default refresh helper, and `FM_UNDERSTAND_JT_AUTO_REFRESH=0` disables its best-effort stale-summary refresh before it appends a brief packet.
+These helpers keep firstmate status, summary, reference, dashboard PID, and redacted dashboard status artifacts under `$FM_HOME/state`; `fm-understand-jt-refresh --refresh` also regenerates the local graph inside `JT_REPO/.understand-anything` under its preflight and lock checks.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):

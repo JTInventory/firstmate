@@ -120,6 +120,7 @@ Persistent secondmate homes are linked firstmate worktrees; startup syncs live o
 Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
 When that profile file exists, crewmate and scout spawns must pass the resolved harness explicitly so `config/crew-harness` is not used as an unnoticed bypass.
 For matching JT Control Room PR-mode ship work in `.openclaw` or `jt-control-room`, spawn also adds a `JT PR Intake Governor` brief gate so the worker classifies priority, proof, authority, duplicates, and runtime-data policy before implementation or PR creation.
+Matching JT briefs may also get a best-effort Understand Anything structure reference after routing; it is orientation only, and workers still verify files, tests, runtime state, and data freshness directly.
 Secondmate launch can use a separate local `config/secondmate-harness`, plus a primary-local `config/secondmate-profile.json` for durable model and effort defaults.
 Secondmate homes inherit the primary's declared local config, including `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, at launch, bootstrap, or an explicit `bin/fm-config-push.sh` run, so their own crewmates, dispatch profiles, and backlog backend use the primary settings.
 When a routed request goes to a secondmate, firstmate marks it so the answer returns through status or a document pointer; direct typing into that secondmate window stays conversational.

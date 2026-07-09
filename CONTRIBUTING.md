@@ -79,6 +79,8 @@ tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for 
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
 tests/fm-understand-anything.test.sh      # Understand Anything dashboard PID identity, cache isolation, token redaction, and OpenClaw graph caveat tests
+tests/fm-understand-jt-dashboard.test.sh  # JT Understand Anything dashboard PID identity, stale process rejection, stop safety, and token redaction tests
+tests/fm-understand-jt-refresh.test.sh    # JT Understand Anything graph refresh, worktree checkout, and external FM_HOME command-reference tests
 tests/fm-understand-jt-reference.test.sh  # JT Understand Anything brief reference context detection, idempotent append, skip, and fallback behavior
 tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
