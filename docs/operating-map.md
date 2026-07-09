@@ -1,0 +1,120 @@
+# Operating Map
+
+This is a navigation map for firstmate's operating lifecycle.
+It points to the command or operating-manual section that owns each step instead of repeating all policy text.
+
+## 1. Captain Request Enters Firstmate
+
+The first mate receives the captain's request in chat and stays the only captain-facing contact.
+It classifies the request as an immediate answer, a backlog change, a scout, a ship task, a secondmate routing case, or a lifecycle operation such as teardown.
+
+Owner: `AGENTS.md` sections 1, 6, 7, and 9.
+
+## 2. Startup, Recovery, And Fleet Truth
+
+At session start, firstmate runs bootstrap, reads local fleet records, and recovers already in-flight work before dispatching anything new.
+The durable inputs are local `data/` records, `state/*.meta`, `state/*.status`, tmux windows, secondmate homes, and project clones.
+
+Owner: `AGENTS.md` sections 2, 3, and 5; `bin/fm-bootstrap.sh`; `bin/fm-fleet-sync.sh`; `bin/fm-crew-state.sh`.
+
+## 3. Intake And Routing
+
+Firstmate resolves the project from `data/projects.md`, applies project mode, checks secondmate scopes, and selects the route profile and crewmate harness.
+Local-only projects stay with the main firstmate; routed secondmate work goes through the registered secondmate home.
+
+Owner: `AGENTS.md` sections 4, 6, and 7; `bin/fm-project-mode.sh`; `bin/fm-route.sh`; `data/projects.md`; `data/secondmates.md`.
+
+## 4. Backlog Placement
+
+Accepted work is recorded under `data/backlog.md` through the active backend.
+Default homes use `tasks-axi`; `config/backlog-backend=manual` opts into hand edits.
+Secondmate handoffs use the validated helper instead of a raw task move.
+
+Owner: `AGENTS.md` section 10; `.tasks.toml`; `bin/fm-tasks-axi-lib.sh`; `bin/fm-backlog-handoff.sh`.
+
+## 5. Brief Creation
+
+A brief becomes the direct-report contract.
+Ship briefs assert checkout identity and isolation, scout briefs are report-only, and secondmate briefs are charters.
+Matching JT Control Room PR-mode ship briefs also receive the JT PR Intake Governor, and matching JT briefs may receive the best-effort Understand Anything structure reference after route selection.
+
+Owner: `AGENTS.md` sections 6 and 7; `bin/fm-brief.sh`; `bin/fm-spawn.sh`; `bin/fm-understand-jt-reference`.
+
+## 6. Spawn
+
+`fm-spawn.sh` allocates the tmux window, gets or validates the isolated worktree, writes the task meta record, launches the selected harness, and installs any harness-specific turn-end hooks.
+Secondmate spawn uses the same direct-report machinery but points at an isolated firstmate home.
+
+Owner: `AGENTS.md` sections 4 and 7; `bin/fm-spawn.sh`; `bin/fm-harness.sh`; `bin/fm-task-identity-lib.sh`; `bin/fm-home-seed.sh`.
+
+## 7. Tmux, Worktree, And Meta Identity
+
+Each direct report has a `state/<id>.meta` record with fields such as `window=`, `worktree=`, `project=`, `kind=`, `mode=`, `yolo=`, and route metadata.
+The tmux window is the live work surface, while the worktree or secondmate home is the filesystem boundary.
+
+Owner: `AGENTS.md` sections 2, 6, and 7; `bin/fm-spawn.sh`; `bin/fm-tmux-lib.sh`; `bin/fm-tangle-lib.sh`.
+
+## 8. Status And Current State
+
+`state/<id>.status` is an append-only event log, not the current state by itself.
+Firstmate reads current state through `fm-crew-state.sh`, which reconciles no-mistakes run state, pane state, and the latest status line.
+
+Owner: `AGENTS.md` sections 2 and 8; `bin/fm-crew-state.sh`; `bin/fm-classify-lib.sh`.
+
+## 9. Watcher And Supervision
+
+The watcher sleeps in bash, queues actionable wakes, and wakes firstmate only when there is something to handle.
+`fm-watch-arm.sh` is the watcher-health source of truth, `fm-guard.sh` is a conservative warning surface, and `fm-watch-session.sh status` proves only the durable runner window.
+
+Owner: `AGENTS.md` section 8; `bin/fm-watch.sh`; `bin/fm-watch-arm.sh`; `bin/fm-watch-session.sh`; `bin/fm-guard.sh`; `bin/fm-wake-drain.sh`; `docs/architecture.md`.
+
+## 10. Radar And Read-Only Model
+
+When a display or operator needs the shared state model, `fm-supervise.sh` emits either a checklist or the `firstmate.supervision.v1.1` JSON contract.
+The JSON includes task classifications, worktree checks, external reminders, watcher source status, and `backlog_consistency` drift findings based on the same audit vocabulary as `fm-backlog-audit.sh`.
+
+Owner: `AGENTS.md` sections 8 and 10; `bin/fm-supervise.sh`; `bin/fm-supervision-model.sh`; `bin/fm-backlog-audit.sh`; `bin/fm-backlog-audit-lib.sh`.
+
+## 11. Steering And Secondmate Return Channel
+
+Firstmate steers direct reports through `fm-send.sh`.
+Bare sends to a `kind=secondmate` target are marked as from-firstmate so the secondmate answers through status lines or document pointers instead of only through chat.
+
+Owner: `AGENTS.md` sections 4, 7, and 8; `bin/fm-send.sh`; `bin/fm-marker-lib.sh`; `bin/fm-peek.sh`.
+
+## 12. PR Checks And Review Readiness
+
+A PR-ready task records its PR URL and PR head metadata, then the watcher can poll for merge state.
+The supervision model treats GitHub commit status and check-runs together before calling CI green.
+
+Owner: `AGENTS.md` sections 1, 7, and 8; `bin/fm-pr-check.sh`; `bin/fm-supervision-model.sh`; `bin/fm-no-mistakes-pr-target-guard.sh`.
+
+## 13. Reports
+
+Scout tasks finish by writing `data/<id>/report.md`.
+The report is the scout deliverable, and teardown is allowed after that report exists.
+Ship tasks report PRs, local merge outcomes, failures, or blockers through firstmate.
+
+Owner: `AGENTS.md` sections 7 and 9; `bin/fm-teardown.sh`; `data/<id>/report.md`.
+
+## 14. Teardown
+
+Teardown returns a scout worktree after its report exists, or returns a ship worktree only when work is landed and clean.
+It refuses dirty or unlanded work unless the captain explicitly approves discard.
+Secondmate teardown means explicit retirement, not ordinary task closeout.
+
+Owner: `AGENTS.md` section 7; `bin/fm-teardown.sh`; `bin/fm-merge-local.sh`; `bin/fm-ff-lib.sh`.
+
+## 15. Backlog Closeout
+
+After landed work, report delivery, or local-only merge, firstmate updates the backlog through the active backend and re-evaluates queued work.
+The done entry should carry the full PR URL, report path, or local merge note.
+
+Owner: `AGENTS.md` sections 7 and 10; `.tasks.toml`; `bin/fm-tasks-axi-lib.sh`; `tasks-axi`.
+
+## 16. Persistent Knowledge
+
+Captain preferences, fleet-local learnings, project-intrinsic knowledge, and task-scoped notes each have different homes.
+General firstmate knowledge belongs in tracked docs through a normal PR.
+
+Owner: `AGENTS.md` section 6; `data/captain.md`; `data/learnings.md`; project `AGENTS.md`; `docs/`.

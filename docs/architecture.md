@@ -31,6 +31,18 @@ It also classifies a scout report as teardown work before PR or missing-worktree
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
+### Watcher truth table
+
+Three watcher-adjacent commands prove different things:
+
+| Command | What it proves | What it does not prove |
+| --- | --- | --- |
+| `bin/fm-watch-arm.sh` | Starts or confirms the inner watcher and fails loudly unless the watcher PID, lock identity, and fresh beacon agree. | It is not a durable tmux runner; it is one verified arm cycle. |
+| `bin/fm-guard.sh` | Conservatively warns when fleet scripts cannot prove a live watcher for this home, including stale beacon or lock mismatch cases. | In restricted shells that cannot see `/proc`, it may warn because it cannot prove PID identity, even when a host-level watcher is alive. |
+| `bin/fm-watch-session.sh status` | Confirms the durable runner tmux window for this home exists. | It does not inspect the runner's last `fm-watch-arm.sh` output and is not proof that the inner watcher is currently healthy. |
+
+When these surfaces disagree, use `bin/fm-watch-arm.sh` as the watcher-health source of truth: it either confirms the live watcher and beacon or exits non-zero. Use `bin/fm-watch-session.sh status` only to check the runner window, and treat `bin/fm-guard.sh` as a conservative pull-based warning that errs loud when process identity cannot be proved.
+
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs and status-scan primitives.
 The always-on watcher also uses that library's provably-working predicate on no-verb signal and non-terminal-stale paths, while the daemon keeps its away-mode stale recheck unchanged.

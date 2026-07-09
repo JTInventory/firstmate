@@ -8,8 +8,8 @@ Usage: fm-supervise.sh [--text|--json|--schema] [--include-ok] [--no-default-rem
 
 Modes:
   --text                  print captain-facing checklist (default)
-  --json                  print firstmate.supervision.v1 JSON
-  --schema                print the v1 JSON schema and exit
+  --json                  print firstmate.supervision.v1.1 JSON
+  --schema                print the v1.1 JSON schema and exit
 
 Inputs:
   --external-pr <url>     include one extra GitHub PR reminder; repeatable
@@ -25,11 +25,11 @@ fm_supervision_schema_json() {
   cat <<'JSON'
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "firstmate.supervision.v1",
+  "$id": "firstmate.supervision.v1.1",
   "type": "object",
-  "required": ["schema_version", "generated_at", "home", "read_only", "sources", "summary", "checklist", "tasks", "worktrees", "external_reminders"],
+  "required": ["schema_version", "generated_at", "home", "read_only", "sources", "summary", "backlog_consistency", "checklist", "tasks", "worktrees", "external_reminders"],
   "properties": {
-    "schema_version": { "const": "firstmate.supervision.v1" },
+    "schema_version": { "const": "firstmate.supervision.v1.1" },
     "generated_at": { "type": "string", "format": "date-time" },
     "home": { "type": "string" },
     "read_only": { "const": true },
@@ -52,6 +52,7 @@ fm_supervision_schema_json() {
       },
       "additionalProperties": false
     },
+    "backlog_consistency": { "$ref": "#/$defs/backlog_consistency" },
     "checklist": { "type": "array", "items": { "$ref": "#/$defs/checklist_item" } },
     "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
     "worktrees": { "type": "array", "items": { "$ref": "#/$defs/worktree" } },
@@ -81,6 +82,44 @@ fm_supervision_schema_json() {
         "pr_url": { "type": "string" },
         "evidence": { "type": "array", "items": { "type": "string" } },
         "read_only_commands": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "backlog_consistency": {
+      "type": "object",
+      "required": ["ok", "drift_count", "expected_exception_count", "checked_at", "findings", "expected_exceptions"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "drift_count": { "type": "integer" },
+        "expected_exception_count": { "type": "integer" },
+        "checked_at": { "type": "string", "format": "date-time" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/backlog_finding" } },
+        "expected_exceptions": { "type": "array", "items": { "$ref": "#/$defs/backlog_expected_exception" } }
+      },
+      "additionalProperties": false
+    },
+    "backlog_finding": {
+      "type": "object",
+      "required": ["category", "id", "severity", "detail", "owner", "evidence", "read_only_commands"],
+      "properties": {
+        "category": { "enum": ["duplicate-done", "meta-without-inflight", "inflight-without-meta", "inflight-pr-ready", "watchlist-adopted"] },
+        "id": { "type": "string" },
+        "severity": { "enum": ["high", "medium"] },
+        "detail": { "type": "string" },
+        "owner": { "const": "firstmate" },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "read_only_commands": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "backlog_expected_exception": {
+      "type": "object",
+      "required": ["category", "id", "reason", "evidence"],
+      "properties": {
+        "category": { "const": "meta-without-inflight" },
+        "id": { "type": "string" },
+        "reason": { "type": "string" },
+        "evidence": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": false
     },
@@ -680,7 +719,9 @@ fm_supervision_checklist_record() {
 
 fm_supervision_collect() {
   fm_supervision_paths
-  local records="" source_records="" checklist_records="" task_records="" worktree_records="" external_records=""
+  # shellcheck source=bin/fm-backlog-audit-lib.sh
+  . "$FM_SUPERVISION_ROOT/bin/fm-backlog-audit-lib.sh"
+  local records="" source_records="" checklist_records="" task_records="" worktree_records="" external_records="" backlog_records=""
   local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
@@ -796,6 +837,35 @@ fm_supervision_collect() {
     medium_count=$((medium_count + 1))
   fi
 
+  if [ "$backlog_ok" = true ]; then
+    local ba_kind ba_category ba_id ba_severity ba_detail ba_evidence ba_reason ba_action ba_why
+    while IFS=$'\t' read -r ba_kind ba_category ba_id ba_severity ba_detail ba_evidence; do
+      [ -n "$ba_kind" ] || continue
+      case "$ba_kind" in
+        finding)
+          line=$(printf 'backlog_finding\t%s\t%s\t%s\t%s\t%s' \
+            "$(fm_supervision_field "$ba_category")" "$(fm_supervision_field "$ba_id")" "$(fm_supervision_field "$ba_severity")" \
+            "$(fm_supervision_field "$ba_detail")" "$(fm_supervision_field "$ba_evidence")")
+          fm_supervision_line_append backlog_records "$line"
+          ba_action="Reconcile backlog/state drift for $ba_id."
+          ba_why="Backlog audit reports $ba_category."
+          line=$(fm_supervision_checklist_record "backlog:$ba_id:$ba_category" "$ba_severity" firstmate "$ba_action" "$ba_why" "$ba_id" "" "" "$ba_evidence")
+          fm_supervision_line_append checklist_records "$line"
+          checklist_count=$((checklist_count + 1))
+          [ "$ba_severity" = high ] && high_count=$((high_count + 1))
+          [ "$ba_severity" = medium ] && medium_count=$((medium_count + 1))
+          ;;
+        exception)
+          ba_reason=$ba_severity
+          line=$(printf 'backlog_exception\t%s\t%s\t%s\t%s' \
+            "$(fm_supervision_field "$ba_category")" "$(fm_supervision_field "$ba_id")" "$(fm_supervision_field "$ba_reason")" \
+            "$(fm_supervision_field "$ba_detail")")
+          fm_supervision_line_append backlog_records "$line"
+          ;;
+      esac
+    done < <(fm_backlog_audit_collect "$FM_SUPERVISION_DATA" "$FM_SUPERVISION_STATE")
+  fi
+
   if [ -d "$FM_SUPERVISION_PROJECTS" ]; then
     local project_dir wt has_meta wt_branch wt_dirty wt_class wt_severity wt_owner wt_action wt_evidence
     for project_dir in "$FM_SUPERVISION_PROJECTS"/*; do
@@ -894,6 +964,7 @@ EOF
   [ -n "$task_records" ] && records="$records"$'\n'"$task_records"
   [ -n "$worktree_records" ] && records="$records"$'\n'"$worktree_records"
   [ -n "$external_records" ] && records="$records"$'\n'"$external_records"
+  [ -n "$backlog_records" ] && records="$records"$'\n'"$backlog_records"
   [ -n "$checklist_records" ] && records="$records"$'\n'"$checklist_records"
   records="$records"$'\n'"summary	$level	$task_count	$checklist_count	$high_count	$medium_count	$github_state	$watcher_state"
   printf '%s\n' "$records"
@@ -901,7 +972,7 @@ EOF
 
 fm_supervision_emit_json() {
   fm_supervision_paths
-  local generated_at source_lines="" task_lines="" worktree_lines="" external_lines="" checklist_lines="" summary_line="" line kind
+  local generated_at source_lines="" task_lines="" worktree_lines="" external_lines="" checklist_lines="" backlog_finding_lines="" backlog_exception_lines="" summary_line="" line kind
   generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -911,6 +982,8 @@ fm_supervision_emit_json() {
       task) fm_supervision_line_append task_lines "$line" ;;
       worktree) fm_supervision_line_append worktree_lines "$line" ;;
       external) fm_supervision_line_append external_lines "$line" ;;
+      backlog_finding) fm_supervision_line_append backlog_finding_lines "$line" ;;
+      backlog_exception) fm_supervision_line_append backlog_exception_lines "$line" ;;
       checklist) fm_supervision_line_append checklist_lines "$line" ;;
       summary) summary_line=$line ;;
     esac
@@ -924,7 +997,7 @@ EOF
   fi
 
   printf '{\n'
-  printf '  "schema_version": "firstmate.supervision.v1",\n'
+  printf '  "schema_version": "firstmate.supervision.v1.1",\n'
   printf '  "generated_at": "%s",\n' "$(fm_supervision_json_escape "$generated_at")"
   printf '  "home": "%s",\n' "$(fm_supervision_json_escape "$FM_SUPERVISION_HOME")"
   printf '  "read_only": true,\n'
@@ -940,6 +1013,50 @@ EOF
   printf '\n  },\n'
   printf '  "summary": { "level": "%s", "tasks_total": %s, "actions_total": %s, "high_total": %s, "medium_total": %s, "github_state": "%s", "watcher_state": "%s" },\n' \
     "$(fm_supervision_json_escape "$s_level")" "$s_tasks" "$s_actions" "$s_high" "$s_medium" "$(fm_supervision_json_escape "$s_github")" "$(fm_supervision_json_escape "$s_watcher")"
+
+  local drift_count=0 exception_count=0
+  if [ -n "$backlog_finding_lines" ]; then
+    drift_count=$(printf '%s\n' "$backlog_finding_lines" | awk 'NF { count++ } END { print count + 0 }')
+  fi
+  if [ -n "$backlog_exception_lines" ]; then
+    exception_count=$(printf '%s\n' "$backlog_exception_lines" | awk 'NF { count++ } END { print count + 0 }')
+  fi
+  printf '  "backlog_consistency": {\n'
+  if [ "$drift_count" -eq 0 ]; then
+    printf '    "ok": true,\n'
+  else
+    printf '    "ok": false,\n'
+  fi
+  printf '    "drift_count": %s,\n' "$drift_count"
+  printf '    "expected_exception_count": %s,\n' "$exception_count"
+  printf '    "checked_at": "%s",\n' "$(fm_supervision_json_escape "$generated_at")"
+  printf '    "findings": ['
+  array_first=true
+  local bf_category bf_id bf_severity bf_detail bf_evidence
+  while IFS=$'\t' read -r _ bf_category bf_id bf_severity bf_detail bf_evidence; do
+    [ -n "$bf_category" ] || continue
+    if [ "$array_first" = true ]; then printf '\n'; array_first=false; else printf ',\n'; fi
+    printf '      { "category": "%s", "id": "%s", "severity": "%s", "detail": "%s", "owner": "firstmate", "evidence": ["%s"], "read_only_commands": ["bin/fm-supervise.sh --json --no-default-reminders", "bin/fm-backlog-audit.sh"] }' \
+      "$(fm_supervision_json_escape "$bf_category")" "$(fm_supervision_json_escape "$bf_id")" "$(fm_supervision_json_escape "$bf_severity")" \
+      "$(fm_supervision_json_escape "$bf_detail")" "$(fm_supervision_json_escape "$bf_evidence")"
+  done <<EOF
+$backlog_finding_lines
+EOF
+  if [ "$array_first" = true ]; then printf '],\n'; else printf '\n    ],\n'; fi
+  printf '    "expected_exceptions": ['
+  array_first=true
+  local be_category be_id be_reason be_evidence
+  while IFS=$'\t' read -r _ be_category be_id be_reason be_evidence; do
+    [ -n "$be_category" ] || continue
+    if [ "$array_first" = true ]; then printf '\n'; array_first=false; else printf ',\n'; fi
+    printf '      { "category": "%s", "id": "%s", "reason": "%s", "evidence": ["%s"] }' \
+      "$(fm_supervision_json_escape "$be_category")" "$(fm_supervision_json_escape "$be_id")" \
+      "$(fm_supervision_json_escape "$be_reason")" "$(fm_supervision_json_escape "$be_evidence")"
+  done <<EOF
+$backlog_exception_lines
+EOF
+  if [ "$array_first" = true ]; then printf ']\n'; else printf '\n    ]\n'; fi
+  printf '  },\n'
 
   printf '  "checklist": ['
   local array_first=true cid sev cowner caction why ctask_id cproject cpr_url cevidence

@@ -34,6 +34,29 @@ raise SystemExit(f"{task_id}: task not found")
 PY
 }
 
+assert_backlog_consistency() {
+  local json=$1 expected_ok=$2 expected_drift=$3 expected_exceptions=$4 label=$5
+  FM_TEST_JSON=$json python3 - "$expected_ok" "$expected_drift" "$expected_exceptions" <<'PY' || fail "$label"
+import json
+import os
+import sys
+
+data = json.loads(os.environ["FM_TEST_JSON"])
+backlog = data["backlog_consistency"]
+expected_ok = sys.argv[1] == "true"
+expected_drift = int(sys.argv[2])
+expected_exceptions = int(sys.argv[3])
+if backlog["ok"] != expected_ok:
+    raise SystemExit(f"expected ok={expected_ok}, got {backlog['ok']}")
+if backlog["drift_count"] != expected_drift:
+    raise SystemExit(f"expected drift_count={expected_drift}, got {backlog['drift_count']}")
+if backlog["expected_exception_count"] != expected_exceptions:
+    raise SystemExit(
+        f"expected expected_exception_count={expected_exceptions}, got {backlog['expected_exception_count']}"
+    )
+PY
+}
+
 make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
@@ -133,7 +156,7 @@ test_model_is_sourceable_and_schema_is_json() {
   local out
   out=$("$CLI" --schema) || fail "schema command failed"
   # shellcheck disable=SC2016 # Dollar sign is literal JSON schema text.
-  assert_contains "$out" '"$id": "firstmate.supervision.v1"' "schema id missing"
+  assert_contains "$out" '"$id": "firstmate.supervision.v1.1"' "schema id missing"
   assert_json_valid "$out" "schema"
   pass "model is sourceable and schema is valid JSON"
 }
@@ -149,8 +172,66 @@ test_empty_home_is_read_only_valid_json() {
   [ "$before" = "$after" ] || fail "supervise wrote state or data files"
   assert_json_valid "$out" "empty home output"
   assert_contains "$out" '"read_only": true' "json should mark read-only"
+  assert_backlog_consistency "$out" true 0 0 "empty home should have clean backlog consistency"
   assert_contains "$out" '"actions_total": 0' "empty home should have no actions"
   pass "empty home produces valid read-only JSON"
+}
+
+test_registered_secondmate_is_expected_backlog_exception() {
+  local home fakebin sm_home out
+  home=$(make_home backlog-secondmate)
+  fakebin="$home/fakebin"
+  sm_home="$home/secondmate-home"
+  mkdir -p "$sm_home"
+  write_fakebin "$fakebin"
+  cat > "$home/data/backlog.md" <<MD
+## Secondmate Backlogs
+- secondmate-ops - ops tooling (home: $sm_home; scope: firstmate ops; projects: firstmate; added 2026-07-09)
+
+## Done
+MD
+  printf -- '- secondmate-ops - ops tooling (home: %s; scope: firstmate ops; projects: firstmate; added 2026-07-09)\n' "$sm_home" > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/secondmate-ops.meta" \
+    "window=fm-secondmate-ops" \
+    "worktree=$sm_home" \
+    "home=$sm_home" \
+    "project=firstmate" \
+    "kind=secondmate" \
+    "mode=secondmate"
+  out=$(run_json "$home" "$fakebin") || fail "registered secondmate backlog json failed"
+  assert_json_valid "$out" "registered secondmate backlog output"
+  assert_backlog_consistency "$out" true 0 1 "registered secondmate should be an expected exception"
+  assert_contains "$out" '"expected_exceptions": [' "expected exception array should be present"
+  assert_contains "$out" '"id": "secondmate-ops"' "expected exception should name the secondmate"
+  assert_not_contains "$out" '"backlog:secondmate-ops:meta-without-inflight"' "expected exception should not create checklist drift"
+  pass "registered secondmate backlog exception is structured but not drift"
+}
+
+test_backlog_drift_is_structured_in_json() {
+  local home fakebin out
+  home=$(make_home backlog-drift)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  cat > "$home/data/backlog.md" <<'MD'
+## In flight
+- [ ] active-task - Active work (repo: demo, since 2026-07-09)
+
+## Done
+MD
+  fm_write_meta "$home/state/stale-task.meta" \
+    "window=fm-stale-task" \
+    "worktree=$home/worktrees/stale-task" \
+    "project=demo" \
+    "kind=ship" \
+    "mode=direct-PR"
+  out=$(run_json "$home" "$fakebin") || fail "backlog drift json failed"
+  assert_json_valid "$out" "backlog drift output"
+  assert_backlog_consistency "$out" false 2 0 "ordinary backlog drift should be exposed"
+  assert_contains "$out" '"category": "meta-without-inflight"' "meta-only drift category should be structured"
+  assert_contains "$out" '"category": "inflight-without-meta"' "missing-meta drift category should be structured"
+  assert_contains "$out" '"level": "action"' "high-severity backlog drift should raise summary level"
+  assert_contains "$out" '"backlog:active-task:inflight-without-meta"' "backlog drift should create checklist item"
+  pass "ordinary backlog drift is exposed in supervision JSON"
 }
 
 test_task_classifications_and_route_metadata() {
@@ -352,6 +433,8 @@ test_text_output_and_watcher_source() {
 
 test_model_is_sourceable_and_schema_is_json
 test_empty_home_is_read_only_valid_json
+test_registered_secondmate_is_expected_backlog_exception
+test_backlog_drift_is_structured_in_json
 test_task_classifications_and_route_metadata
 test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response

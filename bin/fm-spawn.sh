@@ -836,6 +836,14 @@ fi
 append_jt_pr_intake_governor
 append_route_block
 
+# Attach a compact JT Control Room structure reference to matching task briefs.
+# This runs after routing so the reference text cannot influence model/profile
+# selection. It is best-effort: a graph problem must not block the task launch.
+if [ "$KIND" != secondmate ] && [ -x "$FM_ROOT/bin/fm-understand-jt-reference" ]; then
+  "$FM_ROOT/bin/fm-understand-jt-reference" append-brief-if-jt "$BRIEF" "$PROJ_ABS" "$ID" \
+    || echo "warning: JT understand reference attachment failed for $ID" >&2
+fi
+
 mkdir -p "$STATE"
 {
   echo "window=$T"

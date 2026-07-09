@@ -268,6 +268,13 @@ FM_UNDERSTAND_DASHBOARD_IDENTITY_FILE=   # default: $FM_UNDERSTAND_DASHBOARD_PID
 FM_UNDERSTAND_DASHBOARD_URL_WAIT_SECONDS=2   # seconds a background start waits for a current dashboard URL before failing closed
 FM_UNDERSTAND_EVIDENCE_DIR=     # default: ${TMPDIR:-/tmp}/fm-understand-evidence
 FM_UNDERSTAND_PROJECT_DIR=      # default: current working directory; passed to the dashboard as GRAPH_DIR
+# JT Understand Anything helpers
+FM_UNDERSTAND_REFRESH_BIN=      # default: $FM_HOME/bin/fm-understand-jt-refresh; used by fm-understand-jt-reference
+FM_UNDERSTAND_DASHBOARD_PORT=5173 # local Vite dashboard port for fm-understand-jt-dashboard
+FM_UNDERSTAND_JT_AUTO_REFRESH=1 # brief helper may try a best-effort refresh when the summary is stale
+UA_PLUGIN_ROOT=/root/.understand-anything-plugin # dashboard plugin checkout root
+UA_NODE_BIN=/root/.nvm/versions/node/v22.22.2/bin/node # Node runtime for JT helpers
+JT_REPO=/root/.openclaw/workspace/projects/active/JT-Control-Room # graph source repo for JT helpers
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

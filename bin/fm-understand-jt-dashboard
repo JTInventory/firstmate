@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Managed localhost dashboard for the JT Control Room Understand Anything graph.
+set -euo pipefail
+
+FM_HOME="${FM_HOME:-/root/firstmate}"
+JT_REPO="${JT_REPO:-/root/.openclaw/workspace/projects/active/JT-Control-Room}"
+PLUGIN_ROOT="${UA_PLUGIN_ROOT:-/root/.understand-anything-plugin}"
+DASHBOARD_DIR="$PLUGIN_ROOT/packages/dashboard"
+STATE_DIR="$FM_HOME/state"
+RUN_DIR="$STATE_DIR/jt-understand-dashboard"
+PID_FILE="$RUN_DIR/pid"
+LOG_FILE="$RUN_DIR/dashboard.log"
+STATUS_PATH="$STATE_DIR/jt-understand-dashboard.status"
+PORT="${FM_UNDERSTAND_DASHBOARD_PORT:-5173}"
+NODE_BIN="${UA_NODE_BIN:-/root/.nvm/versions/node/v22.22.2/bin/node}"
+if [ ! -x "$NODE_BIN" ]; then
+  NODE_BIN="$(command -v node || true)"
+fi
+NODE_DIR="$(dirname "$NODE_BIN")"
+
+usage() {
+  cat <<'USAGE'
+usage: fm-understand-jt-dashboard [start|stop|restart|status|url]
+
+  start    start the localhost dashboard and print the tokenized URL
+  stop     stop the managed dashboard process
+  restart  stop then start
+  status   print redacted process/status JSON
+  url      print the tokenized localhost URL only
+USAGE
+}
+
+json_status() {
+  local state=$1
+  local pid="${2:-}"
+  local url="${3:-}"
+  local error="${4:-}"
+  mkdir -p "$RUN_DIR"
+  chmod 700 "$RUN_DIR"
+  export STATUS_PATH JT_REPO LOG_FILE PID_FILE state pid url error
+  "$NODE_BIN" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const env = process.env;
+function redact(url) {
+  return url ? url.replace(/token=[^&\s]+/, "token=<redacted>") : "";
+}
+const status = {
+  name: "jt-understand-dashboard",
+  state: env.state,
+  pid: env.pid ? Number(env.pid) : null,
+  urlRedacted: redact(env.url),
+  tokenRedacted: Boolean(env.url),
+  repoPath: env.JT_REPO,
+  logPath: env.LOG_FILE,
+  pidPath: env.PID_FILE,
+  error: env.error || "",
+  checkedAt: new Date().toISOString(),
+};
+fs.mkdirSync(path.dirname(env.STATUS_PATH), { recursive: true });
+fs.writeFileSync(env.STATUS_PATH, JSON.stringify(status, null, 2) + "\n", { mode: 0o600 });
+console.log(JSON.stringify(status, null, 2));
+NODE
+}
+
+pid_value() {
+  [ -f "$PID_FILE" ] || return 1
+  tr -dc '0-9' < "$PID_FILE"
+}
+
+is_alive() {
+  local pid
+  pid="$(pid_value 2>/dev/null || true)"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+dashboard_url() {
+  [ -f "$LOG_FILE" ] || return 1
+  grep -Eo 'http://127\.0\.0\.1:[0-9]+/\?token=[^[:space:]]+' "$LOG_FILE" | tail -1
+}
+
+start_dashboard() {
+  [ -x "$NODE_BIN" ] || { json_status "error" "" "" "Node runtime not found"; exit 2; }
+  [ -d "$DASHBOARD_DIR" ] || { json_status "error" "" "" "dashboard dir not found: $DASHBOARD_DIR"; exit 2; }
+  [ -f "$JT_REPO/.understand-anything/knowledge-graph.json" ] || { json_status "error" "" "" "missing JT knowledge graph"; exit 2; }
+  mkdir -p "$RUN_DIR"
+  chmod 700 "$RUN_DIR"
+  if is_alive; then
+    local pid url
+    pid="$(pid_value)"
+    url="$(dashboard_url || true)"
+    json_status "running" "$pid" "$url" "" >/dev/null
+    if [ -n "$url" ]; then
+      printf '%s\n' "$url"
+    else
+      json_status "starting" "$pid" "" "dashboard alive but URL not yet in log"
+    fi
+    return 0
+  fi
+
+  : > "$LOG_FILE"
+  chmod 600 "$LOG_FILE"
+  setsid bash -lc "cd '$DASHBOARD_DIR' && export PATH='$NODE_DIR':\"\$PATH\" && export GRAPH_DIR='$JT_REPO' && exec corepack pnpm exec vite --host 127.0.0.1 --port '$PORT'" >>"$LOG_FILE" 2>&1 < /dev/null &
+  local pid=$!
+  printf '%s\n' "$pid" > "$PID_FILE"
+  chmod 600 "$PID_FILE"
+
+  local url=""
+  for _ in $(seq 1 80); do
+    sleep 0.25
+    if ! kill -0 "$pid" 2>/dev/null; then
+      json_status "error" "$pid" "" "dashboard process exited; see $LOG_FILE"
+      exit 1
+    fi
+    url="$(dashboard_url || true)"
+    [ -z "$url" ] || break
+  done
+  if [ -z "$url" ]; then
+    json_status "starting" "$pid" "" "dashboard started but token URL not yet present"
+    exit 1
+  fi
+  json_status "running" "$pid" "$url" "" >/dev/null
+  printf '%s\n' "$url"
+}
+
+stop_dashboard() {
+  local pid
+  pid="$(pid_value 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -0 "$pid" 2>/dev/null && kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  json_status "stopped" "" "" ""
+}
+
+status_dashboard() {
+  local pid url
+  pid="$(pid_value 2>/dev/null || true)"
+  url="$(dashboard_url || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    json_status "running" "$pid" "$url" ""
+  else
+    json_status "stopped" "" "" ""
+  fi
+}
+
+url_dashboard() {
+  if ! is_alive; then
+    echo "dashboard is not running" >&2
+    exit 1
+  fi
+  dashboard_url
+}
+
+case "${1:-status}" in
+  start) start_dashboard ;;
+  stop) stop_dashboard ;;
+  restart) stop_dashboard >/dev/null; start_dashboard ;;
+  status) status_dashboard ;;
+  url) url_dashboard ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
