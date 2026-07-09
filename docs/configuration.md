@@ -14,7 +14,8 @@ Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1
 If the default backend is selected but `tasks-axi` is missing or incompatible, bootstrap suggests `npm install -g tasks-axi` through the normal consent flow and falls back to manual editing until it is installed.
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the install suggestion.
 Absent or `tasks-axi` selects the default tasks-axi backend.
-The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` task sections.
+Homes may also carry a `## Secondmate Backlogs` inventory section with `- <secondmate-id> ...` lines for persistent secondmates; `fm-backlog-audit.sh` treats those ids, plus ids in `data/secondmates.md`, as registered secondmate inventory rather than ordinary In flight work.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -38,6 +39,7 @@ The file is created lazily on first learning and follows the same dated, evidenc
 Persistent secondmate routes live locally in `data/secondmates.md`.
 Each line records the secondmate id, charter summary, absolute home path, natural-language scope, project clone list, and added date; `fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
+`fm-backlog-audit.sh` also uses these ids as registered persistent inventory, so a live `kind=secondmate` meta record does not have to appear under the main `## In flight` section.
 Use `fm-home-seed.sh <id> - <project>...` to lease a fresh firstmate worktree for the secondmate home.
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.

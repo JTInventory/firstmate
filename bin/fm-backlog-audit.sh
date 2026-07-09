@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Read-only consistency audit for firstmate backlog/state drift.
 #
-# Checks data/backlog.md against state/*.meta for common supervision drift:
-# duplicate In flight/Done entries, orphan meta files, In flight items without
-# meta, PR-ready/merged work still parked In flight, and Watchlist items that
-# already have local adoption signals.
+# Checks data/backlog.md and data/secondmates.md against state/*.meta for common
+# supervision drift: duplicate In flight/Done entries, orphan ordinary meta
+# files, unregistered secondmate meta files, In flight items without meta,
+# PR-ready/merged work still parked In flight, and Watchlist items that already
+# have local adoption signals.
 # Usage: fm-backlog-audit.sh
 set -eu
 

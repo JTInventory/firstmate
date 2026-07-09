@@ -82,7 +82,7 @@ tests/fm-understand-anything.test.sh      # Understand Anything dashboard PID id
 tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
-tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings and no-change contract
+tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings, persistent secondmate inventory, and no-change contract
 tests/fm-route.test.sh                    # deterministic route profiles, overrides, risk flags, and downgrade handling
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests
 tests/fm-memory-lookup.test.sh            # manual Cognee memory lookup fallback, source-path verification, and optional brief append
