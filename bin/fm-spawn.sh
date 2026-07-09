@@ -27,6 +27,8 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Matching JT Control Room ship spawns for .openclaw or jt-control-room append a
+#   JT PR Intake Governor block to direct-PR/no-mistakes briefs before launch.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
