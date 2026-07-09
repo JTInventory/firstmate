@@ -130,7 +130,9 @@ test_jt_understand_helpers_default_home_to_repo_root() {
     "$ROOT/bin/fm-understand-jt-reference" \
     "$ROOT/bin/fm-understand-jt-refresh" \
     "$ROOT/bin/fm-understand-jt-dashboard"; do
+    # shellcheck disable=SC2016 # These are literal patterns expected in the helper source.
     assert_no_grep 'FM_HOME="${FM_HOME:-/root/firstmate}"' "$helper" "$(basename "$helper") should not hardcode /root/firstmate"
+    # shellcheck disable=SC2016 # These are literal patterns expected in the helper source.
     assert_grep 'FM_HOME="${FM_HOME:-$FM_ROOT}"' "$helper" "$(basename "$helper") should default FM_HOME to its repo root"
   done
   pass "JT Understand helpers derive default FM_HOME from their repo root"
