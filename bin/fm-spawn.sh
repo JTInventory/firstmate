@@ -831,8 +831,8 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
-append_route_block
 append_jt_pr_intake_governor
+append_route_block
 
 mkdir -p "$STATE"
 {

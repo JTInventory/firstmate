@@ -167,6 +167,25 @@ EOF
   pass "JT-looking task ids in unrelated projects skip the PR Intake Governor"
 }
 
+test_jt_project_without_jt_context_skips_pr_intake_governor() {
+  local home proj wt fakebin id out status brief
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case jt-neutral-context .openclaw)
+EOF
+  id=copy-fix-gg7
+  mkdir -p "$home/data/$id"
+  brief="$home/data/$id/brief.md"
+  printf '%s\n' 'Tidy the README wording before opening another PR.' > "$brief"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "neutral .openclaw direct-PR spawn should succeed"
+  assert_contains "$out" "spawned $id harness=codex" "neutral .openclaw spawn did not launch"
+  assert_grep "# Route" "$brief" "neutral .openclaw spawn should still append route block"
+  assert_no_grep "<!-- firstmate:jt-pr-intake-governor:start -->" "$brief" \
+    "route block alone must not trigger the JT intake-governor marker"
+  pass "neutral JT project briefs skip the PR Intake Governor"
+}
+
 test_jt_openclaw_operator_route_brief_appends_pr_intake_governor() {
   local home proj wt fakebin id out status brief
   IFS='|' read -r home proj wt fakebin <<EOF
@@ -212,5 +231,6 @@ test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
 test_jt_direct_pr_spawn_appends_pr_intake_governor
 test_jt_keyword_id_in_unrelated_project_skips_pr_intake_governor
+test_jt_project_without_jt_context_skips_pr_intake_governor
 test_jt_openclaw_operator_route_brief_appends_pr_intake_governor
 test_unsafe_task_ids_are_rejected_before_spawn
