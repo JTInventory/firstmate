@@ -212,6 +212,7 @@ fm_supervision_normalize_tool_path() {
   home=${HOME:-}
   [ -n "$home" ] || return 0
   current_path=${PATH:-}
+  # Non-interactive SSH shells often miss user-local tool shims.
   for candidate in "$home"/.nvm/versions/node/*/bin "$home"/.local/bin; do
     [ -d "$candidate" ] || continue
     case ":$current_path:" in

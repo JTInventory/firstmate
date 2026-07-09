@@ -46,7 +46,7 @@ This is a directory that turns any agent into your firstmate, and you the captai
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
-- **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, backlog drift, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1.1` JSON without changing anything.
+- **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, backlog drift, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1.1` JSON without changing anything, even from non-interactive shells where HOME-local Axi tools are not already on `PATH`.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Operational memory stow** - `/stow` sweeps the current session for durable knowledge, routes it to the right local or project home, and tells you when the session is safe to reset.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind your merge approval.
@@ -112,6 +112,7 @@ Outside tmux, crewmates land in a detached `firstmate` session you can attach to
 You chat with the first mate.
 It routes each request to a crewmate in its own tmux window and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 When the current fleet state is unclear, `bin/fm-supervise.sh` gives a passive read-only checklist, and `bin/fm-supervise.sh --json` exposes the same shared model for display tools such as Radar.
+Before checking optional GitHub state, it adds `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` when those directories exist, so SSH or other non-interactive sessions can still find `gh-axi`.
 For an end-to-end navigation map of the request-to-teardown lifecycle, see [docs/operating-map.md](docs/operating-map.md).
 For PRs, that model combines GitHub commit status and check-runs before deciding whether CI is green, pending, failed, absent, or unknown.
 It also exposes backlog/state drift through `backlog_consistency`, using the same audit vocabulary as `bin/fm-backlog-audit.sh`.
