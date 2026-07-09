@@ -207,8 +207,26 @@ fm_supervision_schema_json() {
 JSON
 }
 
+fm_supervision_normalize_tool_path() {
+  local home candidate current_path
+  home=${HOME:-}
+  [ -n "$home" ] || return 0
+  current_path=${PATH:-}
+  # Non-interactive SSH shells often miss user-local tool shims.
+  for candidate in "$home"/.nvm/versions/node/*/bin "$home"/.local/bin; do
+    [ -d "$candidate" ] || continue
+    case ":$current_path:" in
+      *":$candidate:"*) ;;
+      *) current_path="$current_path${current_path:+:}$candidate" ;;
+    esac
+  done
+  PATH=$current_path
+  export PATH
+}
+
 fm_supervision_paths() {
   local script_dir root
+  fm_supervision_normalize_tool_path
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   root="${FM_ROOT_OVERRIDE:-$(cd "$script_dir/.." && pwd)}"
   FM_SUPERVISION_ROOT="$root"

@@ -72,6 +72,7 @@ Owner: `AGENTS.md` section 8; `bin/fm-watch.sh`; `bin/fm-watch-arm.sh`; `bin/fm-
 
 When a display or operator needs the shared state model, `fm-supervise.sh` emits either a checklist or the `firstmate.supervision.v1.1` JSON contract.
 The JSON includes task classifications, worktree checks, external reminders, watcher source status, and `backlog_consistency` drift findings based on the same audit vocabulary as `fm-backlog-audit.sh`.
+The model normalizes existing HOME-local Axi tool paths before optional GitHub reads, so non-interactive shells can still report GitHub runtime health when `gh-axi` is installed under NVM or `.local/bin`.
 
 Owner: `AGENTS.md` sections 8 and 10; `bin/fm-supervise.sh`; `bin/fm-supervision-model.sh`; `bin/fm-backlog-audit.sh`; `bin/fm-backlog-audit-lib.sh`.
 
