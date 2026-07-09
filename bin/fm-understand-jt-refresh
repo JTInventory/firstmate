@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 JT_REPO="${JT_REPO:-/root/.openclaw/workspace/projects/active/JT-Control-Room}"
 UA_DIR="$JT_REPO/.understand-anything"
@@ -75,7 +75,7 @@ write_status() {
   local started_at="${3:-}"
   local finished_at="${4:-}"
   mkdir -p "$STATE_DIR"
-  export FM_HOME JT_REPO GRAPH META CONFIG IGNORE REVIEW UA_SUMMARY STATUS_PATH SUMMARY_PATH REFERENCE_PATH
+  export FM_ROOT FM_HOME JT_REPO GRAPH META CONFIG IGNORE REVIEW UA_SUMMARY STATUS_PATH SUMMARY_PATH REFERENCE_PATH
   export DASHBOARD_STATUS_PATH REFRESH_STATUS="$refresh_status" ERROR_SUMMARY="$error_summary"
   export REFRESH_STARTED_AT="$started_at" REFRESH_FINISHED_AT="$finished_at"
   export GENERATOR_KIND="deterministic-node"
@@ -234,9 +234,9 @@ const compactSummary = {
   counts: status.counts,
   layers,
   topModules,
-  refreshCommand: `${env.FM_HOME}/bin/fm-understand-jt-refresh --refresh`,
-  statusCommand: `${env.FM_HOME}/bin/fm-understand-jt-refresh --status`,
-  dashboardCommand: `${env.FM_HOME}/bin/fm-understand-jt-dashboard status`,
+  refreshCommand: `${env.FM_ROOT}/bin/fm-understand-jt-refresh --refresh`,
+  statusCommand: `${env.FM_ROOT}/bin/fm-understand-jt-refresh --status`,
+  dashboardCommand: `${env.FM_ROOT}/bin/fm-understand-jt-dashboard status`,
   agentInstruction: "Use this graph to orient, identify likely modules, and reason about impact. Do not treat it as source of truth; open files directly and verify tests/runtime before claiming a fix.",
 };
 
@@ -252,8 +252,8 @@ const reference = `${markerStart}
 - Fresh: ${status.fresh ? "yes" : "no"}${status.staleReasons.length ? ` (${status.staleReasons.join(", ")})` : ""}
 - Current HEAD: ${status.currentHeadShort || "unknown"}
 - Analyzed HEAD: ${status.analyzedHeadShort || "unknown"}
-- Refresh: ${env.FM_HOME}/bin/fm-understand-jt-refresh --refresh
-- Dashboard: ${env.FM_HOME}/bin/fm-understand-jt-dashboard status
+- Refresh: ${env.FM_ROOT}/bin/fm-understand-jt-refresh --refresh
+- Dashboard: ${env.FM_ROOT}/bin/fm-understand-jt-dashboard status
 
 Use this graph for orientation, dependency lookup, and likely impact areas.
 Do not treat it as source of truth. Open files directly and verify code, tests, runtime state, and JT data freshness before making claims.

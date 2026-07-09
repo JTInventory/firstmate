@@ -3,9 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
-REFRESH_BIN="${FM_UNDERSTAND_REFRESH_BIN:-$FM_HOME/bin/fm-understand-jt-refresh}"
+REFRESH_BIN="${FM_UNDERSTAND_REFRESH_BIN:-$FM_ROOT/bin/fm-understand-jt-refresh}"
 STATE_DIR="$FM_HOME/state"
 SUMMARY_PATH="$STATE_DIR/jt-understand-graph.summary.json"
 REFERENCE_PATH="$STATE_DIR/jt-understand-graph.reference.md"

@@ -106,6 +106,24 @@ test_brief_block_falls_back_when_refresh_unavailable() {
   pass "JT reference helper falls back when graph reference is unavailable"
 }
 
+test_reference_uses_repo_root_helper_with_external_home() {
+  local root home reference out
+  root="$TMP_ROOT/external-home-root"
+  home="$TMP_ROOT/external-home"
+  mkdir -p "$root/bin" "$home/state"
+  cp "$REFERENCE" "$root/bin/fm-understand-jt-reference"
+  write_fake_refresh "$root/bin/fm-understand-jt-refresh"
+  reference="$root/bin/fm-understand-jt-reference"
+
+  out=$(FM_HOME="$home" "$reference" brief-block) \
+    || fail "brief-block should use sibling refresh helper with external FM_HOME"
+
+  assert_contains "$out" '# JT Control Room structure reference' "reference should come from sibling helper"
+  assert_present "$home/state/jt-understand-graph.reference.md" "reference should still be written under external FM_HOME"
+  [ ! -e "$home/bin/fm-understand-jt-refresh" ] || fail "test setup should not provide helper under FM_HOME"
+  pass "JT reference helper uses repo root helper with external FM_HOME"
+}
+
 test_jt_understand_helpers_default_home_to_repo_root() {
   local helper
   for helper in \
@@ -122,4 +140,5 @@ test_should_attach_detects_jt_context
 test_append_brief_is_idempotent_and_uses_reference_packet
 test_append_skips_non_jt_context
 test_brief_block_falls_back_when_refresh_unavailable
+test_reference_uses_repo_root_helper_with_external_home
 test_jt_understand_helpers_default_home_to_repo_root

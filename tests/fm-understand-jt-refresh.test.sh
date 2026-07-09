@@ -79,4 +79,27 @@ test_refresh_accepts_git_worktree_dotgit_file() {
   pass "JT Understand refresh accepts git worktree .git files"
 }
 
+test_refresh_reference_commands_use_repo_root_with_external_home() {
+  local root repo home out rc
+  root="$TMP_ROOT/external-home-commands"
+  repo="$root/repo"
+  home="$root/home"
+  fm_git_init_commit "$repo"
+  mkdir -p "$repo/app" "$repo/components" "$repo/lib" "$repo/scripts/lib" "$home/state"
+  printf '%s\n' 'export default function Page() { return null; }' > "$repo/app/page.tsx"
+  write_understand_fixture "$repo"
+
+  set +e
+  out=$(FM_HOME="$home" JT_REPO="$repo" "$REFRESH" --reference 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "reference should succeed with external FM_HOME"
+  assert_contains "$out" "$ROOT/bin/fm-understand-jt-refresh --refresh" "reference should point refresh command at repo root bin"
+  assert_contains "$(cat "$home/state/jt-understand-graph.summary.json")" "$ROOT/bin/fm-understand-jt-refresh --status" "summary should point status command at repo root bin"
+  assert_no_grep "$home/bin/fm-understand-jt-refresh" "$home/state/jt-understand-graph.reference.md" "reference should not point helper commands at FM_HOME bin"
+  pass "JT Understand refresh command references use repo root bin"
+}
+
 test_refresh_accepts_git_worktree_dotgit_file
+test_refresh_reference_commands_use_repo_root_with_external_home
