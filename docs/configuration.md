@@ -248,8 +248,6 @@ FM_COGNEE_TIMEOUT_MS=30000 # connect and request timeout budget for live lookup
 FM_COGNEE_TELEMETRY_FILE=  # default: $FM_HOME/data/cognee/telemetry.jsonl
 FM_COGNEE_EVIDENCE_ROOT=/root/firstmate/data   # local evidence root for fm-cognee-lookup-gate.sh
 FM_COGNEE_AUTO_LOOKUP=0    # must be 1 plus all evidence markers before automatic lookup is allowed
-UA_NODE_BIN=/root/.nvm/versions/node/v22.22.2/bin/node # Node runtime for JT helpers
-JT_REPO=/root/.openclaw/workspace/projects/active/JT-Control-Room # graph source repo for JT helpers
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

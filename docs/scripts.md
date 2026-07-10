@@ -18,6 +18,7 @@ Each file also starts with a short header comment.
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
 | `fm-memory-lookup.sh`    | Manual read-only Cognee memory lookup for optional pre-dispatch hints; opens local source paths before brief attachment and stays non-blocking when unavailable |
 | `fm-no-mistakes-pr-target-guard.sh` | Fail closed before no-mistakes test/push/PR work if direct push resolution, the no-mistakes gate, or no-mistakes status would target `kunchenguid/firstmate` instead of `JTInventory/firstmate`; allow upstream-owner `origin` fetch only with controlled-fork proof |
+| `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`; accepts concrete `--harness`, `--model`, and `--effort` profile axes; ship/scout spawns require an explicit resolved harness when dispatch profiles are active and otherwise apply deterministic route model/effort axes when the active crew harness matches the route; requires an isolated treehouse worktree; matching JT Control Room PR-mode ship spawns append the `JT PR Intake Governor`; installs per-harness turn-end signaling; and secondmate spawns resolve the secondmate harness, apply primary-local secondmate model/effort defaults, locally sync the home, and propagate declared inheritable config before launch |
 | `fm-config-push.sh`      | Config-only mid-session push of declared inheritable local config into live secondmate homes; reports each item as pushed, unchanged, skipped, or error without fast-forwarding tracked files or nudging agents |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-route.sh`            | Classify a task into a deterministic route profile, harness, model, effort, reason, override, and risk flags for spawn/meta integration |
@@ -61,3 +62,8 @@ Each file also starts with a short header comment.
 | `fm-x-link.sh`           | Link a spawned task to its originating X mention by recording `x_request=` and `x_request_ts=` in `state/<id>.meta` |
 | `fm-x-followup.sh`       | Detect, post, and clear the single completion follow-up for an X-linked task, forwarding optional `--image <path>`, enforcing the local 24h window, and retrying only when the relay post fails |
 
+## Cognee policy
+
+Cognee policy lives in [cognee-policy.md](cognee-policy.md). Automatic lookup needs per-wrapper-call cost evidence: `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call`. Current `session_window_only` evidence is accepted only as trial monitoring evidence and still blocks automatic promotion because there is no safe per-wrapper-call cost/request/session/QA id bridge. Manual verified lookup remains read-only, hint-only, fail-closed, and local-source-verified.
+
+The official docs now show raw data readback and session/model cost surfaces. That does not satisfy Firstmate's production gates by itself: raw retention/source-authority guarantees and safe per-wrapper-call cost correlation remain unproven.
