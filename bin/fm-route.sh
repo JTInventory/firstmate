@@ -268,19 +268,19 @@ fi
 
 case "$profile" in
   cheap)
-    model=default
+    model=gpt-5.6-luna
     effort=low
     ;;
   standard)
-    model=gpt-5.5
+    model=gpt-5.6-terra
     effort=medium
     ;;
   deep)
-    model=gpt-5.5
+    model=gpt-5.6-sol
     effort=high
     ;;
   critical)
-    model=gpt-5.5
+    model=gpt-5.6-sol
     effort=medium
     ;;
 esac

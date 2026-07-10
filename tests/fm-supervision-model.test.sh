@@ -241,7 +241,7 @@ test_task_classifications_and_route_metadata() {
   write_fakebin "$fakebin"
   write_meta "$home" live 'working: still running' \
     "project=demo" "window=live" "kind=ship" "mode=direct-PR" "yolo=off" \
-    "harness=codex" "route_profile=critical" "route_harness=codex" "route_model=gpt-5.5" "route_effort=medium" \
+    "harness=codex" "route_profile=critical" "route_harness=codex" "route_model=gpt-5.6-sol" "route_effort=medium" \
     "branch=fm/live"
   write_meta "$home" merged 'done: PR https://github.com/o/r/pull/1 checks green' \
     "project=demo" "window=live" "pr=https://github.com/o/r/pull/1"
@@ -259,7 +259,7 @@ test_task_classifications_and_route_metadata() {
   assert_json_valid "$out" "task output"
   assert_contains "$out" '"classification": "running"' "live worker should be running"
   assert_contains "$out" '"route_profile": "critical"' "route profile should be preserved"
-  assert_contains "$out" '"route_model": "gpt-5.5"' "route model should be preserved"
+  assert_contains "$out" '"route_model": "gpt-5.6-sol"' "route model should be preserved"
   assert_contains "$out" '"recorded_branch": "fm/live"' "recorded branch should be preserved"
   assert_contains "$out" 'merged_pr_live_worker' "merged PR live worker not classified"
   assert_contains "$out" 'pr_open_ci_green' "green PR not classified"

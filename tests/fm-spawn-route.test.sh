@@ -74,7 +74,7 @@ EOF
   meta="$home/state/$id.meta"
   assert_grep "route_profile=critical" "$meta" "ordinary spawn did not record route profile"
   assert_grep "route_harness=codex" "$meta" "ordinary spawn did not record route harness"
-  assert_grep "route_model=gpt-5.5" "$meta" "ordinary spawn did not record route model"
+  assert_grep "route_model=gpt-5.6-sol" "$meta" "ordinary spawn did not record route model"
   assert_grep "route_effort=medium" "$meta" "ordinary spawn did not record route effort"
   assert_grep "route_override=none" "$meta" "ordinary spawn did not record route override"
   assert_grep "route_risk_flags=production,firstmate-core" "$meta" "ordinary spawn did not record route risk flags"

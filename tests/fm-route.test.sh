@@ -15,11 +15,24 @@ route_profile() {
   printf '%s\n' "$1" | awk -F= '$1=="profile"{print $2; exit}'
 }
 
+route_model() {
+  printf '%s\n' "$1" | awk -F= '$1=="model"{print $2; exit}'
+}
+
 assert_profile() {
   local expected=$1 text=$2 out profile
   out=$(run_route --task-file "$text") || fail "route failed for $expected: $out"
   profile=$(route_profile "$out")
   [ "$profile" = "$expected" ] || fail "expected profile $expected, got $profile"$'\n'"$out"
+}
+
+assert_route_model() {
+  local expected_profile=$1 expected_model=$2 text=$3 out profile model
+  out=$(run_route --task-file "$text") || fail "route failed for $expected_profile/$expected_model: $out"
+  profile=$(route_profile "$out")
+  model=$(route_model "$out")
+  [ "$profile" = "$expected_profile" ] || fail "expected profile $expected_profile, got $profile"$'\n'"$out"
+  [ "$model" = "$expected_model" ] || fail "expected model $expected_model for $expected_profile, got $model"$'\n'"$out"
 }
 
 assert_profile_one_of() {
@@ -45,6 +58,8 @@ trap 'rm -rf "$tmp"' EXIT
 prod=$(write_task "$tmp" prod 'Investigate production refresh on the 4187 follow-main serve lane.')
 assert_profile critical "$prod"
 pass "production refresh routes critical"
+assert_route_model critical gpt-5.6-sol "$prod"
+pass "critical route uses GPT-5.6 Sol"
 
 auth=$(write_task "$tmp" auth 'Review Gmail auth token handling for mailbox proof.')
 assert_profile critical "$auth"
@@ -70,6 +85,8 @@ docs_typo_cleanup=$(write_task "$tmp" docs-typo-cleanup 'read-only docs typo cle
 out=$(run_route --kind scout --task-file "$docs_typo_cleanup") || fail "docs typo cleanup route failed: $out"
 profile=$(route_profile "$out")
 [ "$profile" = cheap ] || fail "read-only docs typo cleanup should route cheap, got $profile"$'\n'"$out"
+model=$(route_model "$out")
+[ "$model" = gpt-5.6-luna ] || fail "read-only docs typo cleanup should use GPT-5.6 Luna, got $model"$'\n'"$out"
 pass "read-only docs typo cleanup stays cheap"
 
 cleanup_notes=$(write_task "$tmp" cleanup-notes 'cleanup notes')
@@ -88,6 +105,8 @@ pass "Firstmate core safety routes critical"
 architecture=$(write_task "$tmp" architecture 'Create an architecture migration plan for the workflow.')
 assert_profile deep "$architecture"
 pass "architecture/migration routes deep"
+assert_route_model deep gpt-5.6-sol "$architecture"
+pass "deep route uses GPT-5.6 Sol"
 
 docs_inventory=$(write_task "$tmp" docs 'Read-only docs inventory scout; summarize files only.')
 out=$(run_route --kind scout --task-file "$docs_inventory") || fail "docs inventory route failed: $out"
@@ -102,6 +121,8 @@ pass "read-only docs inventory scout avoids critical"
 ambiguous=$(write_task "$tmp" ambiguous 'Figure out what is going on here and make it better.')
 assert_profile_one_of "standard deep" "$ambiguous"
 pass "unknown ambiguous task is not cheap"
+assert_route_model standard gpt-5.6-terra "$ambiguous"
+pass "standard route uses GPT-5.6 Terra"
 
 out=$(run_route --profile critical --task-file "$docs_inventory") || fail "manual critical upgrade failed: $out"
 assert_contains "$out" "profile=critical" "manual critical upgrade did not set critical"
