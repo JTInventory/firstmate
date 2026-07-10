@@ -65,7 +65,7 @@ Launch mechanics, including the verified command templates, live in [`bin/fm-spa
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents.
 When it is absent or contains `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, preserving the previous behavior.
-`config/secondmate-profile.json` is the separate local, gitignored model/effort profile for those primary-to-secondmate launches, for example `{"model":"gpt-5.5","effort":"high"}`.
+`config/secondmate-profile.json` is the separate local, gitignored model/effort profile for those primary-to-secondmate launches, for example `{"model":"gpt-5.6-sol","effort":"high"}`.
 It never chooses the harness; `config/secondmate-harness` keeps that job.
 Missing file, omitted keys, and explicit `"default"` values preserve `model=default` and `effort=default`.
 Explicit `--model` or `--effort` on `fm-spawn.sh --secondmate` overrides the file for that one launch.
@@ -85,6 +85,7 @@ Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness`, then apply any primary-local `config/secondmate-profile.json` model or effort defaults.
 Each rule has `when`, `use.harness`, optional `use.model`, optional `use.effort`, and optional `why`; an optional `default` profile uses the same `use` shape without `when`.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
+The recommended Codex family policy is: keep MiniMax for very simple token-saving work, use `gpt-5.6-luna` for small Codex-shaped tasks, use `gpt-5.6-terra` as the everyday default, and use `gpt-5.6-sol` for high-risk or critical work.
 When the file exists, bootstrap validates it with `jq`.
 Valid files produce a `CREW_DISPATCH: active config/crew-dispatch.json` block that lists each rule as `rule: <when> -> <harness[/model[/effort]]>` and prints `default:` when present.
 Malformed JSON, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.

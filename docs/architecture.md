@@ -117,7 +117,7 @@ Secondmate spawn also propagates the same inheritable config before launch.
 
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and falls back to `config/crew-harness`, then to the primary's own harness, when unset or `default`.
-`config/secondmate-profile.json` controls only the primary's secondmate launch model and effort axes, so a primary can durably pair `config/secondmate-harness=codex` with `{"model":"gpt-5.5","effort":"high"}` without relying on operator memory.
+`config/secondmate-profile.json` controls only the primary's secondmate launch model and effort axes, so a primary can durably pair `config/secondmate-harness=codex` with `{"model":"gpt-5.6-sol","effort":"high"}` without relying on operator memory.
 `fm-spawn.sh --secondmate` re-reads that profile on each launch or recovery respawn, while explicit `--model` and `--effort` still win for one spawn.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
