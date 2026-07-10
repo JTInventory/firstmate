@@ -223,6 +223,27 @@ log_reports_ci_ready() {
     *) return 1 ;;
   esac
 }
+# A no-mistakes run remains active after checks turn green while it waits for the
+# captain's merge. The CI log is the durable distinction between that ready
+# state and checks that are still running; the most recent marker wins.
+nm_ci_checks_state() {
+  local run_id log_tail marker
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || { printf 'unknown'; return; }
+  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  [ -n "$log_tail" ] || { printf 'unknown'; return; }
+  marker=$(printf '%s\n' "$log_tail" | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' | tail -1)
+  case "$marker" in
+    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+nm_ci_is_monitoring() {
+  [ "${status:-}" = ci ] && return 0
+  [ "${status:-}" = running ] || return 1
+  printf '%s\n' "$RUN_OUT" | grep -qE '^[[:space:]]*ci,[[:space:]]*running,'
+}
 # Most recent run id whose branch matches, from the `no-mistakes axi` run list.
 nm_run_id_for_branch() {  # <branch> <list-output>
   local branch=$1 list=$2 row id rest br in_runs=0 found=""
@@ -323,6 +344,12 @@ if [ "$HAVE_RUN" = 1 ]; then
     esac
   fi
 
+  if [ "$RUN_STATE" = working ] && nm_ci_is_monitoring; then
+    if test "$(nm_ci_checks_state)" = "green"; then
+      RUN_STATE="done"
+      RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+    fi
+  fi
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
   fi
