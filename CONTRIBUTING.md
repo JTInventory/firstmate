@@ -84,7 +84,7 @@ tests/fm-understand-jt-refresh.test.sh    # JT Understand Anything graph refresh
 tests/fm-understand-jt-reference.test.sh  # JT Understand Anything brief reference context detection, idempotent append, skip, and fallback behavior
 tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
-tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, and bootstrap relay
+tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, deterministic single-clone resolution, and bootstrap relay
 tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings, persistent secondmate inventory, and no-change contract
 tests/fm-route.test.sh                    # deterministic route profiles, overrides, risk flags, and downgrade handling
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests
@@ -107,6 +107,7 @@ tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter
 tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, PR-head metadata, tasks-axi/manual backlog reminder, --force override
 tests/fm-pr-merge.test.sh                 # captain-gated PR merge wrapper: approval marker, qualified GitHub URL parsing, PR-evidence recording, squash default, and repository-override refusal
 tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
+tests/fm-crew-state-ci-ready.test.sh      # active no-mistakes CI monitor with green checks reports PR readiness while merge/close monitoring continues
 tests/fm-task-identity.test.sh            # task branch/meta identity guard for PR check, diff review, and teardown helpers
 tests/fm-watch-session.test.sh            # durable home-scoped watcher tmux runner start/status/stop and re-arm delay behavior
 tests/fm-supervision-model.test.sh        # read-only supervision checklist, secondmate/scout classification boundaries, and `firstmate.supervision.v1.1` JSON/schema output

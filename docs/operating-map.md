@@ -60,7 +60,7 @@ Owner: `AGENTS.md` sections 2, 6, and 7; `bin/fm-spawn.sh`; `bin/fm-tmux-lib.sh`
 ## 8. Status And Current State
 
 `state/<id>.status` is an append-only event log, not the current state by itself.
-Firstmate reads current state through `fm-crew-state.sh`, which reconciles no-mistakes run state, pane state, and the latest status line.
+Firstmate reads current state through `fm-crew-state.sh`, which reconciles no-mistakes run state, pane state, and the latest status line; an active CI monitor with a current green-check marker reports PR-ready while it continues watching for merge or close.
 
 Owner: `AGENTS.md` sections 2 and 8; `bin/fm-crew-state.sh`; `bin/fm-classify-lib.sh`.
 
