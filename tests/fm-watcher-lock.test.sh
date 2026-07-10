@@ -749,8 +749,21 @@ test_arm_migrates_live_legacy_watcher_lock() {
     i=$((i + 1))
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
-  printf '%s\n' "legacy locale-sensitive watcher identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  printf '%s\n' "legacy locale-sensitive watcher identity $WATCH" > "$state/.watch.lock/pid-identity"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${LC_ALL:-}" = legacy_TEST ]; then
+  printf 'legacy locale-sensitive watcher identity %s\n' "${FM_FAKE_WATCH_PATH:?}"
+else
+  printf 'current watcher identity %s\n' "${FM_FAKE_WATCH_PATH:?}"
+fi
+SH
+  cat > "$fakebin/locale" <<'SH'
+#!/usr/bin/env bash
+printf 'C\nlegacy_TEST\n'
+SH
+  chmod +x "$fakebin/ps" "$fakebin/locale"
+  PATH="$fakebin:$PATH" FM_FAKE_WATCH_PATH="$WATCH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -771,6 +784,35 @@ test_arm_migrates_live_legacy_watcher_lock() {
   status=$?
   [ "$status" -eq 0 ] || fail "arm did not exit after the migrated watcher ended (status $status)"
   pass "arm migrates and attaches to a live legacy watcher lock"
+}
+
+test_arm_rejects_unverified_legacy_watcher_lock() {
+  local dir state fakebin out armout i wpid armpid status
+  dir=$(make_case arm-reject-legacy)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  printf '%s\n' "unrelated process with $WATCH in its command" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 40
+  status=$?
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  [ "$status" -ne 0 ] || fail "arm accepted an unverified legacy watcher"
+  ! grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm attached to an unverified legacy watcher"
+  grep -qF 'watcher: FAILED' "$armout" || fail "arm did not fail closed for an unverified legacy watcher: $(cat "$armout")"
+  pass "arm rejects an unverified legacy watcher lock"
 }
 
 test_arm_starts_and_self_heals() {
@@ -962,6 +1004,7 @@ test_arm_reclaims_reused_pid_lock_on_plain_arm
 test_watcher_self_evicts_on_lock_takeover
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_migrates_live_legacy_watcher_lock
+test_arm_rejects_unverified_legacy_watcher_lock
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation

@@ -24,14 +24,21 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
-fm_pid_identity() {
-  local pid=$1 out
+fm_pid_identity_for_locale() {
+  local pid=$1 locale=$2 out
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  [ -n "$locale" ] || return 1
+  out=$(LC_ALL="$locale" ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf 'v1:%s\n' "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
+  printf '%s\n' "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
+}
+
+fm_pid_identity() {
+  local identity
+  identity=$(fm_pid_identity_for_locale "$1" C) || return 1
+  printf 'v1:%s\n' "$identity"
 }
 
 fm_pid_identity_matches_stored() {
@@ -49,10 +56,18 @@ fm_pid_identity_is_legacy() {
   esac
 }
 
-fm_pid_command_contains() {
-  local pid=$1 needle=$2 command
-  command=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 1
-  printf '%s\n' "$command" | grep -F -- "$needle" >/dev/null 2>&1
+fm_pid_identity_matches_legacy() {
+  local pid=$1 stored_identity=$2 locale candidate
+  [ -n "$stored_identity" ] || return 1
+  while IFS= read -r locale; do
+    [ -n "$locale" ] || continue
+    candidate=$(fm_pid_identity_for_locale "$pid" "$locale") || continue
+    [ "$candidate" = "$stored_identity" ] && return 0
+  done < <(
+    printf '%s\n' "${LC_ALL:-}" "${LANG:-}" C
+    command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null || true
+  )
+  return 1
 }
 
 fm_lock_migrate_legacy_watcher_identity() {
@@ -64,7 +79,7 @@ fm_lock_migrate_legacy_watcher_identity() {
   [ "$(cat "$owner/fm-home" 2>/dev/null || true)" = "$expected_home" ] || return 1
   [ "$(cat "$owner/watcher-path" 2>/dev/null || true)" = "$expected_path" ] || return 1
   fm_pid_alive "$pid" || return 1
-  fm_pid_command_contains "$pid" "$expected_path" || return 1
+  fm_pid_identity_matches_legacy "$pid" "$stored_identity" || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   fm_lock_points_to_owner "$lockdir" "$owner" || return 1
   [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$pid" ] || return 1
