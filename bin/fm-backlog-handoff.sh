@@ -258,15 +258,17 @@ awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" '
     while ((getline k < keysfile) > 0) { if (k != "") want[k] = 1 }
     section = "## Queued"
   }
-  /^## / { section = $0; print; next }
+  /^## / { section = $0; moving = 0; print; next }
   /^- \[[ x]\] / {
     rest = $0
     sub(/^- \[[ x]\] +/, "", rest)
     id = rest
     sub(/[ \t].*/, "", id)
-    if (id in want) { print section "\t" $0 > movedfile; next }
+    if (id in want) { print section "\t" $0 > movedfile; moving = 1; next }
+    moving = 0
   }
-  { print }
+  moving && /^[[:space:]]+/ { print section "\t" $0 > movedfile; next }
+  { moving = 0; print }
 ' "$MAIN_BACKLOG" > "$KEPT_FILE"
 
 # Pass 2: insert each moved line at the end of its section in the sub backlog,

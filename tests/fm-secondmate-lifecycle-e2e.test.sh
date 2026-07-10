@@ -157,6 +157,8 @@ phase_handoff() {
 ## Queued
 - [ ] feat-x - add feature x (repo: alpha)
 - [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits
+  Context: preserve this indented note.
+  Detail: second paragraph survives the handoff.
 - [ ] bug-z - fix bug z (repo: gamma)
 
 ## Done
@@ -174,6 +176,8 @@ EOF
 
   assert_grep '- [ ] feat-x - add feature x (repo: alpha)' "$SUB/data/backlog.md" "feat-x did not arrive verbatim"
   assert_grep '- [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits' "$SUB/data/backlog.md" "feat-y line not preserved verbatim"
+  assert_grep 'Context: preserve this indented note.' "$SUB/data/backlog.md" "feat-y continuation note did not move with its task"
+  assert_grep 'Detail: second paragraph survives the handoff.' "$SUB/data/backlog.md" "feat-y second continuation note did not move with its task"
   awk '/^## Queued/{q=1;next} /^## /{q=0} q && /feat-x/{found=1} END{exit found?0:1}' "$SUB/data/backlog.md" \
     || fail "feat-x did not land under the Queued section"
 
