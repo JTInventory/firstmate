@@ -638,6 +638,9 @@ EOF
     if [ "$HARNESS" != "$ROUTE_HARNESS" ]; then
       ROUTE_OVERRIDE=config-harness
       ROUTE_REASON="$ROUTE_REASON; launch harness overridden by config/crew-harness: $HARNESS"
+    else
+      [ "$MODEL_SET" -eq 1 ] || MODEL=$ROUTE_MODEL
+      [ "$EFFORT_SET" -eq 1 ] || EFFORT=$ROUTE_EFFORT
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from route profile '$ROUTE_PROFILE'); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
   fi

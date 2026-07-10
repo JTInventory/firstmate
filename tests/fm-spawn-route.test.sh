@@ -23,7 +23,20 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  has-session|new-session|new-window) exit 0 ;;
+esac
+if [ "${1:-}" = send-keys ] && [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+  prev=
+  for arg in "$@"; do
+    if [ "$prev" = -l ]; then
+      printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
+      exit 0
+    fi
+    prev=$arg
+  done
+fi
+case "${1:-}" in
+  send-keys) exit 0 ;;
 esac
 exit 0
 SH
@@ -50,16 +63,17 @@ make_case() {
 run_spawn_case() {
   local home=$1 id=$2 proj=$3 wt=$4 fakebin=$5
   shift 5
+  : > "$home/launch.log"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" "$@" 2>&1
 }
 
 test_ordinary_spawn_records_route_fields() {
-  local home proj wt fakebin id out status meta brief
+  local home proj wt fakebin id out status meta brief launch
   IFS='|' read -r home proj wt fakebin <<EOF
 $(make_case ordinary)
 EOF
@@ -78,6 +92,9 @@ EOF
   assert_grep "route_effort=medium" "$meta" "ordinary spawn did not record route effort"
   assert_grep "route_override=none" "$meta" "ordinary spawn did not record route override"
   assert_grep "route_risk_flags=production,firstmate-core" "$meta" "ordinary spawn did not record route risk flags"
+  launch=$(cat "$home/launch.log")
+  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"medium\"' --dangerously-bypass-approvals-and-sandbox" \
+    "ordinary route did not thread model and effort into launch"
   assert_grep "# Route" "$brief" "ordinary spawn did not add route block to brief"
   assert_grep "route: critical because" "$brief" "ordinary spawn brief route summary missing"
   pass "ordinary spawn records route evidence and appends a brief route block"
