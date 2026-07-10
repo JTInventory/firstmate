@@ -517,7 +517,7 @@ A ship task's path from `done` to landed on `main` is set by the project's `mode
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.
 Pooled clones keep their local default refs frozen at clone time and can lag `origin`; the helper always compares against the authoritative base.
 
-**yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge. With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, run `bin/fm-pr-check.sh <id> <PR url>` before any PR merge if it has not already been run, and run `gh-axi pr merge` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain. Never merge a red PR even under yolo. After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
+**yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge. With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, run `FM_CAPTAIN_APPROVED_MERGE=1 bin/fm-pr-merge.sh <id> <full GitHub PR URL>` after explicit captain approval, or `bin/fm-merge-local.sh` for local-only work - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain. Never merge a red PR even under yolo. After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
 ### Validate
 
@@ -551,7 +551,9 @@ Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and GitHub's `pr_head=
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
-If the captain says "merge it", run `gh-axi pr merge` yourself; that instruction is the explicit approval. If `yolo=on`, merge a green/approved PR yourself and post the required FYI.
+If the captain says "merge it", run `FM_CAPTAIN_APPROVED_MERGE=1 bin/fm-pr-merge.sh <id> <full GitHub PR URL>`; that explicit environment marker records the approval and prevents direct `gh-axi pr merge` use. Local-only work keeps `bin/fm-merge-local.sh`.
+
+The wrapper parses the URL into the PR number and repository, defaults to squash, and rejects `--repo` or `-R` overrides.
 
 ### Ship teardown (only after merge is confirmed)
 
