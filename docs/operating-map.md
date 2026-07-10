@@ -14,8 +14,9 @@ Owner: `AGENTS.md` sections 1, 6, 7, and 9.
 
 At session start, firstmate runs bootstrap, reads local fleet records, and recovers already in-flight work before dispatching anything new.
 The durable inputs are local `data/` records, `state/*.meta`, `state/*.status`, tmux windows, secondmate homes, and project clones.
+Bootstrap uses the shared tool-path helper before dependency checks; spawn, teardown, and the read-only model reuse it so clean non-interactive shells discover HOME-installed Axi tools the same way.
 
-Owner: `AGENTS.md` sections 2, 3, and 5; `bin/fm-bootstrap.sh`; `bin/fm-fleet-sync.sh`; `bin/fm-crew-state.sh`.
+Owner: `AGENTS.md` sections 2, 3, and 5; `bin/fm-bootstrap.sh`; `bin/fm-tool-path-lib.sh`; `bin/fm-fleet-sync.sh`; `bin/fm-crew-state.sh`.
 
 ## 3. Intake And Routing
 
@@ -72,7 +73,7 @@ Owner: `AGENTS.md` section 8; `bin/fm-watch.sh`; `bin/fm-watch-arm.sh`; `bin/fm-
 
 When a display or operator needs the shared state model, `fm-supervise.sh` emits either a checklist or the `firstmate.supervision.v1.1` JSON contract.
 The JSON includes task classifications, worktree checks, external reminders, watcher source status, and `backlog_consistency` drift findings based on the same audit vocabulary as `fm-backlog-audit.sh`.
-The model normalizes existing HOME-local Axi tool paths before optional GitHub reads, so non-interactive shells can still report GitHub runtime health when `gh-axi` is installed under NVM or `.local/bin`.
+The model invokes the shared HOME-local tool-path normalization before optional GitHub reads, so non-interactive shells can still report GitHub runtime health when `gh-axi` is installed under NVM or `.local/bin`.
 
 Owner: `AGENTS.md` sections 8 and 10; `bin/fm-supervise.sh`; `bin/fm-supervision-model.sh`; `bin/fm-backlog-audit.sh`; `bin/fm-backlog-audit-lib.sh`.
 

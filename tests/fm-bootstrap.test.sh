@@ -259,9 +259,24 @@ ROWS
   pass "bootstrap validates secondmate-profile.json and reports malformed or invalid configs"
 }
 
+test_bootstrap_discovers_home_nvm_tasks_axi() {
+  local home nodebin fakebin out
+  home="$TMP_ROOT/bootstrap-home-nvm"
+  nodebin="$home/.nvm/versions/node/v22.22.2/bin"
+  mkdir -p "$nodebin"
+  add_tasks_axi "$nodebin" "0.1.2"
+  fakebin=$(make_fake_toolchain "$home")
+
+  out=$(HOME="$home" PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "TASKS_AXI: available" ] || fail "bootstrap did not discover HOME NVM tasks-axi: $out"
+  pass "bootstrap discovers HOME NVM tasks-axi in a clean non-interactive PATH"
+}
+
 test_bootstrap_reporting
 test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
 test_crew_dispatch_active_rules_are_surfaced
 test_crew_dispatch_validation
 test_secondmate_profile_validation
+test_bootstrap_discovers_home_nvm_tasks_axi

@@ -97,7 +97,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Toolchain
 
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh with `gh pr checks --json` support, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
-For read-only supervision runs, `fm-supervise.sh` also looks in existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories before declaring `gh-axi` missing, which covers non-interactive SSH shells that do not source the usual Node setup.
+Bootstrap, spawn, teardown, and read-only supervision normalize existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories before looking up Axi tools. This covers clean non-interactive SSH shells without overriding an explicit caller PATH.
+Set `FM_TOOL_PATH_HOME` only when those shared lookups must use a home directory other than `HOME`, such as in a specialized shell or test fixture.
 When `config/crew-dispatch.json` or `config/secondmate-profile.json` exists, bootstrap also requires `jq` for JSON validation.
 Malformed `config/secondmate-profile.json`, a non-object top level, non-string axes, an empty model, or an effort outside `default|low|medium|high|xhigh|max` is reported as `SECONDMATE_PROFILE: invalid config/secondmate-profile.json - ...`.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
@@ -209,6 +210,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
@@ -249,7 +251,7 @@ FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 
 # read-only supervision view (bin/fm-supervise.sh)
 FM_SUPERVISE_TREEHOUSE_TIMEOUT=5   # seconds allowed per treehouse status read
 FM_SUPERVISE_GH_TIMEOUT=5          # seconds allowed per gh-axi GitHub read
-# fm-supervise also prepends existing $HOME/.nvm/versions/node/*/bin and $HOME/.local/bin entries when absent
+# bootstrap, spawn, teardown, and fm-supervise append existing HOME-local NVM and .local/bin entries when absent
 # Cognee trial memory and local verification
 FM_COGNEE_LOOKUP_CMD=      # executable backend path for manual memory lookup, usually bin/fm-cognee-lookup.sh
 FM_MEMORY_LOOKUP_MAX_HINT_LINES=40   # maximum hint lines printed from a manual memory lookup
