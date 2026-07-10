@@ -19,7 +19,7 @@ Owner: `AGENTS.md` sections 2, 3, and 5; `bin/fm-bootstrap.sh`; `bin/fm-fleet-sy
 
 ## 3. Intake And Routing
 
-Firstmate resolves the project from `data/projects.md`, applies project mode, checks secondmate scopes, and selects the route profile and crewmate harness.
+Firstmate resolves the project from `data/projects.md`, applies project mode, checks secondmate scopes, and selects the route profile, harness, model, and effort.
 Local-only projects stay with the main firstmate; routed secondmate work goes through the registered secondmate home.
 
 Owner: `AGENTS.md` sections 4, 6, and 7; `bin/fm-project-mode.sh`; `bin/fm-route.sh`; `data/projects.md`; `data/secondmates.md`.
@@ -42,7 +42,7 @@ Owner: `AGENTS.md` sections 6 and 7; `bin/fm-brief.sh`; `bin/fm-spawn.sh`; `bin/
 
 ## 6. Spawn
 
-`fm-spawn.sh` allocates the tmux window, gets or validates the isolated worktree, writes the task meta record, launches the selected harness, and installs any harness-specific turn-end hooks.
+`fm-spawn.sh` allocates the tmux window, gets or validates the isolated worktree, writes the task meta record, launches the selected harness with the resolved model and effort when supported, and installs any harness-specific turn-end hooks.
 Secondmate spawn uses the same direct-report machinery but points at an isolated firstmate home.
 
 Owner: `AGENTS.md` sections 4 and 7; `bin/fm-spawn.sh`; `bin/fm-harness.sh`; `bin/fm-task-identity-lib.sh`; `bin/fm-home-seed.sh`.

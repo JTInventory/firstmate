@@ -338,16 +338,16 @@ test_spawn_secondmate_profile_sets_model_effort_only() {
   sm="$w/sm"
   mkdir -p "$w/home/config"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
-  printf '{"model":"gpt-5.5","effort":"high"}\n' > "$w/home/config/secondmate-profile.json"
+  printf '{"model":"gpt-5.6-sol","effort":"high"}\n' > "$w/home/config/secondmate-profile.json"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
 
   meta="$w/home/state/sm.meta"
   [ "$(meta_harness "$meta")" = codex ] || fail "profile: secondmate harness changed unexpectedly"
-  [ "$(meta_model "$meta")" = gpt-5.5 ] || fail "profile: model was '$(meta_model "$meta")', expected gpt-5.5"
+  [ "$(meta_model "$meta")" = gpt-5.6-sol ] || fail "profile: model was '$(meta_model "$meta")', expected gpt-5.6-sol"
   [ "$(meta_effort "$meta")" = high ] || fail "profile: effort was '$(meta_effort "$meta")', expected high"
-  assert_contains "$(cat "$meta")" "route_model=gpt-5.5" "profile: route_model did not record resolved profile"
+  assert_contains "$(cat "$meta")" "route_model=gpt-5.6-sol" "profile: route_model did not record resolved profile"
   assert_contains "$(cat "$meta")" "route_effort=high" "profile: route_effort did not record resolved profile"
   [ -e "$sm/config/secondmate-profile.json" ] \
     && fail "profile: secondmate-profile.json leaked into the secondmate home"
@@ -360,14 +360,14 @@ test_spawn_secondmate_profile_reread_and_explicit_axes_win() {
   sm="$w/sm"
   mkdir -p "$w/home/config"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
-  printf '{"model":"gpt-5.5","effort":"medium"}\n' > "$w/home/config/secondmate-profile.json"
+  printf '{"model":"gpt-5.6-terra","effort":"medium"}\n' > "$w/home/config/secondmate-profile.json"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
   meta="$w/home/state/sm.meta"
   [ "$(meta_effort "$meta")" = medium ] || fail "profile reread: first effort was not medium"
 
-  printf '{"model":"gpt-5.5","effort":"high"}\n' > "$w/home/config/secondmate-profile.json"
+  printf '{"model":"gpt-5.6-sol","effort":"high"}\n' > "$w/home/config/secondmate-profile.json"
   spawn_secondmate "$w" sm "$sm"
   [ "$(meta_effort "$meta")" = high ] || fail "profile reread: respawn did not read changed effort"
 

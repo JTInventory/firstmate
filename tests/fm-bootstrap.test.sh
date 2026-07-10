@@ -184,14 +184,14 @@ test_crew_dispatch_active_rules_are_surfaced() {
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":{"harness":"codex","model":"gpt-5.5","effort":"high"}}],"default":{"harness":"claude","model":"haiku","effort":"low"}}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-sol","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5.6-terra","effort":"medium"}}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
-  expect=$'CREW_DISPATCH: active config/crew-dispatch.json\n  rule: fresh news -> grok\n  rule: big feature -> codex/gpt-5.5/high\n  default: claude/haiku/low'
+  expect=$'CREW_DISPATCH: active config/crew-dispatch.json\n  rule: fresh news -> grok\n  rule: big feature -> codex/gpt-5.6-sol/high\n  default: codex/gpt-5.6-terra/medium'
   [ "$out" = "$expect" ] || fail "active dispatch profile block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
   pass "bootstrap surfaces active crew-dispatch rules and default"
 }
@@ -247,7 +247,7 @@ test_secondmate_profile_validation() {
         [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
     esac
   done <<'ROWS'
-valid profile is silent^{"model":"gpt-5.5","effort":"high"}^empty^
+valid profile is silent^{"model":"gpt-5.6-sol","effort":"high"}^empty^
 default values are silent^{"model":"default","effort":"default"}^empty^
 malformed profile config is flagged^{"model":^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - malformed JSON
 non-object profile is flagged^[]^exact^SECONDMATE_PROFILE: invalid config/secondmate-profile.json - top-level value must be an object

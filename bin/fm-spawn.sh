@@ -10,11 +10,14 @@
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
-#   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
-#   spawns require an explicit harness so firstmate cannot silently skip dispatch
-#   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
-#   harness (config/secondmate-harness -> config/crew-harness -> own), then fills
-#   any omitted --model/--effort axes from primary-local config/secondmate-profile.json.
+#   config/crew-dispatch.json is absent. It also reads fm-route.sh and fills any
+#   omitted --model/--effort axes from the route when the active crew harness still
+#   matches the routed harness. When config/crew-dispatch.json exists,
+#   crewmate/scout spawns require an explicit harness so firstmate cannot silently
+#   skip dispatch profile consultation. A --secondmate spawn is exempt and resolves
+#   the SECONDMATE harness (config/secondmate-harness -> config/crew-harness -> own),
+#   then fills any omitted --model/--effort axes from primary-local
+#   config/secondmate-profile.json.
 #   That keeps the secondmate-vs-crewmate launch profile DURABLE across every
 #   respawn (recovery, /updatefirstmate, restart). A bare adapter name
 #   (claude|codex|opencode|pi|grok) overrides the harness for this spawn (either
@@ -638,6 +641,9 @@ EOF
     if [ "$HARNESS" != "$ROUTE_HARNESS" ]; then
       ROUTE_OVERRIDE=config-harness
       ROUTE_REASON="$ROUTE_REASON; launch harness overridden by config/crew-harness: $HARNESS"
+    else
+      [ "$MODEL_SET" -eq 1 ] || MODEL=$ROUTE_MODEL
+      [ "$EFFORT_SET" -eq 1 ] || EFFORT=$ROUTE_EFFORT
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from route profile '$ROUTE_PROFILE'); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
   fi
