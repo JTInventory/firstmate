@@ -536,7 +536,7 @@ That log is an append-only wake-*event* log, not a current-state field, and it g
 So never infer current state from a `tail` of that log; `bin/fm-crew-state.sh` reports the live run-step state and explicitly flags the stale log line superseded, where a raw `tail` would mislead you into re-escalating settled work.
 The fields below name the run-step states and outcomes it reads from `no-mistakes axi status`; run that command directly when you want the full gate findings.
 
-- `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); these run for many minutes and quiet is normal, so leave it alone.
+- `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); these run for many minutes and quiet is normal, so leave it alone. The exception is a current CI log marker saying checks are green: `fm-crew-state.sh` then reports the PR ready for captain review while no-mistakes continues to watch for merge or close.
 - `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`.
   The crewmate owes a response; if it is idle-waiting for the run to advance on its own, steer it to follow no-mistakes' active-gate help.
 - `outcome: passed` or `checks-passed` - the helper reports `done`; `passed` means the PR is already merged or closed, while `checks-passed` means it is ready for PR review.
