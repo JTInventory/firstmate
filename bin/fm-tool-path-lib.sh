@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Normalize tool lookup for interactive and clean non-interactive OpenClaw shells.
 # Usage: . bin/fm-tool-path-lib.sh; fm_normalize_tool_path
+# FM_TOOL_PATH_HOME overrides HOME for tests or specialized shells.
 
 fm_normalize_tool_path() {
   local home candidate current_path

@@ -112,7 +112,8 @@ Outside tmux, crewmates land in a detached `firstmate` session you can attach to
 You chat with the first mate.
 It routes each request to a crewmate in its own tmux window and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 When the current fleet state is unclear, `bin/fm-supervise.sh` gives a passive read-only checklist, and `bin/fm-supervise.sh --json` exposes the same shared model for display tools such as Radar.
-Before checking optional GitHub state, it adds `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` when those directories exist, so SSH or other non-interactive sessions can still find `gh-axi`.
+Bootstrap, spawn, teardown, and the read-only supervision model share the same tool-path normalization: they append existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories without overriding the caller's earlier `PATH` entries.
+That lets SSH and other clean non-interactive sessions find HOME-installed Axi tools consistently.
 For an end-to-end navigation map of the request-to-teardown lifecycle, see [docs/operating-map.md](docs/operating-map.md).
 For PRs, that model combines GitHub commit status and check-runs before deciding whether CI is green, pending, failed, absent, or unknown.
 It also exposes backlog/state drift through `backlog_consistency`, using the same audit vocabulary as `bin/fm-backlog-audit.sh`.
@@ -159,6 +160,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, optional X mode, the files you set, and harness support.
 - [docs/cognee-policy.md](docs/cognee-policy.md) - the trial-only, hint-only Cognee memory policy and production gates.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
+- [docs/upstream-adoption-ledger.md](docs/upstream-adoption-ledger.md) - the evidence, decisions, and safety boundaries for selective upstream adoption.
 - [`AGENTS.md`](AGENTS.md) - firstmate's full operating manual for the orchestrator agent.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
 

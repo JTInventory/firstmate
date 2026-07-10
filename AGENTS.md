@@ -120,6 +120,8 @@ Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 
 Run `bin/fm-bootstrap.sh`.
+Before checking the toolchain, bootstrap adds existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories to `PATH` without moving them ahead of an explicit caller path.
+The same shared normalization runs before tool lookup in spawn, teardown, and the read-only supervision model, so clean non-interactive shells can find HOME-installed Axi tools consistently.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Bootstrap also sweeps every live secondmate home, fast-forwarding each one's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
