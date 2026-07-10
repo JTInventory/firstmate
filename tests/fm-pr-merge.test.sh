@@ -48,5 +48,18 @@ test_refusals_do_not_record_or_merge() {
   pass 'missing approval and malformed URL refuse before side effects'
 }
 
+test_repo_override_refuses_and_explicit_method_is_preserved() {
+  local dir rc
+  dir=$(make_case override)
+  set +e; FM_CAPTAIN_APPROVED_MERGE=1 run_merge "$dir" task-x1 https://github.com/JTInventory/firstmate/pull/47 -- --repo other/repo >/dev/null 2>&1; rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail 'repository override was accepted'
+  [ ! -s "$dir/gh.log" ] || fail 'repository override reached gh-axi'
+
+  dir=$(make_case method)
+  FM_CAPTAIN_APPROVED_MERGE=1 run_merge "$dir" task-x1 https://github.com/JTInventory/firstmate/pull/48 -- --merge || fail 'explicit merge method failed'
+  grep -qxF 'pr merge 48 --repo JTInventory/firstmate --merge' "$dir/gh.log" || fail 'explicit merge method was overridden by squash'
+  pass 'repository override refuses and explicit merge method is preserved'
+}
+
 test_approved_url_defaults_to_squash
 test_refusals_do_not_record_or_merge
