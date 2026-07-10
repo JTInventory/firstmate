@@ -30,7 +30,22 @@ fm_pid_identity() {
   esac
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  printf 'v1:%s\n' "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
+}
+
+fm_pid_identity_matches_stored() {
+  local pid=$1 stored_identity=$2 current_identity
+  [ -n "$stored_identity" ] || return 1
+  current_identity=$(fm_pid_identity "$pid") || return 1
+  [ "$current_identity" = "$stored_identity" ]
+}
+
+fm_pid_identity_is_legacy() {
+  local stored_identity=$1
+  case "$stored_identity" in
+    v1:*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 fm_path_mtime() {
@@ -198,16 +213,14 @@ fm_lock_mid_acquire_is_fresh() {
   return 1
 }
 
-# Live PIDs normally block steals. The only exception is a lock that recorded a
-# non-empty pid-identity for an older process and the current live PID no longer
-# matches it, which means the OS reused the PID after the real owner died.
 fm_lock_live_pid_has_mismatched_identity() {
-  local lockdir=$1 pid=$2 stored_identity current_identity
+  local lockdir=$1 pid=$2 stored_identity
   fm_pid_alive "$pid" || return 1
   stored_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ -n "$stored_identity" ] || return 1
-  current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" != "$stored_identity" ]
+  fm_pid_identity_matches_stored "$pid" "$stored_identity" && return 1
+  fm_pid_identity_is_legacy "$stored_identity" && return 1
+  return 0
 }
 
 fm_lock_recheck_stale_owner() {

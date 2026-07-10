@@ -411,7 +411,7 @@ test_lock_reclaims_live_lock_with_mismatched_pid_identity() {
   live=$!
   mkdir "$lockdir"
   printf '%s\n' "$live" > "$lockdir/pid"
-  printf '%s\n' "stale identity for a previous process" > "$lockdir/pid-identity"
+  printf '%s\n' "v1:stale identity for a previous process" > "$lockdir/pid-identity"
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
@@ -428,6 +428,36 @@ test_lock_reclaims_live_lock_with_mismatched_pid_identity() {
   [ -n "$lockpid" ] || fail "reclaimed mismatched-identity lock recorded no new pid: $out"
   [ "$lockpid" != "$live" ] || fail "mismatched-identity lock kept the reused live pid: $out"
   pass "live-held lock with mismatched pid identity is reclaimed"
+}
+
+test_lock_preserves_live_lock_with_legacy_pid_identity() {
+  local dir state lockdir live out lockpid
+  dir=$(make_case lock-live-legacy-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "legacy locale-sensitive process identity" > "$lockdir/pid-identity"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "legacy live lock was acquired instead of preserving it during migration: $out" ;;
+  esac
+  case "$out" in
+    *"held=$live"*) ;;
+    *) fail "legacy live holder pid not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$live" ] || fail "legacy live holder's lock was clobbered (got '$lockpid')"
+  pass "live-held legacy identity remains protected during migration"
 }
 
 test_lock_without_pid_identity_keeps_existing_live_held_behavior() {
@@ -552,7 +582,7 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "v1:stale watcher identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   # The honest arm forks the fresh watcher as a tracked child and waits on it, so
@@ -589,7 +619,7 @@ test_arm_reclaims_reused_pid_lock_on_plain_arm() {
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "v1:stale watcher identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
@@ -852,6 +882,7 @@ test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_does_not_steal_live_lock_with_matching_pid_identity
 test_lock_reclaims_live_lock_with_mismatched_pid_identity
+test_lock_preserves_live_lock_with_legacy_pid_identity
 test_lock_without_pid_identity_keeps_existing_live_held_behavior
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
