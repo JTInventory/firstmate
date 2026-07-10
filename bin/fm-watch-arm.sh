@@ -19,14 +19,17 @@
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
-#   watcher: healthy pid=<N> (beacon <age>s)             - a genuinely live+fresh watcher already held the lock
+#   watcher: attached pid=<N> (beacon <age>s)            - arm mode found a live+fresh watcher
+#                                                          holding the lock and waits for that cycle
+#   watcher: healthy pid=<N> (beacon <age>s)             - restart-only healthy peer
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
-# It NEVER reports started/healthy off a stale beacon or a dead/reused pid: a
+# It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # dead holder, or a reused PID whose current process no longer matches the stored
 # watcher identity, self-heals through the singleton steal path and is confirmed;
 # a live holder with no stale-identity proof returns the FAILED line. On
-# started/healthy it exits zero; on FAILED it exits non-zero so the failure is
-# loud and a caller can react. A healthy line means a live cycle already exists;
+# started waits on its child; attached stays live until that verified cycle ends;
+# restart-only healthy exits zero; on FAILED it exits non-zero so the failure is
+# loud and a caller can react. An attached or healthy line means a live cycle exists;
 # do not churn extra no-op arms until that cycle fires.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
@@ -47,6 +50,8 @@ BEAT="$STATE/.last-watcher-beat"
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
+# Poll interval while attached to an existing healthy watcher.
+ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 
 watch_lock_matches_pid() {
   local pid=$1 lock_home lock_path lock_identity current_identity
@@ -89,10 +94,32 @@ healthy_watcher() {
   return 0
 }
 
+report_attached() {
+  local age
+  age=$(fm_path_age "$BEAT")
+  echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+}
+
 report_healthy() {
   local age
   age=$(fm_path_age "$BEAT")
   echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
+}
+
+attach_and_wait() {
+  local attached_pid=$1
+  while :; do
+    if healthy_watcher; then
+      if [ "$HEALTHY_PID" != "$attached_pid" ]; then
+        attached_pid=$HEALTHY_PID
+        report_attached
+      fi
+      sleep "$ATTACH_POLL"
+      continue
+    fi
+    # The attached watcher ended or lost its verified identity.
+    exit 0
+  done
 }
 
 watch_output_has_wake() {
@@ -136,8 +163,8 @@ fi
 # one - the singleton would no-op anyway. Report it honestly and return success.
 # (--restart skips this: it just stopped this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
-  report_healthy
-  exit 0
+  report_attached
+  attach_and_wait "$HEALTHY_PID"
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
@@ -179,7 +206,16 @@ while :; do
       rm -f "$child_out" 2>/dev/null || true
       exit "$rc"
     fi
-    # Another watcher won the singleton; our child stood down. Report the live one.
+    # Another watcher won the singleton; our child stood down.
+    if [ "$mode" = arm ]; then
+      report_attached
+      wait "$child" 2>/dev/null || true
+      rm -f "$child_out" 2>/dev/null || true
+      child=
+      child_out=
+      trap - HUP TERM INT
+      attach_and_wait "$HEALTHY_PID"
+    fi
     report_healthy
     wait "$child" 2>/dev/null || true
     rm -f "$child_out" 2>/dev/null || true

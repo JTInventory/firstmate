@@ -210,6 +210,7 @@ FMX_NOW_OVERRIDE=       # test-only epoch override for X task-link and follow-up
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid or mismatched-identity lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings and arm health checks treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
+FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached to an existing healthy watcher cycle
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_WATCH_SESSION_REARM_DELAY=1   # seconds watch-session waits after failed arms or quiet healthy no-op arms; wake output re-arms immediately
 FM_WATCH_SESSION_RETRY_DELAY=    # legacy alias for FM_WATCH_SESSION_REARM_DELAY
