@@ -57,14 +57,7 @@ WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 
 watch_lock_matches_pid() {
-  local pid=$1 lock_home lock_path lock_identity
-  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$FM_HOME" ] || return 1
-  [ "$lock_path" = "$WATCH_PATH" ] || return 1
-  [ -n "$lock_identity" ] || return 1
-  fm_pid_identity_matches_stored "$pid" "$lock_identity"
+  fm_watcher_lock_matches_pid "$WATCH_LOCK" "$1" "$FM_HOME" "$WATCH_PATH"
 }
 
 watcher_lock_desc() {

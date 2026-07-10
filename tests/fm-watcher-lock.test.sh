@@ -460,6 +460,35 @@ test_lock_preserves_live_lock_with_legacy_pid_identity() {
   pass "live-held legacy identity remains protected during migration"
 }
 
+test_lock_reclaims_expired_legacy_pid_identity() {
+  local dir state lockdir live out lockpid
+  dir=$(make_case lock-expired-legacy-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "legacy locale-sensitive process identity" > "$lockdir/pid-identity"
+  touch -t 200001010000 "$lockdir"
+  out=$(FM_LOCK_LEGACY_IDENTITY_MAX_AGE=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s lockpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)"
+    [ "$rc" -eq 0 ] && fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir")
+  lockpid=${out#*lockpid=}; lockpid=${lockpid%% *}
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "expired legacy lock was not reclaimed: $out" ;;
+  esac
+  [ -n "$lockpid" ] || fail "expired legacy lock recorded no replacement pid: $out"
+  [ "$lockpid" != "$live" ] || fail "expired legacy lock kept the reused live pid: $out"
+  pass "expired live-held legacy identity is reclaimed"
+}
+
 test_lock_without_pid_identity_keeps_existing_live_held_behavior() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-no-identity)
@@ -704,6 +733,46 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   pass "arm attaches to a live fresh watcher and exits only when that cycle ends"
 }
 
+test_arm_migrates_live_legacy_watcher_lock() {
+  local dir state fakebin out armout i wpid armpid status identity
+  dir=$(make_case arm-migrate-legacy)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  printf '%s\n' "legacy locale-sensitive watcher identity" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not attach to the migrated legacy watcher: $(cat "$armout")"
+  case "$identity" in
+    v1:*) ;;
+    *) fail "arm did not migrate the legacy watcher identity: $identity" ;;
+  esac
+  ! grep -qF 'watcher: started' "$armout" || fail "arm started a second watcher behind the migrated legacy watcher"
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -eq 0 ] || fail "arm did not exit after the migrated watcher ended (status $status)"
+  pass "arm migrates and attaches to a live legacy watcher lock"
+}
+
 test_arm_starts_and_self_heals() {
   # Arming with no confirmable watcher must FORK one and confirm it live + fresh
   # before reporting 'started' - whether the lock is empty (clean start) or held
@@ -883,6 +952,7 @@ test_lock_does_not_steal_live_lock
 test_lock_does_not_steal_live_lock_with_matching_pid_identity
 test_lock_reclaims_live_lock_with_mismatched_pid_identity
 test_lock_preserves_live_lock_with_legacy_pid_identity
+test_lock_reclaims_expired_legacy_pid_identity
 test_lock_without_pid_identity_keeps_existing_live_held_behavior
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
@@ -891,6 +961,7 @@ test_watch_restart_rejects_reused_pid
 test_arm_reclaims_reused_pid_lock_on_plain_arm
 test_watcher_self_evicts_on_lock_takeover
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_arm_migrates_live_legacy_watcher_lock
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation

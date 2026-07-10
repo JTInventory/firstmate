@@ -9,6 +9,7 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_LOCK_LEGACY_IDENTITY_MAX_AGE="${FM_LOCK_LEGACY_IDENTITY_MAX_AGE:-300}"
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -46,6 +47,50 @@ fm_pid_identity_is_legacy() {
     v1:*) return 1 ;;
     *) return 0 ;;
   esac
+}
+
+fm_pid_command_contains() {
+  local pid=$1 needle=$2 command
+  command=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 1
+  printf '%s\n' "$command" | grep -F -- "$needle" >/dev/null 2>&1
+}
+
+fm_lock_migrate_legacy_watcher_identity() {
+  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 owner stored_identity current_identity temp
+  owner=$(fm_lock_link_owner "$lockdir") || return 1
+  stored_identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  fm_pid_identity_is_legacy "$stored_identity" || return 1
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$pid" ] || return 1
+  [ "$(cat "$owner/fm-home" 2>/dev/null || true)" = "$expected_home" ] || return 1
+  [ "$(cat "$owner/watcher-path" 2>/dev/null || true)" = "$expected_path" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  fm_pid_command_contains "$pid" "$expected_path" || return 1
+  current_identity=$(fm_pid_identity "$pid") || return 1
+  fm_lock_points_to_owner "$lockdir" "$owner" || return 1
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$pid" ] || return 1
+  [ "$(cat "$owner/pid-identity" 2>/dev/null || true)" = "$stored_identity" ] || return 1
+  temp="$owner/.pid-identity.migrate.$(fm_current_pid)"
+  printf '%s\n' "$current_identity" > "$temp" || return 1
+  if ! fm_lock_points_to_owner "$lockdir" "$owner" || ! mv -f "$temp" "$owner/pid-identity"; then
+    rm -f "$temp" 2>/dev/null || true
+    return 1
+  fi
+}
+
+fm_watcher_lock_matches_pid() {
+  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 lock_home lock_path lock_identity
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ "$lock_home" = "$expected_home" ] || return 1
+  [ "$lock_path" = "$expected_path" ] || return 1
+  [ -n "$lock_identity" ] || return 1
+  if fm_pid_identity_matches_stored "$pid" "$lock_identity"; then
+    return 0
+  fi
+  fm_pid_identity_is_legacy "$lock_identity" || return 1
+  fm_lock_migrate_legacy_watcher_identity "$lockdir" "$pid" "$expected_home" "$expected_path" \
+    && fm_pid_identity_matches_stored "$pid" "$(cat "$lockdir/pid-identity" 2>/dev/null || true)"
 }
 
 fm_path_mtime() {
@@ -219,7 +264,9 @@ fm_lock_live_pid_has_mismatched_identity() {
   stored_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ -n "$stored_identity" ] || return 1
   fm_pid_identity_matches_stored "$pid" "$stored_identity" && return 1
-  fm_pid_identity_is_legacy "$stored_identity" && return 1
+  if fm_pid_identity_is_legacy "$stored_identity"; then
+    [ "$(fm_path_age "$lockdir")" -ge "$FM_LOCK_LEGACY_IDENTITY_MAX_AGE" ] || return 1
+  fi
   return 0
 }
 
