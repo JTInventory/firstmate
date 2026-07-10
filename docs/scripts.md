@@ -8,7 +8,7 @@ Each file also starts with a short header comment.
 | `fm-bootstrap.sh`        | Detect required toolchain and version problems, dispatch profile JSON errors or active-rule blocks, secondmate profile JSON errors, default backlog-backend status, primary-checkout `TANGLE:` problems, and actionable clone refresh outcomes; refresh project clones best-effort; locally sync live secondmate homes and propagate declared inheritable config; set up opt-in X mode; install tools only after consent |
 | `fm-fleet-sync.sh`       | Fetch clones, fast-forward safe default-branch states, self-heal clean detached ancestor drift, report unsafe drift as `STUCK:`, and safely prune branches whose remote is gone |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
-| `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
+| `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog item blocks (including indented context) from the main home into a seeded secondmate home                 |
 | `fm-backlog-audit.sh`    | Read-only audit for backlog/state drift between `data/backlog.md`, `data/secondmates.md`, `state/*.meta`, and local adoption signals; registered secondmate meta is persistent inventory, while unregistered secondmate meta stays loud |
 | `fm-backlog-audit-lib.sh` | Sourceable read-only audit collector shared by `fm-backlog-audit.sh` and the supervision JSON model; emits structured findings and expected secondmate exceptions |
 | `fm-brief.sh`            | Scaffold a ship brief with a worktree-isolation assertion, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
@@ -56,7 +56,7 @@ Each file also starts with a short header comment.
 | `fm-pr-check.sh`         | Record `pr=` and GitHub's `pr_head=` when available for a PR-ready task, then arm the watcher's merge poll          |
 | `fm-pr-merge.sh`         | Captain-gated PR merge wrapper: requires `FM_CAPTAIN_APPROVED_MERGE=1`, records `pr=` through `fm-pr-check.sh`, parses a full GitHub PR URL, defaults to squash, and refuses `--repo`/`-R` overrides |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
-| `fm-teardown.sh`         | Return a clean, landed ship worktree or retire/release a secondmate home; requires scout reports, checks child work, removes firstmate-owned hook artifacts, and prints the backend-aware backlog reminder |
+| `fm-teardown.sh`         | Return a clean, landed ship worktree or retire/release a secondmate home; requires scout reports, checks child work, removes firstmate-owned hook artifacts, and prints the backend-aware backlog reminder for ship tasks; secondmate retirement leaves the main backlog unchanged |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate (`crew`) or secondmate-launch (`secondmate`) harness     |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
 | `fm-x-lib.sh`            | Shared X-mode `.env`, alternate env-file, relay, dry-run config, reply-thread splitting, outbound image payloads, and task-to-X-request meta-link helpers |

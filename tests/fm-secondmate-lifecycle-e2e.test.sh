@@ -157,6 +157,9 @@ phase_handoff() {
 ## Queued
 - [ ] feat-x - add feature x (repo: alpha)
 - [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits
+  Context: preserve this indented note.
+
+  Detail: second paragraph survives the handoff.
 - [ ] bug-z - fix bug z (repo: gamma)
 
 ## Done
@@ -174,6 +177,11 @@ EOF
 
   assert_grep '- [ ] feat-x - add feature x (repo: alpha)' "$SUB/data/backlog.md" "feat-x did not arrive verbatim"
   assert_grep '- [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits' "$SUB/data/backlog.md" "feat-y line not preserved verbatim"
+  assert_grep 'Context: preserve this indented note.' "$SUB/data/backlog.md" "feat-y continuation note did not move with its task"
+  assert_grep 'Detail: second paragraph survives the handoff.' "$SUB/data/backlog.md" "feat-y second continuation note did not move with its task"
+  awk '/Context: preserve this indented note./ { getline blank; getline detail; if (blank == "" && detail ~ /Detail: second paragraph survives the handoff./) found = 1 } END { exit found ? 0 : 1 }' "$SUB/data/backlog.md" \
+    || fail "feat-y blank-line paragraph boundary did not move with its task"
+  assert_no_grep 'Detail: second paragraph survives the handoff.' "$HOME_DIR/data/backlog.md" "feat-y blank-line continuation was left in the main backlog"
   awk '/^## Queued/{q=1;next} /^## /{q=0} q && /feat-x/{found=1} END{exit found?0:1}' "$SUB/data/backlog.md" \
     || fail "feat-x did not land under the Queued section"
 
@@ -184,7 +192,7 @@ EOF
   [ "$(grep -cF -- '- [ ] feat-x - add feature x (repo: alpha)' "$SUB/data/backlog.md")" -eq 1 ] \
     || fail "idempotent re-run duplicated feat-x in the subhome backlog"
   [ "$before" = "$(cat "$HOME_DIR/data/backlog.md")" ] || fail "idempotent re-run mutated the main backlog"
-  pass "handoff: in-scope items move verbatim, out-of-scope stays, idempotent"
+  pass "handoff: in-scope item blocks move verbatim, out-of-scope stays, idempotent"
 }
 
 phase_recovery() {
@@ -202,10 +210,13 @@ phase_recovery() {
 }
 
 phase_teardown() {
+  local teardown_out
   : > "$LOG"
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1 \
+  teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design 2>&1) \
     || fail "teardown failed for the empty secondmate home"
+  printf "%s\n" "$teardown_out" | grep -F "Backlog:" >/dev/null \
+    && fail "secondmate teardown emitted a main-backlog completion reminder"
   assert_absent "$SUB" "teardown did not remove the retired secondmate home"
   assert_absent "$HOME_DIR/state/design.meta" "teardown did not clear the parent meta"
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"

@@ -29,7 +29,9 @@ Owner: `AGENTS.md` sections 4, 6, and 7; `bin/fm-project-mode.sh`; `bin/fm-route
 
 Accepted work is recorded under `data/backlog.md` through the active backend.
 Default homes use `tasks-axi`; `config/backlog-backend=manual` opts into hand edits.
-Secondmate handoffs use the validated helper instead of a raw task move.
+Secondmate handoffs use the validated helper instead of a raw task move; it
+moves the selected queued item's complete block, including indented context,
+into the secondmate's own backlog.
 
 Owner: `AGENTS.md` section 10; `.tasks.toml`; `bin/fm-tasks-axi-lib.sh`; `bin/fm-backlog-handoff.sh`.
 
@@ -105,7 +107,8 @@ Owner: `AGENTS.md` sections 7 and 9; `bin/fm-teardown.sh`; `data/<id>/report.md`
 
 Teardown returns a scout worktree after its report exists, or returns a ship worktree only when work is landed and clean.
 It refuses dirty or unlanded work unless the captain explicitly approves discard.
-Secondmate teardown means explicit retirement, not ordinary task closeout.
+Secondmate teardown means explicit retirement, not ordinary task closeout, and
+leaves the main backlog unchanged.
 
 Owner: `AGENTS.md` section 7; `bin/fm-teardown.sh`; `bin/fm-merge-local.sh`; `bin/fm-ff-lib.sh`.
 

@@ -340,7 +340,7 @@ This idle contract is encoded in the charter brief (section 11), so it travels w
 **Hand off in-scope backlog on creation.**
 When a secondmate is created for a domain, the existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
-Read `data/backlog.md`, pick queued items that fit the scope, and move them with `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`.
+Read `data/backlog.md`, pick queued items that fit the scope, and move their complete item blocks, including indented context, with `bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...`.
 Do not hand off `local-only` items; that work stays with the main firstmate (section 7).
 For idempotence, destination validation, and refusal of `## In flight` entries, load `secondmate-provisioning`.
 
@@ -578,7 +578,7 @@ A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
 Load `secondmate-provisioning` before retiring it.
-The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
+The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work. A successful secondmate teardown does not mark or remind against the main backlog; its queue was already transferred to the secondmate home.
 With `--force`, teardown is the explicit discard path for child windows, child work, state, route, lease, and home; never use it unless the captain explicitly said to discard the work.
 
 ### Scout tasks (report instead of PR)
