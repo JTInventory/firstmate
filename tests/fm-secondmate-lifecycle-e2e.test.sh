@@ -188,7 +188,7 @@ EOF
   [ "$(grep -cF -- '- [ ] feat-x - add feature x (repo: alpha)' "$SUB/data/backlog.md")" -eq 1 ] \
     || fail "idempotent re-run duplicated feat-x in the subhome backlog"
   [ "$before" = "$(cat "$HOME_DIR/data/backlog.md")" ] || fail "idempotent re-run mutated the main backlog"
-  pass "handoff: in-scope items move verbatim, out-of-scope stays, idempotent"
+  pass "handoff: in-scope item blocks move verbatim, out-of-scope stays, idempotent"
 }
 
 phase_recovery() {

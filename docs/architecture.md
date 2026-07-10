@@ -99,8 +99,8 @@ The same project may appear in multiple secondmate homes when their scopes diffe
 Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
 Bare `fm-send.sh fm-<id>` requests to a live `kind=secondmate` are prefixed with the from-firstmate marker from `bin/fm-marker-lib.sh`, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
 Explicit `session:window` sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
-After seeding a secondmate, `fm-backlog-handoff.sh` moves already-judged in-scope queued items from the main backlog into that secondmate home so the domain queue starts in the right place.
-Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
+After seeding a secondmate, `fm-backlog-handoff.sh` moves each already-judged in-scope queued item block, including its indented context, from the main backlog into that secondmate home so the domain queue starts in the right place.
+Idle secondmate panes are healthy; teardown is explicit, emits no main-backlog completion reminder, and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 Historical PR metadata on the secondmate's parent record, such as a merged or closed seed PR, does not turn a live secondmate into ordinary PR-worker cleanup.
 The backlog audit follows the same model: a `kind=secondmate` meta record registered in `data/secondmates.md` or the main backlog's `## Secondmate Backlogs` section is expected persistent inventory outside main `## In flight`, while unregistered secondmate meta is still reported as drift.
 
