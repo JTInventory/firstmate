@@ -49,6 +49,7 @@ make_fake_root() {
   mkdir -p "$fake/bin" "$fake/state"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
+  ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -147,6 +148,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   local fake="$TMP_ROOT/$id-root"
   mkdir -p "$fake/bin" "$fake/state"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
+  ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
