@@ -97,7 +97,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Toolchain
 
 On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh with `gh pr checks --json` support, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
-For read-only supervision runs, `fm-supervise.sh` also looks in existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories before declaring `gh-axi` missing, which covers non-interactive SSH shells that do not source the usual Node setup.
+Bootstrap, spawn, teardown, and read-only supervision normalize existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories before looking up Axi tools. This covers clean non-interactive SSH shells without overriding an explicit caller PATH.
 When `config/crew-dispatch.json` or `config/secondmate-profile.json` exists, bootstrap also requires `jq` for JSON validation.
 Malformed `config/secondmate-profile.json`, a non-object top level, non-string axes, an empty model, or an effort outside `default|low|medium|high|xhigh|max` is reported as `SECONDMATE_PROFILE: invalid config/secondmate-profile.json - ...`.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.

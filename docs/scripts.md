@@ -89,3 +89,4 @@ That means a canonical OpenClaw graph or packet HEAD can help a worker orient, b
 Cognee policy lives in [cognee-policy.md](cognee-policy.md). Automatic lookup needs per-wrapper-call cost evidence: `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call`. Current `session_window_only` evidence is accepted only as trial monitoring evidence and still blocks automatic promotion because there is no safe per-wrapper-call cost/request/session/QA id bridge. Manual verified lookup remains read-only, hint-only, fail-closed, and local-source-verified.
 
 The official docs now show raw data readback and session/model cost surfaces. That does not satisfy Firstmate's production gates by itself: raw retention/source-authority guarantees and safe per-wrapper-call cost correlation remain unproven.
+| `fm-tool-path-lib.sh`    | Shared non-interactive NVM and user-local PATH normalization sourced by bootstrap, spawn, teardown, and supervision |
