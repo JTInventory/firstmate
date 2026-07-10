@@ -39,9 +39,9 @@ Owner: `AGENTS.md` section 10; `.tasks.toml`; `bin/fm-tasks-axi-lib.sh`; `bin/fm
 
 A brief becomes the direct-report contract.
 Ship briefs assert checkout identity and isolation, scout briefs are report-only, and secondmate briefs are charters.
-Matching JT Control Room PR-mode ship briefs also receive the JT PR Intake Governor, and matching JT briefs may receive the best-effort Understand Anything structure reference after route selection.
+Matching JT Control Room PR-mode ship briefs also receive the JT PR Intake Governor after route selection.
 
-Owner: `AGENTS.md` sections 6 and 7; `bin/fm-brief.sh`; `bin/fm-spawn.sh`; `bin/fm-understand-jt-reference`.
+Owner: `AGENTS.md` sections 6 and 7; `bin/fm-brief.sh`; `bin/fm-spawn.sh`.
 
 ## 6. Spawn
 
