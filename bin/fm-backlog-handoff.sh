@@ -267,7 +267,7 @@ awk -v keysfile="$KEYS_FILE" -v movedfile="$MOVED_FILE" '
     if (id in want) { print section "\t" $0 > movedfile; moving = 1; next }
     moving = 0
   }
-  moving && /^[[:space:]]+/ { print section "\t" $0 > movedfile; next }
+  moving && (/^$/ || /^[[:space:]]+/) { print section "\t" $0 > movedfile; next }
   { moving = 0; print }
 ' "$MAIN_BACKLOG" > "$KEPT_FILE"
 

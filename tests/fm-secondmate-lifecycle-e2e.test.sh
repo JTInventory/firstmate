@@ -158,6 +158,7 @@ phase_handoff() {
 - [ ] feat-x - add feature x (repo: alpha)
 - [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits
   Context: preserve this indented note.
+
   Detail: second paragraph survives the handoff.
 - [ ] bug-z - fix bug z (repo: gamma)
 
@@ -178,6 +179,9 @@ EOF
   assert_grep '- [ ] feat-y - add feature y (repo: beta) blocked-by: feat-x - waits' "$SUB/data/backlog.md" "feat-y line not preserved verbatim"
   assert_grep 'Context: preserve this indented note.' "$SUB/data/backlog.md" "feat-y continuation note did not move with its task"
   assert_grep 'Detail: second paragraph survives the handoff.' "$SUB/data/backlog.md" "feat-y second continuation note did not move with its task"
+  awk '/Context: preserve this indented note./ { getline blank; getline detail; if (blank == "" && detail ~ /Detail: second paragraph survives the handoff./) found = 1 } END { exit found ? 0 : 1 }' "$SUB/data/backlog.md" \
+    || fail "feat-y blank-line paragraph boundary did not move with its task"
+  assert_no_grep 'Detail: second paragraph survives the handoff.' "$HOME_DIR/data/backlog.md" "feat-y blank-line continuation was left in the main backlog"
   awk '/^## Queued/{q=1;next} /^## /{q=0} q && /feat-x/{found=1} END{exit found?0:1}' "$SUB/data/backlog.md" \
     || fail "feat-x did not land under the Queued section"
 
