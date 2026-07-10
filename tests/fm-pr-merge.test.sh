@@ -63,3 +63,4 @@ test_repo_override_refuses_and_explicit_method_is_preserved() {
 
 test_approved_url_defaults_to_squash
 test_refusals_do_not_record_or_merge
+test_repo_override_refuses_and_explicit_method_is_preserved
