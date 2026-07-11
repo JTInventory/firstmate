@@ -586,7 +586,7 @@ cleanup_firstmate_home_children() {
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        ( cd "$child_proj" && treehouse return --force "$child_wt" ) || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
