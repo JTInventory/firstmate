@@ -676,13 +676,15 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS") || exit 1
+tmux set-window-option -t "$WID" automatic-rename off 2>/dev/null || true
+tmux set-window-option -t "$WID" allow-rename off 2>/dev/null || true
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  tmux send-keys -t "$WID" 'treehouse get' Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+    p=$(tmux display-message -p -t "$WID" '#{pane_current_path}' 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
