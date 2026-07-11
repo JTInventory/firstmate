@@ -88,11 +88,11 @@ That keeps spawn launch compatible across claude, codex, grok, pi, and opencode 
 
 ## Optional CBM orientation
 
-For allowlisted ship and scout projects, `fm-spawn.sh` can add optional codebase-memory-mcp (CBM) orientation to the generated brief and pass its cache, resource caps, and binary directory into the launch environment. It is for architecture maps, call chains, and multi-file navigation—not proof, runtime truth, or authority for an external action.
+For allowlisted ship and scout projects, `fm-spawn.sh` can add optional codebase-memory-mcp (CBM) orientation to the generated brief and pass its cache, resource caps, binary directory, task id, and logged CLI path into the launch environment. It is for architecture maps, call chains, and multi-file navigation—not proof, runtime truth, or authority for an external action.
 
 CBM is a soft dependency: a missing binary or empty index never prevents a spawn, and workers continue with normal search and read tools. Secondmate charters remain unchanged. A local `config/cbm-projects` file is a restrictive allowlist; without it, `.openclaw`, JT Control Room, and firstmate are eligible. `config/cbm.env` contains only simple `FM_CBM_*=value` settings.
 
-Firstmate does not install CBM or change host MCP configuration. The captain may use `bin/fm-cbm-index.sh` to check status, list projects, or index an allowlisted target. The helper indexes the JT Control Room application path rather than the `.openclaw` monorepo root.
+Firstmate does not install CBM or change host MCP configuration. The captain may use `bin/fm-cbm-index.sh` to check status, list projects, or index an allowlisted target. The helper routes its CLI calls through `bin/fm-cbm-cli.sh` when available, recording durable usage in `$FM_HOME/data/cbm/usage.jsonl`; `bin/fm-cbm-usage.sh` summarizes, locates, or tails that log. The brief recommends the same wrapper and spawned ship/scout panes tag its entries with `FM_CBM_TASK_ID`. A captain may point a host MCP command at `bin/fm-cbm-mcp.sh` to count MCP process starts, but that optional wrapper does not count individual MCP tool calls. The helper indexes the JT Control Room application path rather than the `.openclaw` monorepo root.
 
 ## Optional secondmates
 

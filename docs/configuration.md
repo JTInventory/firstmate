@@ -218,6 +218,17 @@ Index data lives under the cache directory and is not committed to the firstmate
 
 Use `bin/fm-cbm-index.sh status|list|index [jt|firstmate|all|<abs-path>]` for ops hygiene on this host. `jt` resolves to the JT Control Room app path; the `.openclaw` monorepo root is never an index target, even though it remains eligible for spawn orientation.
 
+### Durable usage log (not Codex logs)
+
+CLI and index metering do not depend on Codex session logs that get wiped for disk:
+
+- Log file: `$FM_HOME/data/cbm/usage.jsonl` (under gitignored `data/`)
+- Logged CLI: `bin/fm-cbm-cli.sh <tool> [json]` (used by `fm-cbm-index.sh`; recommended in crewmate briefs)
+- Optional MCP session counter: set host MCP `command` to `bin/fm-cbm-mcp.sh` (one `mcp-session` line per process start, not per tool)
+- Inspect: `bin/fm-cbm-usage.sh summary`, `path`, or `tail [N]`
+
+Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection runs so wrapper lines can tag the task.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
