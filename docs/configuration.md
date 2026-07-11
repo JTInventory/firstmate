@@ -42,7 +42,7 @@ The main first mate routes by reading those scopes with judgment; the project li
 `fm-backlog-audit.sh` also uses these ids as registered persistent inventory, so a live `kind=secondmate` meta record does not have to appear under the main `## In flight` section.
 Use `fm-home-seed.sh <id> - <project>...` to lease a fresh firstmate worktree for the secondmate home.
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
-Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
+Teardown retries a `treehouse return` error only when Git reports an existing `index.lock`, then fails closed if the lease still cannot be released; plain-clone homes with no treehouse pool slot are removed directly.
 Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent, moves each selected item's indented continuation context with it, and refuses in-flight items or non-secondmate homes.
@@ -241,6 +241,8 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
+FM_TREEHOUSE_RETURN_LOCK_RETRIES=3   # additional `treehouse return` retries after a matching transient git index.lock error; invalid values use 3
+FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1   # whole seconds between those retries; 0 disables waiting and invalid values warn then use 1
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

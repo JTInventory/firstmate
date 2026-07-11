@@ -28,6 +28,11 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# A `treehouse return` failure that reports an existing git `index.lock` is
+# retried because that lock can be transient; other return failures still stop
+# teardown. FM_TREEHOUSE_RETURN_LOCK_RETRIES controls additional attempts
+# (default 3) and FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS controls the whole-
+# second wait between them (default 1).
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -86,6 +91,38 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 TASK_TMP_CLEANUP=$(validated_task_tmp_cleanup_path "$TASK_TMP") || exit 1
+
+TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
+TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-1}
+case "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS" in
+  ''|*[!0-9]*)
+    echo "teardown: invalid transient-lock retry wait '$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS'; using 1s" >&2
+    TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1
+    ;;
+esac
+
+treehouse_return_is_index_lock_error() {
+  printf '%s\n' "$1" | grep -Fq 'index.lock' && printf '%s\n' "$1" | grep -Fq 'File exists'
+}
+
+teardown_treehouse_return() {
+  local dir=$1 cd_dir=$2 label=$3 out attempt=0 retries
+  retries=$TREEHOUSE_RETURN_LOCK_RETRIES
+  case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
+  while :; do
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      [ -n "$out" ] && printf '%s\n' "$out"
+      return 0
+    fi
+    [ -n "$out" ] && printf '%s\n' "$out" >&2
+    if ! treehouse_return_is_index_lock_error "$out" || [ "$attempt" -ge "$retries" ]; then
+      return 1
+    fi
+    attempt=$(( attempt + 1 ))
+    echo "teardown: $label return hit a transient git index lock; retrying ($attempt/$retries)" >&2
+    sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
+  done
+}
 
 if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ]; then
   fm_assert_task_branch_matches_meta "$ID" "$META" "REFUSED" || exit 1
@@ -497,7 +534,7 @@ remove_firstmate_home() {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    ( cd "$FM_ROOT" && treehouse return --force "$abs_home_path" ) || {
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
@@ -554,7 +591,7 @@ cleanup_firstmate_home_children() {
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        ( cd "$child_proj" && treehouse return --force "$child_wt" ) || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
@@ -671,7 +708,7 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project.
-  ( cd "$PROJ" && treehouse return --force "$WT" )
+  teardown_treehouse_return "$WT" "$PROJ" "worktree"
 fi
 
 tmux kill-window -t "$T" 2>/dev/null || true

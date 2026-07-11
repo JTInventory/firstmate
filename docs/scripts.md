@@ -57,7 +57,7 @@ Each file also starts with a short header comment.
 | `fm-pr-check.sh`         | Record `pr=` and GitHub's `pr_head=` when available for a PR-ready task, then arm the watcher's merge poll          |
 | `fm-pr-merge.sh`         | Captain-gated PR merge wrapper: requires `FM_CAPTAIN_APPROVED_MERGE=1`, records `pr=` through `fm-pr-check.sh`, parses a full GitHub PR URL, defaults to squash, and refuses `--repo`/`-R` overrides |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
-| `fm-teardown.sh`         | Return a clean, landed ship worktree or retire/release a secondmate home; requires scout reports, checks child work, removes firstmate-owned hook artifacts, and prints the backend-aware backlog reminder for ship tasks; secondmate retirement leaves the main backlog unchanged |
+| `fm-teardown.sh`         | Return a clean, landed ship worktree or retire/release a secondmate home; requires scout reports, checks child work, removes firstmate-owned hook artifacts, retries only transient Git `index.lock` return failures, and prints the backend-aware backlog reminder for ship tasks; secondmate retirement leaves the main backlog unchanged |
 | `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate (`crew`) or secondmate-launch (`secondmate`) harness     |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
 | `fm-x-lib.sh`            | Shared X-mode `.env`, alternate env-file, relay, dry-run config, reply-thread splitting, outbound image payloads, and task-to-X-request meta-link helpers |

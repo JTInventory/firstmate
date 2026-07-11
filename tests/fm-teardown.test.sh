@@ -659,6 +659,80 @@ test_teardown_refuses_unsafe_tasktmp() {
   pass "teardown refuses arbitrary tasktmp cleanup targets from meta"
 }
 
+test_teardown_retries_transient_index_lock() {
+  local case_dir rc wt_head attempts
+  case_dir=$(make_case transient-index-lock)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work before transient lock"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  attempts="$case_dir/treehouse-attempts"
+
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' attempt >> "$attempts"
+if [ "\$(wc -l < "$attempts")" -eq 1 ]; then
+  echo "fatal: Unable to create '/tmp/example/index.lock': File exists" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "transient-index-lock: teardown should retry once the lock clears"
+  [ "$(wc -l < "$attempts")" -eq 2 ] || fail "transient-index-lock: treehouse should be called twice"
+  pass "teardown retries a transient index lock without weakening landed-work checks"
+}
+
+test_forced_secondmate_teardown_retries_child_index_lock() {
+  local case_dir rc home child attempts
+  case_dir=$(make_case forced-child-index-lock)
+  home="$case_dir/home"
+  child="$case_dir/wt"
+  attempts="$case_dir/treehouse-attempts"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$home/state/child-x1.meta" \
+    "window=fm-child-x1" \
+    "worktree=$child" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' attempt >> "$attempts"
+if [ "\$(wc -l < "$attempts")" -eq 1 ]; then
+  echo "fatal: Unable to create '/tmp/example/index.lock': File exists" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forced-child-index-lock: forced secondmate teardown should retry a child worktree lock"
+  [ "$(wc -l < "$attempts")" -eq 2 ] || fail "forced-child-index-lock: child treehouse return should be retried"
+  [ ! -e "$home" ] || fail "forced-child-index-lock: secondmate home should be removed after child return succeeds"
+  pass "forced secondmate teardown retries a transient child worktree index lock"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -678,3 +752,5 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_teardown_retries_transient_index_lock
+test_forced_secondmate_teardown_retries_child_index_lock

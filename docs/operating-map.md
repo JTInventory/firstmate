@@ -107,6 +107,7 @@ Owner: `AGENTS.md` sections 7 and 9; `bin/fm-teardown.sh`; `data/<id>/report.md`
 
 Teardown returns a scout worktree after its report exists, or returns a ship worktree only when work is landed and clean.
 It refuses dirty or unlanded work unless the captain explicitly approves discard.
+It retries only transient Git `index.lock` failures while returning a worktree or leased secondmate home; any other return failure remains fail-closed.
 Secondmate teardown means explicit retirement, not ordinary task closeout, and
 leaves the main backlog unchanged.
 
