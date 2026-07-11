@@ -622,15 +622,15 @@ Arm or re-arm the watcher only through the harness's own tracked background mech
 Never fire-and-forget the watcher with a shell `&` inside another call: that backgrounded child is reaped when the call returns, so supervision silently stops, and worse, the dying process reports a false "already running" that hides the gap.
 **Standalone, never bundled.**
 Run `bin/fm-watch-arm.sh` as its OWN background task with nothing else in that bash, never tacked onto the tail of a multi-command call: bundled, its self-verifying status line is buried in unrelated output and it can silently no-op as a side effect of those other commands, so no fresh cycle gets established and supervision lapses unnoticed.
-`bin/fm-watch-arm.sh` is self-verifying: it confirms a genuinely live watcher with a fresh beacon and prints exactly one honest status line - `watcher: started ...`, `watcher: healthy ...`, or `watcher: FAILED - no live watcher with a fresh beacon` (which exits non-zero) - so treat that line, not a process count or an unverified "already running", as the source of truth for watcher state.
+`bin/fm-watch-arm.sh` is self-verifying: it confirms a genuinely live watcher with a fresh beacon and prints exactly one honest status line - `watcher: started ...`, `watcher: attached ...`, restart-only `watcher: healthy ...`, or `watcher: FAILED - no live watcher with a fresh beacon` (which exits non-zero) - so treat that line, not a process count or an unverified `already running`, as the source of truth for watcher state.
 **Re-arm after each FIRE; do not churn on a no-op.**
-Read that line to know whether a cycle is already live: `started` (this arm just launched the live cycle, now blocking for the next wake) and `healthy` (a live cycle already held the lock) both mean a cycle is live, so do NOT start another - re-running it while one is healthy only churns no-op tasks and never establishes a fresh cycle; `FAILED` means no live cycle, so arm one now after draining any queued wakes.
+Read that line to know whether a cycle is already live: `started` launches the live cycle and blocks for the next wake; `attached` means this arm found a verified live cycle and stays alive until it ends; restart-only `healthy` means a peer held the lock after the restart child stood down. All three mean a cycle is live, so do NOT start another. `FAILED` means no live cycle, so arm one only after draining queued wakes.
 A cycle is down only when its background task completes carrying a WAKE REASON (`signal`/`stale`/`check`/`heartbeat`): that is the watcher firing, and that is the one moment to handle the wake and then start exactly one fresh cycle.
 The watcher is singleton-safe: acquisition is race-proof, so under any number of concurrent arms at most one watcher ever holds this home's lock, and a duplicate that somehow starts self-evicts within one poll once it sees the lock no longer names it.
-If one is already alive with a fresh liveness beacon, another invocation exits cleanly instead of creating a duplicate watcher; if the lock records a stale watcher identity for a reused PID, a fresh arm may reclaim that lock without signaling the unrelated process; if a live holder cannot be proven stale by identity, a stale beacon still exits with an actionable failure.
+If one is already alive with a fresh liveness beacon, an arm invocation attaches to that verified cycle instead of creating a duplicate watcher and stays live until the cycle ends; if the lock records a stale watcher identity for a reused PID, a fresh arm may reclaim that lock without signaling the unrelated process; if a live holder cannot be proven stale by identity, a stale beacon still exits with an actionable failure.
 **No turn ends blind, holds included.**
 Never end a turn while any task is in flight without a live cycle running: a text-only "holding" or "waiting" reply with crewmates live and no live cycle is a bug, and because such a turn runs no supervision script it is exactly the blind gap the script-only guard (`fm-guard.sh`, below) cannot catch, so this discipline must.
-If a forced restart is ever genuinely needed, use `bin/fm-watch-arm.sh --restart`, which stops only this home's watcher (the pid recorded in this home's `state/.watch.lock`) and starts a fresh one.
+If a forced restart is ever genuinely needed, use `bin/fm-watch-arm.sh --restart`, which signals only the watcher recorded in this home state lock and starts a fresh cycle; if a healthy peer remains after the child stands down, restart reports `healthy` and exits without attaching.
 Never `pkill -f bin/fm-watch.sh`: that pattern matches every firstmate home's watcher, including secondmate homes that run the same script, so a broad pkill from one home kills sibling homes' watchers.
 Away-mode supervision is provided by the `/afk` skill and its daemon; while `state/.afk` exists, the daemon owns the watcher.
 Waiting on the watcher is intentionally silent.
@@ -638,7 +638,7 @@ After arming it, do not send idle progress updates to the captain; wait until it
 Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, not conversational progress.
 
 ```sh
-bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
+bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; attaches to a healthy cycle
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch-session.sh start   # durable home-scoped tmux runner; immediate re-arm after wake output
 bin/fm-watch-session.sh --status  # report whether this home's runner window is live
