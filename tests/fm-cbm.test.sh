@@ -472,6 +472,8 @@ test_usage_log_fallback_encodes_json() {
     export FM_HOME="$dir/home"
     export FM_DATA_OVERRIDE="$dir/data"
     export FM_CBM_TASK_ID="$task"
+    # ShellCheck cannot see command() being called by the sourced helper.
+    # shellcheck disable=SC2317
     command() {
       if [ "$1" = -v ] && [ "${2:-}" = jq ]; then
         return 1
