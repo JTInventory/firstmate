@@ -202,7 +202,7 @@ When the file exists, only listed entries match (defaults are not merged).
 - `FM_CBM_ENABLED=auto` (default): CBM is on only when the `codebase-memory-mcp` binary is found on `PATH` or under common install paths.
 - `0` / `off` force off; `1` / `on` require a binary.
 - Cache defaults to `/root/var/cbm-cache` when that directory exists, otherwise `$HOME/.cache/codebase-memory-mcp`.
-- Resource caps default to `CBM_MEM_BUDGET_MB=1024` and `CBM_WORKERS=2`; values above 4096 MB or 8 workers fall back to those defaults.
+- Resource caps default to `CBM_MEM_BUDGET_MB=1024` and `CBM_WORKERS=2`; values outside `1–4096` MB or `1–8` workers fall back to those defaults.
 
 On **ship/scout** spawn for an eligible project, `fm-spawn.sh`:
 

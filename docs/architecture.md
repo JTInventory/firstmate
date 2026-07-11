@@ -86,6 +86,14 @@ Secondmate launches are exempt because they resolve the secondmate harness inste
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
 
+## Optional CBM orientation
+
+For allowlisted ship and scout projects, `fm-spawn.sh` can add optional codebase-memory-mcp (CBM) orientation to the generated brief and pass its cache, resource caps, and binary directory into the launch environment. It is for architecture maps, call chains, and multi-file navigation—not proof, runtime truth, or authority for an external action.
+
+CBM is a soft dependency: a missing binary or empty index never prevents a spawn, and workers continue with normal search and read tools. Secondmate charters remain unchanged. A local `config/cbm-projects` file is a restrictive allowlist; without it, `.openclaw`, JT Control Room, and firstmate are eligible. `config/cbm.env` contains only simple `FM_CBM_*=value` settings.
+
+Firstmate does not install CBM or change host MCP configuration. The captain may use `bin/fm-cbm-index.sh` to check status, list projects, or index an allowlisted target. The helper indexes the JT Control Room application path rather than the `.openclaw` monorepo root.
+
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.

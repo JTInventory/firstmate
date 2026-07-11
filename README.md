@@ -49,6 +49,7 @@ This is a directory that turns any agent into your firstmate, and you the captai
 - **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, backlog drift, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1.1` JSON without changing anything, even from non-interactive shells where HOME-local Axi tools are not already on `PATH`.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Operational memory stow** - `/stow` sweeps the current session for durable knowledge, routes it to the right local or project home, and tells you when the session is safe to reset.
+- **Optional code orientation** - allowlisted ship and scout workers can receive non-blocking codebase-memory-mcp context for multi-file exploration; normal source reads remain the proof authority.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; PR merges require an explicit captain-approved wrapper that records PR evidence and derives the target repository from the full GitHub URL.
 - **Restart-proof** - all state lives on disk and in tmux; kill the session anytime and the next one reconciles and carries on.
 
@@ -124,6 +125,7 @@ The recommended dispatch policy keeps MiniMax for very simple token-saving work,
 When no dispatch profile file is active, spawn uses the deterministic route's model and effort for the launch if the active crew harness still matches the route.
 When that profile file exists, crewmate and scout spawns must pass the resolved harness explicitly so `config/crew-harness` is not used as an unnoticed bypass.
 For matching JT Control Room PR-mode ship work in `.openclaw` or `jt-control-room`, spawn also adds a `JT PR Intake Governor` brief gate so the worker classifies priority, proof, authority, duplicates, and runtime-data policy before implementation or PR creation.
+For allowlisted ship and scout work, spawn can also add optional codebase-memory-mcp (CBM) orientation and pass its environment into the worker. CBM is non-blocking context for multi-file navigation only: it never replaces runtime sources or source-file proof, and secondmate charters stay unchanged. The captain owns host MCP registration and any indexing through `bin/fm-cbm-index.sh`; Firstmate does not install or configure it automatically.
 Secondmate launch can use a separate local `config/secondmate-harness`, plus a primary-local `config/secondmate-profile.json` for durable model and effort defaults.
 Secondmate homes inherit the primary's declared local config, including `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, at launch, bootstrap, or an explicit `bin/fm-config-push.sh` run, so their own crewmates, dispatch profiles, and backlog backend use the primary settings.
 When a routed request goes to a secondmate, firstmate marks it so the answer returns through status or a document pointer; direct typing into that secondmate window stays conversational.
@@ -156,7 +158,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/operating-map.md](docs/operating-map.md) - end-to-end lifecycle map from request intake through teardown and backlog closeout.
-- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, optional X mode, the files you set, and harness support.
+- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, optional X mode and CBM orientation, the files you set, and harness support.
 - [docs/cognee-policy.md](docs/cognee-policy.md) - the trial-only, hint-only Cognee memory policy and production gates.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [docs/upstream-adoption-ledger.md](docs/upstream-adoption-ledger.md) - the evidence, decisions, and safety boundaries for selective upstream adoption.
