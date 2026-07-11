@@ -659,6 +659,36 @@ test_teardown_refuses_unsafe_tasktmp() {
   pass "teardown refuses arbitrary tasktmp cleanup targets from meta"
 }
 
+test_teardown_retries_transient_index_lock() {
+  local case_dir rc wt_head attempts
+  case_dir=$(make_case transient-index-lock)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work before transient lock"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  attempts="$case_dir/treehouse-attempts"
+
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$attempts" ]; then
+  : > "$attempts"
+  echo "fatal: Unable to create '/tmp/example/index.lock': File exists" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "transient-index-lock: teardown should retry once the lock clears"
+  assert_present "$attempts" "transient-index-lock: treehouse mock should observe the first failed attempt"
+  pass "teardown retries a transient index lock without weakening landed-work checks"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -678,3 +708,4 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_teardown_retries_transient_index_lock
