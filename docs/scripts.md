@@ -20,7 +20,7 @@ Each file also starts with a short header comment.
 | `fm-cbm-lib.sh`          | Optional codebase-memory-mcp (CBM) helpers: soft enable, cache/env exports, project allowlist, launch env prefix, brief orientation block, status line, durable usage JSONL helper; never blocks callers when CBM is missing |
 | `fm-cbm-cli.sh`          | Logged CLI wrapper for CBM tools; appends one line to `$FM_HOME/data/cbm/usage.jsonl` then runs the real binary |
 | `fm-cbm-mcp.sh`          | Optional MCP stdio entrypoint that logs one `mcp-session` event then execs the real binary (per-session count, not per-tool) |
-| `fm-cbm-usage.sh`        | Summarize or tail the durable CBM usage JSONL log |
+| `fm-cbm-usage.sh`        | Summarize, locate (`path`), or tail the durable CBM usage JSONL log |
 | `fm-cbm-index.sh`        | Host ops helper for CBM `status`, `list`, and `index` of allowlisted targets (`jt`, `firstmate`, `all`, or an absolute path); routes list/index through the logged CLI when present; soft dependency, not required for fleet health |
 | `fm-no-mistakes-pr-target-guard.sh` | Fail closed before no-mistakes test/push/PR work if direct push resolution, the no-mistakes gate, or no-mistakes status would target `kunchenguid/firstmate` instead of `JTInventory/firstmate`; allow upstream-owner `origin` fetch only with controlled-fork proof |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`; accepts concrete `--harness`, `--model`, and `--effort` profile axes; ship/scout spawns require an explicit resolved harness when dispatch profiles are active and otherwise apply deterministic route model/effort axes when the active crew harness matches the route; requires an isolated treehouse worktree; matching JT Control Room PR-mode ship spawns append the `JT PR Intake Governor`; eligible projects may also receive optional CBM orientation brief + env exports (soft dependency); installs per-harness turn-end signaling; and secondmate spawns resolve the secondmate harness, apply primary-local secondmate model/effort defaults, locally sync the home, and propagate declared inheritable config before launch |
@@ -75,5 +75,5 @@ The official docs now show raw data readback and session/model cost surfaces. Th
 
 ## Optional CBM (codebase-memory-mcp)
 
-CBM is soft orientation only: see [configuration.md](configuration.md#optional-codebase-memory-mcp-cbm).
-First Mate never auto-installs multi-agent MCP configs; host Codex/Claude MCP registration and index rebuilds stay captain-side (`fm-cbm-index.sh`).
+CBM is soft orientation only: see [configuration.md](configuration.md#optional-codebase-memory-mcp-cbm). Use `fm-cbm-cli.sh <tool> [json]` to record one best-effort CLI event and `fm-cbm-usage.sh summary`, `path`, or `tail [N]` to inspect `$FM_HOME/data/cbm/usage.jsonl`; `fm-cbm-index.sh` uses that wrapper for `list` and `index` when it is present. Spawned eligible ship/scout panes set `FM_CBM_TASK_ID` and `FM_CBM_CLI` so wrapper calls can be attributed to the task.
+First Mate never auto-installs multi-agent MCP configs; host Codex/Claude MCP registration and index rebuilds stay captain-side. A captain may opt into `fm-cbm-mcp.sh` as the host command to count MCP process starts, but it does not meter individual MCP tool calls.

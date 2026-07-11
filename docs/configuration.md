@@ -225,7 +225,7 @@ CLI and index metering do not depend on Codex session logs that get wiped for di
 - Log file: `$FM_HOME/data/cbm/usage.jsonl` (under gitignored `data/`)
 - Logged CLI: `bin/fm-cbm-cli.sh <tool> [json]` (used by `fm-cbm-index.sh`; recommended in crewmate briefs)
 - Optional MCP session counter: set host MCP `command` to `bin/fm-cbm-mcp.sh` (one `mcp-session` line per process start, not per tool)
-- Summary: `bin/fm-cbm-usage.sh summary` or `tail`
+- Inspect: `bin/fm-cbm-usage.sh summary`, `path`, or `tail [N]`
 
 Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection runs so wrapper lines can tag the task.
 
