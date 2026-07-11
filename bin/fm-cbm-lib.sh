@@ -271,11 +271,13 @@ fm_cbm_status_line() {
 
 # Durable CBM usage log (survives Codex log cleanup). Under $FM_HOME/data/cbm/.
 fm_cbm_usage_dir() {
-  local home=${FM_HOME:-${FM_ROOT:-}}
+  local home data
+  home=${FM_HOME:-${FM_ROOT:-}}
   if [ -z "$home" ]; then
     home=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd) || home="${HOME:-/root}/firstmate"
   fi
-  printf '%s\n' "$home/data/cbm"
+  data=${FM_DATA_OVERRIDE:-$home/data}
+  printf '%s\n' "$data/cbm"
 }
 
 fm_cbm_usage_log_path() {
@@ -323,13 +325,24 @@ fm_cbm_usage_log() {
         }'
     ) || return 0
   else
-    # Minimal fallback without jq (escape not full JSON; prefer jq on host).
-    line=$(printf '{"ts":"%s","source":"%s","tool":"%s","rc":%s,"task_id":%s}\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      "${source//\"/}" \
-      "${tool//\"/}" \
-      "$rc" \
-      "$( [ -n "$task" ] && printf '"%s"' "${task//\"/}" || printf 'null' )")
+    command -v python3 >/dev/null 2>&1 || return 0
+    line=$(python3 - "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$source" "$tool" "$rc" "${ms:-}" "$task" "$detail" <<'PY'
+import json
+import sys
+
+ts, source, tool, rc, ms, task, detail = sys.argv[1:]
+event = {
+    "ts": ts,
+    "source": source,
+    "tool": tool,
+    "rc": int(rc),
+    "ms": int(ms) if ms else None,
+    "task_id": task or None,
+    "detail": detail or None,
+}
+print(json.dumps(event, separators=(",", ":")))
+PY
+    ) || return 0
   fi
   printf '%s\n' "$line" >>"$logfile" 2>/dev/null || true
 }

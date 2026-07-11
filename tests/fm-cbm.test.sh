@@ -445,11 +445,13 @@ EOF
   (
     export FM_ROOT_OVERRIDE="$ROOT"
     export FM_HOME="$dir/home"
+    export FM_DATA_OVERRIDE="$dir/isolated-data"
     export FM_CBM_TASK_ID="task-usage-1"
     export CONFIG="$dir/home/config"
     "$ROOT/bin/fm-cbm-cli.sh" list_projects >/dev/null
-    usage="$dir/home/data/cbm/usage.jsonl"
+    usage="$dir/isolated-data/cbm/usage.jsonl"
     [ -f "$usage" ] || fail "usage.jsonl missing at $usage"
+    [ ! -e "$dir/home/data/cbm/usage.jsonl" ] || fail "usage log must honor FM_DATA_OVERRIDE"
     grep -q '"tool":"list_projects"' "$usage" || fail "usage line missing tool"
     grep -q '"source":"cli"' "$usage" || fail "usage line missing source=cli"
     grep -q '"task_id":"task-usage-1"' "$usage" || fail "usage line missing task_id"
@@ -457,6 +459,40 @@ EOF
     printf '%s' "$out" | grep -q 'events: 1' || fail "usage summary should show 1 event"
   ) || fail "subshell failed"
   pass "fm-cbm-cli: appends durable usage.jsonl and summary works"
+}
+
+test_usage_log_fallback_encodes_json() {
+  local dir usage tool detail task
+  dir=$(fm_test_tmproot fm-cbm)
+  usage="$dir/data/cbm/usage.jsonl"
+  tool=$'tool\\name\nnext\001'
+  detail=$'detail\\value\nnext\002'
+  task=$'task\\name\nnext\003'
+  (
+    export FM_HOME="$dir/home"
+    export FM_DATA_OVERRIDE="$dir/data"
+    export FM_CBM_TASK_ID="$task"
+    command() {
+      if [ "$1" = -v ] && [ "${2:-}" = jq ]; then
+        return 1
+      fi
+      builtin command "$@"
+    }
+    # shellcheck source=bin/fm-cbm-lib.sh
+    . "$LIB"
+    fm_cbm_usage_log --source cli --tool "$tool" --detail "$detail"
+    python3 - "$usage" "$tool" "$detail" "$task" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as usage:
+    event = json.loads(usage.read())
+assert event["tool"] == sys.argv[2]
+assert event["detail"] == sys.argv[3]
+assert event["task_id"] == sys.argv[4]
+PY
+  ) || fail "subshell failed"
+  pass "fm-cbm-lib: no-jq fallback writes valid escaped JSONL"
 }
 
 test_brief_mentions_logged_cli() {
@@ -500,4 +536,5 @@ test_index_all_skips_ineligible_without_failing
 test_index_rejects_openclaw_monorepo_root
 test_index_list_surfaces_cli_failures
 test_cli_wrapper_logs_usage
+test_usage_log_fallback_encodes_json
 test_brief_mentions_logged_cli
