@@ -677,8 +677,19 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
 fi
 
 WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS") || exit 1
-tmux set-window-option -t "$WID" automatic-rename off 2>/dev/null || true
-tmux set-window-option -t "$WID" allow-rename off 2>/dev/null || true
+case "$WID" in
+  @*) ;;
+  *)
+    echo "error: tmux did not return a window id for $T" >&2
+    exit 1 ;;
+esac
+tmux set-window-option -t "$WID" automatic-rename off
+tmux set-window-option -t "$WID" allow-rename off
+tmux rename-window -t "$WID" "$W"
+if [ "$(tmux display-message -p -t "$WID" '#{window_name}')" != "$W" ]; then
+  echo "error: tmux did not retain canonical window name $T" >&2
+  exit 1
+fi
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$WID" 'treehouse get' Enter
 
@@ -900,7 +911,7 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 sq_gotmpdir=$(shell_quote "$TASK_TMP/gotmp")
-tmux send-keys -t "$T" "export GOTMPDIR=$sq_gotmpdir" Enter
+tmux send-keys -t "$WID" "export GOTMPDIR=$sq_gotmpdir" Enter
 sleep 0.3
 # Soft CBM env for orientation tools/CLI (cache + resource caps + PATH).
 # Also prefix the launch command so the agent process itself inherits CBM even
@@ -916,12 +927,12 @@ if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
   # FM_CBM_TASK_ID tags usage.jsonl lines from fm-cbm-cli.sh for this task.
   # FM_CBM_CLI points agents at the logged CLI wrapper when they shell out.
   cbm_cli_wrap=$(shell_quote "$FM_ROOT/bin/fm-cbm-cli.sh")
-  tmux send-keys -t "$T" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
+  tmux send-keys -t "$WID" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
   sleep 0.2
   LAUNCH="${cbm_prefix}${LAUNCH}"
 fi
-tmux send-keys -t "$T" -l "$LAUNCH"
+tmux send-keys -t "$WID" -l "$LAUNCH"
 sleep 0.3
-tmux send-keys -t "$T" Enter
+tmux send-keys -t "$WID" Enter
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

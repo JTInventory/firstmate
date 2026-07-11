@@ -17,16 +17,44 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*)
-    case "$*" in *@42*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;; *) printf '\n' ;; esac
-    exit 0 ;;
-esac
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "${1:-}" >> "$FM_FAKE_TMUX_LOG"
+uses_window_id() {
+  local previous=
+  for argument in "$@"; do
+    if [ "$previous" = -t ] && [ "$argument" = @42 ]; then
+      return 0
+    fi
+    previous=$argument
+  done
+  return 1
+}
+
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{pane_current_path}"*)
+        uses_window_id "$@" || exit 64
+        printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+        exit 0 ;;
+      *"#{window_name}"*)
+        uses_window_id "$@" || exit 64
+        cat "${FM_FAKE_TMUX_STATE:?}"
+        exit 0 ;;
+    esac
+    printf 'firstmate\n'
+    exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session) exit 0 ;;
-  new-window) printf '%s\n' '@42'; exit 0 ;;
+  new-window)
+    [ "${2:-}" = -dP ] && [ "${3:-}" = -F ] && [ "${4:-}" = '#{window_id}' ] || exit 64
+    printf '%s\n' "${FM_FAKE_NEW_WINDOW_ID-@42}"
+    exit 0 ;;
+  set-window-option|send-keys)
+    uses_window_id "$@" || exit 64 ;;
+  rename-window)
+    uses_window_id "$@" && [ "${4:-}" = "${FM_FAKE_WINDOW_NAME:-}" ] || exit 64
+    printf '%s\n' "$FM_FAKE_WINDOW_NAME" > "$FM_FAKE_TMUX_STATE"
+    exit 0 ;;
 esac
 if [ "${1:-}" = send-keys ] && [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
   prev=
@@ -67,10 +95,12 @@ run_spawn_case() {
   local home=$1 id=$2 proj=$3 wt=$4 fakebin=$5
   shift 5
   : > "$home/launch.log"
+  : > "$home/tmux.log"
+  printf '%s\n' terminal-title > "$home/tmux-window-name"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" "$@" 2>&1
 }
@@ -246,6 +276,24 @@ EOF
   pass "unsafe task ids are rejected before spawn side effects"
 }
 
+test_empty_window_id_stops_before_post_create_commands() {
+  local home proj wt fakebin id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case empty-window-id)
+EOF
+  id=empty-window-id-hh8
+  mkdir -p "$home/data/$id"
+  printf '%s\n' 'Reject an empty tmux window id.' > "$home/data/$id/brief.md"
+
+  out=$(FM_FAKE_NEW_WINDOW_ID= run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "empty tmux window id should fail"
+  assert_contains "$out" "tmux did not return a window id" "empty tmux window id should explain failure"
+  assert_grep "new-window" "$home/tmux.log" "empty tmux window id should create the window once"
+  assert_no_grep "set-window-option" "$home/tmux.log" "empty tmux window id must stop before option changes"
+  assert_no_grep "send-keys" "$home/tmux.log" "empty tmux window id must stop before pane commands"
+  pass "empty tmux window ids stop before post-create commands"
+}
+
 test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
@@ -254,3 +302,4 @@ test_jt_keyword_id_in_unrelated_project_skips_pr_intake_governor
 test_jt_project_without_jt_context_skips_pr_intake_governor
 test_jt_openclaw_operator_route_brief_appends_pr_intake_governor
 test_unsafe_task_ids_are_rejected_before_spawn
+test_empty_window_id_stops_before_post_create_commands
