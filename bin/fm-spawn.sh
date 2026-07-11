@@ -900,13 +900,14 @@ sleep 0.3
 # Soft CBM env for orientation tools/CLI (cache + resource caps + PATH).
 # Also prefix the launch command so the agent process itself inherits CBM even
 # if a later pane export is missed. Missing CBM is a no-op.
-if cbm_prefix=$(fm_cbm_launch_env_prefix 2>/dev/null); then
+if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
+  && fm_cbm_prepare_environment 2>/dev/null \
+  && cbm_prefix=$(fm_cbm_launch_env_prefix_prepared 2>/dev/null); then
   # Pane-level exports for shell tools the agent may run later.
-  cbm_cache=$(fm_cbm_cache_dir)
-  cbm_bin=$(fm_cbm_binary)
-  cbm_mem=${FM_CBM_MEM_BUDGET_MB:-1024}
-  cbm_workers=${FM_CBM_WORKERS:-2}
-  cbm_path_prefix=$(dirname "$cbm_bin")
+  cbm_cache=$FM_CBM_RESOLVED_CACHE
+  cbm_mem=$FM_CBM_RESOLVED_MEM
+  cbm_workers=$FM_CBM_RESOLVED_WORKERS
+  cbm_path_prefix=$FM_CBM_RESOLVED_PATH_PREFIX
   tmux send-keys -t "$T" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
   sleep 0.2
   LAUNCH="${cbm_prefix}${LAUNCH}"

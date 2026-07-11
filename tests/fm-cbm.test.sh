@@ -62,6 +62,59 @@ SH
   pass "fm-cbm-lib: auto enables with binary and builds launch prefix"
 }
 
+test_lib_rejects_unsafe_resource_caps() {
+  local dir marker prefix out
+  dir=$(fm_test_tmproot fm-cbm)
+  marker="$dir/injected"
+  mkdir -p "$dir/bin" "$dir/config"
+  cat > "$dir/bin/codebase-memory-mcp" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/bin/codebase-memory-mcp"
+  cat > "$dir/config/cbm.env" <<EOF
+FM_CBM_MEM_BUDGET_MB=2; touch $marker; #
+FM_CBM_WORKERS=workers
+EOF
+  (
+    export PATH="$dir/bin:$PATH"
+    export CONFIG="$dir/config"
+    export FM_HOME="$dir"
+    # shellcheck source=bin/fm-cbm-lib.sh
+    . "$LIB"
+    prefix=$(fm_cbm_launch_env_prefix) || fail "launch prefix should succeed"
+    bash -c "${prefix}env" > "$dir/env"
+    [ ! -e "$marker" ] || fail "resource cap config must not execute shell text"
+    grep -qx 'CBM_MEM_BUDGET_MB=1024' "$dir/env" || fail "invalid memory cap must use default"
+    grep -qx 'CBM_WORKERS=2' "$dir/env" || fail "invalid worker cap must use default"
+  ) || fail "subshell failed"
+  pass "fm-cbm-lib: unsafe resource caps are rejected"
+}
+
+test_lib_rejects_relative_explicit_binary() {
+  local dir found
+  dir=$(fm_test_tmproot fm-cbm)
+  mkdir -p "$dir/config" "$dir/relative-bin"
+  cat > "$dir/relative-bin/codebase-memory-mcp" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/relative-bin/codebase-memory-mcp"
+  printf '%s\n' 'FM_CBM_BIN=relative-bin/codebase-memory-mcp' > "$dir/config/cbm.env"
+  (
+    export PATH=/usr/bin:/bin
+    export CONFIG="$dir/config"
+    export FM_HOME="$dir"
+    cd "$dir"
+    # shellcheck source=bin/fm-cbm-lib.sh
+    . "$LIB"
+    fm_cbm_load_config_file
+    found=$(fm_cbm_binary || true)
+    [ "$found" != 'relative-bin/codebase-memory-mcp' ] || fail "relative explicit binary must be rejected"
+  ) || fail "subshell failed"
+  pass "fm-cbm-lib: rejects relative explicit binary"
+}
+
 test_lib_project_eligibility_defaults() {
   local dir
   dir=$(fm_test_tmproot fm-cbm)
@@ -94,6 +147,9 @@ test_lib_project_eligibility_file() {
     fm_cbm_project_eligible "/tmp/only-this" || fail "allowlisted name should match"
     if fm_cbm_project_eligible "/tmp/.openclaw"; then
       fail "default allowlist must not apply when file exists"
+    fi
+    if fm_cbm_project_eligible "/x/workspace/projects/active/JT-Control-Room"; then
+      fail "JT shortcut must not bypass configured allowlist"
     fi
   ) || fail "subshell failed"
   pass "fm-cbm-lib: config/cbm-projects overrides defaults"
@@ -154,6 +210,9 @@ SH
 }
 
 test_spawn_sources_cbm_and_exports() {
+  local eligible_gate secondmate_gate
+  eligible_gate='fm_cbm_project_eligible "$PROJ_ABS"'
+  secondmate_gate='[ "$KIND" != secondmate ]'
   # Structural contract: spawn must source cbm lib, append policy, and export CBM env.
   grep -F 'fm-cbm-lib.sh' "$SPAWN" >/dev/null \
     || fail "fm-spawn must source fm-cbm-lib.sh"
@@ -163,7 +222,77 @@ test_spawn_sources_cbm_and_exports() {
     || fail "fm-spawn must use fm_cbm_launch_env_prefix"
   grep -F 'export CBM_CACHE_DIR=' "$SPAWN" >/dev/null \
     || fail "fm-spawn must export CBM_CACHE_DIR into the pane"
+  grep -F "$eligible_gate" "$SPAWN" >/dev/null \
+    || fail "fm-spawn must gate CBM env by project eligibility"
+  grep -F "$secondmate_gate" "$SPAWN" >/dev/null \
+    || fail "fm-spawn must not inject CBM into secondmates"
+  if grep -F 'fm_cbm_binary' "$SPAWN" >/dev/null; then
+    fail "fm-spawn must reuse the prepared CBM binary"
+  fi
   pass "fm-spawn: CBM integration contract lines present"
+}
+
+test_index_escapes_paths_and_fails_loudly() {
+  local dir repo fake log out
+  dir=$(fm_test_tmproot fm-cbm)
+  repo="$dir/repo\"quoted"
+  fake="$dir/bin/codebase-memory-mcp"
+  log="$dir/request.json"
+  mkdir -p "$dir/home/config" "$dir/bin" "$repo"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+printf '%s' "$3" > "$CBM_TEST_LOG"
+exit "${CBM_FAKE_EXIT:-0}"
+SH
+  chmod +x "$fake"
+  cat > "$dir/home/config/cbm.env" <<EOF
+FM_CBM_ENABLED=1
+FM_CBM_BIN=$fake
+FM_CBM_CACHE_DIR=$dir/cache
+EOF
+  printf '%s\n' "$repo" > "$dir/home/config/cbm-projects"
+  (
+    export FM_ROOT_OVERRIDE="$dir/home"
+    export FM_HOME="$dir/home"
+    export CBM_TEST_LOG="$log"
+    "$INDEX" index "$repo" >/dev/null
+    jq -e --arg repo_path "$repo" '.repo_path == $repo_path' "$log" >/dev/null \
+      || fail "index request must JSON-escape repo_path"
+    if CBM_FAKE_EXIT=9 "$INDEX" index "$repo" >/dev/null 2>&1; then
+      fail "failed explicit index must return nonzero"
+    fi
+  ) || fail "subshell failed"
+  pass "fm-cbm-index: escapes paths and surfaces index failures"
+}
+
+test_index_rejects_unallowlisted_absolute_path() {
+  local dir repo fake log
+  dir=$(fm_test_tmproot fm-cbm)
+  repo="$dir/unallowlisted"
+  fake="$dir/bin/codebase-memory-mcp"
+  log="$dir/invoked"
+  mkdir -p "$dir/home/config" "$dir/bin" "$repo"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+touch "$CBM_TEST_LOG"
+SH
+  chmod +x "$fake"
+  cat > "$dir/home/config/cbm.env" <<EOF
+FM_CBM_ENABLED=1
+FM_CBM_BIN=$fake
+FM_CBM_CACHE_DIR=$dir/cache
+EOF
+  printf '%s\n' 'another-project' > "$dir/home/config/cbm-projects"
+  (
+    export FM_ROOT_OVERRIDE="$dir/home"
+    export FM_HOME="$dir/home"
+    export CBM_TEST_LOG="$log"
+    if "$INDEX" index "$repo" >/dev/null 2>&1; then
+      fail "unallowlisted absolute index target must fail"
+    fi
+    [ ! -e "$log" ] || fail "unallowlisted path must not invoke CBM"
+  ) || fail "subshell failed"
+  pass "fm-cbm-index: rejects unallowlisted absolute paths"
 }
 
 test_index_helper_exists_and_help() {
@@ -176,9 +305,13 @@ test_index_helper_exists_and_help() {
 
 test_lib_disabled_when_forced_off
 test_lib_auto_on_with_binary
+test_lib_rejects_unsafe_resource_caps
+test_lib_rejects_relative_explicit_binary
 test_lib_project_eligibility_defaults
 test_lib_project_eligibility_file
 test_lib_append_brief_policy
 test_lib_append_skips_ineligible
 test_spawn_sources_cbm_and_exports
 test_index_helper_exists_and_help
+test_index_escapes_paths_and_fails_loudly
+test_index_rejects_unallowlisted_absolute_path

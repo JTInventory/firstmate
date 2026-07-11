@@ -21,6 +21,32 @@ fm_cbm_truthy() {
   esac
 }
 
+fm_cbm_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+fm_cbm_resource_cap() {
+  local value=${1:-} fallback=$2
+  if [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+fm_cbm_canonical_executable() {
+  local candidate=$1 dir
+  case "$candidate" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -x "$candidate" ] || return 1
+  dir=$(cd -P "$(dirname "$candidate")" 2>/dev/null && pwd) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+}
+
 fm_cbm_load_config_file() {
   local conf key val
   conf="${CONFIG:-${FM_HOME:-}/config}/cbm.env"
@@ -47,19 +73,22 @@ fm_cbm_load_config_file() {
 
 fm_cbm_binary() {
   local b
-  if [ -n "${FM_CBM_BIN:-}" ] && [ -x "${FM_CBM_BIN}" ]; then
-    printf '%s\n' "$FM_CBM_BIN"
-    return 0
+  if [ -n "${FM_CBM_BIN:-}" ]; then
+    fm_cbm_canonical_executable "$FM_CBM_BIN" && return 0
   fi
   b=$(command -v codebase-memory-mcp 2>/dev/null || true)
   if [ -n "$b" ] && [ -x "$b" ]; then
-    printf '%s\n' "$b"
-    return 0
+    case "$b" in
+      /*) fm_cbm_canonical_executable "$b" && return 0 ;;
+      *)
+        b="$(cd -P "$(dirname "$b")" 2>/dev/null && pwd)/$(basename "$b")"
+        fm_cbm_canonical_executable "$b" && return 0
+        ;;
+    esac
   fi
   for b in "$HOME/.local/bin/codebase-memory-mcp" /root/.local/bin/codebase-memory-mcp /usr/local/bin/codebase-memory-mcp; do
     if [ -x "$b" ]; then
-      printf '%s\n' "$b"
-      return 0
+      fm_cbm_canonical_executable "$b" && return 0
     fi
   done
   return 1
@@ -103,11 +132,6 @@ fm_cbm_project_eligible() {
   lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
   conf="${CONFIG:-${FM_HOME:-}/config}/cbm-projects"
 
-  # Path contains JT Control Room active app
-  case "$project_abs" in
-    */JT-Control-Room|*/JT-Control-Room/*|*/jt-control-room|*/jt-control-room/*) return 0 ;;
-  esac
-
   if [ -f "$conf" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in ''|\#*) continue ;; esac
@@ -122,6 +146,10 @@ fm_cbm_project_eligible() {
     done < "$conf"
     return 1
   fi
+
+  case "$project_abs" in
+    */JT-Control-Room|*/JT-Control-Room/*|*/jt-control-room|*/jt-control-room/*) return 0 ;;
+  esac
 
   while IFS= read -r line; do
     [ "$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')" = "$lower" ] && return 0
@@ -140,38 +168,46 @@ fm_cbm_env_assignments() {
   fm_cbm_enabled || return 1
   bin=$(fm_cbm_binary) || return 1
   cache=$(fm_cbm_cache_dir)
-  mem=${FM_CBM_MEM_BUDGET_MB:-1024}
-  workers=${FM_CBM_WORKERS:-2}
+  mem=$(fm_cbm_resource_cap "${FM_CBM_MEM_BUDGET_MB:-}" 1024)
+  workers=$(fm_cbm_resource_cap "${FM_CBM_WORKERS:-}" 2)
   mkdir -p "$cache" 2>/dev/null || true
   path_prefix=$(dirname "$bin")
-  printf 'CBM_CACHE_DIR=%s\n' "$(printf '%s' "$cache" | sed "s/'/'\\\\''/g")"
-  # Use shell-quoted form for consumers that build export lines
-  printf 'FM_CBM_BIN=%s\n' "$bin"
-  printf 'CBM_MEM_BUDGET_MB=%s\n' "$mem"
-  printf 'CBM_WORKERS=%s\n' "$workers"
-  printf 'FM_CBM_PATH_PREFIX=%s\n' "$path_prefix"
+  printf 'CBM_CACHE_DIR=%s\n' "$(fm_cbm_shell_quote "$cache")"
+  printf 'FM_CBM_BIN=%s\n' "$(fm_cbm_shell_quote "$bin")"
+  printf 'CBM_MEM_BUDGET_MB=%s\n' "$(fm_cbm_shell_quote "$mem")"
+  printf 'CBM_WORKERS=%s\n' "$(fm_cbm_shell_quote "$workers")"
+  printf 'FM_CBM_PATH_PREFIX=%s\n' "$(fm_cbm_shell_quote "$path_prefix")"
+}
+
+fm_cbm_prepare_environment() {
+  fm_cbm_enabled || return 1
+  FM_CBM_RESOLVED_BIN=$(fm_cbm_binary) || return 1
+  FM_CBM_RESOLVED_CACHE=$(fm_cbm_cache_dir)
+  FM_CBM_RESOLVED_MEM=$(fm_cbm_resource_cap "${FM_CBM_MEM_BUDGET_MB:-}" 1024)
+  FM_CBM_RESOLVED_WORKERS=$(fm_cbm_resource_cap "${FM_CBM_WORKERS:-}" 2)
+  FM_CBM_RESOLVED_PATH_PREFIX=$(dirname "$FM_CBM_RESOLVED_BIN")
+  mkdir -p "$FM_CBM_RESOLVED_CACHE" 2>/dev/null || true
 }
 
 # Echo a single-line env prefix for the agent launch command (codex/claude/...).
 # Example: CBM_CACHE_DIR='...' CBM_MEM_BUDGET_MB=1024 PATH='/x:/usr/bin' 
+fm_cbm_launch_env_prefix_prepared() {
+  printf "CBM_CACHE_DIR=%s CBM_MEM_BUDGET_MB=%s CBM_WORKERS=%s PATH=%s:\"\$PATH\" " \
+    "$(fm_cbm_shell_quote "$FM_CBM_RESOLVED_CACHE")" \
+    "$(fm_cbm_shell_quote "$FM_CBM_RESOLVED_MEM")" \
+    "$(fm_cbm_shell_quote "$FM_CBM_RESOLVED_WORKERS")" \
+    "$(fm_cbm_shell_quote "$FM_CBM_RESOLVED_PATH_PREFIX")"
+}
+
 fm_cbm_launch_env_prefix() {
-  local bin cache mem workers path_prefix sq
-  fm_cbm_enabled || return 1
-  bin=$(fm_cbm_binary) || return 1
-  cache=$(fm_cbm_cache_dir)
-  mem=${FM_CBM_MEM_BUDGET_MB:-1024}
-  workers=${FM_CBM_WORKERS:-2}
-  path_prefix=$(dirname "$bin")
-  mkdir -p "$cache" 2>/dev/null || true
-  sq() { printf "'" ; printf '%s' "$1" | sed "s/'/'\\\\''/g" ; printf "'" ; }
-  printf 'CBM_CACHE_DIR=%s CBM_MEM_BUDGET_MB=%s CBM_WORKERS=%s PATH=%s:"$PATH" ' \
-    "$(sq "$cache")" "$mem" "$workers" "$(sq "$path_prefix")"
+  fm_cbm_prepare_environment || return 1
+  fm_cbm_launch_env_prefix_prepared
 }
 
 # Append orientation policy to a crewmate brief when eligible.
 # Args: <brief-path> <project-abs> <kind>
 fm_cbm_append_brief_policy() {
-  local brief=$1 project_abs=$2 kind=${3:-ship}
+  local brief=$1 project_abs=$2
   local bin cache slug
   [ -f "$brief" ] || return 0
   grep -qxF '<!-- firstmate:cbm-orientation:start -->' "$brief" 2>/dev/null && return 0

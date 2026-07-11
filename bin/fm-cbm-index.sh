@@ -6,7 +6,7 @@
 #   fm-cbm-index.sh status
 #   fm-cbm-index.sh list
 #   fm-cbm-index.sh index [<abs-path>|jt|firstmate|all]
-set -eu
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -31,18 +31,18 @@ case "$cmd" in
     ;;
 esac
 
-if ! fm_cbm_enabled; then
+if ! fm_cbm_prepare_environment; then
   echo "CBM: disabled or binary missing"
   [ "$cmd" = status ] && exit 0
   exit 1
 fi
 
-bin=$(fm_cbm_binary)
-cache=$(fm_cbm_cache_dir)
+bin=$FM_CBM_RESOLVED_BIN
+cache=$FM_CBM_RESOLVED_CACHE
 export CBM_CACHE_DIR=$cache
-export CBM_MEM_BUDGET_MB=${FM_CBM_MEM_BUDGET_MB:-1024}
-export CBM_WORKERS=${FM_CBM_WORKERS:-2}
-export PATH="$(dirname "$bin"):$PATH"
+export CBM_MEM_BUDGET_MB=$FM_CBM_RESOLVED_MEM
+export CBM_WORKERS=$FM_CBM_RESOLVED_WORKERS
+export PATH="$FM_CBM_RESOLVED_PATH_PREFIX:$PATH"
 
 resolve_target() {
   case "$1" in
@@ -92,8 +92,13 @@ case "$cmd" in
     fi
     for p in "${paths[@]}"; do
       [ -n "$p" ] || continue
+      if ! fm_cbm_project_eligible "$p"; then
+        echo "error: index target is not allowlisted: $p" >&2
+        exit 1
+      fi
       echo "indexing: $p"
-      "$bin" cli index_repository "{\"repo_path\": \"$p\"}" 2>&1 | sed '/^level=/d' || true
+      payload=$(jq -cn --arg repo_path "$p" '{repo_path: $repo_path}')
+      "$bin" cli index_repository "$payload" 2>&1 | sed '/^level=/d'
     done
     ;;
   -h|--help|help)
