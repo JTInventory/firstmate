@@ -670,8 +670,8 @@ test_teardown_retries_transient_index_lock() {
 
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-if [ ! -e "$attempts" ]; then
-  : > "$attempts"
+printf '%s\n' attempt >> "$attempts"
+if [ "\$(wc -l < "$attempts")" -eq 1 ]; then
   echo "fatal: Unable to create '/tmp/example/index.lock': File exists" >&2
   exit 1
 fi
@@ -685,7 +685,7 @@ SH
   set -e
 
   expect_code 0 "$rc" "transient-index-lock: teardown should retry once the lock clears"
-  assert_present "$attempts" "transient-index-lock: treehouse mock should observe the first failed attempt"
+  [ "$(wc -l < "$attempts")" -eq 2 ] || fail "transient-index-lock: treehouse should be called twice"
   pass "teardown retries a transient index lock without weakening landed-work checks"
 }
 
@@ -713,8 +713,8 @@ test_forced_secondmate_teardown_retries_child_index_lock() {
 
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-if [ ! -e "$attempts" ]; then
-  : > "$attempts"
+printf '%s\n' attempt >> "$attempts"
+if [ "\$(wc -l < "$attempts")" -eq 1 ]; then
   echo "fatal: Unable to create '/tmp/example/index.lock': File exists" >&2
   exit 1
 fi
@@ -728,7 +728,7 @@ SH
   set -e
 
   expect_code 0 "$rc" "forced-child-index-lock: forced secondmate teardown should retry a child worktree lock"
-  assert_present "$attempts" "forced-child-index-lock: treehouse mock should observe the first failed child return"
+  [ "$(wc -l < "$attempts")" -eq 2 ] || fail "forced-child-index-lock: child treehouse return should be retried"
   [ ! -e "$home" ] || fail "forced-child-index-lock: secondmate home should be removed after child return succeeds"
   pass "forced secondmate teardown retries a transient child worktree index lock"
 }
