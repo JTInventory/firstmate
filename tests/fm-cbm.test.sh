@@ -283,6 +283,10 @@ test_spawn_sources_cbm_and_exports() {
     || fail "fm-spawn must use fm_cbm_launch_env_prefix"
   grep -F 'export CBM_CACHE_DIR=' "$SPAWN" >/dev/null \
     || fail "fm-spawn must export CBM_CACHE_DIR into the pane"
+  grep -F 'FM_CBM_TASK_ID=' "$SPAWN" >/dev/null \
+    || fail "fm-spawn must export FM_CBM_TASK_ID for usage metering"
+  grep -F 'FM_CBM_CLI=' "$SPAWN" >/dev/null \
+    || fail "fm-spawn must export FM_CBM_CLI for logged CLI"
   grep -F "$eligible_gate" "$SPAWN" >/dev/null \
     || fail "fm-spawn must gate CBM env by project eligibility"
   # Brief policy and env injection both skip secondmates (appear twice).
@@ -419,6 +423,67 @@ test_index_helper_exists_and_help() {
   pass "fm-cbm-index.sh: help works"
 }
 
+test_cli_wrapper_logs_usage() {
+  local dir fake usage
+  dir=$(fm_test_tmproot fm-cbm)
+  fake="$dir/bin/codebase-memory-mcp"
+  mkdir -p "$dir/home/config" "$dir/bin"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+# echo a tiny JSON payload so list_projects looks successful
+if [ "${2:-}" = list_projects ] || [ "${1:-}" = list_projects ]; then
+  printf '%s\n' '{"projects":[]}'
+fi
+exit 0
+SH
+  chmod +x "$fake"
+  cat > "$dir/home/config/cbm.env" <<EOF
+FM_CBM_ENABLED=1
+FM_CBM_BIN=$fake
+FM_CBM_CACHE_DIR=$dir/cache
+EOF
+  (
+    export FM_ROOT_OVERRIDE="$ROOT"
+    export FM_HOME="$dir/home"
+    export FM_CBM_TASK_ID="task-usage-1"
+    export CONFIG="$dir/home/config"
+    "$ROOT/bin/fm-cbm-cli.sh" list_projects >/dev/null
+    usage="$dir/home/data/cbm/usage.jsonl"
+    [ -f "$usage" ] || fail "usage.jsonl missing at $usage"
+    grep -q '"tool":"list_projects"' "$usage" || fail "usage line missing tool"
+    grep -q '"source":"cli"' "$usage" || fail "usage line missing source=cli"
+    grep -q '"task_id":"task-usage-1"' "$usage" || fail "usage line missing task_id"
+    out=$("$ROOT/bin/fm-cbm-usage.sh" summary)
+    printf '%s' "$out" | grep -q 'events: 1' || fail "usage summary should show 1 event"
+  ) || fail "subshell failed"
+  pass "fm-cbm-cli: appends durable usage.jsonl and summary works"
+}
+
+test_brief_mentions_logged_cli() {
+  local dir brief
+  dir=$(fm_test_tmproot fm-cbm)
+  mkdir -p "$dir/bin" "$dir/config" "$dir/data/t1"
+  cat > "$dir/bin/codebase-memory-mcp" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/bin/codebase-memory-mcp"
+  brief="$dir/data/t1/brief.md"
+  printf '%s\n' '# Task' > "$brief"
+  (
+    export PATH="$dir/bin:$PATH"
+    export CONFIG="$dir/config"
+    export FM_HOME="$dir"
+    export FM_ROOT="$ROOT"
+    unset FM_CBM_ENABLED
+    # shellcheck source=bin/fm-cbm-lib.sh
+    . "$LIB"
+    fm_cbm_append_brief_policy "$brief" "/repo/.openclaw" scout
+    grep -q 'fm-cbm-cli.sh' "$brief" || fail "brief should recommend logged CLI wrapper"
+  ) || fail "subshell failed"
+  pass "fm-cbm-lib: brief points at fm-cbm-cli.sh"
+}
+
 test_lib_disabled_when_forced_off
 test_lib_auto_on_with_binary
 test_lib_rejects_unsafe_resource_caps
@@ -434,3 +499,5 @@ test_index_rejects_unallowlisted_absolute_path
 test_index_all_skips_ineligible_without_failing
 test_index_rejects_openclaw_monorepo_root
 test_index_list_surfaces_cli_failures
+test_cli_wrapper_logs_usage
+test_brief_mentions_logged_cli

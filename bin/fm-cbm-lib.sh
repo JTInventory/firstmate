@@ -217,7 +217,7 @@ fm_cbm_launch_env_prefix() {
 # Args: <brief-path> <project-abs> <kind>
 fm_cbm_append_brief_policy() {
   local brief=$1 project_abs=$2
-  local bin cache slug
+  local bin cache slug fm_root_for_cli cli_wrap
   [ -f "$brief" ] || return 0
   grep -qxF '<!-- firstmate:cbm-orientation:start -->' "$brief" 2>/dev/null && return 0
   fm_cbm_enabled || return 0
@@ -225,6 +225,9 @@ fm_cbm_append_brief_policy() {
   bin=$(fm_cbm_binary) || return 0
   cache=$(fm_cbm_cache_dir)
   slug=$(basename "$project_abs")
+  # Prefer the repo bin that wrote this brief (works in worktrees and homes).
+  fm_root_for_cli=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+  cli_wrap="$fm_root_for_cli/bin/fm-cbm-cli.sh"
 
   cat >> "$brief" <<EOF
 
@@ -238,8 +241,8 @@ CBM is optional memory/orientation for multi-file code exploration. It is not pr
 - Skip CBM for tiny one-file tasks (single manifest/doc read) when a direct Read is enough.
 
 ## How to use it (if tools or CLI are available)
-1. Prefer MCP tools from \`codebase-memory-mcp\` when listed.
-2. Or CLI: \`$bin cli …\` with env \`CBM_CACHE_DIR=$cache\`.
+1. Prefer MCP tools from \`codebase-memory-mcp\` when listed (host MCP registration).
+2. Or logged CLI (preferred for First Mate metering): \`$cli_wrap <tool> [json]\` with env \`CBM_CACHE_DIR=$cache\` (and \`FM_CBM_TASK_ID\` if set). Fallback raw: \`$bin cli …\`.
 3. Start with \`list_projects\` / \`get_architecture\` (overview) or \`search_graph\` with a tight limit.
 4. Then **Read** the few real files needed to verify claims. Graph edges can be noisy.
 5. Project path for this task: \`$project_abs\` (basename \`$slug\`). Indexed JT app path is often under \`workspace/projects/active/JT-Control-Room\` when the spawn root is \`.openclaw\`.
@@ -264,4 +267,69 @@ fm_cbm_status_line() {
   else
     printf 'CBM: binary-ok empty-cache=%s (run index for projects)\n' "$cache"
   fi
+}
+
+# Durable CBM usage log (survives Codex log cleanup). Under $FM_HOME/data/cbm/.
+fm_cbm_usage_dir() {
+  local home=${FM_HOME:-${FM_ROOT:-}}
+  if [ -z "$home" ]; then
+    home=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd) || home="${HOME:-/root}/firstmate"
+  fi
+  printf '%s\n' "$home/data/cbm"
+}
+
+fm_cbm_usage_log_path() {
+  printf '%s/usage.jsonl\n' "$(fm_cbm_usage_dir)"
+}
+
+# Append one JSONL usage event. Never fails the caller (best-effort).
+# Args: --source <cli|index|mcp-session|...> --tool <name> [--rc N] [--ms N] [--detail <text>]
+fm_cbm_usage_log() {
+  local source= tool= rc=0 ms= detail= task= logdir logfile line
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --source) source=${2:-}; shift 2 ;;
+      --tool) tool=${2:-}; shift 2 ;;
+      --rc) rc=${2:-0}; shift 2 ;;
+      --ms) ms=${2:-}; shift 2 ;;
+      --detail) detail=${2:-}; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$source" ] || return 0
+  [ -n "$tool" ] || tool=unknown
+  task=${FM_CBM_TASK_ID:-${FM_TASK_ID:-}}
+  logdir=$(fm_cbm_usage_dir) || return 0
+  mkdir -p "$logdir" 2>/dev/null || return 0
+  logfile="$logdir/usage.jsonl"
+  if command -v jq >/dev/null 2>&1; then
+    line=$(
+      jq -cn \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg source "$source" \
+        --arg tool "$tool" \
+        --argjson rc "$rc" \
+        --arg ms "${ms:-}" \
+        --arg task "$task" \
+        --arg detail "$detail" \
+        '{
+          ts: $ts,
+          source: $source,
+          tool: $tool,
+          rc: $rc,
+          ms: (if $ms == "" then null else ($ms|tonumber) end),
+          task_id: (if $task == "" then null else $task end),
+          detail: (if $detail == "" then null else $detail end)
+        }'
+    ) || return 0
+  else
+    # Minimal fallback without jq (escape not full JSON; prefer jq on host).
+    line=$(printf '{"ts":"%s","source":"%s","tool":"%s","rc":%s,"task_id":%s}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "${source//\"/}" \
+      "${tool//\"/}" \
+      "$rc" \
+      "$( [ -n "$task" ] && printf '"%s"' "${task//\"/}" || printf 'null' )")
+  fi
+  printf '%s\n' "$line" >>"$logfile" 2>/dev/null || true
 }

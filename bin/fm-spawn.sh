@@ -911,7 +911,10 @@ if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
   cbm_mem=$FM_CBM_RESOLVED_MEM
   cbm_workers=$FM_CBM_RESOLVED_WORKERS
   cbm_path_prefix=$FM_CBM_RESOLVED_PATH_PREFIX
-  tmux send-keys -t "$T" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
+  # FM_CBM_TASK_ID tags usage.jsonl lines from fm-cbm-cli.sh for this task.
+  # FM_CBM_CLI points agents at the logged CLI wrapper when they shell out.
+  cbm_cli_wrap=$(shell_quote "$FM_ROOT/bin/fm-cbm-cli.sh")
+  tmux send-keys -t "$T" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
   sleep 0.2
   LAUNCH="${cbm_prefix}${LAUNCH}"
 fi

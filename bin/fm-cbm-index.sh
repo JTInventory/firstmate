@@ -43,6 +43,18 @@ export CBM_CACHE_DIR=$cache
 export CBM_MEM_BUDGET_MB=$FM_CBM_RESOLVED_MEM
 export CBM_WORKERS=$FM_CBM_RESOLVED_WORKERS
 export PATH="$FM_CBM_RESOLVED_PATH_PREFIX:$PATH"
+# Prefer logged CLI when present so index/list feed usage.jsonl.
+CBM_CLI="$SCRIPT_DIR/fm-cbm-cli.sh"
+if [ ! -x "$CBM_CLI" ]; then
+  CBM_CLI=
+fi
+cbm_cli() {
+  if [ -n "$CBM_CLI" ]; then
+    "$CBM_CLI" "$@"
+  else
+    "$bin" cli "$@"
+  fi
+}
 
 resolve_target() {
   case "$1" in
@@ -77,7 +89,7 @@ case "$cmd" in
     fm_cbm_status_line
     ;;
   list)
-    if ! "$bin" cli list_projects 2>&1 | sed '/^level=/d'; then
+    if ! cbm_cli list_projects 2>&1 | sed '/^level=/d'; then
       echo "error: CBM project listing failed" >&2
       exit 1
     fi
@@ -107,7 +119,7 @@ case "$cmd" in
       fi
       echo "indexing: $p"
       payload=$(jq -cn --arg repo_path "$p" '{repo_path: $repo_path}')
-      "$bin" cli index_repository "$payload" 2>&1 | sed '/^level=/d'
+      cbm_cli index_repository "$payload" 2>&1 | sed '/^level=/d'
       indexed=$((indexed + 1))
     done
     if [ "$target" = all ] && [ "$indexed" -eq 0 ]; then
