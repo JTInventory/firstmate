@@ -65,19 +65,19 @@ fm_pid_identity_matches_legacy() {
     [ "$candidate" = "$stored_identity" ] && return 0
   done < <(
     printf '%s\n' "${LC_ALL:-}" "${LANG:-}" C
-    command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null || true
+    if command -v locale >/dev/null 2>&1; then
+      locale -a 2>/dev/null || true
+    fi
   )
   return 1
 }
 
-fm_lock_migrate_legacy_watcher_identity() {
-  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 owner stored_identity current_identity temp
+fm_lock_migrate_legacy_identity() {
+  local lockdir=$1 pid=$2 owner stored_identity current_identity temp
   owner=$(fm_lock_link_owner "$lockdir") || return 1
   stored_identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
   fm_pid_identity_is_legacy "$stored_identity" || return 1
   [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$pid" ] || return 1
-  [ "$(cat "$owner/fm-home" 2>/dev/null || true)" = "$expected_home" ] || return 1
-  [ "$(cat "$owner/watcher-path" 2>/dev/null || true)" = "$expected_path" ] || return 1
   fm_pid_alive "$pid" || return 1
   fm_pid_identity_matches_legacy "$pid" "$stored_identity" || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
@@ -90,6 +90,14 @@ fm_lock_migrate_legacy_watcher_identity() {
     rm -f "$temp" 2>/dev/null || true
     return 1
   fi
+}
+
+fm_lock_migrate_legacy_watcher_identity() {
+  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 owner
+  owner=$(fm_lock_link_owner "$lockdir") || return 1
+  [ "$(cat "$owner/fm-home" 2>/dev/null || true)" = "$expected_home" ] || return 1
+  [ "$(cat "$owner/watcher-path" 2>/dev/null || true)" = "$expected_path" ] || return 1
+  fm_lock_migrate_legacy_identity "$lockdir" "$pid"
 }
 
 fm_watcher_lock_matches_pid() {
@@ -280,6 +288,7 @@ fm_lock_live_pid_has_mismatched_identity() {
   [ -n "$stored_identity" ] || return 1
   fm_pid_identity_matches_stored "$pid" "$stored_identity" && return 1
   if fm_pid_identity_is_legacy "$stored_identity"; then
+    fm_lock_migrate_legacy_identity "$lockdir" "$pid" && return 1
     [ "$(fm_path_age "$lockdir")" -ge "$FM_LOCK_LEGACY_IDENTITY_MAX_AGE" ] || return 1
   fi
   return 0

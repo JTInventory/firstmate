@@ -489,6 +489,52 @@ test_lock_reclaims_expired_legacy_pid_identity() {
   pass "expired live-held legacy identity is reclaimed"
 }
 
+test_watcher_preserves_matching_expired_legacy_watcher_lock() {
+  local dir state fakebin first_out second_out wpid second_pid i identity
+  dir=$(make_case lock-migrate-expired-legacy-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  first_out="$dir/first.out"
+  second_out="$dir/second.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$first_out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${LC_ALL:-}" = legacy_TEST ]; then
+  printf '%s\n' 'legacy locale-sensitive process identity'
+else
+  printf '%s\n' 'current process identity'
+fi
+SH
+  cat > "$fakebin/locale" <<'SH'
+#!/usr/bin/env bash
+printf 'C\nlegacy_TEST\n'
+SH
+  chmod +x "$fakebin/ps" "$fakebin/locale"
+  printf '%s\n' 'legacy locale-sensitive process identity' > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.watch.lock"
+  PATH="$fakebin:$PATH" FM_LOCK_LEGACY_IDENTITY_MAX_AGE=0 FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$second_out" &
+  second_pid=$!
+  wait "$second_pid" || fail "second watcher failed while checking the legacy lock"
+  identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  grep -qF "watcher: already running pid $wpid" "$second_out" || fail "matching expired legacy watcher lock was not preserved: $(cat "$second_out")"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "matching expired legacy watcher lock was replaced"
+  case "$identity" in
+    v1:*) ;;
+    *) fail "matching expired legacy watcher lock was not migrated: $identity" ;;
+  esac
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  pass "matching expired legacy watcher identity is migrated before expiry recovery"
+}
+
 test_lock_without_pid_identity_keeps_existing_live_held_behavior() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-no-identity)
@@ -995,6 +1041,7 @@ test_lock_does_not_steal_live_lock_with_matching_pid_identity
 test_lock_reclaims_live_lock_with_mismatched_pid_identity
 test_lock_preserves_live_lock_with_legacy_pid_identity
 test_lock_reclaims_expired_legacy_pid_identity
+test_watcher_preserves_matching_expired_legacy_watcher_lock
 test_lock_without_pid_identity_keeps_existing_live_held_behavior
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
