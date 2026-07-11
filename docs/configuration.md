@@ -204,11 +204,13 @@ When the file exists, only listed entries match (defaults are not merged).
 - Cache defaults to `/root/var/cbm-cache` when that directory exists, otherwise `$HOME/.cache/codebase-memory-mcp`.
 - Resource caps default to `CBM_MEM_BUDGET_MB=1024` and `CBM_WORKERS=2`.
 
-On ship/scout spawn for an eligible project, `fm-spawn.sh`:
+On **ship/scout** spawn for an eligible project, `fm-spawn.sh`:
 
 1. Appends an idempotent CBM orientation block to the brief (after JT PR Intake Governor / route blocks when present).
 2. Exports `CBM_CACHE_DIR`, `CBM_MEM_BUDGET_MB`, `CBM_WORKERS`, and prepends the binary directory to `PATH` in the pane.
 3. Prefixes the same env onto the harness launch command so the agent process inherits CBM even if a later export is missed.
+
+Secondmate launches never get the CBM brief block or env injection (charters stay clean; CBM remains a crewmate orientation aid).
 
 First Mate does **not** run `codebase-memory-mcp install` or rewrite multi-agent MCP configs.
 Host MCP registration (for example Codex `~/.codex/config.toml`) stays a captain-side setup step.

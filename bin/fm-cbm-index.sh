@@ -90,16 +90,27 @@ case "$cmd" in
       echo "error: could not resolve index target '$target'" >&2
       exit 1
     fi
+    indexed=0
     for p in "${paths[@]}"; do
       [ -n "$p" ] || continue
       if ! fm_cbm_project_eligible "$p"; then
+        if [ "$target" = all ]; then
+          # Bundle mode: skip non-allowlisted targets without failing the rest.
+          echo "skip (not allowlisted): $p" >&2
+          continue
+        fi
         echo "error: index target is not allowlisted: $p" >&2
         exit 1
       fi
       echo "indexing: $p"
       payload=$(jq -cn --arg repo_path "$p" '{repo_path: $repo_path}')
       "$bin" cli index_repository "$payload" 2>&1 | sed '/^level=/d'
+      indexed=$((indexed + 1))
     done
+    if [ "$target" = all ] && [ "$indexed" -eq 0 ]; then
+      echo "error: no allowlisted index targets resolved for 'all'" >&2
+      exit 1
+    fi
     ;;
   -h|--help|help)
     usage

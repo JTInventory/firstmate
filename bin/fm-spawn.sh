@@ -849,8 +849,11 @@ fi
 
 append_jt_pr_intake_governor
 append_route_block
-# Soft CBM orientation for allowlisted projects (no-op if CBM off/missing).
-fm_cbm_append_brief_policy "$BRIEF" "$PROJ_ABS" "$KIND" || true
+# Soft CBM orientation for allowlisted ship/scout projects only (no-op if CBM
+# off/missing). Secondmate charters stay free of CBM policy text.
+if [ "$KIND" != secondmate ]; then
+  fm_cbm_append_brief_policy "$BRIEF" "$PROJ_ABS" "$KIND" || true
+fi
 
 mkdir -p "$STATE"
 {
