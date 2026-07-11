@@ -74,7 +74,7 @@ SH
   chmod +x "$dir/bin/codebase-memory-mcp"
   cat > "$dir/config/cbm.env" <<EOF
 FM_CBM_MEM_BUDGET_MB=2; touch $marker; #
-FM_CBM_WORKERS=workers
+FM_CBM_WORKERS=999999999
 EOF
   (
     export PATH="$dir/bin:$PATH"
@@ -86,9 +86,68 @@ EOF
     bash -c "${prefix}env" > "$dir/env"
     [ ! -e "$marker" ] || fail "resource cap config must not execute shell text"
     grep -qx 'CBM_MEM_BUDGET_MB=1024' "$dir/env" || fail "invalid memory cap must use default"
-    grep -qx 'CBM_WORKERS=2' "$dir/env" || fail "invalid worker cap must use default"
+    grep -qx 'CBM_WORKERS=2' "$dir/env" || fail "out-of-range worker cap must use default"
   ) || fail "subshell failed"
   pass "fm-cbm-lib: unsafe resource caps are rejected"
+}
+
+test_index_rejects_openclaw_monorepo_root() {
+  local dir repo linked_repo fake log target
+  dir=$(fm_test_tmproot fm-cbm)
+  repo="$dir/.openclaw"
+  fake="$dir/bin/codebase-memory-mcp"
+  log="$dir/invoked"
+  mkdir -p "$dir/home/config" "$dir/bin" "$repo"
+  linked_repo="$dir/linked/.openclaw"
+  mkdir -p "$(dirname "$linked_repo")"
+  ln -s "$repo" "$linked_repo"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+touch "$CBM_TEST_LOG"
+SH
+  chmod +x "$fake"
+  cat > "$dir/home/config/cbm.env" <<EOF
+FM_CBM_ENABLED=1
+FM_CBM_BIN=$fake
+FM_CBM_CACHE_DIR=$dir/cache
+EOF
+  (
+    export FM_ROOT_OVERRIDE="$dir/home"
+    export FM_HOME="$dir/home"
+    export CBM_TEST_LOG="$log"
+    for target in "$repo"/ "$linked_repo"; do
+      if "$INDEX" index "$target" >/dev/null 2>&1; then
+        fail "the .openclaw monorepo root must not be indexed"
+      fi
+    done
+    [ ! -e "$log" ] || fail "monorepo root must not invoke CBM"
+  ) || fail "subshell failed"
+  pass "fm-cbm-index: rejects the .openclaw monorepo root"
+}
+
+test_index_list_surfaces_cli_failures() {
+  local dir fake
+  dir=$(fm_test_tmproot fm-cbm)
+  fake="$dir/bin/codebase-memory-mcp"
+  mkdir -p "$dir/home/config" "$dir/bin"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+exit 9
+SH
+  chmod +x "$fake"
+  cat > "$dir/home/config/cbm.env" <<EOF
+FM_CBM_ENABLED=1
+FM_CBM_BIN=$fake
+FM_CBM_CACHE_DIR=$dir/cache
+EOF
+  (
+    export FM_ROOT_OVERRIDE="$dir/home"
+    export FM_HOME="$dir/home"
+    if "$INDEX" list >/dev/null 2>&1; then
+      fail "list must return nonzero when CBM CLI fails"
+    fi
+  ) || fail "subshell failed"
+  pass "fm-cbm-index: list surfaces CLI failures"
 }
 
 test_lib_rejects_relative_explicit_binary() {
@@ -371,3 +430,5 @@ test_index_helper_exists_and_help
 test_index_escapes_paths_and_fails_loudly
 test_index_rejects_unallowlisted_absolute_path
 test_index_all_skips_ineligible_without_failing
+test_index_rejects_openclaw_monorepo_root
+test_index_list_surfaces_cli_failures

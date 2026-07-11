@@ -64,7 +64,7 @@ resolve_target() {
       ;;
     /*)
       [ -d "$1" ] || return 1
-      printf '%s\n' "$1"
+      (cd -P "$1" && pwd)
       ;;
     *)
       return 1
@@ -77,7 +77,10 @@ case "$cmd" in
     fm_cbm_status_line
     ;;
   list)
-    "$bin" cli list_projects 2>/dev/null | sed '/^level=/d' || echo '{"projects":[]}'
+    if ! "$bin" cli list_projects 2>&1 | sed '/^level=/d'; then
+      echo "error: CBM project listing failed" >&2
+      exit 1
+    fi
     ;;
   index)
     target=${1:-jt}
@@ -93,7 +96,7 @@ case "$cmd" in
     indexed=0
     for p in "${paths[@]}"; do
       [ -n "$p" ] || continue
-      if ! fm_cbm_project_eligible "$p"; then
+      if ! fm_cbm_index_target_eligible "$p"; then
         if [ "$target" = all ]; then
           # Bundle mode: skip non-allowlisted targets without failing the rest.
           echo "skip (not allowlisted): $p" >&2

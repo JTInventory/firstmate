@@ -28,8 +28,8 @@ fm_cbm_shell_quote() {
 }
 
 fm_cbm_resource_cap() {
-  local value=${1:-} fallback=$2
-  if [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+  local value=${1:-} fallback=$2 maximum=$3
+  if [[ "$value" =~ ^[1-9][0-9]*$ ]] && [ "$value" -le "$maximum" ]; then
     printf '%s\n' "$value"
   else
     printf '%s\n' "$fallback"
@@ -161,6 +161,15 @@ EOF
   return 1
 }
 
+fm_cbm_index_target_eligible() {
+  local project_abs=${1:-}
+  [ -n "$project_abs" ] || return 1
+  fm_cbm_project_eligible "$project_abs" || return 1
+  case "$project_abs" in
+    */.openclaw) return 1 ;;
+  esac
+}
+
 # Print shell-safe KEY=VALUE assignments suitable for prefixing a launch command
 # or for `export` via tmux. One assignment per line without the export keyword.
 fm_cbm_env_assignments() {
@@ -168,8 +177,8 @@ fm_cbm_env_assignments() {
   fm_cbm_enabled || return 1
   bin=$(fm_cbm_binary) || return 1
   cache=$(fm_cbm_cache_dir)
-  mem=$(fm_cbm_resource_cap "${FM_CBM_MEM_BUDGET_MB:-}" 1024)
-  workers=$(fm_cbm_resource_cap "${FM_CBM_WORKERS:-}" 2)
+  mem=$(fm_cbm_resource_cap "${FM_CBM_MEM_BUDGET_MB:-}" 1024 4096)
+  workers=$(fm_cbm_resource_cap "${FM_CBM_WORKERS:-}" 2 8)
   mkdir -p "$cache" 2>/dev/null || true
   path_prefix=$(dirname "$bin")
   printf 'CBM_CACHE_DIR=%s\n' "$(fm_cbm_shell_quote "$cache")"
@@ -183,8 +192,8 @@ fm_cbm_prepare_environment() {
   fm_cbm_enabled || return 1
   FM_CBM_RESOLVED_BIN=$(fm_cbm_binary) || return 1
   FM_CBM_RESOLVED_CACHE=$(fm_cbm_cache_dir)
-  FM_CBM_RESOLVED_MEM=$(fm_cbm_resource_cap "${FM_CBM_MEM_BUDGET_MB:-}" 1024)
-  FM_CBM_RESOLVED_WORKERS=$(fm_cbm_resource_cap "${FM_CBM_WORKERS:-}" 2)
+  FM_CBM_RESOLVED_MEM=$(fm_cbm_resource_cap "${FM_CBM_MEM_BUDGET_MB:-}" 1024 4096)
+  FM_CBM_RESOLVED_WORKERS=$(fm_cbm_resource_cap "${FM_CBM_WORKERS:-}" 2 8)
   FM_CBM_RESOLVED_PATH_PREFIX=$(dirname "$FM_CBM_RESOLVED_BIN")
   mkdir -p "$FM_CBM_RESOLVED_CACHE" 2>/dev/null || true
 }
