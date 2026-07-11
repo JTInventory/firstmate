@@ -100,7 +100,7 @@ Firstmate does not install CBM or change host MCP configuration. The captain may
 `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
-If returning the lease fails during teardown, firstmate leaves the route and home intact instead of hiding a still-held lease.
+Teardown retries only a transient Git `index.lock`/`File exists` failure from `treehouse return` before leaving the route and home intact for any remaining return failure, rather than hiding a still-held lease.
 Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
 The same project may appear in multiple secondmate homes when their scopes differ, such as issue triage versus feature development.
@@ -142,6 +142,7 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 Every PR merge remains captain-gated, including for `+yolo` projects: after explicit approval, firstmate uses `FM_CAPTAIN_APPROVED_MERGE=1 bin/fm-pr-merge.sh <id> <full GitHub PR URL>` rather than invoking `gh-axi pr merge` directly.
 The wrapper records PR metadata before merging, accepts only a qualified GitHub PR URL, derives its repository from that URL, defaults to squash, and refuses repository override arguments.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
+Before failing a `treehouse return`, teardown retries only the transient Git `index.lock`/`File exists` case; all other return failures remain fail-closed.
 Landed work is accepted when `HEAD` is reachable from any remote-tracking branch, when a merged PR's GitHub head contains the current local work, or when the worktree content is already present in the freshly fetched default branch.
 PR-head containment covers an exact PR head match, a local `HEAD` that is an ancestor of the PR head, or unpushed local patches whose patch IDs appear in the PR head after no-mistakes replayed the branch.
 GitHub lookup errors fall back to the content check and still refuse if that check is inconclusive.

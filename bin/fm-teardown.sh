@@ -28,6 +28,11 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# A `treehouse return` failure that reports an existing git `index.lock` is
+# retried because that lock can be transient; other return failures still stop
+# teardown. FM_TREEHOUSE_RETURN_LOCK_RETRIES controls additional attempts
+# (default 3) and FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS controls the whole-
+# second wait between them (default 1).
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it

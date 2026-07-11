@@ -564,6 +564,7 @@ bin/fm-teardown.sh <id>
 ```
 
 The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
+When `treehouse return` reports only a transient Git `index.lock`/`File exists` failure, it retries before refusing; all other return failures remain fail-closed.
 "Landed" is broader than remote-reachable: for a normal ship task whose commits are not reachable from any remote-tracking branch, the script also accepts the work when its PR is merged and GitHub reports a PR head that contains the current local work, or when its content is already present in the up-to-date default branch.
 Containment means local `HEAD` is the PR head, local `HEAD` is an ancestor of the PR head, or the unpushed local patches have matching patch IDs in that PR head after no-mistakes replayed the branch.
 This recognizes the common squash-merge-then-delete-branch flow, where the branch's own commits live nowhere on a remote yet the change is fully in `main`; a merged-and-deleted branch now tears down cleanly instead of false-refusing.
@@ -581,6 +582,7 @@ An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
 Load `secondmate-provisioning` before retiring it.
 The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work. A successful secondmate teardown does not mark or remind against the main backlog; its queue was already transferred to the secondmate home.
+For a leased home, the same bounded retry applies only to a transient Git `index.lock`/`File exists` error while releasing the lease; any remaining return failure leaves the home and route intact.
 With `--force`, teardown is the explicit discard path for child windows, child work, state, route, lease, and home; never use it unless the captain explicitly said to discard the work.
 
 ### Scout tasks (report instead of PR)
