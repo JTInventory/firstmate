@@ -497,6 +497,28 @@ PY
   pass "fm-cbm-lib: no-jq fallback writes valid escaped JSONL"
 }
 
+test_usage_log_omits_detail_as_null() {
+  local dir usage
+  dir=$(fm_test_tmproot fm-cbm)
+  usage="$dir/data/cbm/usage.jsonl"
+  (
+    export FM_HOME="$dir/home"
+    export FM_DATA_OVERRIDE="$dir/data"
+    # shellcheck source=bin/fm-cbm-lib.sh
+    . "$LIB"
+    fm_cbm_usage_log --source cli --tool list_projects
+    python3 - "$usage" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as usage:
+    event = json.loads(usage.read())
+assert event["detail"] is None
+PY
+  ) || fail "subshell failed"
+  pass "fm-cbm-lib: omitted detail is logged as null"
+}
+
 test_brief_mentions_logged_cli() {
   local dir brief
   dir=$(fm_test_tmproot fm-cbm)
@@ -539,4 +561,5 @@ test_index_rejects_openclaw_monorepo_root
 test_index_list_surfaces_cli_failures
 test_cli_wrapper_logs_usage
 test_usage_log_fallback_encodes_json
+test_usage_log_omits_detail_as_null
 test_brief_mentions_logged_cli

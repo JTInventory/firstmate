@@ -287,7 +287,7 @@ fm_cbm_usage_log_path() {
 # Append one JSONL usage event. Never fails the caller (best-effort).
 # Args: --source <cli|index|mcp-session|...> --tool <name> [--rc N] [--ms N] [--detail <text>]
 fm_cbm_usage_log() {
-  local source tool rc=0 ms detail task logdir logfile line
+  local source= tool= rc=0 ms= detail= task= logdir logfile line
   while [ $# -gt 0 ]; do
     case "$1" in
       --source) source=${2:-}; shift 2 ;;
