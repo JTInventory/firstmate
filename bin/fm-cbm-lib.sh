@@ -199,7 +199,7 @@ fm_cbm_prepare_environment() {
 }
 
 # Echo a single-line env prefix for the agent launch command (codex/claude/...).
-# Example: CBM_CACHE_DIR='...' CBM_MEM_BUDGET_MB=1024 PATH='/x:/usr/bin' 
+# Example: CBM_CACHE_DIR='...' CBM_MEM_BUDGET_MB=1024 PATH='/x:/usr/bin'
 fm_cbm_launch_env_prefix_prepared() {
   printf "CBM_CACHE_DIR=%s CBM_MEM_BUDGET_MB=%s CBM_WORKERS=%s PATH=%s:\"\$PATH\" " \
     "$(fm_cbm_shell_quote "$FM_CBM_RESOLVED_CACHE")" \

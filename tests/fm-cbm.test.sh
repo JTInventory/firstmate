@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for optional codebase-memory-mcp integration.
+# shellcheck disable=SC2030,SC2031 # Each case uses a subshell to isolate its test environment.
+# shellcheck disable=SC2016 # Structural contract strings deliberately retain literal shell syntax.
 set -u
 
 # shellcheck source=tests/lib.sh
