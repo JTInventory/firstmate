@@ -32,6 +32,9 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Matching JT Control Room ship spawns for .openclaw or jt-control-room append a
 #   JT PR Intake Governor block to direct-PR/no-mistakes briefs before launch.
+#   Eligible projects may also receive an optional codebase-memory-mcp (CBM)
+#   orientation block and CBM env exports at launch (soft dependency; see
+#   bin/fm-cbm-lib.sh). Missing CBM never blocks spawn.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
@@ -73,6 +76,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-cbm-lib.sh
+. "$SCRIPT_DIR/fm-cbm-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -844,6 +849,11 @@ fi
 
 append_jt_pr_intake_governor
 append_route_block
+# Soft CBM orientation for allowlisted ship/scout projects only (no-op if CBM
+# off/missing). Secondmate charters stay free of CBM policy text.
+if [ "$KIND" != secondmate ]; then
+  fm_cbm_append_brief_policy "$BRIEF" "$PROJ_ABS" "$KIND" || true
+fi
 
 mkdir -p "$STATE"
 {
@@ -890,6 +900,21 @@ fi
 sq_gotmpdir=$(shell_quote "$TASK_TMP/gotmp")
 tmux send-keys -t "$T" "export GOTMPDIR=$sq_gotmpdir" Enter
 sleep 0.3
+# Soft CBM env for orientation tools/CLI (cache + resource caps + PATH).
+# Also prefix the launch command so the agent process itself inherits CBM even
+# if a later pane export is missed. Missing CBM is a no-op.
+if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
+  && fm_cbm_prepare_environment 2>/dev/null \
+  && cbm_prefix=$(fm_cbm_launch_env_prefix_prepared 2>/dev/null); then
+  # Pane-level exports for shell tools the agent may run later.
+  cbm_cache=$FM_CBM_RESOLVED_CACHE
+  cbm_mem=$FM_CBM_RESOLVED_MEM
+  cbm_workers=$FM_CBM_RESOLVED_WORKERS
+  cbm_path_prefix=$FM_CBM_RESOLVED_PATH_PREFIX
+  tmux send-keys -t "$T" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
+  sleep 0.2
+  LAUNCH="${cbm_prefix}${LAUNCH}"
+fi
 tmux send-keys -t "$T" -l "$LAUNCH"
 sleep 0.3
 tmux send-keys -t "$T" Enter

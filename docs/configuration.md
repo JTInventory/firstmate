@@ -178,6 +178,46 @@ The live wrapper calls only `POST /api/v1/search`, records secret-safe telemetry
 Automatic lookup remains disabled unless `FM_COGNEE_AUTO_LOOKUP=1` and the local evidence under `FM_COGNEE_EVIDENCE_ROOT` proves every gate marker, including `FM_COGNEE_GATE_COST_USAGE_EVIDENCE=per_wrapper_call` and `FM_COGNEE_GATE_RAW_DURABILITY_SOURCE_AUTHORITY=pass`.
 `session_window_only` cost evidence is accepted only as trial monitoring evidence and still blocks automatic promotion.
 
+## Optional codebase-memory-mcp (CBM)
+
+CBM is optional code orientation for multi-file exploration (architecture maps, call chains, "where is X?").
+It is not proof, not runtime truth, and not authority for merge, deploy, refresh, purchase, or destructive action.
+Missing binary, empty index, or disabled config never blocks spawn or marks a crewmate `blocked`.
+
+### Local config (gitignored)
+
+Copy the tracked examples when you want host-local overrides:
+
+- [`docs/examples/cbm.env.example`](examples/cbm.env.example) → `config/cbm.env`
+- [`docs/examples/cbm-projects.example`](examples/cbm-projects.example) → `config/cbm-projects`
+
+`config/cbm.env` accepts only simple `FM_CBM_*=value` lines (no shell execution). Supported keys: `FM_CBM_ENABLED`, `FM_CBM_CACHE_DIR`, `FM_CBM_MEM_BUDGET_MB`, `FM_CBM_WORKERS`, `FM_CBM_BIN`.
+
+`config/cbm-projects` is an allowlist of project basenames or absolute paths that receive the CBM brief block.
+When the file is absent, First Mate defaults to `.openclaw`, `jt-control-room` / `JT-Control-Room`, and `firstmate`.
+When the file exists, only listed entries match (defaults are not merged).
+
+### Defaults and spawn behavior
+
+- `FM_CBM_ENABLED=auto` (default): CBM is on only when the `codebase-memory-mcp` binary is found on `PATH` or under common install paths.
+- `0` / `off` force off; `1` / `on` require a binary.
+- Cache defaults to `/root/var/cbm-cache` when that directory exists, otherwise `$HOME/.cache/codebase-memory-mcp`.
+- Resource caps default to `CBM_MEM_BUDGET_MB=1024` and `CBM_WORKERS=2`; values outside `1–4096` MB or `1–8` workers fall back to those defaults.
+
+On **ship/scout** spawn for an eligible project, `fm-spawn.sh`:
+
+1. Appends an idempotent CBM orientation block to the brief (after JT PR Intake Governor / route blocks when present).
+2. Exports `CBM_CACHE_DIR`, `CBM_MEM_BUDGET_MB`, `CBM_WORKERS`, and prepends the binary directory to `PATH` in the pane.
+3. Prefixes the same env onto the harness launch command so the agent process inherits CBM even if a later export is missed.
+
+Secondmate launches never get the CBM brief block or env injection (charters stay clean; CBM remains a crewmate orientation aid).
+
+First Mate does **not** run `codebase-memory-mcp install` or rewrite multi-agent MCP configs.
+Host MCP registration (for example Codex `~/.codex/config.toml`) stays a captain-side setup step.
+Index data lives under the cache directory and is not committed to the firstmate repo.
+
+Use `bin/fm-cbm-index.sh status|list|index [jt|firstmate|all|<abs-path>]` for ops hygiene on this host. `jt` resolves to the JT Control Room app path; the `.openclaw` monorepo root is never an index target, even though it remains eligible for spawn orientation.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -234,6 +274,12 @@ FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 
 FM_SUPERVISE_TREEHOUSE_TIMEOUT=5   # seconds allowed per treehouse status read
 FM_SUPERVISE_GH_TIMEOUT=5          # seconds allowed per gh-axi GitHub read
 # bootstrap, spawn, teardown, and fm-supervise append existing HOME-local NVM and .local/bin entries when absent
+# Optional codebase-memory-mcp (CBM) orientation; also loadable from config/cbm.env
+FM_CBM_ENABLED=auto        # auto | 1 | 0 — auto enables only when the binary is present
+FM_CBM_CACHE_DIR=          # SQLite graph store; default /root/var/cbm-cache or $HOME/.cache/codebase-memory-mcp
+FM_CBM_MEM_BUDGET_MB=1024  # memory budget exported as CBM_MEM_BUDGET_MB at spawn
+FM_CBM_WORKERS=2           # worker cap exported as CBM_WORKERS at spawn
+FM_CBM_BIN=                # optional absolute path to codebase-memory-mcp when not on PATH
 # Cognee trial memory and local verification
 FM_COGNEE_LOOKUP_CMD=      # executable backend path for manual memory lookup, usually bin/fm-cognee-lookup.sh
 FM_MEMORY_LOOKUP_MAX_HINT_LINES=40   # maximum hint lines printed from a manual memory lookup

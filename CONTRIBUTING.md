@@ -86,6 +86,7 @@ tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit 
 tests/fm-route.test.sh                    # deterministic route profiles, overrides, risk flags, and downgrade handling
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests
 tests/fm-memory-lookup.test.sh            # manual Cognee memory lookup fallback, source-path verification, and optional brief append
+tests/fm-cbm.test.sh                      # optional CBM config, allowlist, brief/env injection, index targeting, and soft-failure behavior
 tests/fm-cognee-lookup-gate.test.sh       # fail-closed Cognee automatic/manual gate markers and unsafe-evidence rejection
 tests/fm-cognee-lookup.test.sh            # Cognee dry-run/live lookup wrapper, redacted telemetry, retry, and source verification behavior
 tests/fm-cognee-session-cost-probe.test.sh # disabled Cognee session/cost probe planner, endpoint allowlist, and redacted JSONL output
