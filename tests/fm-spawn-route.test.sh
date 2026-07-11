@@ -49,11 +49,21 @@ case "${1:-}" in
     [ "${2:-}" = -dP ] && [ "${3:-}" = -F ] && [ "${4:-}" = '#{window_id}' ] || exit 64
     printf '%s\n' "${FM_FAKE_NEW_WINDOW_ID-@42}"
     exit 0 ;;
-  set-window-option|send-keys)
+  set-window-option)
+    uses_window_id "$@" || exit 64
+    if [ "${4:-}" = allow-rename ] && [ "${5:-}" = off ]; then
+      : > "${FM_FAKE_ALLOW_RENAME_LOCK:?}"
+    fi
+    exit 0 ;;
+  send-keys)
     uses_window_id "$@" || exit 64 ;;
   rename-window)
     uses_window_id "$@" && [ "${4:-}" = "${FM_FAKE_WINDOW_NAME:-}" ] || exit 64
-    printf '%s\n' "$FM_FAKE_WINDOW_NAME" > "$FM_FAKE_TMUX_STATE"
+    if [ -f "${FM_FAKE_ALLOW_RENAME_LOCK:?}" ]; then
+      printf '%s\n' "$FM_FAKE_WINDOW_NAME" > "$FM_FAKE_TMUX_STATE"
+    else
+      printf '%s\n' terminal-title > "$FM_FAKE_TMUX_STATE"
+    fi
     exit 0 ;;
 esac
 if [ "${1:-}" = send-keys ] && [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
@@ -96,17 +106,18 @@ run_spawn_case() {
   shift 5
   : > "$home/launch.log"
   : > "$home/tmux.log"
+  rm -f "$home/tmux-allow-rename-lock"
   printf '%s\n' terminal-title > "$home/tmux-window-name"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_ALLOW_RENAME_LOCK="$home/tmux-allow-rename-lock" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" "$@" 2>&1
 }
 
 test_ordinary_spawn_records_route_fields() {
-  local home proj wt fakebin id out status meta brief launch
+  local home proj wt fakebin id out status meta brief launch window_name
   IFS='|' read -r home proj wt fakebin <<EOF
 $(make_case ordinary)
 EOF
@@ -125,6 +136,9 @@ EOF
   assert_grep "route_effort=medium" "$meta" "ordinary spawn did not record route effort"
   assert_grep "route_override=none" "$meta" "ordinary spawn did not record route override"
   assert_grep "route_risk_flags=production,firstmate-core" "$meta" "ordinary spawn did not record route risk flags"
+  assert_present "$home/tmux-allow-rename-lock" "ordinary spawn did not lock terminal renames"
+  window_name=$(cat "$home/tmux-window-name")
+  assert_contains "$window_name" "fm-$id" "ordinary spawn did not restore the canonical window name after locking renames"
   launch=$(cat "$home/launch.log")
   assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"medium\"' --dangerously-bypass-approvals-and-sandbox" \
     "ordinary route did not thread model and effort into launch"
