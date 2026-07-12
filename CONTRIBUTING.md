@@ -80,7 +80,7 @@ tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for 
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
 tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
-tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, and session-lock detection tests
+tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, session-lock detection, and immutable tmux-window targeting fixture tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, deterministic single-clone resolution, and bootstrap relay
 tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings, persistent secondmate inventory, and no-change contract
 tests/fm-route.test.sh                    # deterministic route profiles, overrides, risk flags, and downgrade handling
@@ -93,10 +93,10 @@ tests/fm-cognee-session-cost-probe.test.sh # disabled Cognee session/cost probe 
 tests/fm-cognee-source-verify.test.sh     # Cognee answer reference parsing, manifest matching, local source reopen, and telemetry
 tests/fm-cognee-telemetry.test.sh         # secret-safe Cognee telemetry schema, redaction flags, IDs, and env-file loading
 tests/fm-cognee-brief-rules.test.sh       # generated briefs include the trial-only, hint-only Cognee memory rules
-tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection and spawn/brief isolation tests
+tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection, spawn/brief isolation, and immutable tmux-window targeting fixture tests
 tests/fm-spawn-batch.test.sh              # batch dispatch, local-config isolation, and FM_HOME project-path scoping tests
-tests/fm-spawn-route.test.sh              # spawn records route profile/model/effort metadata and appends the JT PR Intake Governor for matching PR-mode ship briefs without changing launch behavior
-tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, secondmate exemption, and secondmate launch profile threading
+tests/fm-spawn-route.test.sh              # spawn records route profile/model/effort metadata, uses verified immutable tmux window IDs with cleanup on setup failure, and appends the JT PR Intake Governor for matching PR-mode ship briefs without changing launch behavior
+tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, immutable tmux-window targeting, launch templates, batch forwarding, secondmate exemption, and secondmate launch profile threading
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, and spawn hook tests
 tests/fm-secondmate-harness.test.sh       # secondmate-vs-crewmate harness resolution, secondmate launch profiles, primary-to-secondmate config inheritance, and config-push tests
