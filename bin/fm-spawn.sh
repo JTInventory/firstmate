@@ -680,14 +680,26 @@ cleanup_spawn_window() {
   tmux kill-window -t "$1" >/dev/null 2>&1 || true
 }
 
+cleanup_unidentified_spawn_window() {
+  local window_ids_after window_id candidate= candidate_count=0
+  window_ids_after=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
+  while IFS= read -r window_id; do
+    [ -n "$window_id" ] || continue
+    if ! grep -qxF "$window_id" <<<"$WINDOW_IDS_BEFORE"; then
+      candidate=$window_id
+      candidate_count=$((candidate_count + 1))
+    fi
+  done <<<"$window_ids_after"
+  [ "$candidate_count" -eq 1 ] && cleanup_spawn_window "$candidate"
+}
+
+WINDOW_IDS_BEFORE=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
 WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS") || exit 1
-case "$WID" in
-  @*) ;;
-  *)
-    cleanup_spawn_window "$T"
-    echo "error: tmux did not return a window id for $T" >&2
-    exit 1 ;;
-esac
+if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
+  cleanup_unidentified_spawn_window
+  echo "error: tmux did not return a window id for $T" >&2
+  exit 1
+fi
 if ! tmux set-window-option -t "$WID" automatic-rename off; then
   cleanup_spawn_window "$WID"
   echo "error: tmux failed to disable automatic window renaming for $T" >&2

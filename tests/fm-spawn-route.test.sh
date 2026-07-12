@@ -46,7 +46,25 @@ case "${1:-}" in
     esac
     printf 'firstmate\n'
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    case "$*" in
+      *"#{window_name}"*) exit 0 ;;
+      *"#{window_id}"*)
+        state=${FM_FAKE_TMUX_WINDOW_IDS_STATE:-}
+        if [ -z "$state" ]; then
+          exit 0
+        fi
+        count=0
+        [ -f "$state" ] && count=$(cat "$state")
+        printf '%s\n' "$((count + 1))" > "$state"
+        if [ "$count" -eq 0 ]; then
+          printf '%s\n' "${FM_FAKE_TMUX_WINDOW_IDS_BEFORE:-}"
+        else
+          printf '%s\n' "${FM_FAKE_TMUX_WINDOW_IDS_AFTER:-}"
+        fi
+        exit 0 ;;
+    esac
+    exit 64 ;;
   has-session|new-session) exit 0 ;;
   new-window)
     [ "${2:-}" = -dP ] && [ "${3:-}" = -F ] && [ "${4:-}" = '#{window_id}' ] || exit 64
@@ -116,11 +134,12 @@ run_spawn_case() {
   : > "$home/tmux.log"
   rm -f "$home/tmux-automatic-rename-lock"
   rm -f "$home/tmux-allow-rename-lock"
+  rm -f "$home/tmux-window-ids-state"
   printf '%s\n' terminal-title > "$home/tmux-window-name"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_RETAINED_WINDOW_NAME="${FM_FAKE_RETAINED_WINDOW_NAME-}" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_AUTOMATIC_RENAME_LOCK="$home/tmux-automatic-rename-lock" FM_FAKE_ALLOW_RENAME_LOCK="$home/tmux-allow-rename-lock" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_RETAINED_WINDOW_NAME="${FM_FAKE_RETAINED_WINDOW_NAME-}" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_AUTOMATIC_RENAME_LOCK="$home/tmux-automatic-rename-lock" FM_FAKE_ALLOW_RENAME_LOCK="$home/tmux-allow-rename-lock" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_TMUX_WINDOW_IDS_STATE="$home/tmux-window-ids-state" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" "$@" 2>&1
 }
@@ -309,14 +328,33 @@ EOF
   mkdir -p "$home/data/$id"
   printf '%s\n' 'Reject an empty tmux window id.' > "$home/data/$id/brief.md"
 
-  out=$(FM_FAKE_NEW_WINDOW_ID= run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  out=$(FM_FAKE_NEW_WINDOW_ID= FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER=$'@1\n@57' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 1 "$status" "empty tmux window id should fail"
   assert_contains "$out" "tmux did not return a window id" "empty tmux window id should explain failure"
   assert_grep "new-window" "$home/tmux.log" "empty tmux window id should create the window once"
-  assert_grep "kill-window -t firstmate:fm-$id" "$home/tmux.log" "empty tmux window id should remove the untracked window"
+  assert_grep "kill-window -t @57" "$home/tmux.log" "empty tmux window id should remove the newly created window by id"
+  assert_no_grep "kill-window -t firstmate:fm-$id" "$home/tmux.log" "empty tmux window id must not clean up by mutable title"
   assert_no_grep "set-window-option" "$home/tmux.log" "empty tmux window id must stop before option changes"
   assert_no_grep "send-keys" "$home/tmux.log" "empty tmux window id must stop before pane commands"
   pass "empty tmux window ids stop before post-create commands"
+}
+
+test_malformed_window_id_stops_before_post_create_commands() {
+  local home proj wt fakebin id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case malformed-window-id)
+EOF
+  id=malformed-window-id-hh9
+  mkdir -p "$home/data/$id"
+  printf '%s\n' 'Reject a malformed tmux window id.' > "$home/data/$id/brief.md"
+
+  out=$(FM_FAKE_NEW_WINDOW_ID=@not-a-window-id FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER=$'@1\n@58' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "malformed tmux window id should fail"
+  assert_contains "$out" "tmux did not return a window id" "malformed tmux window id should explain failure"
+  assert_grep "kill-window -t @58" "$home/tmux.log" "malformed tmux window id should remove the newly created window by id"
+  assert_no_grep "set-window-option" "$home/tmux.log" "malformed tmux window id must stop before option changes"
+  assert_no_grep "send-keys" "$home/tmux.log" "malformed tmux window id must stop before pane commands"
+  pass "malformed tmux window ids stop before post-create commands"
 }
 
 test_rejected_window_name_removes_new_window() {
@@ -364,5 +402,6 @@ test_jt_project_without_jt_context_skips_pr_intake_governor
 test_jt_openclaw_operator_route_brief_appends_pr_intake_governor
 test_unsafe_task_ids_are_rejected_before_spawn
 test_empty_window_id_stops_before_post_create_commands
+test_malformed_window_id_stops_before_post_create_commands
 test_rejected_window_name_removes_new_window
 test_window_setup_failures_remove_new_window
