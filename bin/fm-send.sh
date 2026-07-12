@@ -58,8 +58,10 @@ resolve() {
       [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; exit 1; }
       echo "$window"
       ;;
-    *) tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$1\$" \
-         || { echo "error: no window named $1" >&2; exit 1; } ;;
+    *)
+      echo "error: target '$1' is not resolvable; use fm-<id> for a recorded task or session:window for an explicit target" >&2
+      exit 1
+      ;;
   esac
 }
 
