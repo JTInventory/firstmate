@@ -19,9 +19,9 @@ make_spawn_fakebin() {
 set -u
 [ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "${1:-}" >> "$FM_FAKE_TMUX_LOG"
 uses_window_id() {
-  local previous=
+  local previous= expected_id="${FM_FAKE_NEW_WINDOW_ID-@42}"
   for argument in "$@"; do
-    if [ "$previous" = -t ] && [ "$argument" = @42 ]; then
+    if [ "$previous" = -t ] && [ "$argument" = "$expected_id" ]; then
       return 0
     fi
     previous=$argument
@@ -51,6 +51,9 @@ case "${1:-}" in
     exit 0 ;;
   set-window-option)
     uses_window_id "$@" || exit 64
+    if [ "${4:-}" = automatic-rename ] && [ "${5:-}" = off ]; then
+      : > "${FM_FAKE_AUTOMATIC_RENAME_LOCK:?}"
+    fi
     if [ "${4:-}" = allow-rename ] && [ "${5:-}" = off ]; then
       : > "${FM_FAKE_ALLOW_RENAME_LOCK:?}"
     fi
@@ -59,7 +62,7 @@ case "${1:-}" in
     uses_window_id "$@" || exit 64 ;;
   rename-window)
     uses_window_id "$@" && [ "${4:-}" = "${FM_FAKE_WINDOW_NAME:-}" ] || exit 64
-    if [ -f "${FM_FAKE_ALLOW_RENAME_LOCK:?}" ]; then
+    if [ -f "${FM_FAKE_AUTOMATIC_RENAME_LOCK:?}" ] && [ -f "${FM_FAKE_ALLOW_RENAME_LOCK:?}" ]; then
       printf '%s\n' "$FM_FAKE_WINDOW_NAME" > "$FM_FAKE_TMUX_STATE"
     else
       printf '%s\n' terminal-title > "$FM_FAKE_TMUX_STATE"
@@ -106,12 +109,13 @@ run_spawn_case() {
   shift 5
   : > "$home/launch.log"
   : > "$home/tmux.log"
+  rm -f "$home/tmux-automatic-rename-lock"
   rm -f "$home/tmux-allow-rename-lock"
   printf '%s\n' terminal-title > "$home/tmux-window-name"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_ALLOW_RENAME_LOCK="$home/tmux-allow-rename-lock" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_WINDOW_NAME="fm-$id" FM_FAKE_TMUX_STATE="$home/tmux-window-name" FM_FAKE_AUTOMATIC_RENAME_LOCK="$home/tmux-automatic-rename-lock" FM_FAKE_ALLOW_RENAME_LOCK="$home/tmux-allow-rename-lock" FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_NEW_WINDOW_ID="${FM_FAKE_NEW_WINDOW_ID-@42}" FM_FAKE_LAUNCH_LOG="$home/launch.log" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" "$@" 2>&1
 }
@@ -126,7 +130,7 @@ EOF
   brief="$home/data/$id/brief.md"
   printf '%s\n' 'Investigate production refresh on 4187 and keep state/meta truthful.' > "$brief"
 
-  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  out=$(FM_FAKE_NEW_WINDOW_ID=@71 run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 0 "$status" "ordinary routed spawn should succeed"
   assert_contains "$out" "spawned $id harness=codex" "ordinary spawn should launch route harness"
   meta="$home/state/$id.meta"
@@ -136,7 +140,8 @@ EOF
   assert_grep "route_effort=medium" "$meta" "ordinary spawn did not record route effort"
   assert_grep "route_override=none" "$meta" "ordinary spawn did not record route override"
   assert_grep "route_risk_flags=production,firstmate-core" "$meta" "ordinary spawn did not record route risk flags"
-  assert_present "$home/tmux-allow-rename-lock" "ordinary spawn did not lock terminal renames"
+  assert_present "$home/tmux-automatic-rename-lock" "ordinary spawn did not disable automatic terminal renames"
+  assert_present "$home/tmux-allow-rename-lock" "ordinary spawn did not disable terminal renames"
   window_name=$(cat "$home/tmux-window-name")
   assert_contains "$window_name" "fm-$id" "ordinary spawn did not restore the canonical window name after locking renames"
   launch=$(cat "$home/launch.log")
