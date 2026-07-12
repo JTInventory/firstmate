@@ -676,13 +676,56 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$PROJ_ABS"
+cleanup_spawn_window() {
+  tmux kill-window -t "$1" >/dev/null 2>&1 || true
+}
+
+cleanup_unidentified_spawn_window() {
+  local window_ids_after window_id candidate='' candidate_count=0
+  window_ids_after=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
+  while IFS= read -r window_id; do
+    [ -n "$window_id" ] || continue
+    if ! grep -qxF "$window_id" <<<"$WINDOW_IDS_BEFORE"; then
+      candidate=$window_id
+      candidate_count=$((candidate_count + 1))
+    fi
+  done <<<"$window_ids_after"
+  [ "$candidate_count" -eq 1 ] && cleanup_spawn_window "$candidate"
+}
+
+WINDOW_IDS_BEFORE=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
+WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS") || exit 1
+if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
+  cleanup_unidentified_spawn_window
+  echo "error: tmux did not return a window id for $T" >&2
+  exit 1
+fi
+if ! tmux set-window-option -t "$WID" automatic-rename off; then
+  cleanup_spawn_window "$WID"
+  echo "error: tmux failed to disable automatic window renaming for $T" >&2
+  exit 1
+fi
+if ! tmux set-window-option -t "$WID" allow-rename off; then
+  cleanup_spawn_window "$WID"
+  echo "error: tmux failed to disable window renaming for $T" >&2
+  exit 1
+fi
+if ! tmux rename-window -t "$WID" "$W"; then
+  cleanup_spawn_window "$WID"
+  echo "error: tmux failed to restore canonical window name $T" >&2
+  exit 1
+fi
+if [ "$(tmux display-message -p -t "$WID" '#{window_name}')" != "$W" ]; then
+  cleanup_spawn_window "$WID"
+  echo "error: tmux did not retain canonical window name $T" >&2
+  exit 1
+fi
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$T" 'treehouse get' Enter
+  tmux send-keys -t "$WID" 'treehouse get' Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   for _ in $(seq 1 60); do
-    p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+    p=$(tmux display-message -p -t "$WID" '#{pane_current_path}' 2>/dev/null || true)
     if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
       WT="$p"
       break
@@ -898,7 +941,7 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 sq_gotmpdir=$(shell_quote "$TASK_TMP/gotmp")
-tmux send-keys -t "$T" "export GOTMPDIR=$sq_gotmpdir" Enter
+tmux send-keys -t "$WID" "export GOTMPDIR=$sq_gotmpdir" Enter
 sleep 0.3
 # Soft CBM env for orientation tools/CLI (cache + resource caps + PATH).
 # Also prefix the launch command so the agent process itself inherits CBM even
@@ -914,12 +957,12 @@ if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
   # FM_CBM_TASK_ID tags usage.jsonl lines from fm-cbm-cli.sh for this task.
   # FM_CBM_CLI points agents at the logged CLI wrapper when they shell out.
   cbm_cli_wrap=$(shell_quote "$FM_ROOT/bin/fm-cbm-cli.sh")
-  tmux send-keys -t "$T" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
+  tmux send-keys -t "$WID" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
   sleep 0.2
   LAUNCH="${cbm_prefix}${LAUNCH}"
 fi
-tmux send-keys -t "$T" -l "$LAUNCH"
+tmux send-keys -t "$WID" -l "$LAUNCH"
 sleep 0.3
-tmux send-keys -t "$T" Enter
+tmux send-keys -t "$WID" Enter
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

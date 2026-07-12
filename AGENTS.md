@@ -116,6 +116,8 @@ state/               volatile runtime signals; gitignored
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
 The tmux window for a task is always named `fm-<id>`.
+`fm-spawn.sh` creates that window by tmux window ID, disables automatic and application-driven renaming, restores the canonical name, and verifies it before sending any pane commands.
+After creation it targets the immutable window ID, never the mutable `session:window-name` label; if setup cannot prove the ID or canonical name, it cleans up a uniquely identified new window and aborts.
 
 ## 3. Bootstrap (run at every session start)
 

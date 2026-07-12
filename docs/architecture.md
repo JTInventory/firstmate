@@ -59,6 +59,8 @@ After successful text sends, it adds its own `FM_SEND_SETTLE` pause so immediate
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.
 For ship and scout work, `fm-spawn.sh` waits for `treehouse get` and then refuses to launch unless the pane resolves to a real git worktree root that is distinct from the project primary checkout.
+It creates each tmux window as `fm-<id>`, disables automatic and application-driven renaming, restores and verifies that title, then targets every post-create tmux operation by the immutable window ID rather than the mutable title.
+If tmux does not return a valid ID or cannot retain the canonical title, spawn cleans up a uniquely identified newly created window and aborts before it sends a pane command.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
