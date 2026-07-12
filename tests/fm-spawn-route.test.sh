@@ -28,6 +28,9 @@ uses_window_id() {
   done
   return 1
 }
+fails_tmux_command() {
+  [ "${FM_FAKE_TMUX_FAIL:-}" = "$1" ]
+}
 
 case "${1:-}" in
   display-message)
@@ -51,6 +54,7 @@ case "${1:-}" in
     exit 0 ;;
   set-window-option)
     uses_window_id "$@" || exit 64
+    fails_tmux_command "${4:-}" && exit 1
     if [ "${4:-}" = automatic-rename ] && [ "${5:-}" = off ]; then
       : > "${FM_FAKE_AUTOMATIC_RENAME_LOCK:?}"
     fi
@@ -62,6 +66,7 @@ case "${1:-}" in
     uses_window_id "$@" || exit 64 ;;
   rename-window)
     uses_window_id "$@" && [ "${4:-}" = "${FM_FAKE_WINDOW_NAME:-}" ] || exit 64
+    fails_tmux_command rename-window && exit 1
     if [ -f "${FM_FAKE_AUTOMATIC_RENAME_LOCK:?}" ] && [ -f "${FM_FAKE_ALLOW_RENAME_LOCK:?}" ]; then
       printf '%s\n' "${FM_FAKE_RETAINED_WINDOW_NAME:-$FM_FAKE_WINDOW_NAME}" > "$FM_FAKE_TMUX_STATE"
     else
@@ -331,6 +336,25 @@ EOF
   pass "rejected tmux window names remove new windows"
 }
 
+test_window_setup_failures_remove_new_window() {
+  local setup home proj wt fakebin id out status
+  for setup in automatic-rename allow-rename rename-window; do
+    IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case "setup-failure-$setup")
+EOF
+    id="setup-failure-$setup-jj0"
+    mkdir -p "$home/data/$id"
+    printf '%s\n' 'Reject a failed tmux window setup.' > "$home/data/$id/brief.md"
+
+    out=$(FM_FAKE_NEW_WINDOW_ID=@71 FM_FAKE_TMUX_FAIL="$setup" run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+    expect_code 1 "$status" "failed $setup setup should fail"
+    assert_contains "$out" "tmux failed" "failed $setup setup should explain failure"
+    assert_grep "kill-window -t @71" "$home/tmux.log" "failed $setup setup should remove the new window"
+    assert_no_grep "send-keys" "$home/tmux.log" "failed $setup setup must stop before pane commands"
+  done
+  pass "failed tmux window setup removes new windows"
+}
+
 test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
@@ -341,3 +365,4 @@ test_jt_openclaw_operator_route_brief_appends_pr_intake_governor
 test_unsafe_task_ids_are_rejected_before_spawn
 test_empty_window_id_stops_before_post_create_commands
 test_rejected_window_name_removes_new_window
+test_window_setup_failures_remove_new_window

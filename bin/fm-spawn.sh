@@ -688,9 +688,21 @@ case "$WID" in
     echo "error: tmux did not return a window id for $T" >&2
     exit 1 ;;
 esac
-tmux set-window-option -t "$WID" automatic-rename off
-tmux set-window-option -t "$WID" allow-rename off
-tmux rename-window -t "$WID" "$W"
+if ! tmux set-window-option -t "$WID" automatic-rename off; then
+  cleanup_spawn_window "$WID"
+  echo "error: tmux failed to disable automatic window renaming for $T" >&2
+  exit 1
+fi
+if ! tmux set-window-option -t "$WID" allow-rename off; then
+  cleanup_spawn_window "$WID"
+  echo "error: tmux failed to disable window renaming for $T" >&2
+  exit 1
+fi
+if ! tmux rename-window -t "$WID" "$W"; then
+  cleanup_spawn_window "$WID"
+  echo "error: tmux failed to restore canonical window name $T" >&2
+  exit 1
+fi
 if [ "$(tmux display-message -p -t "$WID" '#{window_name}')" != "$W" ]; then
   cleanup_spawn_window "$WID"
   echo "error: tmux did not retain canonical window name $T" >&2
