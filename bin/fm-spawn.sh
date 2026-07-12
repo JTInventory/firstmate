@@ -681,7 +681,7 @@ cleanup_spawn_window() {
 }
 
 cleanup_unidentified_spawn_window() {
-  local window_ids_after window_id candidate= candidate_count=0
+  local window_ids_after window_id candidate='' candidate_count=0
   window_ids_after=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
   while IFS= read -r window_id; do
     [ -n "$window_id" ] || continue

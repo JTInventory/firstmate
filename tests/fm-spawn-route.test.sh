@@ -328,7 +328,7 @@ EOF
   mkdir -p "$home/data/$id"
   printf '%s\n' 'Reject an empty tmux window id.' > "$home/data/$id/brief.md"
 
-  out=$(FM_FAKE_NEW_WINDOW_ID= FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER=$'@1\n@57' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  out=$(FM_FAKE_NEW_WINDOW_ID='' FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER=$'@1\n@57' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 1 "$status" "empty tmux window id should fail"
   assert_contains "$out" "tmux did not return a window id" "empty tmux window id should explain failure"
   assert_grep "new-window" "$home/tmux.log" "empty tmux window id should create the window once"
