@@ -676,10 +676,15 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
+cleanup_spawn_window() {
+  tmux kill-window -t "$1" >/dev/null 2>&1 || true
+}
+
 WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS") || exit 1
 case "$WID" in
   @*) ;;
   *)
+    cleanup_spawn_window "$T"
     echo "error: tmux did not return a window id for $T" >&2
     exit 1 ;;
 esac
@@ -687,6 +692,7 @@ tmux set-window-option -t "$WID" automatic-rename off
 tmux set-window-option -t "$WID" allow-rename off
 tmux rename-window -t "$WID" "$W"
 if [ "$(tmux display-message -p -t "$WID" '#{window_name}')" != "$W" ]; then
+  cleanup_spawn_window "$WID"
   echo "error: tmux did not retain canonical window name $T" >&2
   exit 1
 fi
