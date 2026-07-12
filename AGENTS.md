@@ -439,7 +439,7 @@ Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the secondmate whose natural-language scope actually fits the work, such as triage versus feature development.
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
 If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
-The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
+The only accepted bare target is `fm-<id>`, which resolves through this home's `state/<id>.meta`; other bare window names fail closed, so pass `session:window` only when intentionally targeting a window outside this firstmate home.
 A secondmate is itself a firstmate, so a request reaches it in its own chat, which you never read - the return channel that wakes you is its status file.
 So `fm-send` to a bare `fm-<id>` whose meta is `kind=secondmate` automatically prepends a from-firstmate marker (`bin/fm-marker-lib.sh`); the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
 For codex secondmates, that marked ordinary-text path also uses the longer pre-Enter settle so the already-typed request is not left unsubmitted by input timing.

@@ -84,6 +84,7 @@ Owner: `AGENTS.md` sections 8 and 10; `bin/fm-supervise.sh`; `bin/fm-supervision
 ## 11. Steering And Secondmate Return Channel
 
 Firstmate steers direct reports through `fm-send.sh`.
+It accepts only a recorded bare `fm-<id>` target or an explicit `session:window` target; other bare window names fail closed.
 Bare sends to a `kind=secondmate` target are marked as from-firstmate so the secondmate answers through status lines or document pointers instead of only through chat.
 
 Owner: `AGENTS.md` sections 4, 7, and 8; `bin/fm-send.sh`; `bin/fm-marker-lib.sh`; `bin/fm-peek.sh`.
