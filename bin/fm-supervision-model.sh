@@ -581,6 +581,12 @@ fm_supervision_paused_reconciliation() {  # <id> <remaining seconds>
   printf '%s\t%s' "$state" "$source"
 }
 
+fm_supervision_pause_reconcile_seconds() {
+  local value=${FM_SUPERVISION_PAUSE_RECONCILE_SECS:-5}
+  [[ "$value" =~ ^[0-9]+$ ]] || value=5
+  printf '%s' "$((10#$value))"
+}
+
 fm_supervision_classify_task() {
   local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} paused_is_current=${12:-true}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
@@ -763,7 +769,7 @@ fm_supervision_collect() {
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
   local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_deadline pause_reconcile_remaining pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
-  local class_data classification severity owner action why evidence line status_pr window_live scout_report_exists treehouse_failed=false
+  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
   [ -f "$FM_SUPERVISION_DATA/backlog.md" ] || backlog_ok=false
@@ -777,7 +783,8 @@ fm_supervision_collect() {
   fi
 
   if [ -d "$FM_SUPERVISION_STATE" ]; then
-    pause_reconcile_deadline=$(( SECONDS + ${FM_SUPERVISION_PAUSE_RECONCILE_SECS:-5} ))
+    pause_reconcile_secs=$(fm_supervision_pause_reconcile_seconds)
+    pause_reconcile_deadline=$(( SECONDS + pause_reconcile_secs ))
     for meta in "$FM_SUPERVISION_STATE"/*.meta; do
       [ -e "$meta" ] || continue
       treehouse_failed=false
@@ -797,6 +804,7 @@ fm_supervision_collect() {
       [ -n "$worktree" ] && referenced_worktrees="$referenced_worktrees$worktree|"
       last_status=$(fm_supervision_last_status "$FM_SUPERVISION_STATE/$id.status")
       classification_status=$last_status
+      status_pr=$(fm_supervision_status_pr_url "$last_status")
       paused_is_current=true
       if fm_supervision_status_is_paused "$last_status"; then
         pause_reconcile_remaining=$(( pause_reconcile_deadline - SECONDS ))
@@ -813,7 +821,6 @@ fm_supervision_collect() {
       turn_ended=false
       [ -e "$FM_SUPERVISION_STATE/$id.turn-ended" ] && turn_ended=true
       pr_url=$(fm_supervision_meta_value "$meta" pr)
-      status_pr=$(fm_supervision_status_pr_url "$classification_status")
       [ -n "$pr_url" ] || pr_url=$status_pr
       if fm_supervision_window_live "$window"; then window_live=true; else window_live=false; fi
       scout_report_exists=false

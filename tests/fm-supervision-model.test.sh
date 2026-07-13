@@ -381,6 +381,20 @@ test_paused_status_superseded_by_terminal_run() {
   pass "terminal run supersedes paused status"
 }
 
+test_terminal_pause_keeps_status_pr_url() {
+  local home fakebin out
+  home=$(make_home paused-terminal-pr)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-terminal-pr 'paused: waiting for vendor response; PR https://github.com/o/r/pull/2' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' run_json "$home" "$fakebin") || fail "terminal paused PR json failed"
+  assert_json_valid "$out" "terminal paused PR output"
+  assert_task_classification "$out" paused-terminal-pr pr_open_ci_green "terminal run should retain the paused status PR URL"
+  assert_contains "$out" '"pr_url": "https://github.com/o/r/pull/2"' "terminal run should preserve the paused status PR URL"
+  pass "terminal pause reconciliation preserves status PR URL"
+}
+
 test_paused_status_superseded_by_parked_run() {
   local home fakebin out
   home=$(make_home paused-parked)
@@ -410,6 +424,19 @@ test_paused_reconciliation_has_a_fleet_budget() {
   assert_task_classification "$out" paused-budget worker_external_wait "unreconciled pause remains visible"
   [ ! -e "$log" ] || fail "exhausted pause budget should skip crew-state reads"
   pass "paused reconciliation has a fleet budget"
+}
+
+test_paused_reconciliation_invalid_budget_uses_default() {
+  local home fakebin out
+  home=$(make_home paused-invalid-budget)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-invalid-budget 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' FM_SUPERVISION_PAUSE_RECONCILE_SECS=5s run_json "$home" "$fakebin") || fail "invalid paused budget should not abort supervision"
+  assert_json_valid "$out" "invalid paused budget output"
+  assert_task_classification "$out" paused-invalid-budget worker_done_no_pr "invalid paused budget should use the default reconciliation budget"
+  pass "invalid paused reconciliation budget uses default"
 }
 
 test_completed_scout_with_report_is_not_pr_worker() {
@@ -561,6 +588,8 @@ test_paused_status_is_an_external_wait
 test_paused_status_requires_reason
 test_paused_status_superseded_by_active_run
 test_paused_status_superseded_by_terminal_run
+test_paused_reconciliation_invalid_budget_uses_default
+test_terminal_pause_keeps_status_pr_url
 test_paused_status_superseded_by_parked_run
 test_paused_reconciliation_has_a_fleet_budget
 test_completed_scout_with_report_is_not_pr_worker
