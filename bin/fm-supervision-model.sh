@@ -807,6 +807,7 @@ fm_supervision_collect() {
           run-step:working|pane:working) paused_is_current=false ;;
           run-step:done) paused_is_current=false; classification_status="done: authoritative run completed" ;;
           run-step:failed) paused_is_current=false; classification_status="failed: authoritative run failed" ;;
+          run-step:parked) paused_is_current=false; classification_status="needs-decision: authoritative run awaits captain decision" ;;
         esac
       fi
       turn_ended=false

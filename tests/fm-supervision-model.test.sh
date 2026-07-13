@@ -381,6 +381,22 @@ test_paused_status_superseded_by_terminal_run() {
   pass "terminal run supersedes paused status"
 }
 
+test_paused_status_superseded_by_parked_run() {
+  local home fakebin out
+  home=$(make_home paused-parked)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-parked 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review (ask-user: captain decision)' run_json "$home" "$fakebin") || fail "parked paused status json failed"
+  assert_json_valid "$out" "parked paused status output"
+  assert_task_classification "$out" paused-parked worker_needs_decision "parked matched run should surface a captain decision"
+  assert_contains "$out" 'paused-parked:worker_needs_decision' "parked run should create a captain-owned checklist item"
+  assert_contains "$out" '"owner": "captain", "action": "Make the requested decision."' "parked run should retain the captain decision action"
+  assert_not_contains "$out" 'paused-parked:worker_external_wait' "parked run should not remain an external wait"
+  pass "parked run supersedes paused status"
+}
+
 test_paused_reconciliation_has_a_fleet_budget() {
   local home fakebin log out
   home=$(make_home paused-budget)
@@ -545,6 +561,7 @@ test_paused_status_is_an_external_wait
 test_paused_status_requires_reason
 test_paused_status_superseded_by_active_run
 test_paused_status_superseded_by_terminal_run
+test_paused_status_superseded_by_parked_run
 test_paused_reconciliation_has_a_fleet_budget
 test_completed_scout_with_report_is_not_pr_worker
 test_scout_report_requires_done_status
