@@ -402,7 +402,9 @@ pause_marker_record() {  # <window> <state>
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win")")
   marker="$state/.subsuper-paused-$key"
-  [ -e "$marker" ] || _now > "$marker"
+  if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
+    _now > "$marker"
+  fi
 }
 
 pause_marker_record_status() {  # <status-file> <state>
@@ -593,7 +595,14 @@ housekeeping() {  # <state>
       rm -f "$marker"
       continue
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    marker_epoch=$(cat "$marker" 2>/dev/null || true)
+    case "$marker_epoch" in
+      ''|*[!0-9]*)
+        _now > "$marker"
+        marker_epoch=$now
+        ;;
+    esac
+    age=$(( now - marker_epoch ))
     [ "$age" -ge "$pause_secs" ] || continue
     canonical=$(crew_state_value "$task")
     case "$canonical" in

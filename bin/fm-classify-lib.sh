@@ -55,7 +55,11 @@ last_status_line() {
 status_is_captain_relevant() {
   local line=$1
   [ -n "$line" ] || return 1
-  status_is_paused "$line" && return 1
+  # A caller-provided FM_CAPTAIN_RE is an explicit policy override; the default
+  # classifier keeps paused external waits out of the captain-relevant set.
+  if [ "${FM_CAPTAIN_RE+x}" != x ]; then
+    status_is_paused "$line" && return 1
+  fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
