@@ -68,6 +68,7 @@ The no-mistakes receipt is anchored by `.no-mistakes.yaml` and `CONTRIBUTING.md`
 The clean detached checkout at runtime head `5da9351f3ce17c4fdd318da0021625645e046ef3` passed these focused Phase II suites: `fm-teardown`, `fm-spawn-route`, `fm-tangle-guard`, `fm-send-strict`, `fm-crew-state`, `fm-watch-triage`, `fm-daemon`, and `fm-supervision-model`.
 
 ```sh
+set -e
 for test_script in tests/fm-teardown.test.sh tests/fm-spawn-route.test.sh tests/fm-tangle-guard.test.sh tests/fm-send-strict.test.sh tests/fm-crew-state.test.sh tests/fm-watch-triage.test.sh tests/fm-daemon.test.sh tests/fm-supervision-model.test.sh; do bash "$test_script"; done
 ```
 
