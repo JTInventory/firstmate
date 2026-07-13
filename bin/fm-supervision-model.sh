@@ -614,6 +614,12 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Read or relay the secondmate response; keep the secondmate live."
     why="$last_status"
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && printf '%s\n' "$last_status" | grep -q '^paused:'; then
+    classification=worker_external_wait
+    severity=medium
+    owner=external
+    action="Review the declared external wait before continuing."
+    why="$last_status"
   elif [ "$kind" = secondmate ] && [ "$window_live" = true ]; then
     classification=persistent_secondmate_idle
     severity=info
@@ -677,6 +683,12 @@ fm_supervision_classify_task() {
     severity=high
     owner=firstmate
     action="Inspect the worker failure and decide the next step."
+    why="$last_status"
+  elif printf '%s\n' "$last_status" | grep -q '^paused:'; then
+    classification=worker_external_wait
+    severity=medium
+    owner=external
+    action="Review the declared external wait before continuing."
     why="$last_status"
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$classification" "$severity" "$owner" "$action" "$why"

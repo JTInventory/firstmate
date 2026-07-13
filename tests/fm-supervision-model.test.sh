@@ -307,6 +307,24 @@ test_live_secondmate_done_status_surfaces_response() {
   pass "live secondmate done statuses surface without retiring the secondmate"
 }
 
+test_paused_status_is_an_external_wait() {
+  local home fakebin out
+  home=$(make_home paused)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-worker 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  write_meta "$home" paused-secondmate 'paused: waiting for captain confirmation' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
+  out=$(run_json "$home" "$fakebin") || fail "paused status json failed"
+  assert_json_valid "$out" "paused status output"
+  assert_task_classification "$out" paused-worker worker_external_wait "paused worker should not be reported as running"
+  assert_task_classification "$out" paused-secondmate worker_external_wait "paused secondmate should not be reported as idle"
+  assert_contains "$out" '"owner": "external", "action": "Review the declared external wait before continuing."' "paused wait should show external review action"
+  assert_contains "$out" 'paused: waiting for vendor response' "paused reason should be preserved"
+  pass "paused statuses are explicit external waits"
+}
+
 test_completed_scout_with_report_is_not_pr_worker() {
   local home fakebin out
   home=$(make_home scout-report)
@@ -452,6 +470,7 @@ test_backlog_drift_is_structured_in_json
 test_task_classifications_and_route_metadata
 test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response
+test_paused_status_is_an_external_wait
 test_completed_scout_with_report_is_not_pr_worker
 test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown
