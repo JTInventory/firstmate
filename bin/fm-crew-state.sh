@@ -52,6 +52,7 @@ META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+NM_TIMEOUT=$((10#$NM_TIMEOUT))
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.

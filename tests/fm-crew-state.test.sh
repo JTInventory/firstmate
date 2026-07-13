@@ -621,6 +621,19 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+test_leading_zero_timeout_is_decimal() {
+  reset_fakes
+  local d; d=$(new_case leading-zero-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-leading-zero-timeout
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-leading-zero-timeout.meta" "window=fm:fm-feat-leading-zero-timeout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-leading-zero-timeout)"
+  local out; out=$(FM_CREW_STATE_NM_TIMEOUT=08 run_crew_state "$d" feat-leading-zero-timeout)
+  assert_contains "$out" "state: working" "leading-zero timeout is accepted as decimal"
+  assert_contains "$out" "source: run-step" "leading-zero timeout still reads the authoritative run-step"
+  pass "leading-zero timeout is normalized as decimal"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -694,6 +707,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_leading_zero_timeout_is_decimal
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
