@@ -81,6 +81,10 @@ SH
 [ "${TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
 printf 'ok\n'
 SH
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none}"
+SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 [ "$1" = api ] && [ "$2" = GET ] || exit 2
@@ -135,7 +139,7 @@ case "$3" in
     ;;
 esac
 SH
-  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/gh-axi"
+  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/fm-crew-state.sh" "$fakebin/gh-axi"
 }
 
 write_meta() {
@@ -348,6 +352,20 @@ test_paused_status_requires_reason() {
   pass "paused statuses require a non-whitespace reason"
 }
 
+test_paused_status_superseded_by_active_run() {
+  local home fakebin out
+  home=$(make_home paused-superseded)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-resumed 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' run_json "$home" "$fakebin") || fail "superseded paused status json failed"
+  assert_json_valid "$out" "superseded paused status output"
+  assert_task_classification "$out" paused-resumed running "active matched run should supersede paused status"
+  assert_not_contains "$out" 'paused-resumed:worker_external_wait' "active matched run should not remain an external wait"
+  pass "active run supersedes paused status"
+}
+
 test_completed_scout_with_report_is_not_pr_worker() {
   local home fakebin out
   home=$(make_home scout-report)
@@ -495,6 +513,7 @@ test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response
 test_paused_status_is_an_external_wait
 test_paused_status_requires_reason
+test_paused_status_superseded_by_active_run
 test_completed_scout_with_report_is_not_pr_worker
 test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown

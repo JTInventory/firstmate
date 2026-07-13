@@ -4,6 +4,8 @@
 FM_SUPERVISION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-tool-path-lib.sh
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-tool-path-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$FM_SUPERVISION_SCRIPT_DIR/fm-classify-lib.sh"
 
 fm_supervision_usage() {
   cat <<'USAGE'
@@ -570,7 +572,7 @@ fm_supervision_status_is_paused() {
 }
 
 fm_supervision_classify_task() {
-  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false}
+  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} paused_is_current=${12:-true}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
   # Classification order is part of the public supervision contract: completed
   # scout reports require a done status, and live secondmates are persistent
@@ -623,7 +625,7 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Read or relay the secondmate response; keep the secondmate live."
     why="$last_status"
-  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && fm_supervision_status_is_paused "$last_status"; then
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && [ "$paused_is_current" = true ] && fm_supervision_status_is_paused "$last_status"; then
     classification=worker_external_wait
     severity=medium
     owner=external
@@ -693,7 +695,7 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Inspect the worker failure and decide the next step."
     why="$last_status"
-  elif fm_supervision_status_is_paused "$last_status"; then
+  elif [ "$paused_is_current" = true ] && fm_supervision_status_is_paused "$last_status"; then
     classification=worker_external_wait
     severity=medium
     owner=external
@@ -750,7 +752,7 @@ fm_supervision_collect() {
   local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
-  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status turn_ended pr_url pr_data pr_state ci_state mergeable_state
+  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status paused_is_current turn_ended pr_url pr_data pr_state ci_state mergeable_state
   local class_data classification severity owner action why evidence line status_pr window_live scout_report_exists treehouse_failed=false
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
@@ -783,6 +785,10 @@ fm_supervision_collect() {
       recorded_branch=$(fm_supervision_meta_value "$meta" branch); [ -n "$recorded_branch" ] || recorded_branch=unknown
       [ -n "$worktree" ] && referenced_worktrees="$referenced_worktrees$worktree|"
       last_status=$(fm_supervision_last_status "$FM_SUPERVISION_STATE/$id.status")
+      paused_is_current=true
+      if fm_supervision_status_is_paused "$last_status" && crew_is_provably_working "$id"; then
+        paused_is_current=false
+      fi
       turn_ended=false
       [ -e "$FM_SUPERVISION_STATE/$id.turn-ended" ] && turn_ended=true
       pr_url=$(fm_supervision_meta_value "$meta" pr)
@@ -817,7 +823,7 @@ fm_supervision_collect() {
           treehouse_ok=false
         fi
       fi
-      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$last_status" "$pr_url" "$pr_state" "$ci_state" "$scout_report_exists")
+      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$last_status" "$pr_url" "$pr_state" "$ci_state" "$scout_report_exists" "$paused_is_current")
       classification=$(printf '%s' "$class_data" | awk -F '\t' '{ print $1 }')
       severity=$(printf '%s' "$class_data" | awk -F '\t' '{ print $2 }')
       owner=$(printf '%s' "$class_data" | awk -F '\t' '{ print $3 }')
