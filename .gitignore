@@ -5,6 +5,6 @@ data/
 .lavish/
 .DS_Store
 .env
-config/
-reports/
-backups/
+/config/
+/reports/
+/backups/
