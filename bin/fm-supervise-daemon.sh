@@ -400,6 +400,14 @@ pause_marker_record() {  # <window> <state>
   [ -e "$marker" ] || _now > "$marker"
 }
 
+pause_marker_record_status() {  # <status-file> <state>
+  local f=$1 state=$2 task win
+  task=$(basename "$f"); task=${task%.status}
+  win=$(window_for_task "$task" 2>/dev/null || true)
+  [ -n "$win" ] || return 0
+  pause_marker_record "$win" "$state"
+}
+
 # Record the seen-status marker for a captain-relevant status line so the
 # heartbeat catch-all scan does not re-fire it. The single source of truth for
 # the .subsuper-seen-status-<task> dedup state: called from both the per-wake
@@ -572,6 +580,18 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
+    canonical=$(crew_state_value "$task")
+    case "$canonical" in
+      done|failed|blocked|parked)
+        escalate_add "$state" "paused ${age}s superseded by canonical $canonical: $win"
+        rm -f "$marker"
+        continue
+        ;;
+      working)
+        rm -f "$marker"
+        continue
+        ;;
+    esac
     if [ "$(crew_absorb_class "$task")" = working ]; then
       rm -f "$marker"
       continue
@@ -747,6 +767,10 @@ handle_wake() {  # <reason> <state>
   distilled=${decision#*|}
   if [ "$action" = "escalate" ]; then
     log "escalate: $reason -> $distilled"
+    if [ "$kind" = signal ] && status_is_paused "$(last_status_line "$arg")" \
+      && [ "$(status_file_kind "$arg")" = secondmate ]; then
+      pause_marker_record_status "$arg" "$state"
+    fi
     escalate_add "$state" "$distilled"
     # A terminal-stale escalate must not leave a persistence marker behind, or
     # housekeeping re-escalates the same pane as a false wedge later.

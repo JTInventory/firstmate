@@ -133,6 +133,27 @@ afk_present() { [ -e "$STATE/.afk" ]; }
 # cadence window.
 pause_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
+pause_window_for_task() {  # <task>
+  local task=$1 meta w
+  for meta in "$STATE/$task.meta" "$STATE/$task.status.meta"; do
+    [ -e "$meta" ] || continue
+    w=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$w" ] && { printf '%s' "$w"; return; }
+  done
+}
+
+pause_marker_record_status() {  # <status-file>
+  local f=$1 task win key marker
+  task=$(basename "$f"); task=${task%.status}
+  win=$(pause_window_for_task "$task")
+  [ -n "$win" ] || return 0
+  key=$(pause_key "$win")
+  marker="$STATE/.paused-$key"
+  if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
+    date +%s > "$marker"
+  fi
+}
+
 pause_tracking_clear() {  # <window>
   local key
   key=$(pause_key "$1")
@@ -442,6 +463,9 @@ EOF
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
+        if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
+          pause_marker_record_status "$f"
+        fi
         mark_surfaced "$f"
       done <<EOF
 $pending
@@ -464,9 +488,16 @@ EOF
   # remembers the hash already classified).
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
-    # it through status writes and heartbeats, not pane-idle staleness.
-    [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+    # it through status writes and heartbeats, except while a declared pause
+    # marker is active so the same bounded re-surface cadence still applies.
+    if [ "$(window_kind "$w")" = secondmate ]; then
+      key=$(printf '%s' "$w" | tr ':/.' '___')
+      [ -e "$STATE/.paused-$key" ] || continue
+    fi
+    if ! tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null); then
+      pause_tracking_clear "$w"
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -549,13 +580,16 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: it is alive, so clear any pending
-        # non-terminal-stale escalation timer.
+        # pause and non-terminal-stale escalation timers.
+        pause_tracking_clear "$w"
         rm -f "$ssf"
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      # Pane content changed: the crew is active again, so reset the escalation timer.
+      # Pane content changed: the crew is active again, so reset pause and
+      # escalation timers before a later pause starts a fresh cadence.
+      pause_tracking_clear "$w"
       rm -f "$ssf"
     fi
   done < <(recorded_windows)

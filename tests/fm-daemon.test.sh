@@ -131,16 +131,27 @@ test_paused_stale_classifies_and_resurfaces_once() {
 }
 
 test_paused_secondmate_signal_escalates() {
-  local dir state reason out
-  dir=$(make_supercase paused-secondmate-signal); state="$dir/state"
+  local dir state fakebin reason out key pane
+  dir=$(make_supercase paused-secondmate-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  pane="$dir/pane.txt"; printf 'idle child wait\n' > "$pane"
   printf 'window=sess:fm-paused-secondmate\nkind=secondmate\n' > "$state/paused-secondmate.meta"
   printf 'paused: waiting for child dependency\n' > "$state/paused-secondmate.status"
   reason="$state/paused-secondmate.status"
   out=$(classify_signal "$reason" "$state")
   case "$out" in
-    escalate\|*) pass "paused secondmate signal remains actionable in away mode" ;;
+    escalate\|*) ;;
     *) fail "paused secondmate signal was self-handled: $out" ;;
   esac
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-paused-secondmate' FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" handle_wake "signal: $reason" "$state"
+  key=$(printf '%s' 'paused-secondmate' | tr ':/.' '___')
+  [ -e "$state/.subsuper-paused-$key" ] || fail "paused secondmate signal did not create a cadence marker"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-paused-secondmate' FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F 'paused' "$state/.subsuper-escalations" >/dev/null \
+    || fail "paused secondmate marker did not re-surface in away mode"
+  pass "paused secondmate signal remains actionable and cadence-bound in away mode"
 }
 
 test_active_run_wins_over_pause() {
