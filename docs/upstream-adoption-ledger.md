@@ -41,7 +41,8 @@ All changes were first characterized in the clean clone and delivered only to th
 
 ## Phase II closeout (2026-07-13)
 
-The selective transition is complete for the accepted reliability and operator-truth families. The JT fork delivered and merged the following focused adaptations:
+The selective transition is complete for the accepted reliability and operator-truth families.
+The JT fork delivered and merged the following focused adaptations:
 
 | JT PR | Adopted family | JT boundary preserved |
 | --- | --- | --- |
@@ -52,7 +53,10 @@ The selective transition is complete for the accepted reliability and operator-t
 | #60 | Shared pause re-surface cadence | Watcher and away-mode daemon share one bounded marker/cadence contract. |
 | #61 | Read-only supervisor wedge visibility | `.subsuper-inject-wedged` becomes a local high-severity checklist item; no external notifier is added. |
 
-This is a historical closeout record captured on 2026-07-13, not a live runtime-status assertion. The four required GitHub checks—Behavior tests, Lint shell scripts, Repo invariants, and PR must be raised via no-mistakes—were SUCCESS for PRs #55, #57, #58, #59, #60, and #61. The PR #61 no-mistakes run separately recorded `Lint - 1 error`; that internal result was explicitly accepted only after local ShellCheck passed, and is not omitted from this record. The PR and Checks links below are the audit trail.
+This is a historical closeout record captured on 2026-07-13, not a live runtime-status assertion.
+The four required GitHub checks—Behavior tests, Lint shell scripts, Repo invariants, and PR must be raised via no-mistakes—were SUCCESS for PRs #55, #57, #58, #59, #60, and #61.
+The PR #61 no-mistakes run separately recorded `Lint - 1 error`; that internal result was explicitly accepted only after local ShellCheck passed, and is not omitted from this record.
+The PR and Checks links below are the audit trail.
 
 | PR | Landed commit | Historical receipt |
 | --- | --- | --- |
@@ -72,13 +76,17 @@ set -e
 for test_script in tests/fm-teardown.test.sh tests/fm-spawn-route.test.sh tests/fm-tangle-guard.test.sh tests/fm-send-strict.test.sh tests/fm-crew-state.test.sh tests/fm-watch-triage.test.sh tests/fm-daemon.test.sh tests/fm-supervision-model.test.sh; do bash "$test_script"; done
 ```
 
-The canonical `/root/firstmate` home was then fast-forwarded to the fork head while preserving operator-owned untracked configuration, plans, reports, and skill copies; Treehouse dirty/leased slots were not cleaned or restarted. The historical runtime proof used `bin/fm-supervise.sh --json` against `state/.subsuper-inject-wedged`, `bin/fm-backlog-audit.sh` against `data/backlog.md`, `data/secondmates.md`, and `state/*.meta`, `bin/fm-watch-arm.sh` against `state/.watch.lock` and `state/.last-watcher-beat`, and `bin/fm-no-mistakes-pr-target-guard.sh` for the `JTInventory/firstmate` target. It recorded a clean tracked tree, `fm-supervise --json` at `ok` with no high/medium actions, a running watcher, no backlog drift, and a silent guard after the queued wake was drained.
+The canonical `/root/firstmate` home was then fast-forwarded to the fork head while preserving operator-owned untracked configuration, plans, reports, and skill copies; Treehouse dirty/leased slots were not cleaned or restarted.
+The historical runtime proof used `bin/fm-supervise.sh --json` against `state/.subsuper-inject-wedged`, `bin/fm-backlog-audit.sh` against `data/backlog.md`, `data/secondmates.md`, and `state/*.meta`, `bin/fm-watch-arm.sh` against `state/.watch.lock` and `state/.last-watcher-beat`, and `bin/fm-no-mistakes-pr-target-guard.sh` for the `JTInventory/firstmate` target.
+It recorded a clean tracked tree, `fm-supervise --json` at `ok` with no high/medium actions, a running watcher, no backlog drift, and a silent guard after the queued wake was drained.
 
-The durable Compound Engineering explanation is maintained outside this repository, in the JT workspace at `docs/solutions/architecture-patterns/firstmate-selective-upstream-adoption.md`. This ledger remains the Firstmate-side decision record; the Compound document explains the reusable pattern and links back here rather than duplicating this table.
+The durable Compound Engineering explanation is maintained outside this repository, in the JT workspace at `docs/solutions/architecture-patterns/firstmate-selective-upstream-adoption.md`.
+This ledger remains the Firstmate-side decision record; the Compound document explains the reusable pattern and links back here rather than duplicating this table.
 
 ### Explicitly not enabled by this train
 
 - U5b JT Control Room ingestion of the local wedge marker: deferred because there is no approved JT writer, endpoint, generated-data contract, or demonstrated operator gap.
 - Generic multi-runtime backends, project-less secondmate homes, quota-balanced dispatch, and global hook changes: deferred pending separate JT contracts and approval.
-- New upstream Herdr, Orca, cmux, Zellij, and external Slack/SMS/paging variants: rejected by this train as outside the supported JT identity and approval boundary. Existing optional Pi harness and opt-in X mode remain available under their existing verified/local contracts; this train neither enables nor broadens them.
+- New upstream Herdr, Orca, cmux, Zellij, and external Slack/SMS/paging variants: rejected by this train as outside the supported JT identity and approval boundary.
+  Existing optional Pi harness and opt-in X mode remain available under their existing verified/local contracts; this train neither enables nor broadens them.
 - Grok remains the already-landed optional adapter from JT PR #28 / upstream #143; the open/conflicting Grok-primary proposal (upstream #461) is not adopted.
