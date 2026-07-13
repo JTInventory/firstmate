@@ -768,7 +768,7 @@ fm_supervision_collect() {
   local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
-  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_deadline pause_reconcile_remaining pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
+  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
   local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
@@ -784,7 +784,7 @@ fm_supervision_collect() {
 
   if [ -d "$FM_SUPERVISION_STATE" ]; then
     pause_reconcile_secs=$(fm_supervision_pause_reconcile_seconds)
-    pause_reconcile_deadline=$(( SECONDS + pause_reconcile_secs ))
+    pause_reconcile_used=0
     for meta in "$FM_SUPERVISION_STATE"/*.meta; do
       [ -e "$meta" ] || continue
       treehouse_failed=false
@@ -807,8 +807,10 @@ fm_supervision_collect() {
       status_pr=$(fm_supervision_status_pr_url "$last_status")
       paused_is_current=true
       if fm_supervision_status_is_paused "$last_status"; then
-        pause_reconcile_remaining=$(( pause_reconcile_deadline - SECONDS ))
+        pause_reconcile_remaining=$(( pause_reconcile_secs - pause_reconcile_used ))
+        pause_reconcile_started=$SECONDS
         pause_reconciliation=$(fm_supervision_paused_reconciliation "$id" "$pause_reconcile_remaining")
+        pause_reconcile_used=$(( pause_reconcile_used + SECONDS - pause_reconcile_started ))
         pause_state=${pause_reconciliation%%$'\t'*}
         pause_source=${pause_reconciliation#*$'\t'}
         case "$pause_source:$pause_state" in

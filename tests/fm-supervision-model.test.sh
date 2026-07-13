@@ -79,6 +79,7 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ "${TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
+[ -z "${FM_FAKE_TREEHOUSE_DELAY:-}" ] || sleep "$FM_FAKE_TREEHOUSE_DELAY"
 printf 'ok\n'
 SH
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
@@ -426,6 +427,25 @@ test_paused_reconciliation_has_a_fleet_budget() {
   pass "paused reconciliation has a fleet budget"
 }
 
+test_paused_reconciliation_ignores_prior_task_delay() {
+  local home fakebin project out
+  home=$(make_home paused-prior-delay)
+  fakebin="$home/fakebin"
+  project="$home/projects/slow-project"
+  mkdir -p "$project"
+  write_fakebin "$fakebin"
+  write_meta "$home" a-slow 'working: checking remote state' \
+    "project=$project" "window=live" "kind=ship" "mode=no-mistakes"
+  write_meta "$home" z-paused 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' FM_FAKE_TREEHOUSE_DELAY=2 FM_SUPERVISION_PAUSE_RECONCILE_SECS=1 run_json "$home" "$fakebin") \
+    || fail "prior task delay should not exhaust paused reconciliation budget"
+  assert_json_valid "$out" "prior task delay output"
+  assert_task_classification "$out" z-paused worker_done_no_pr "paused reconciliation should retain its budget after an earlier slow task"
+  assert_not_contains "$out" 'z-paused:worker_external_wait' "later paused worker should reconcile after earlier slow task"
+  pass "paused reconciliation ignores prior non-paused task delay"
+}
+
 test_paused_reconciliation_invalid_budget_uses_default() {
   local home fakebin out
   home=$(make_home paused-invalid-budget)
@@ -606,6 +626,7 @@ test_paused_reconciliation_oversized_budget_uses_default
 test_terminal_pause_keeps_status_pr_url
 test_paused_status_superseded_by_parked_run
 test_paused_reconciliation_has_a_fleet_budget
+test_paused_reconciliation_ignores_prior_task_delay
 test_completed_scout_with_report_is_not_pr_worker
 test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown

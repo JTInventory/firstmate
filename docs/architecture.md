@@ -30,7 +30,7 @@ A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if 
 A shared tool-path helper appends existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories without moving them ahead of an explicit caller path.
 Bootstrap, spawn, teardown, and the read-only supervision model use it before tool lookup, so SSH and other clean non-interactive sessions can find HOME-installed Axi tools consistently.
 It combines GitHub commit status and check-runs when classifying PR CI, so Actions failures such as stale or failed check-runs are not treated as green just because legacy commit status is empty.
-It also classifies a scout report as teardown work before PR or missing-worktree checks only when the latest status is `done:`, and a live `kind=secondmate` record as a persistent direct report unless the latest status is `done:`, `blocked:`, `needs-decision:`, or `failed:`.
+It also classifies a scout report as teardown work before PR or missing-worktree checks only when the latest status is `done:`, and a live `kind=secondmate` record as a persistent direct report unless the latest status is `done:`, `blocked:`, `needs-decision:`, `failed:`, or valid `paused: <reason>`.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
