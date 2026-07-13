@@ -439,6 +439,19 @@ test_paused_reconciliation_invalid_budget_uses_default() {
   pass "invalid paused reconciliation budget uses default"
 }
 
+test_paused_reconciliation_oversized_budget_uses_default() {
+  local home fakebin out
+  home=$(make_home paused-oversized-budget)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-oversized-budget 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' FM_SUPERVISION_PAUSE_RECONCILE_SECS=9999999999999999999 run_json "$home" "$fakebin") || fail "oversized paused budget should not abort supervision"
+  assert_json_valid "$out" "oversized paused budget output"
+  assert_task_classification "$out" paused-oversized-budget worker_done_no_pr "oversized paused budget should use the default reconciliation budget"
+  pass "oversized paused reconciliation budget uses default"
+}
+
 test_completed_scout_with_report_is_not_pr_worker() {
   local home fakebin out
   home=$(make_home scout-report)
@@ -589,6 +602,7 @@ test_paused_status_requires_reason
 test_paused_status_superseded_by_active_run
 test_paused_status_superseded_by_terminal_run
 test_paused_reconciliation_invalid_budget_uses_default
+test_paused_reconciliation_oversized_budget_uses_default
 test_terminal_pause_keeps_status_pr_url
 test_paused_status_superseded_by_parked_run
 test_paused_reconciliation_has_a_fleet_budget

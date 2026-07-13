@@ -634,6 +634,19 @@ test_leading_zero_timeout_is_decimal() {
   pass "leading-zero timeout is normalized as decimal"
 }
 
+test_oversized_timeout_uses_default() {
+  reset_fakes
+  local d; d=$(new_case oversized-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-oversized-timeout
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-oversized-timeout.meta" "window=fm:fm-feat-oversized-timeout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-oversized-timeout)"
+  local out; out=$(FM_CREW_STATE_NM_TIMEOUT=9999999999999999999 run_crew_state "$d" feat-oversized-timeout)
+  assert_contains "$out" "state: working" "oversized timeout uses the default budget"
+  assert_contains "$out" "source: run-step" "oversized timeout still reads the authoritative run-step"
+  pass "oversized timeout uses the default"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -708,6 +721,7 @@ test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_leading_zero_timeout_is_decimal
+test_oversized_timeout_uses_default
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

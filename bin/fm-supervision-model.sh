@@ -6,6 +6,8 @@ FM_SUPERVISION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-tool-path-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-numeric-lib.sh
+. "$FM_SUPERVISION_SCRIPT_DIR/fm-numeric-lib.sh"
 
 fm_supervision_usage() {
   cat <<'USAGE'
@@ -582,9 +584,7 @@ fm_supervision_paused_reconciliation() {  # <id> <remaining seconds>
 }
 
 fm_supervision_pause_reconcile_seconds() {
-  local value=${FM_SUPERVISION_PAUSE_RECONCILE_SECS:-5}
-  [[ "$value" =~ ^[0-9]+$ ]] || value=5
-  printf '%s' "$((10#$value))"
+  fm_nonnegative_integer_or_default "${FM_SUPERVISION_PAUSE_RECONCILE_SECS:-5}" 5 86400
 }
 
 fm_supervision_classify_task() {

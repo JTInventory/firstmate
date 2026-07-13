@@ -44,15 +44,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-numeric-lib.sh
+. "$SCRIPT_DIR/fm-numeric-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
-NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
-case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
-NM_TIMEOUT=$((10#$NM_TIMEOUT))
+NM_TIMEOUT=$(fm_nonnegative_integer_or_default "${FM_CREW_STATE_NM_TIMEOUT:-10}" 10 86400)
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
