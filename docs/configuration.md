@@ -6,6 +6,12 @@ The files and environment variables you set to operate firstmate.
 
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
 
+## Local directory boundary
+
+The repository-root `/config/`, `/reports/`, and `/backups/` directories are gitignored local fleet material.
+The ignore rules are root-anchored, so same-named directories nested under tracked shared surfaces such as `docs/examples/` and `tests/` remain trackable.
+Keep reusable configuration examples under [`docs/examples/`](examples/) and copy them into the local `config/` directory when needed.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -184,7 +190,7 @@ CBM is optional code orientation for multi-file exploration (architecture maps, 
 It is not proof, not runtime truth, and not authority for merge, deploy, refresh, purchase, or destructive action.
 Missing binary, empty index, or disabled config never blocks spawn or marks a crewmate `blocked`.
 
-### Local config (gitignored)
+### Local config (root-level `config/`, gitignored)
 
 Copy the tracked examples when you want host-local overrides:
 

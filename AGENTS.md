@@ -49,7 +49,7 @@ When the fleet is empty, you may make those firstmate-repo changes directly.
 Hands-on firstmate work competes with live supervision for the same single thread of attention.
 This repo is a shared template, not the captain's personal project.
 The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (.env, data/, state/, config/, projects/, .no-mistakes/) is not.
-Local report or preservation folders such as `reports/` and `backups/` are not canonical tracked surfaces; keep them out of PRs unless a specific artifact is deliberately promoted into shared documentation.
+The repository-root `/config/`, `/reports/`, and `/backups/` directories are not canonical tracked surfaces; keep local reports and preservation files out of PRs unless a specific artifact is deliberately promoted into shared documentation.
 Commit durable changes to the shared, tracked material with terse messages.
 This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 For this captain-owned Firstmate checkout, the no-mistakes PR target is `JTInventory/firstmate`.
@@ -76,7 +76,7 @@ README.md            public overview and development notes
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
-config/              per-home configuration; LOCAL, gitignored as a whole
+config/              per-home configuration; LOCAL, gitignored as a whole at the repository root
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited: the primary pushes this into every secondmate home's config/ (section 4), so a secondmate's own crewmates use the primary's value
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents; LOCAL, gitignored; absent or "default" falls back to config/crew-harness then firstmate's own (section 4). The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
@@ -96,8 +96,8 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
-reports/             local reports; not a canonical tracked surface
-backups/             local preservation files; not a canonical tracked surface
+reports/             root-local reports; not a canonical tracked surface
+backups/             root-local preservation files; not a canonical tracked surface
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
