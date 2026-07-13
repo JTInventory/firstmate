@@ -96,6 +96,116 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+test_paused_stale_classifies_and_resurfaces_once() {
+  local dir state fakebin win pane key out
+  dir=$(make_supercase paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-paused-d1"
+  pane="$dir/pane.txt"
+  printf 'idle external wait\n' > "$pane"
+  printf 'paused: waiting for vendor window\n' > "$state/paused-d1.status"
+  key=$(printf '%s' "paused-d1" | tr ':/.' '___')
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in pause\|*) ;; *) fail "paused stale did not classify as pause: $out" ;; esac
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "paused stale did not create daemon pause marker"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "paused stale left a wedge marker"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F "paused" "$state/.subsuper-escalations" >/dev/null \
+    || fail "expired paused marker did not add a pause recheck escalation"
+  before=$(wc -l < "$state/.subsuper-escalations")
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  after=$(wc -l < "$state/.subsuper-escalations")
+  [ "$after" -eq "$before" ] || fail "pause recheck duplicated inside one cadence"
+
+  printf 'working: resumed\n' > "$state/paused-d1.status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "pause marker survived leaving paused state"
+  pass "daemon classifies paused stale, re-surfaces once, throttles, and clears on resume"
+}
+
+test_paused_secondmate_signal_escalates() {
+  local dir state fakebin reason out key pane turn
+  dir=$(make_supercase paused-secondmate-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  pane="$dir/pane.txt"; printf 'idle child wait\n' > "$pane"
+  printf 'window=sess:fm-paused-secondmate\nkind=secondmate\n' > "$state/paused-secondmate.meta"
+  printf 'paused: waiting for child dependency\n' > "$state/paused-secondmate.status"
+  turn="$state/paused-secondmate.turn-ended"
+  printf 'turn ended\n' > "$turn"
+  reason="$state/paused-secondmate.status $turn"
+  out=$(classify_signal "$reason" "$state")
+  case "$out" in
+    escalate\|*) ;;
+    *) fail "paused secondmate signal was self-handled: $out" ;;
+  esac
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-paused-secondmate' FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" handle_wake "signal: $reason" "$state"
+  key=$(printf '%s' 'paused-secondmate' | tr ':/.' '___')
+  [ -e "$state/.subsuper-paused-$key" ] || fail "paused secondmate signal did not create a cadence marker"
+  printf '00008\n' > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-paused-secondmate' FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -qE '^[0-9]+$' "$state/.subsuper-paused-$key" \
+    || fail "corrupt paused marker was not repaired before housekeeping arithmetic"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-paused-secondmate' FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F 'paused' "$state/.subsuper-escalations" >/dev/null \
+    || fail "paused secondmate marker did not re-surface in away mode"
+  pass "paused secondmate signal remains actionable and cadence-bound in away mode"
+}
+
+test_active_run_wins_over_pause() {
+  local dir state fakebin win out key old_crew_bin
+  dir=$(make_supercase paused-active-run); state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-paused-active"
+  make_fake_crew_state "$fakebin" >/dev/null
+  printf 'paused: waiting for vendor window\n' > "$state/paused-active.status"
+  export FM_FAKE_CREW_STATE='state: working ? source: run-step ? active validation'
+  old_crew_bin=${FM_CREW_STATE_BIN:-}
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  out=$(classify_stale "$win" "$state")
+  case "$out" in
+    self\|transient\ stale*) ;;
+    *) FM_CREW_STATE_BIN=$old_crew_bin; fail "active run did not override stale pause: $out" ;;
+  esac
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    handle_wake "stale: $win" "$state"
+  key=$(printf '%s' "paused-active" | tr ':/.' '___')
+  [ -e "$state/.subsuper-stale-$key" ] || { FM_CREW_STATE_BIN=$old_crew_bin; fail "active run did not retain transient stale marker"; }
+  [ ! -e "$state/.subsuper-paused-$key" ] || { FM_CREW_STATE_BIN=$old_crew_bin; fail "active run created a pause marker"; }
+  FM_CREW_STATE_BIN=$old_crew_bin
+  pass "active run wins over a stale declared pause"
+}
+
+test_canonical_state_wins_over_pause() {
+  local dir state fakebin win out old_crew_bin old_fake state_value
+  dir=$(make_supercase paused-canonical); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-paused-canonical"
+  printf 'paused: waiting for vendor window\n' > "$state/paused-canonical.status"
+  old_crew_bin=${FM_CREW_STATE_BIN:-}
+  old_fake=${FM_FAKE_CREW_STATE:-}
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  for state_value in 'done' failed parked; do
+    export FM_FAKE_CREW_STATE="state: $state_value ? source: run-step ? canonical state"
+    out=$(classify_stale "$win" "$state")
+    case "$out" in
+      escalate\|*) ;;
+      *) FM_CREW_STATE_BIN=$old_crew_bin; FM_FAKE_CREW_STATE=$old_fake; fail "canonical $state_value was hidden by stale pause: $out" ;;
+    esac
+  done
+  FM_CREW_STATE_BIN=$old_crew_bin
+  FM_FAKE_CREW_STATE=$old_fake
+  pass "canonical done, failed, and parked states override stale pause"
+}
+
 test_housekeeping_persistent_stale_escalates() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-persistent)
@@ -689,6 +799,10 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
+test_paused_stale_classifies_and_resurfaces_once
+test_paused_secondmate_signal_escalates
+test_active_run_wins_over_pause
+test_canonical_state_wins_over_pause
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest

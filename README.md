@@ -45,7 +45,7 @@ This is a directory that turns any agent into your firstmate, and you the captai
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
-- **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
+- **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you, with bounded reviews for declared external waits.
 - **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, backlog drift, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1.1` JSON without changing anything, even from non-interactive shells where HOME-local Axi tools are not already on `PATH`.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Operational memory stow** - `/stow` sweeps the current session for durable knowledge, routes it to the right local or project home, and tells you when the session is safe to reset.
@@ -118,7 +118,7 @@ That lets SSH and other clean non-interactive sessions find HOME-installed Axi t
 For an end-to-end navigation map of the request-to-teardown lifecycle, see [docs/operating-map.md](docs/operating-map.md).
 For PRs, that model combines GitHub commit status and check-runs before deciding whether CI is green, pending, failed, absent, or unknown.
 It also exposes backlog/state drift through `backlog_consistency`, using the same audit vocabulary as `bin/fm-backlog-audit.sh`.
-It treats scout reports with a fresh `done:` status as teardown work instead of PR-worker work, and treats live secondmates as persistent direct reports unless they have a fresh `done:`, `blocked:`, `needs-decision:`, or `failed:` status.
+It treats scout reports with a fresh `done:` status as teardown work instead of PR-worker work, and treats live secondmates as persistent direct reports unless they have a fresh `done:`, `blocked:`, `needs-decision:`, `failed:`, or current `paused: <reason>` status.
 Persistent secondmate homes are linked firstmate worktrees; startup syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
 Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
 The recommended dispatch policy keeps MiniMax for very simple token-saving work, uses GPT-5.6-Luna for small Codex-shaped work, GPT-5.6-Terra for everyday implementation, and GPT-5.6-Sol for high-risk or critical work.
@@ -148,7 +148,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash and escalates only captain-relevant events as one batched digest, cutting supervision cost while you step away |
+| `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash, re-surfaces declared external waits for review on a bounded cadence, and escalates captain-relevant events as one batched digest |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
 

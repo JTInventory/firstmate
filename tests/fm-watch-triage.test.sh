@@ -128,6 +128,7 @@ test_classifier_primitives() {
   [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
+  FM_CAPTAIN_RE='paused:' status_is_captain_relevant "paused: waiting on vendor" || fail "FM_CAPTAIN_RE override could not opt paused into captain relevance"
   pass "classifier primitives: last line, captain-relevance, window->task, FM_CAPTAIN_RE override"
 }
 
@@ -290,6 +291,63 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+test_paused_secondmate_signal_surfaced() {
+  local dir state fakebin out drain_out status_file window capture_file pid old_fake key pane_hash
+  dir=$(make_case paused-secondmate-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-paused-secondmate"
+  status_file="$state/paused-secondmate.status"
+  printf 'idle child wait' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/paused-secondmate.meta"
+  printf 'paused: waiting for child dependency\n' > "$status_file"
+  old_fake=${FM_FAKE_CREW_STATE:-}
+  export FM_FAKE_CREW_STATE='state: paused ? source: status-log ? waiting for child dependency'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal was absorbed indefinitely"; }
+  grep -F "signal: $status_file" "$out" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal did not surface"; }
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "drain after paused secondmate signal failed"; }
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal was not queued"; }
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  [ -e "$state/.paused-$key" ] || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal did not create a cadence marker"; }
+
+  # A restart's first baseline has no prior pane hash; it must preserve the
+  # marker so the next stable sample can re-surface the wait.
+  rm -f "$state/.hash-$key" "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart did not stay live for pause baseline"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart cleared the pause marker during baseline"; }
+  reap "$pid"
+
+  pane_hash=$(hash_text "idle child wait")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.paused-$key"
+  rm -f "$state/.paused-resurfaced-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate marker did not re-surface"; }
+  grep -F "paused" "$out" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate re-surface did not explain the wait"; }
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "drain after paused secondmate re-surface failed"; }
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate re-surface was not queued"; }
+  FM_FAKE_CREW_STATE=$old_fake
+  pass "paused secondmate signal remains actionable and cadence-bound in always-on mode"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -365,6 +423,86 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# --- declared external pause: absorb, then re-surface once per cadence --------
+test_paused_stale_absorbed_then_resurfaced() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case paused-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-paused"
+  printf 'idle external wait' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused.status.meta"
+  printf 'paused: waiting for vendor window\n' > "$state/paused.status"
+  sig=$(seen_sig "$state/paused.status"); printf '%s' "$sig" > "$state/.seen-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle external wait")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused ? source: status-log ? waiting for vendor window'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "declared pause surfaced before its cadence: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "declared pause emitted a wake before expiry: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "declared pause queued a wake before expiry"
+  [ -e "$state/.paused-$key" ] || fail "declared pause did not create its shared watcher marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "declared pause started a wedge timer"
+  reap "$pid"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.paused-$key"
+  rm -f "$state/.paused-resurfaced-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "expired declared pause did not re-surface"
+  grep -F "paused" "$out" >/dev/null || fail "pause re-surface did not explain the external wait"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after pause re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "pause re-surface was not queued"
+  reap "$pid"
+
+  : > "$state/.wake-queue"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "pause re-surfaced repeatedly inside one cadence: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "pause emitted a duplicate wake inside one cadence: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "pause queued a duplicate wake inside one cadence"
+  reap "$pid"
+
+  # Leaving pause clears both pause markers and does not inherit an old wedge timer.
+  printf 'working: resumed\n' > "$state/paused.status"
+  export FM_FAKE_CREW_STATE='state: working ? source: run-step ? resumed validation'
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited while leaving declared pause: $(cat "$out")"
+  fi
+  [ ! -e "$state/.paused-$key" ] || fail "watcher pause marker survived leaving pause"
+  since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) fail "watcher did not initialize a fresh stale timer after pause" ;; esac
+  [ "$since" -gt $(( $(date +%s) - 60 )) ] || fail "watcher carried an old wedge timer out of pause"
+  [ ! -s "$state/.wake-queue" ] || fail "leaving pause inherited an immediate stale wake"
+  reap "$pid"
+  pass "declared pause is absorbed, re-surfaces once after cadence, throttles duplicates, then clears on resume"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -590,7 +728,9 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_paused_secondmate_signal_surfaced
 test_terminal_stale_surfaced
+test_paused_stale_absorbed_then_resurfaced
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_repairs_missing_or_corrupt_timer

@@ -38,6 +38,29 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # captain-relevant wedge. U6 owns bounded re-surfacing after its review cadence.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
+# Shared declared external-wait vocabulary and cadence. U6 keeps this contract
+# in one library so watcher and away-mode daemon cannot drift.
+FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
+# shellcheck disable=SC2034 # Read by the watcher and daemon after sourcing this library.
+FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
+
+# Normalize an all-digit value without Bash's leading-zero octal interpretation.
+# Returns non-zero for malformed input; callers choose their safe default.
+decimal_digits_or_zero() {  # <value>
+  local value=$1 normalized
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  normalized=$(printf '%s' "$value" | sed 's/^0*//')
+  [ -n "$normalized" ] || normalized=0
+  printf '%s' "$normalized"
+}
+
+positive_seconds_or_default() {  # <value> <default>
+  local value=$1 default=$2 normalized
+  normalized=$(decimal_digits_or_zero "$value") || { printf '%s' "$default"; return; }
+  [ "$normalized" = 0 ] && { printf '%s' "$default"; return; }
+  printf '%s' "$normalized"
+}
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1
@@ -49,7 +72,105 @@ last_status_line() {
 status_is_captain_relevant() {
   local line=$1
   [ -n "$line" ] || return 1
+  # A caller-provided FM_CAPTAIN_RE is an explicit policy override; the default
+  # classifier keeps paused external waits out of the captain-relevant set.
+  if [ "${FM_CAPTAIN_RE+x}" != x ]; then
+    status_is_paused "$line" && return 1
+  fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+}
+
+# 0 when a status line declares a non-empty known external dependency.
+status_is_paused() {  # <status-line>
+  local line=$1 verb reason
+  [ -n "$line" ] || return 1
+  case "$line" in
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  verb=${line%%:*}
+  verb="${verb#"${verb%%[![:space:]]*}"}"
+  verb="${verb%"${verb##*[![:space:]]}"}"
+  [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ] || return 1
+  reason=${line#*:}
+  reason="${reason#"${reason%%[![:space:]]*}"}"
+  [ -n "$reason" ]
+}
+
+# Read the canonical crew-state line once and expose its stable state token.
+# Unknown/unavailable reads remain explicit so callers can fail closed.
+crew_state_value() {  # <id>
+  local id=$1 line state
+  [ -n "$id" ] || { printf 'unknown'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in
+    state:*)
+      state=${line#state: }
+      state=${state%% *}
+      [ -n "$state" ] && { printf '%s' "$state"; return; }
+      ;;
+  esac
+  printf 'unknown'
+}
+
+# Return the recorded task kind for a status file. Older fixtures and homes may
+# name metadata either <id>.meta or <id>.status.meta, so accept both forms.
+status_file_kind() {  # <status-file>
+  local f=$1 meta kind
+  for meta in "${f%.status}.meta" "$f.meta"; do
+    [ -e "$meta" ] || continue
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$kind" ] && { printf '%s' "$kind"; return; }
+  done
+  printf 'unknown'
+}
+
+# Read the canonical crew-state once and classify the two safe absorb reasons.
+# This is intentionally separate from the captain-relevant status regex: a
+# declared pause is expected idle work, while a stopped/unknown crew remains loud.
+crew_absorb_class() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || { printf 'none'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  state=${line#state: }; state=${state%% *}
+  if [ "$state" = paused ]; then
+    printf 'paused'
+    return
+  fi
+  if [ "$state" = working ]; then
+    src=${line#*source: }; src=${src%% *}
+    case "$src" in run-step|pane) printf 'working'; return ;; esac
+  fi
+  printf 'none'
+}
+
+# 0 (benign) if every referenced signal belongs to a working or paused crew.
+signal_crew_absorbable() {  # <file> ...
+  local f base task last seen=""
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status) task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *) continue ;;
+    esac
+    [ -n "$task" ] || continue
+    if [[ "$base" = *.status ]]; then
+      last=$(last_status_line "$f")
+      if status_is_paused "$last" && [ "$(status_file_kind "$f")" = secondmate ]; then
+        return 1
+      fi
+    fi
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    case "$(crew_absorb_class "$task")" in
+      working|paused) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ -n "$seen" ] || return 1
+  return 0
 }
 
 # task id from a tmux window name "<session>:fm-<id>" -> "<id>"

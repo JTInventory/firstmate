@@ -70,8 +70,9 @@ Owner: `AGENTS.md` sections 2 and 8; `bin/fm-crew-state.sh`; `bin/fm-classify-li
 
 The watcher sleeps in bash, queues actionable wakes, and wakes firstmate only when there is something to handle.
 `fm-watch-arm.sh` is the watcher-health source of truth, `fm-guard.sh` is a conservative warning surface, and `fm-watch-session.sh status` proves only the durable runner window.
+A valid `paused: <reason>` is an external wait rather than a wedge, but the watcher and away-mode daemon re-surface it for review at the shared `FM_PAUSE_RESURFACE_SECS` cadence (default 3600 seconds); confirm current state and recheck the named dependency before treating that wake as stuck work.
 
-Owner: `AGENTS.md` section 8; `bin/fm-watch.sh`; `bin/fm-watch-arm.sh`; `bin/fm-watch-session.sh`; `bin/fm-guard.sh`; `bin/fm-wake-drain.sh`; `docs/architecture.md`.
+Owner: `AGENTS.md` section 8; `bin/fm-watch.sh`; `bin/fm-watch-arm.sh`; `bin/fm-watch-session.sh`; `bin/fm-guard.sh`; `bin/fm-wake-drain.sh`; `bin/fm-supervise-daemon.sh`; `bin/fm-classify-lib.sh`; `docs/architecture.md`.
 
 ## 10. Radar And Read-Only Model
 

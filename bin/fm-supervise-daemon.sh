@@ -44,6 +44,9 @@
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged if submit still cannot be confirmed.
+#   - Declared external waits are not wedges or permanent silence: a valid
+#     paused: <reason> is rechecked and re-surfaced at the shared
+#     FM_PAUSE_RESURFACE_SECS cadence while it remains idle.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -66,6 +69,8 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
+#          FM_PAUSE_RESURFACE_SECS  seconds before an idle declared external
+#                                   wait re-surfaces for review (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -281,6 +286,13 @@ classify_signal() {  # <reason-after-colon> <state>
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
+    # A paused secondmate has no stale-pane path: keep its external wait
+    # actionable instead of self-handling it into indefinite silence.
+    if status_is_paused "$last" && [ "$(status_file_kind "$f")" = secondmate ]; then
+      rel=1
+      all_seen=0
+      continue
+    fi
     status_is_captain_relevant "$last" || continue
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
@@ -308,9 +320,32 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last seen absorb_class canonical
   task=$(window_to_task "$win")
   last=$(last_status_line "$state/$task.status")
+  if [ -n "$last" ] && status_is_paused "$last"; then
+    # A status log is append-only: an authoritative run can supersede its old
+    # pause line. Terminal or parked canonical states must surface immediately;
+    # only a declared pause with no active/actionable proof enters its cadence.
+    canonical=$(crew_state_value "$task")
+    case "$canonical" in
+      done|failed|blocked|parked)
+        printf 'escalate|stale + canonical %s supersedes pause: %s' "$canonical" "$last"
+        return
+        ;;
+      working)
+        printf 'self|transient stale (%s): %s' "$win" "$last"
+        return
+        ;;
+    esac
+    absorb_class=$(crew_absorb_class "$task")
+    if [ "$absorb_class" = working ]; then
+      printf 'self|transient stale (%s): %s' "$win" "$last"
+    else
+      printf 'pause|paused (awaiting external): %s' "$last"
+    fi
+    return
+  fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
@@ -361,6 +396,33 @@ stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win")")
   rm -f "$state/.subsuper-stale-$key"
+}
+
+pause_marker_record() {  # <window> <state>
+  local win=$1 state=$2 key marker
+  key=$(_stale_key "$(window_to_task "$win")")
+  marker="$state/.subsuper-paused-$key"
+  if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
+    _now > "$marker"
+  fi
+}
+
+pause_marker_record_status() {  # <status-file> <state>
+  local f=$1 state=$2 task win
+  task=$(basename "$f"); task=${task%.status}
+  win=$(window_for_task "$task" 2>/dev/null || true)
+  [ -n "$win" ] || return 0
+  pause_marker_record "$win" "$state"
+}
+
+pause_marker_record_signal() {  # <space-separated signal files> <state>
+  local reason=$1 state=$2 f
+  for f in $reason; do
+    [ -e "$f" ] || continue
+    if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
+      pause_marker_record_status "$f" "$state"
+    fi
+  done
 }
 
 # Record the seen-status marker for a captain-relevant status line so the
@@ -510,6 +572,70 @@ housekeeping() {  # <state>
       fi
     fi
   fi
+
+  # (2a) declared external-wait re-surface. A pause is not a wedge:
+  # retain one task marker in the existing state directory and recheck it once
+  # per shared cadence. Clearing the status or losing/resuming the pane removes
+  # the marker; an expired idle pause adds one bounded recheck event and resets
+  # its cadence.
+  pause_secs=$(positive_seconds_or_default \
+    "${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}" \
+    "$FM_PAUSE_RESURFACE_SECS_DEFAULT")
+  for marker in "$state"/.subsuper-paused-*; do
+    [ -e "$marker" ] || continue
+    key=$(basename "$marker")
+    key=${key#.subsuper-paused-}
+    win=$(window_for_task "$key" 2>/dev/null || true)
+    if [ -z "$win" ]; then
+      rm -f "$marker"
+      continue
+    fi
+    task=$(window_to_task "$win")
+    last=$(last_status_line "$state/$task.status")
+    if ! status_is_paused "$last"; then
+      rm -f "$marker"
+      continue
+    fi
+    marker_epoch=$(cat "$marker" 2>/dev/null || true)
+    case "$marker_epoch" in
+      ''|*[!0-9]*)
+        _now > "$marker"
+        marker_epoch=$now
+        ;;
+      *)
+        marker_epoch=$(decimal_digits_or_zero "$marker_epoch")
+        printf '%s' "$marker_epoch" > "$marker"
+        ;;
+    esac
+    age=$(( now - marker_epoch ))
+    [ "$age" -ge "$pause_secs" ] || continue
+    canonical=$(crew_state_value "$task")
+    case "$canonical" in
+      done|failed|blocked|parked)
+        escalate_add "$state" "paused ${age}s superseded by canonical $canonical: $win"
+        rm -f "$marker"
+        continue
+        ;;
+      working)
+        rm -f "$marker"
+        continue
+        ;;
+    esac
+    if [ "$(crew_absorb_class "$task")" = working ]; then
+      rm -f "$marker"
+      continue
+    fi
+    if ! tmux display-message -p -t "$win" '#{pane_id}' >/dev/null 2>&1; then
+      rm -f "$marker"
+      continue
+    fi
+    if pane_is_busy "$win"; then
+      rm -f "$marker"
+      continue
+    fi
+    escalate_add "$state" "paused ${age}s (awaiting external; recheck the declared wait): $win"
+    _now > "$marker"
+  done
 
   # (2) stale persistence recheck
   for marker in "$state"/.subsuper-stale-*; do
@@ -670,12 +796,19 @@ handle_wake() {  # <reason> <state>
   distilled=${decision#*|}
   if [ "$action" = "escalate" ]; then
     log "escalate: $reason -> $distilled"
+    if [ "$kind" = signal ]; then
+      pause_marker_record_signal "$arg" "$state"
+    fi
     escalate_add "$state" "$distilled"
     # A terminal-stale escalate must not leave a persistence marker behind, or
     # housekeeping re-escalates the same pane as a false wedge later.
     [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
     mark_escalated_seen "$kind" "$arg" "$state"
     [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+  elif [ "$action" = pause ]; then
+    pause_marker_record "$arg" "$state"
+    stale_marker_remove "$arg" "$state"
+    log "self-handle paused external wait: $reason -> $distilled"
   else
     # Transient (non-terminal) stale: record/refresh the marker so housekeeping
     # can age it; the persistence recheck, not this wake, escalates a wedge.

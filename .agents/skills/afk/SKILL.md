@@ -1,6 +1,6 @@
 ---
 name: afk
-description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate only captain-relevant events as one batched digest, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
+description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes, re-surface declared external waits on a bounded cadence, and escalate captain-relevant events as one batched digest. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
 user-invocable: true
 ---
 
@@ -136,6 +136,9 @@ Classify each wake this way:
 - `signal` whose status content has no captain-relevant verb
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
   -> self-handle. Captain-relevant verb -> escalate.
+  A valid `paused: <reason>` is a declared external wait, not a wedge: record it
+  for re-review. A paused secondmate is included in the digest immediately so
+  its parent can see the handoff, then follows the same re-review cadence.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
@@ -143,6 +146,11 @@ Classify each wake this way:
   possible wedge. This bounds wedge-detection latency to the threshold plus a
   tick: a delay, never a loss. Healthy crewmates are autonomous and do not wait
   on firstmate mid-task.
+  A still-valid `paused: <reason>` instead uses `FM_PAUSE_RESURFACE_SECS`
+  (default 3600): housekeeping confirms that no active or terminal run
+  superseded it, then adds one "recheck the declared wait" digest item and
+  resets the cadence. It clears the pause marker when the status changes, the
+  pane disappears, or work resumes.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
@@ -204,6 +212,7 @@ These properties must hold:
 - Nothing is lost. The durable queue plus `fm-wake-drain.sh` recover any missed
   or crashed injection.
 - Wedge detection is bounded-latency, not lossy.
+- Declared external waits are bounded-review, not an indefinite mute.
 - The catch-all scan backs up the keyword classifier.
 - The daemon preserves a single-instance portable lock, crash-loop backoff,
   a pane-gone guard, and a signal-trapped shutdown that flushes buffered

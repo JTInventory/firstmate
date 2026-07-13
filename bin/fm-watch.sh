@@ -12,8 +12,9 @@
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
 #   stale: <window>        terminal stale pane, a non-terminal stale whose crew is
-#                          not provably working (surfaced at once), or a provably-
-#                          working stale past the wedge threshold, unless afk active
+#                          not provably working (surfaced at once), a provably-
+#                          working stale past the wedge threshold, or an expired
+#                          paused external-wait recheck, unless afk active
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
@@ -116,6 +117,9 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a non-terminal stale escalates as a possible wedge
+PAUSE_RESURFACE_SECS=$(positive_seconds_or_default \
+  "${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}" \
+  "$FM_PAUSE_RESURFACE_SECS_DEFAULT")
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 
@@ -124,6 +128,118 @@ TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # every wake) and let the daemon classify - never absorb here, or the daemon's
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
+
+# Pause tracking is local to the existing watcher state directory. A pause marker
+# stores its first-observed epoch; the recheck marker bounds authoritative
+# run-state reads, and the re-surfaced marker prevents duplicate wakes in one
+# cadence window.
+pause_key() { printf '%s' "$1" | tr ':/.' '___'; }
+
+pause_window_for_task() {  # <task>
+  local task=$1 meta w
+  for meta in "$STATE/$task.meta" "$STATE/$task.status.meta"; do
+    [ -e "$meta" ] || continue
+    w=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$w" ] && { printf '%s' "$w"; return; }
+  done
+}
+
+pause_marker_record_status() {  # <status-file>
+  local f=$1 task win key marker
+  task=$(basename "$f"); task=${task%.status}
+  win=$(pause_window_for_task "$task")
+  [ -n "$win" ] || return 0
+  key=$(pause_key "$win")
+  marker="$STATE/.paused-$key"
+  if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
+    date +%s > "$marker"
+  fi
+}
+
+pause_tracking_clear() {  # <window>
+  local key
+  key=$(pause_key "$1")
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" \
+    "$STATE/.paused-resurfaced-$key"
+}
+
+# Return paused/working/none for a stale window. Re-read authoritative crew state
+# only on first sight and after the normal stale recheck interval; a stale pause
+# cannot hide a resumed run indefinitely, while each poll remains cheap.
+pause_state_class() {  # <window> <task>
+  local win=$1 task=$2 key last recheck class age normalized
+  key=$(pause_key "$win")
+  last=$(last_status_line "$STATE/$task.status")
+  if ! status_is_paused "$last"; then
+    # A pause that ended must not carry its pre-pause wedge timer into the
+    # ordinary stale path; a fresh timer will be initialized if the pane stays idle.
+    if [ -e "$STATE/.paused-$key" ] || [ -e "$STATE/.paused-rechecked-$key" ] || [ -e "$STATE/.paused-resurfaced-$key" ]; then
+      rm -f "$STATE/.stale-since-$key"
+    fi
+    pause_tracking_clear "$win"
+    printf 'none'
+    return
+  fi
+  recheck="$STATE/.paused-rechecked-$key"
+  if [ -e "$STATE/.paused-$key" ]; then
+    age=$(cat "$recheck" 2>/dev/null || true)
+    case "$age" in
+      ''|*[!0-9]*) ;;
+      *)
+        normalized=$(decimal_digits_or_zero "$age") || normalized=0
+        if [ $(( $(date +%s) - normalized )) -lt "$STALE_ESCALATE_SECS" ]; then
+          printf 'paused'
+          return
+        fi
+        ;;
+    esac
+  fi
+  class=$(crew_absorb_class "$task")
+  case "$class" in
+    paused)
+      date +%s > "$recheck"
+      printf 'paused'
+      ;;
+    *)
+      # A timer that predates a declared pause must not immediately wedge-wake
+      # after the pause ends; clear it only when pause tracking actually existed.
+      if [ -e "$STATE/.paused-$key" ] || [ -e "$recheck" ] || [ -e "$STATE/.paused-resurfaced-$key" ]; then
+        rm -f "$STATE/.stale-since-$key"
+      fi
+      pause_tracking_clear "$win"
+      printf '%s' "$class"
+      ;;
+  esac
+}
+
+handle_paused_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key marker resurfaced now age resurfaced_age reason
+  key=$(pause_key "$win")
+  marker="$STATE/.paused-$key"
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key"
+  if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
+    date +%s > "$marker"
+  fi
+  now=$(date +%s)
+  marker_epoch=$(cat "$marker" 2>/dev/null || true)
+  case "$marker_epoch" in
+    ''|*[!0-9]*) marker_epoch=$now ;;
+    *) marker_epoch=$(decimal_digits_or_zero "$marker_epoch") ;;
+  esac
+  age=$(( now - marker_epoch ))
+  resurfaced="$STATE/.paused-resurfaced-$key"
+  resurfaced_age=$(age_of "$resurfaced")
+  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$resurfaced_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    reason="stale: $win (paused ${age}s, awaiting external; recheck the declared wait)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    printf '%s' "$now" > "$resurfaced"
+    printf '%s' "$now" > "$marker"
+    wake "$reason"
+  fi
+  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
 
 # Append one line to the triage debug log explaining an absorbed (benign) wake,
 # size-capped so a long benign stretch cannot grow it without bound. Best-effort:
@@ -345,7 +461,7 @@ EOF
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || signal_reason_is_actionable $files || ! signal_crew_absorbable $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -355,6 +471,9 @@ EOF
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
+        if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
+          pause_marker_record_status "$f"
+        fi
         mark_surfaced "$f"
       done <<EOF
 $pending
@@ -377,9 +496,16 @@ EOF
   # remembers the hash already classified).
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
-    # it through status writes and heartbeats, not pane-idle staleness.
-    [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+    # it through status writes and heartbeats, except while a declared pause
+    # marker is active so the same bounded re-surface cadence still applies.
+    if [ "$(window_kind "$w")" = secondmate ]; then
+      key=$(printf '%s' "$w" | tr ':/.' '___')
+      [ -e "$STATE/.paused-$key" ] || continue
+    fi
+    if ! tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null); then
+      pause_tracking_clear "$w"
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -396,6 +522,13 @@ EOF
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
+        if ! afk_present; then
+          task=$(window_to_task "$w")
+          if [ "$(pause_state_class "$w" "$task")" = paused ]; then
+            handle_paused_stale "$w" "$task" "$h"
+            continue
+          fi
+        fi
         if afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
@@ -454,14 +587,23 @@ EOF
           fi
         fi
       else
-        # Pane busy or not yet stably stale: it is alive, so clear any pending
-        # non-terminal-stale escalation timer.
+        # Pane busy is proven activity once two samples agree; a first baseline
+        # sample must preserve a declared pause marker across watcher restarts.
+        if [ "$n" -ge 2 ]; then
+          pause_tracking_clear "$w"
+        fi
         rm -f "$ssf"
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      # Pane content changed: the crew is active again, so reset the escalation timer.
+      # Pane content changed: the crew is active again, so reset pause and
+      # escalation timers before a later pause starts a fresh cadence. During
+      # the first baseline after a watcher restart, preserve an existing pause
+      # marker until the next stable sample can reconcile it.
+      if [ -n "$prev" ]; then
+        pause_tracking_clear "$w"
+      fi
       rm -f "$ssf"
     fi
   done < <(recorded_windows)
