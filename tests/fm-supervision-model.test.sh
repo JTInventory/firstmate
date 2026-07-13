@@ -83,6 +83,7 @@ printf 'ok\n'
 SH
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
 printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none}"
 SH
   cat > "$fakebin/gh-axi" <<'SH'
@@ -366,6 +367,35 @@ test_paused_status_superseded_by_active_run() {
   pass "active run supersedes paused status"
 }
 
+test_paused_status_superseded_by_terminal_run() {
+  local home fakebin out
+  home=$(make_home paused-terminal)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-terminal 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed' run_json "$home" "$fakebin") || fail "terminal paused status json failed"
+  assert_json_valid "$out" "terminal paused status output"
+  assert_task_classification "$out" paused-terminal worker_failed "terminal matched run should surface its failure"
+  assert_not_contains "$out" 'paused-terminal:worker_external_wait' "terminal run should not remain an external wait"
+  pass "terminal run supersedes paused status"
+}
+
+test_paused_reconciliation_has_a_fleet_budget() {
+  local home fakebin log out
+  home=$(make_home paused-budget)
+  fakebin="$home/fakebin"
+  log="$home/crew-state.log"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-budget 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$log" FM_SUPERVISION_PAUSE_RECONCILE_SECS=0 run_json "$home" "$fakebin") || fail "paused budget json failed"
+  assert_json_valid "$out" "paused budget output"
+  assert_task_classification "$out" paused-budget worker_external_wait "unreconciled pause remains visible"
+  [ ! -e "$log" ] || fail "exhausted pause budget should skip crew-state reads"
+  pass "paused reconciliation has a fleet budget"
+}
+
 test_completed_scout_with_report_is_not_pr_worker() {
   local home fakebin out
   home=$(make_home scout-report)
@@ -514,6 +544,8 @@ test_live_secondmate_done_status_surfaces_response
 test_paused_status_is_an_external_wait
 test_paused_status_requires_reason
 test_paused_status_superseded_by_active_run
+test_paused_status_superseded_by_terminal_run
+test_paused_reconciliation_has_a_fleet_budget
 test_completed_scout_with_report_is_not_pr_worker
 test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown
