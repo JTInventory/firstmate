@@ -5,11 +5,6 @@ data/
 .lavish/
 .DS_Store
 .env
-config/crew-harness
-config/crew-dispatch.json
-config/secondmate-harness
-config/secondmate-profile.json
-config/backlog-backend
-config/x-mode.env
-config/cbm.env
-config/cbm-projects
+config/
+reports/
+backups/
