@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate window, then Enter.
-# Usage: fm-send.sh <window> <text...>
-#   <window> may be a bare firstmate window name (fm-xyz), resolved through
-#   this home's state/<id>.meta, or explicit session:window.
-# Special keys instead of text: fm-send.sh <window> --key Escape   (or Enter, C-c, ...)
+# Usage: fm-send.sh <target> <text...>
+#   <target> must be a bare firstmate window name (fm-xyz), resolved through
+#   this home's state/<id>.meta, or an explicit session:window; other bare
+#   window names are refused.
+# Special keys instead of text: fm-send.sh <target> --key Escape   (or Enter, C-c, ...)
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the composer clears. If a swallowed
@@ -58,8 +59,10 @@ resolve() {
       [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; exit 1; }
       echo "$window"
       ;;
-    *) tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$1\$" \
-         || { echo "error: no window named $1" >&2; exit 1; } ;;
+    *)
+      echo "error: target '$1' is not resolvable; use fm-<id> for a recorded task or session:window for an explicit target" >&2
+      exit 1
+      ;;
   esac
 }
 

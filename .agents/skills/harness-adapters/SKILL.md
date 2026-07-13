@@ -81,7 +81,7 @@ Natural language is acceptable if uncertain.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
-If such a dialog is showing, accept it with `bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, and verify the brief started processing.
+If such a dialog is showing, accept it with `bin/fm-send.sh fm-<id> --key Enter` (or an explicit `session:window` target), or the choice the dialog requires, and verify the brief started processing.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
