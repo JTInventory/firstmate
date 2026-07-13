@@ -281,6 +281,13 @@ classify_signal() {  # <reason-after-colon> <state>
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
+    # A paused secondmate has no stale-pane path: keep its external wait
+    # actionable instead of self-handling it into indefinite silence.
+    if status_is_paused "$last" && [ "$(status_file_kind "$f")" = secondmate ]; then
+      rel=1
+      all_seen=0
+      continue
+    fi
     status_is_captain_relevant "$last" || continue
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
@@ -308,13 +315,24 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen absorb_class
+  local win=$1 state=$2 task last seen absorb_class canonical
   task=$(window_to_task "$win")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
-    # A status log is append-only: an active run can supersede its old pause
-    # line. Keep the normal transient-stale path for that run; only a declared
-    # pause with no active-run proof enters the bounded pause cadence.
+    # A status log is append-only: an authoritative run can supersede its old
+    # pause line. Terminal or parked canonical states must surface immediately;
+    # only a declared pause with no active/actionable proof enters its cadence.
+    canonical=$(crew_state_value "$task")
+    case "$canonical" in
+      done|failed|blocked|parked)
+        printf 'escalate|stale + canonical %s supersedes pause: %s' "$canonical" "$last"
+        return
+        ;;
+      working)
+        printf 'self|transient stale (%s): %s' "$win" "$last"
+        return
+        ;;
+    esac
     absorb_class=$(crew_absorb_class "$task")
     if [ "$absorb_class" = working ]; then
       printf 'self|transient stale (%s): %s' "$win" "$last"

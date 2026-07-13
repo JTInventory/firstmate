@@ -76,6 +76,34 @@ status_is_paused() {  # <status-line>
   [ -n "$reason" ]
 }
 
+# Read the canonical crew-state line once and expose its stable state token.
+# Unknown/unavailable reads remain explicit so callers can fail closed.
+crew_state_value() {  # <id>
+  local id=$1 line state
+  [ -n "$id" ] || { printf 'unknown'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in
+    state:*)
+      state=${line#state: }
+      state=${state%% *}
+      [ -n "$state" ] && { printf '%s' "$state"; return; }
+      ;;
+  esac
+  printf 'unknown'
+}
+
+# Return the recorded task kind for a status file. Older fixtures and homes may
+# name metadata either <id>.meta or <id>.status.meta, so accept both forms.
+status_file_kind() {  # <status-file>
+  local f=$1 meta kind
+  for meta in "${f%.status}.meta" "$f.meta"; do
+    [ -e "$meta" ] || continue
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$kind" ] && { printf '%s' "$kind"; return; }
+  done
+  printf 'unknown'
+}
+
 # Read the canonical crew-state once and classify the two safe absorb reasons.
 # This is intentionally separate from the captain-relevant status regex: a
 # declared pause is expected idle work, while a stopped/unknown crew remains loud.
@@ -98,7 +126,7 @@ crew_absorb_class() {  # <id>
 
 # 0 (benign) if every referenced signal belongs to a working or paused crew.
 signal_crew_absorbable() {  # <file> ...
-  local f base task seen=""
+  local f base task last seen=""
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
@@ -107,6 +135,12 @@ signal_crew_absorbable() {  # <file> ...
       *) continue ;;
     esac
     [ -n "$task" ] || continue
+    if [[ "$base" = *.status ]]; then
+      last=$(last_status_line "$f")
+      if status_is_paused "$last" && [ "$(status_file_kind "$f")" = secondmate ]; then
+        return 1
+      fi
+    fi
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
     case "$(crew_absorb_class "$task")" in

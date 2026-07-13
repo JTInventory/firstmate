@@ -130,6 +130,19 @@ test_paused_stale_classifies_and_resurfaces_once() {
   pass "daemon classifies paused stale, re-surfaces once, throttles, and clears on resume"
 }
 
+test_paused_secondmate_signal_escalates() {
+  local dir state reason out
+  dir=$(make_supercase paused-secondmate-signal); state="$dir/state"
+  printf 'window=sess:fm-paused-secondmate\nkind=secondmate\n' > "$state/paused-secondmate.meta"
+  printf 'paused: waiting for child dependency\n' > "$state/paused-secondmate.status"
+  reason="$state/paused-secondmate.status"
+  out=$(classify_signal "$reason" "$state")
+  case "$out" in
+    escalate\|*) pass "paused secondmate signal remains actionable in away mode" ;;
+    *) fail "paused secondmate signal was self-handled: $out" ;;
+  esac
+}
+
 test_active_run_wins_over_pause() {
   local dir state fakebin win out key old_crew_bin
   dir=$(make_supercase paused-active-run); state="$dir/state"; fakebin="$dir/fakebin"
@@ -151,6 +164,28 @@ test_active_run_wins_over_pause() {
   [ ! -e "$state/.subsuper-paused-$key" ] || { FM_CREW_STATE_BIN=$old_crew_bin; fail "active run created a pause marker"; }
   FM_CREW_STATE_BIN=$old_crew_bin
   pass "active run wins over a stale declared pause"
+}
+
+test_canonical_state_wins_over_pause() {
+  local dir state fakebin win out old_crew_bin old_fake state_value
+  dir=$(make_supercase paused-canonical); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-paused-canonical"
+  printf 'paused: waiting for vendor window\n' > "$state/paused-canonical.status"
+  old_crew_bin=${FM_CREW_STATE_BIN:-}
+  old_fake=${FM_FAKE_CREW_STATE:-}
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  for state_value in 'done' failed parked; do
+    export FM_FAKE_CREW_STATE="state: $state_value ? source: run-step ? canonical state"
+    out=$(classify_stale "$win" "$state")
+    case "$out" in
+      escalate\|*) ;;
+      *) FM_CREW_STATE_BIN=$old_crew_bin; FM_FAKE_CREW_STATE=$old_fake; fail "canonical $state_value was hidden by stale pause: $out" ;;
+    esac
+  done
+  FM_CREW_STATE_BIN=$old_crew_bin
+  FM_FAKE_CREW_STATE=$old_fake
+  pass "canonical done, failed, and parked states override stale pause"
 }
 
 test_housekeeping_persistent_stale_escalates() {
@@ -747,7 +782,9 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_paused_stale_classifies_and_resurfaces_once
+test_paused_secondmate_signal_escalates
 test_active_run_wins_over_pause
+test_canonical_state_wins_over_pause
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest
