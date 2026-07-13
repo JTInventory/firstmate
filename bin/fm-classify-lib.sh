@@ -38,6 +38,12 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # captain-relevant wedge. U6 owns bounded re-surfacing after its review cadence.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
+# Shared declared external-wait vocabulary and cadence. U6 keeps this contract
+# in one library so watcher and away-mode daemon cannot drift.
+FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
+# shellcheck disable=SC2034 # Read by the watcher and daemon after sourcing this library.
+FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1
@@ -49,7 +55,67 @@ last_status_line() {
 status_is_captain_relevant() {
   local line=$1
   [ -n "$line" ] || return 1
+  status_is_paused "$line" && return 1
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+}
+
+# 0 when a status line declares a non-empty known external dependency.
+status_is_paused() {  # <status-line>
+  local line=$1 verb reason
+  [ -n "$line" ] || return 1
+  case "$line" in
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  verb=${line%%:*}
+  verb="${verb#"${verb%%[![:space:]]*}"}"
+  verb="${verb%"${verb##*[![:space:]]}"}"
+  [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ] || return 1
+  reason=${line#*:}
+  reason="${reason#"${reason%%[![:space:]]*}"}"
+  [ -n "$reason" ]
+}
+
+# Read the canonical crew-state once and classify the two safe absorb reasons.
+# This is intentionally separate from the captain-relevant status regex: a
+# declared pause is expected idle work, while a stopped/unknown crew remains loud.
+crew_absorb_class() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || { printf 'none'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  state=${line#state: }; state=${state%% *}
+  if [ "$state" = paused ]; then
+    printf 'paused'
+    return
+  fi
+  if [ "$state" = working ]; then
+    src=${line#*source: }; src=${src%% *}
+    case "$src" in run-step|pane) printf 'working'; return ;; esac
+  fi
+  printf 'none'
+}
+
+# 0 (benign) if every referenced signal belongs to a working or paused crew.
+signal_crew_absorbable() {  # <file> ...
+  local f base task seen=""
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.status) task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *) continue ;;
+    esac
+    [ -n "$task" ] || continue
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    case "$(crew_absorb_class "$task")" in
+      working|paused) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ -n "$seen" ] || return 1
+  return 0
 }
 
 # task id from a tmux window name "<session>:fm-<id>" -> "<id>"
