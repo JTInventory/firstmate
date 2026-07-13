@@ -131,12 +131,14 @@ test_paused_stale_classifies_and_resurfaces_once() {
 }
 
 test_paused_secondmate_signal_escalates() {
-  local dir state fakebin reason out key pane
+  local dir state fakebin reason out key pane turn
   dir=$(make_supercase paused-secondmate-signal); state="$dir/state"; fakebin="$dir/fakebin"
   pane="$dir/pane.txt"; printf 'idle child wait\n' > "$pane"
   printf 'window=sess:fm-paused-secondmate\nkind=secondmate\n' > "$state/paused-secondmate.meta"
   printf 'paused: waiting for child dependency\n' > "$state/paused-secondmate.status"
-  reason="$state/paused-secondmate.status"
+  turn="$state/paused-secondmate.turn-ended"
+  printf 'turn ended\n' > "$turn"
+  reason="$state/paused-secondmate.status $turn"
   out=$(classify_signal "$reason" "$state")
   case "$out" in
     escalate\|*) ;;

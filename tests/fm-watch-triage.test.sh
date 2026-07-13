@@ -313,6 +313,21 @@ test_paused_secondmate_signal_surfaced() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   [ -e "$state/.paused-$key" ] || { FM_FAKE_CREW_STATE=$old_fake; fail "paused secondmate signal did not create a cadence marker"; }
 
+  # A restart's first baseline has no prior pane hash; it must preserve the
+  # marker so the next stable sample can re-surface the wait.
+  rm -f "$state/.hash-$key" "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart did not stay live for pause baseline"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; FM_FAKE_CREW_STATE=$old_fake; fail "watcher restart cleared the pause marker during baseline"; }
+  reap "$pid"
+
   pane_hash=$(hash_text "idle child wait")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"

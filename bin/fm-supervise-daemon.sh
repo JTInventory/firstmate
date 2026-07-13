@@ -413,6 +413,16 @@ pause_marker_record_status() {  # <status-file> <state>
   pause_marker_record "$win" "$state"
 }
 
+pause_marker_record_signal() {  # <space-separated signal files> <state>
+  local reason=$1 state=$2 f
+  for f in $reason; do
+    [ -e "$f" ] || continue
+    if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
+      pause_marker_record_status "$f" "$state"
+    fi
+  done
+}
+
 # Record the seen-status marker for a captain-relevant status line so the
 # heartbeat catch-all scan does not re-fire it. The single source of truth for
 # the .subsuper-seen-status-<task> dedup state: called from both the per-wake
@@ -772,9 +782,8 @@ handle_wake() {  # <reason> <state>
   distilled=${decision#*|}
   if [ "$action" = "escalate" ]; then
     log "escalate: $reason -> $distilled"
-    if [ "$kind" = signal ] && status_is_paused "$(last_status_line "$arg")" \
-      && [ "$(status_file_kind "$arg")" = secondmate ]; then
-      pause_marker_record_status "$arg" "$state"
+    if [ "$kind" = signal ]; then
+      pause_marker_record_signal "$arg" "$state"
     fi
     escalate_add "$state" "$distilled"
     # A terminal-stale escalate must not leave a persistence marker behind, or

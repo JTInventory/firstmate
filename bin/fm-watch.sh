@@ -580,17 +580,23 @@ EOF
           fi
         fi
       else
-        # Pane busy or not yet stably stale: it is alive, so clear any pending
-        # pause and non-terminal-stale escalation timers.
-        pause_tracking_clear "$w"
+        # Pane busy is proven activity once two samples agree; a first baseline
+        # sample must preserve a declared pause marker across watcher restarts.
+        if [ "$n" -ge 2 ]; then
+          pause_tracking_clear "$w"
+        fi
         rm -f "$ssf"
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       # Pane content changed: the crew is active again, so reset pause and
-      # escalation timers before a later pause starts a fresh cadence.
-      pause_tracking_clear "$w"
+      # escalation timers before a later pause starts a fresh cadence. During
+      # the first baseline after a watcher restart, preserve an existing pause
+      # marker until the next stable sample can reconcile it.
+      if [ -n "$prev" ]; then
+        pause_tracking_clear "$w"
+      fi
       rm -f "$ssf"
     fi
   done < <(recorded_windows)
