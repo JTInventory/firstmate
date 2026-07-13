@@ -328,3 +328,5 @@ FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher c
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
+
+If a batched away-mode escalation remains undelivered past `FM_MAX_DEFER_SECS`, the daemon preserves the escalation buffer and writes `state/.subsuper-inject-wedged`. The read-only `bin/fm-supervise.sh` checklist and `--json` model surface that non-empty marker as the high-severity `supervision:inject-wedged` finding owned by firstmate; reading it does not clear the marker or retry injection.
