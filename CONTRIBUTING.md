@@ -37,7 +37,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   `AGENTS.md` is the agent's main job description and names when to load bundled skills; `CLAUDE.md` is a symlink to it, and `.claude/skills` is a symlink to `.agents/skills`.
 - Only shared material is tracked: `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `bin/`, and `tests/`.
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
-  Local report or preservation folders such as `reports/` and `backups/` are not canonical tracked surfaces; leave them out of PRs unless a specific artifact is intentionally promoted into shared documentation.
+  The repository-root `/config/`, `/reports/`, and `/backups/` rules are anchored, so same-named directories nested under shared surfaces such as `docs/examples/` and `tests/` remain trackable.
+  Local report or preservation folders such as `/reports/` and `/backups/` are not canonical tracked surfaces; leave them out of PRs unless a specific artifact is intentionally promoted into shared documentation.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations.
   A local `config/backlog-backend=manual` opt-out forces hand-editing and stays gitignored.
   It does not make `data/` tracked.
@@ -74,11 +75,14 @@ tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tu
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands, codex $skill invocations, and marked codex secondmate text
 tests/fm-send-codex-secondmate-submit-retry.test.sh # fm-send delayed final Enter for marked Codex secondmate text after generic retries report pending
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
+tests/fm-send-strict.test.sh              # fm-send refuses unresolved bare targets
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for afk injection: partial-input deferral, swallowed-Enter retry, and single clean digest
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
+tests/fm-gitignore-boundary.test.sh       # local fleet directory ignore boundary for config/, reports/, and backups/
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
+tests/fm-no-mistakes-required-workflow.test.sh # required-workflow guard for live PR-body lookup and the no-mistakes marker
 tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, session-lock detection, and immutable tmux-window targeting fixture tests
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, deterministic single-clone resolution, and bootstrap relay
