@@ -560,6 +560,15 @@ fm_supervision_watcher_status() {
   printf '%s\t%s\t%s' "$ok" "$state" "$detail"
 }
 
+fm_supervision_status_is_paused() {
+  local reason
+  case "$1" in
+    paused:*) reason=${1#paused:} ;;
+    *) return 1 ;;
+  esac
+  [[ "$reason" =~ [^[:space:]] ]]
+}
+
 fm_supervision_classify_task() {
   local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
@@ -614,7 +623,7 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Read or relay the secondmate response; keep the secondmate live."
     why="$last_status"
-  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && printf '%s\n' "$last_status" | grep -q '^paused:'; then
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && fm_supervision_status_is_paused "$last_status"; then
     classification=worker_external_wait
     severity=medium
     owner=external
@@ -684,7 +693,7 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Inspect the worker failure and decide the next step."
     why="$last_status"
-  elif printf '%s\n' "$last_status" | grep -q '^paused:'; then
+  elif fm_supervision_status_is_paused "$last_status"; then
     classification=worker_external_wait
     severity=medium
     owner=external

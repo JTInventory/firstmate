@@ -325,6 +325,29 @@ test_paused_status_is_an_external_wait() {
   pass "paused statuses are explicit external waits"
 }
 
+test_paused_status_requires_reason() {
+  local home fakebin out
+  home=$(make_home paused-empty)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-bare 'paused:' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  write_meta "$home" paused-whitespace 'paused:    ' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  write_meta "$home" secondmate-paused-bare 'paused:' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
+  write_meta "$home" secondmate-paused-whitespace 'paused:    ' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
+  out=$(run_json "$home" "$fakebin") || fail "empty paused status json failed"
+  assert_json_valid "$out" "empty paused status output"
+  assert_task_classification "$out" paused-bare running "bare paused worker should remain running"
+  assert_task_classification "$out" paused-whitespace running "whitespace paused worker should remain running"
+  assert_task_classification "$out" secondmate-paused-bare persistent_secondmate_idle "bare paused secondmate should remain idle"
+  assert_task_classification "$out" secondmate-paused-whitespace persistent_secondmate_idle "whitespace paused secondmate should remain idle"
+  assert_not_contains "$out" 'worker_external_wait' "empty paused reasons never become external waits"
+  pass "paused statuses require a non-whitespace reason"
+}
+
 test_completed_scout_with_report_is_not_pr_worker() {
   local home fakebin out
   home=$(make_home scout-report)
@@ -471,6 +494,7 @@ test_task_classifications_and_route_metadata
 test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response
 test_paused_status_is_an_external_wait
+test_paused_status_requires_reason
 test_completed_scout_with_report_is_not_pr_worker
 test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown

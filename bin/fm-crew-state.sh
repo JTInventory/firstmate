@@ -102,11 +102,14 @@ log_note_of() {  # <line>
 # Map a status-log verb onto a canonical state for the fallback path. The
 # paused verb is a declared external wait and remains distinct from actionable
 # blocked.
-map_log_state() {  # <verb>
-  case "$1" in
+map_log_state() {  # <line>
+  local verb note
+  verb=$(log_verb_of "$1")
+  note=$(log_note_of "$1")
+  case "$verb" in
     working)        echo working ;;
     needs-decision) echo parked ;;
-    paused)         echo paused ;;
+    paused)         [[ "$note" =~ [^[:space:]] ]] && echo paused || echo unknown ;;
     blocked)        echo blocked ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
@@ -390,7 +393,7 @@ if [ "$KIND" != secondmate ] && fm_pane_is_busy "$WIN"; then
 fi
 
 if [ -n "$LOG_VERB" ]; then
-  emit "$(map_log_state "$LOG_VERB")" status-log "$(log_note_of "$LOG_LINE")"
+  emit "$(map_log_state "$LOG_LINE")" status-log "$(log_note_of "$LOG_LINE")"
 fi
 
 emit unknown none "no current-state source available"

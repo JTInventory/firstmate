@@ -475,6 +475,24 @@ test_no_run_idle_pane_uses_paused_log() {
   pass "no run + idle pane uses paused status-log state"
 }
 
+test_paused_log_requires_reason() {
+  local declaration
+  for declaration in 'paused:' 'paused:    '; do
+    reset_fakes
+    local d; d=$(new_case "paused-empty-${#declaration}")
+    make_repo_on_branch "$d/wt" "fm/feat-paused-empty-${#declaration}"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-paused-empty-${#declaration}.meta" "window=fm:fm-feat-paused-empty-${#declaration}" "worktree=$d/wt" "kind=ship"
+    printf '%s\n' "$declaration" > "$d/state/feat-paused-empty-${#declaration}.status"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_BUSY=0
+    local out; out=$(run_crew_state "$d" "feat-paused-empty-${#declaration}")
+    assert_contains "$out" "state: unknown" "empty paused reason remains unknown"
+    assert_not_contains "$out" "state: paused" "empty paused reason never becomes paused"
+  done
+  pass "paused status-log requires a non-whitespace reason"
+}
+
 test_stale_paused_superseded() {
   reset_fakes
   local d; d=$(new_case paused-superseded)
@@ -668,6 +686,7 @@ test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_idle_pane_uses_paused_log
+test_paused_log_requires_reason
 test_stale_paused_superseded
 test_malformed_status_log_stays_unknown
 test_no_run_idle_pane_uses_log
