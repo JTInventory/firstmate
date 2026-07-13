@@ -12,8 +12,9 @@
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
 #   stale: <window>        terminal stale pane, a non-terminal stale whose crew is
-#                          not provably working (surfaced at once), or a provably-
-#                          working stale past the wedge threshold, unless afk active
+#                          not provably working (surfaced at once), a provably-
+#                          working stale past the wedge threshold, or an expired
+#                          paused external-wait recheck, unless afk active
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
