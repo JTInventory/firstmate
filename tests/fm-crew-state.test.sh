@@ -459,6 +459,53 @@ test_no_run_busy_pane() {
 }
 
 # (g) no run + idle pane -> the status-log verb, as-is
+test_no_run_idle_pane_uses_paused_log() {
+  reset_fakes
+  local d; d=$(new_case paused)
+  make_repo_on_branch "$d/wt" fm/feat-paused
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-paused.meta" "window=fm:fm-feat-paused" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting for vendor window\n' > "$d/state/feat-paused.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-paused)
+  assert_contains "$out" "state: paused" "paused log -> paused"
+  assert_contains "$out" "source: status-log" "paused log -> status-log source"
+  assert_contains "$out" "waiting for vendor window" "paused detail preserves reason"
+  pass "no run + idle pane uses paused status-log state"
+}
+
+test_stale_paused_superseded() {
+  reset_fakes
+  local d; d=$(new_case paused-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-paused-active
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-paused-active.meta" "window=fm:fm-feat-paused-active" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting for vendor window\n' > "$d/state/feat-paused-active.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-paused-active)"
+  local out; out=$(run_crew_state "$d" feat-paused-active)
+  assert_contains "$out" "state: working" "active run overrides paused log"
+  assert_contains "$out" "source: run-step" "active run remains authoritative over paused log"
+  assert_contains "$out" "superseded" "stale paused log flagged superseded"
+  pass "stale paused log over active run is superseded"
+}
+
+test_malformed_status_log_stays_unknown() {
+  reset_fakes
+  local d; d=$(new_case malformed-log)
+  make_repo_on_branch "$d/wt" fm/feat-malformed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-malformed.meta" "window=fm:fm-feat-malformed" "worktree=$d/wt" "kind=ship"
+  printf 'pause waiting for vendor window\n' > "$d/state/feat-malformed.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-malformed)
+  assert_contains "$out" "state: unknown" "malformed status log remains unknown"
+  assert_contains "$out" "source: status-log" "malformed status log remains attributable"
+  assert_not_contains "$out" "state: paused" "malformed status log never becomes paused"
+  pass "malformed status log stays unknown"
+}
+
 test_no_run_idle_pane_uses_log() {
   reset_fakes
   local d; d=$(new_case idle)
@@ -620,6 +667,9 @@ test_cross_branch_attribution_via_list
 test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_idle_pane_uses_paused_log
+test_stale_paused_superseded
+test_malformed_status_log_stays_unknown
 test_no_run_idle_pane_uses_log
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step

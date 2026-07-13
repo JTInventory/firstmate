@@ -2,7 +2,7 @@
 # fm-crew-state.sh - deterministic read of a crew's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crews append only wake-worthy transitions (done/needs-decision/blocked/failed)
+# Crews append only wake-worthy transitions (done/needs-decision/paused/blocked/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|paused|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + window + kind from state/<id>.meta.
@@ -23,7 +23,7 @@
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed.
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
+#   3. Reconcile the status log: if its last line says needs-decision/paused/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
@@ -99,11 +99,14 @@ log_note_of() {  # <line>
     *)   printf '%s' "$1" ;;
   esac
 }
-# Map a status-log verb onto a canonical state for the fallback path.
+# Map a status-log verb onto a canonical state for the fallback path. The
+# paused verb is a declared external wait and remains distinct from actionable
+# blocked.
 map_log_state() {  # <verb>
   case "$1" in
     working)        echo working ;;
     needs-decision) echo parked ;;
+    paused)         echo paused ;;
     blocked)        echo blocked ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
@@ -354,11 +357,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
-  # Reconcile the status log. A needs-decision/blocked log line that the run-step
+  # Reconcile the status log. A needs-decision/paused/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
   case "$LOG_VERB" in
-    needs-decision|blocked)
+    needs-decision|paused|blocked)
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
