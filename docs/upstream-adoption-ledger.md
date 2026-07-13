@@ -52,9 +52,9 @@ The selective transition is complete for the accepted reliability and operator-t
 | #60 | Shared pause re-surface cadence | Watcher and away-mode daemon share one bounded marker/cadence contract. |
 | #61 | Read-only supervisor wedge visibility | `.subsuper-inject-wedged` becomes a local high-severity checklist item; no external notifier is added. |
 
-This is a historical closeout record captured on 2026-07-13, not a live runtime-status assertion. Each PR was merged after the repository's required behavior, shell-lint, invariant, no-mistakes, and CI checks passed; the PR and Checks links below are the audit trail.
+This is a historical closeout record captured on 2026-07-13, not a live runtime-status assertion. The four required GitHub checks—Behavior tests, Lint shell scripts, Repo invariants, and PR must be raised via no-mistakes—were SUCCESS for PRs #55, #57, #58, #59, #60, and #61. The PR #61 no-mistakes run separately recorded `Lint - 1 error`; that internal result was explicitly accepted only after local ShellCheck passed, and is not omitted from this record. The PR and Checks links below are the audit trail.
 
-| PR | Merge commit | Historical receipt |
+| PR | Landed commit | Historical receipt |
 | --- | --- | --- |
 | [#55](https://github.com/JTInventory/firstmate/pull/55) | `fab23e711b524d565f4a3574baa2162f79aec4f5` | [Checks](https://github.com/JTInventory/firstmate/pull/55/checks) |
 | [#57](https://github.com/JTInventory/firstmate/pull/57) | `e2559ae1471cdc0057a0955346bde92f54b8ae1d` | [Checks](https://github.com/JTInventory/firstmate/pull/57/checks) |
