@@ -60,12 +60,22 @@ In this captain-owned delivery lane, no-mistakes PRs must target `JTInventory/fi
 `bin/fm-no-mistakes-pr-target-guard.sh` checks direct push targets, all no-mistakes fetch and push targets, and `no-mistakes status` before the test suite runs, so stale gate state cannot open or update a PR on `kunchenguid/firstmate`.
 It allows `origin` to fetch from upstream `kunchenguid/firstmate` only in a controlled-fork checkout where `fork`, branch tracking, no-mistakes status, the no-mistakes gate, and resolved `origin` push targets all prove delivery to `JTInventory/firstmate`.
 
+### Local behavior-test runner
+
+The local no-mistakes test step invokes `bin/fm-run-behavior-tests.sh`.
+It runs the PR-target guard first, requires `tmux`, runs every `tests/*.test.sh`, and fails if any test fails.
+By default it uses up to four parallel jobs, bounded by the host CPU count.
+Set `FM_TEST_JOBS=1` for the legacy serial behavior, or choose another positive job count for a local timing tradeoff.
+Each test receives a private `TMPDIR` and `GOTMPDIR`, so tests that use temporary state do not share a job directory.
+The CI workflow still runs the complete `tests/*.test.sh` loop independently and does not skip docs-only changes or any other test category.
+
 Check and test the toolbelt before pushing:
 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
 shellcheck -x -P SCRIPTDIR bin/*.sh tests/*.sh # lint the toolbelt and behavior tests; CI enforces this
-for test_script in tests/*.test.sh; do bash "$test_script"; done   # behavior tests, matching CI and no-mistakes commands.test
+FM_TEST_JOBS=1 bash bin/fm-run-behavior-tests.sh                   # serial local gate replay
+FM_TEST_JOBS=2 bash bin/fm-run-behavior-tests.sh                   # bounded parallel local run
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
 tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
 tests/fm-wake-lib-locale.test.sh          # locale-stable watcher PID identity regression test
