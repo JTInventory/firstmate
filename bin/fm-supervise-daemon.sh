@@ -578,8 +578,9 @@ housekeeping() {  # <state>
   # per shared cadence. Clearing the status or losing/resuming the pane removes
   # the marker; an expired idle pause adds one bounded recheck event and resets
   # its cadence.
-  pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
-  case "$pause_secs" in ''|0|*[!0-9]*) pause_secs=$FM_PAUSE_RESURFACE_SECS_DEFAULT ;; esac
+  pause_secs=$(positive_seconds_or_default \
+    "${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}" \
+    "$FM_PAUSE_RESURFACE_SECS_DEFAULT")
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key=$(basename "$marker")
@@ -600,6 +601,10 @@ housekeeping() {  # <state>
       ''|*[!0-9]*)
         _now > "$marker"
         marker_epoch=$now
+        ;;
+      *)
+        marker_epoch=$(decimal_digits_or_zero "$marker_epoch")
+        printf '%s' "$marker_epoch" > "$marker"
         ;;
     esac
     age=$(( now - marker_epoch ))

@@ -117,8 +117,9 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a non-terminal stale escalates as a possible wedge
-PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
-case "$PAUSE_RESURFACE_SECS" in ''|0|*[!0-9]*) PAUSE_RESURFACE_SECS=$FM_PAUSE_RESURFACE_SECS_DEFAULT ;; esac
+PAUSE_RESURFACE_SECS=$(positive_seconds_or_default \
+  "${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}" \
+  "$FM_PAUSE_RESURFACE_SECS_DEFAULT")
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 
@@ -166,7 +167,7 @@ pause_tracking_clear() {  # <window>
 # only on first sight and after the normal stale recheck interval; a stale pause
 # cannot hide a resumed run indefinitely, while each poll remains cheap.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck class age
+  local win=$1 task=$2 key last recheck class age normalized
   key=$(pause_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   if ! status_is_paused "$last"; then
@@ -185,7 +186,8 @@ pause_state_class() {  # <window> <task>
     case "$age" in
       ''|*[!0-9]*) ;;
       *)
-        if [ $(( $(date +%s) - age )) -lt "$STALE_ESCALATE_SECS" ]; then
+        normalized=$(decimal_digits_or_zero "$age") || normalized=0
+        if [ $(( $(date +%s) - normalized )) -lt "$STALE_ESCALATE_SECS" ]; then
           printf 'paused'
           return
         fi
@@ -220,7 +222,12 @@ handle_paused_stale() {  # <window> <task> <hash>
     date +%s > "$marker"
   fi
   now=$(date +%s)
-  age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+  marker_epoch=$(cat "$marker" 2>/dev/null || true)
+  case "$marker_epoch" in
+    ''|*[!0-9]*) marker_epoch=$now ;;
+    *) marker_epoch=$(decimal_digits_or_zero "$marker_epoch") ;;
+  esac
+  age=$(( now - marker_epoch ))
   resurfaced="$STATE/.paused-resurfaced-$key"
   resurfaced_age=$(age_of "$resurfaced")
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$resurfaced_age" -ge "$PAUSE_RESURFACE_SECS" ]; then

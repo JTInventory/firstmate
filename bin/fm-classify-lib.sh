@@ -44,6 +44,23 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon after sourcing this library.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# Normalize an all-digit value without Bash's leading-zero octal interpretation.
+# Returns non-zero for malformed input; callers choose their safe default.
+decimal_digits_or_zero() {  # <value>
+  local value=$1 normalized
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  normalized=$(printf '%s' "$value" | sed 's/^0*//')
+  [ -n "$normalized" ] || normalized=0
+  printf '%s' "$normalized"
+}
+
+positive_seconds_or_default() {  # <value> <default>
+  local value=$1 default=$2 normalized
+  normalized=$(decimal_digits_or_zero "$value") || { printf '%s' "$default"; return; }
+  [ "$normalized" = 0 ] && { printf '%s' "$default"; return; }
+  printf '%s' "$normalized"
+}
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1

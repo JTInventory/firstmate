@@ -148,7 +148,7 @@ test_paused_secondmate_signal_escalates() {
     FM_STATE_OVERRIDE="$state" handle_wake "signal: $reason" "$state"
   key=$(printf '%s' 'paused-secondmate' | tr ':/.' '___')
   [ -e "$state/.subsuper-paused-$key" ] || fail "paused secondmate signal did not create a cadence marker"
-  printf 'corrupt\n' > "$state/.subsuper-paused-$key"
+  printf '00008\n' > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-paused-secondmate' FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
   grep -qE '^[0-9]+$' "$state/.subsuper-paused-$key" \
