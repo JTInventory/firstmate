@@ -108,7 +108,7 @@ tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state recon
 tests/fm-crew-state-ci-ready.test.sh      # active no-mistakes CI monitor with green checks reports PR readiness while merge/close monitoring continues
 tests/fm-task-identity.test.sh            # task branch/meta identity guard for PR check, diff review, and teardown helpers
 tests/fm-watch-session.test.sh            # durable home-scoped watcher tmux runner start/status/stop and re-arm delay behavior
-tests/fm-supervision-model.test.sh        # read-only supervision checklist, secondmate/scout classification boundaries, and `firstmate.supervision.v1.1` JSON/schema output
+tests/fm-supervision-model.test.sh        # read-only supervision checklist, away-mode injection-wedge surfacing, secondmate/scout classification boundaries, and `firstmate.supervision.v1.1` JSON/schema output
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)

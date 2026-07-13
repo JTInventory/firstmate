@@ -886,6 +886,23 @@ fm_supervision_collect() {
     done
   fi
 
+  # A failed away-mode injection is durable local supervision truth. Surface
+  # it through the existing read-only checklist contract without attempting
+  # recovery or mutating the marker.
+  local wedge_marker="$FM_SUPERVISION_STATE/.subsuper-inject-wedged"
+  if [ -s "$wedge_marker" ]; then
+    local wedge_detail=""
+    IFS= read -r wedge_detail < "$wedge_marker" 2>/dev/null || true
+    line=$(fm_supervision_checklist_record \
+      "supervision:inject-wedged" high firstmate \
+      "Review the local wedge marker and restore the supervisor injection path before relying on away-mode silence." \
+      "The away-mode daemon could not confirm an escalation submit after the configured defer window." \
+      "" "" "" "marker=$wedge_marker; detail=$wedge_detail")
+    fm_supervision_line_append checklist_records "$line"
+    checklist_count=$((checklist_count + 1))
+    high_count=$((high_count + 1))
+  fi
+
   local watcher_data
   watcher_data=$(fm_supervision_watcher_status "$task_count")
   watcher_ok=$(printf '%s' "$watcher_data" | awk -F '\t' '{ print $1 }')

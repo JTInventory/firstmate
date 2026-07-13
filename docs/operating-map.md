@@ -80,6 +80,7 @@ When a display or operator needs the shared state model, `fm-supervise.sh` emits
 The JSON includes task classifications, worktree checks, external reminders, watcher source status, and `backlog_consistency` drift findings based on the same audit vocabulary as `fm-backlog-audit.sh`.
 The model invokes the shared HOME-local tool-path normalization before optional GitHub reads, so non-interactive shells can still report GitHub runtime health when `gh-axi` is installed under NVM or `.local/bin`.
 For valid paused statuses, it shares `FM_SUPERVISION_PAUSE_RECONCILE_SECS` across current-state reads in one collection; a matching active or terminal run wins, otherwise the task is `worker_external_wait` with `external` ownership.
+When away-mode cannot confirm an escalation submit after the configured defer window, a non-empty `state/.subsuper-inject-wedged` marker adds the high-severity `supervision:inject-wedged` checklist finding; collection is read-only and leaves the marker for recovery or catch-up.
 
 Owner: `AGENTS.md` sections 8 and 10; `bin/fm-supervise.sh`; `bin/fm-supervision-model.sh`; `bin/fm-backlog-audit.sh`; `bin/fm-backlog-audit-lib.sh`.
 

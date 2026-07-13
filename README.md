@@ -119,6 +119,7 @@ For an end-to-end navigation map of the request-to-teardown lifecycle, see [docs
 For PRs, that model combines GitHub commit status and check-runs before deciding whether CI is green, pending, failed, absent, or unknown.
 It also exposes backlog/state drift through `backlog_consistency`, using the same audit vocabulary as `bin/fm-backlog-audit.sh`.
 It treats scout reports with a fresh `done:` status as teardown work instead of PR-worker work, and treats live secondmates as persistent direct reports unless they have a fresh `done:`, `blocked:`, `needs-decision:`, `failed:`, or current `paused: <reason>` status.
+If away-mode escalation delivery wedges, a non-empty `state/.subsuper-inject-wedged` marker is surfaced as a high-severity `supervision:inject-wedged` checklist item; the read-only view preserves the marker and does not attempt recovery.
 Persistent secondmate homes are linked firstmate worktrees; startup syncs live ones and secondmate launch syncs the target home to the primary default-branch commit without fetching from origin when it is safe.
 Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
 The recommended dispatch policy keeps MiniMax for very simple token-saving work, uses GPT-5.6-Luna for small Codex-shaped work, GPT-5.6-Terra for everyday implementation, and GPT-5.6-Sol for high-risk or critical work.

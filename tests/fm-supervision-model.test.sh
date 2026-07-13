@@ -183,6 +183,34 @@ test_empty_home_is_read_only_valid_json() {
   pass "empty home produces valid read-only JSON"
 }
 
+test_injection_wedge_is_structured_in_json() {
+  local home fakebin out before after
+  home=$(make_home injection-wedge)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  printf 'fm away-mode inject WEDGED: 600s undelivered\nBuffered items: done: PR 1\n' > "$home/state/.subsuper-inject-wedged"
+  before=$(find "$home/state" "$home/data" -type f -print0 | sort -z | xargs -0 sha256sum)
+  out=$(run_json "$home" "$fakebin") || fail "wedge marker json failed"
+  after=$(find "$home/state" "$home/data" -type f -print0 | sort -z | xargs -0 sha256sum)
+  [ "$before" = "$after" ] || fail "supervise mutated state while reading wedge marker"
+  assert_json_valid "$out" "wedge marker output"
+  FM_TEST_JSON="$out" python3 - <<'PY' || fail "wedge marker checklist item was not structured"
+import json, os
+data = json.loads(os.environ["FM_TEST_JSON"])
+items = [item for item in data["checklist"] if item["id"] == "supervision:inject-wedged"]
+if len(items) != 1:
+    raise SystemExit(f"expected one wedge item, got {len(items)}")
+item = items[0]
+if item["severity"] != "high" or item["owner"] != "firstmate":
+    raise SystemExit(f"unexpected wedge item: {item}")
+if "WEDGED" not in " ".join(item["evidence"]):
+    raise SystemExit(f"marker evidence missing: {item}")
+if data["summary"]["level"] != "action" or data["summary"]["high_total"] < 1:
+    raise SystemExit(f"summary did not promote wedge: {data['summary']}")
+PY
+  pass "injection wedge is exposed as read-only structured supervision"
+}
+
 test_registered_secondmate_is_expected_backlog_exception() {
   local home fakebin sm_home out
   home=$(make_home backlog-secondmate)
@@ -612,6 +640,7 @@ test_text_output_and_watcher_source() {
 
 test_model_is_sourceable_and_schema_is_json
 test_empty_home_is_read_only_valid_json
+test_injection_wedge_is_structured_in_json
 test_registered_secondmate_is_expected_backlog_exception
 test_backlog_drift_is_structured_in_json
 test_task_classifications_and_route_metadata
