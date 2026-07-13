@@ -11,8 +11,8 @@
 | Upstream comparison ref | `kunchenguid/firstmate` `31afb8c` fetched on 2026-07-10 |
 | Divergence at comparison | JT fork 42 commits ahead, 92 commits behind |
 
-The active `/root/firstmate` checkout is not an integration target.  All changes
-are first characterized in the clean clone and are delivered only to the JT fork.
+The `/root/firstmate` checkout used for this historical adoption was not an integration target.
+All changes were first characterized in the clean clone and delivered only to the JT fork.
 
 ## Decisions
 
@@ -74,7 +74,7 @@ for test_script in tests/fm-teardown.test.sh tests/fm-spawn-route.test.sh tests/
 
 The canonical `/root/firstmate` home was then fast-forwarded to the fork head while preserving operator-owned untracked configuration, plans, reports, and skill copies; Treehouse dirty/leased slots were not cleaned or restarted. The historical runtime proof used `bin/fm-supervise.sh --json` against `state/.subsuper-inject-wedged`, `bin/fm-backlog-audit.sh` against `data/backlog.md`, `data/secondmates.md`, and `state/*.meta`, `bin/fm-watch-arm.sh` against `state/.watch.lock` and `state/.last-watcher-beat`, and `bin/fm-no-mistakes-pr-target-guard.sh` for the `JTInventory/firstmate` target. It recorded a clean tracked tree, `fm-supervise --json` at `ok` with no high/medium actions, a running watcher, no backlog drift, and a silent guard after the queued wake was drained.
 
-The durable Compound Engineering explanation is maintained in the JT workspace at `docs/solutions/architecture-patterns/firstmate-selective-upstream-adoption.md` (outside this repository tree). This ledger remains the Firstmate-side decision record; the Compound document explains the reusable pattern and links back here rather than duplicating this table.
+The durable Compound Engineering explanation is maintained outside this repository, in the JT workspace at `docs/solutions/architecture-patterns/firstmate-selective-upstream-adoption.md`. This ledger remains the Firstmate-side decision record; the Compound document explains the reusable pattern and links back here rather than duplicating this table.
 
 ### Explicitly not enabled by this train
 
