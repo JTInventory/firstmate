@@ -2,7 +2,7 @@
 # fm-crew-state.sh - deterministic read of a crew's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crews append only wake-worthy transitions (done/needs-decision/blocked/failed)
+# Crews append only wake-worthy transitions (done/needs-decision/paused/blocked/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|paused|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + window + kind from state/<id>.meta.
@@ -23,7 +23,7 @@
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed.
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
+#   3. Reconcile the status log: if its last line says needs-decision/paused/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
@@ -44,14 +44,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-numeric-lib.sh
+. "$SCRIPT_DIR/fm-numeric-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
-NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
-case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+NM_TIMEOUT=$(fm_nonnegative_integer_or_default "${FM_CREW_STATE_NM_TIMEOUT:-10}" 10 86400)
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -99,11 +100,17 @@ log_note_of() {  # <line>
     *)   printf '%s' "$1" ;;
   esac
 }
-# Map a status-log verb onto a canonical state for the fallback path.
-map_log_state() {  # <verb>
-  case "$1" in
+# Map a status-log verb onto a canonical state for the fallback path. The
+# paused verb is a declared external wait and remains distinct from actionable
+# blocked.
+map_log_state() {  # <line>
+  local verb note
+  verb=$(log_verb_of "$1")
+  note=$(log_note_of "$1")
+  case "$verb" in
     working)        echo working ;;
     needs-decision) echo parked ;;
+    paused)         [[ "$note" =~ [^[:space:]] ]] && echo paused || echo unknown ;;
     blocked)        echo blocked ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
@@ -145,11 +152,17 @@ if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
 elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
+NM_DEADLINE=0
+[ "$HAVE_TIMEOUT" = none ] || NM_DEADLINE=$(( SECONDS + NM_TIMEOUT ))
 nm_run() {  # <args...>
+  local remaining
+  [ "$HAVE_TIMEOUT" = none ] && return 0
+  remaining=$(( NM_DEADLINE - SECONDS ))
+  [ "$remaining" -gt 0 ] || return 0
   case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
+    timeout)  ( cd "$WT" && timeout "$remaining" no-mistakes "$@" ) 2>/dev/null || true ;;
+    gtimeout) ( cd "$WT" && gtimeout "$remaining" no-mistakes "$@" ) 2>/dev/null || true ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$remaining" no-mistakes "$@" ) 2>/dev/null || true ;;
     *)        true ;;
   esac
 }
@@ -354,11 +367,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
-  # Reconcile the status log. A needs-decision/blocked log line that the run-step
+  # Reconcile the status log. A needs-decision/paused/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
   case "$LOG_VERB" in
-    needs-decision|blocked)
+    needs-decision|paused|blocked)
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
@@ -387,7 +400,7 @@ if [ "$KIND" != secondmate ] && fm_pane_is_busy "$WIN"; then
 fi
 
 if [ -n "$LOG_VERB" ]; then
-  emit "$(map_log_state "$LOG_VERB")" status-log "$(log_note_of "$LOG_LINE")"
+  emit "$(map_log_state "$LOG_LINE")" status-log "$(log_note_of "$LOG_LINE")"
 fi
 
 emit unknown none "no current-state source available"

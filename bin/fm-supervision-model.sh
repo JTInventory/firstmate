@@ -4,6 +4,10 @@
 FM_SUPERVISION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-tool-path-lib.sh
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-tool-path-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$FM_SUPERVISION_SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-numeric-lib.sh
+. "$FM_SUPERVISION_SCRIPT_DIR/fm-numeric-lib.sh"
 
 fm_supervision_usage() {
   cat <<'USAGE'
@@ -560,8 +564,31 @@ fm_supervision_watcher_status() {
   printf '%s\t%s\t%s' "$ok" "$state" "$detail"
 }
 
+fm_supervision_status_is_paused() {
+  local reason
+  case "$1" in
+    paused:*) reason=${1#paused:} ;;
+    *) return 1 ;;
+  esac
+  [[ "$reason" =~ [^[:space:]] ]]
+}
+
+fm_supervision_paused_reconciliation() {  # <id> <remaining seconds>
+  local id=$1 remaining=$2 line state source
+  [ "$remaining" -gt 0 ] || { printf 'unknown\tnone'; return 0; }
+  line=$(FM_CREW_STATE_NM_TIMEOUT="$remaining" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) printf 'unknown\tnone'; return 0 ;; esac
+  state=${line#state: }; state=${state%% *}
+  source=${line#*source: }; source=${source%% *}
+  printf '%s\t%s' "$state" "$source"
+}
+
+fm_supervision_pause_reconcile_seconds() {
+  fm_nonnegative_integer_or_default "${FM_SUPERVISION_PAUSE_RECONCILE_SECS:-5}" 5 86400
+}
+
 fm_supervision_classify_task() {
-  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false}
+  local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} paused_is_current=${12:-true}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
   # Classification order is part of the public supervision contract: completed
   # scout reports require a done status, and live secondmates are persistent
@@ -613,6 +640,12 @@ fm_supervision_classify_task() {
     severity=medium
     owner=firstmate
     action="Read or relay the secondmate response; keep the secondmate live."
+    why="$last_status"
+  elif [ "$kind" = secondmate ] && [ "$window_live" = true ] && [ "$paused_is_current" = true ] && fm_supervision_status_is_paused "$last_status"; then
+    classification=worker_external_wait
+    severity=medium
+    owner=external
+    action="Review the declared external wait before continuing."
     why="$last_status"
   elif [ "$kind" = secondmate ] && [ "$window_live" = true ]; then
     classification=persistent_secondmate_idle
@@ -678,6 +711,12 @@ fm_supervision_classify_task() {
     owner=firstmate
     action="Inspect the worker failure and decide the next step."
     why="$last_status"
+  elif [ "$paused_is_current" = true ] && fm_supervision_status_is_paused "$last_status"; then
+    classification=worker_external_wait
+    severity=medium
+    owner=external
+    action="Review the declared external wait before continuing."
+    why="$last_status"
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$classification" "$severity" "$owner" "$action" "$why"
 }
@@ -729,8 +768,8 @@ fm_supervision_collect() {
   local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
-  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status turn_ended pr_url pr_data pr_state ci_state mergeable_state
-  local class_data classification severity owner action why evidence line status_pr window_live scout_report_exists treehouse_failed=false
+  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
+  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
   [ -f "$FM_SUPERVISION_DATA/backlog.md" ] || backlog_ok=false
@@ -744,6 +783,8 @@ fm_supervision_collect() {
   fi
 
   if [ -d "$FM_SUPERVISION_STATE" ]; then
+    pause_reconcile_secs=$(fm_supervision_pause_reconcile_seconds)
+    pause_reconcile_used=0
     for meta in "$FM_SUPERVISION_STATE"/*.meta; do
       [ -e "$meta" ] || continue
       treehouse_failed=false
@@ -762,10 +803,26 @@ fm_supervision_collect() {
       recorded_branch=$(fm_supervision_meta_value "$meta" branch); [ -n "$recorded_branch" ] || recorded_branch=unknown
       [ -n "$worktree" ] && referenced_worktrees="$referenced_worktrees$worktree|"
       last_status=$(fm_supervision_last_status "$FM_SUPERVISION_STATE/$id.status")
+      classification_status=$last_status
+      status_pr=$(fm_supervision_status_pr_url "$last_status")
+      paused_is_current=true
+      if fm_supervision_status_is_paused "$last_status"; then
+        pause_reconcile_remaining=$(( pause_reconcile_secs - pause_reconcile_used ))
+        pause_reconcile_started=$SECONDS
+        pause_reconciliation=$(fm_supervision_paused_reconciliation "$id" "$pause_reconcile_remaining")
+        pause_reconcile_used=$(( pause_reconcile_used + SECONDS - pause_reconcile_started ))
+        pause_state=${pause_reconciliation%%$'\t'*}
+        pause_source=${pause_reconciliation#*$'\t'}
+        case "$pause_source:$pause_state" in
+          run-step:working|pane:working) paused_is_current=false ;;
+          run-step:done) paused_is_current=false; classification_status="done: authoritative run completed" ;;
+          run-step:failed) paused_is_current=false; classification_status="failed: authoritative run failed" ;;
+          run-step:parked) paused_is_current=false; classification_status="needs-decision: authoritative run awaits captain decision" ;;
+        esac
+      fi
       turn_ended=false
       [ -e "$FM_SUPERVISION_STATE/$id.turn-ended" ] && turn_ended=true
       pr_url=$(fm_supervision_meta_value "$meta" pr)
-      status_pr=$(fm_supervision_status_pr_url "$last_status")
       [ -n "$pr_url" ] || pr_url=$status_pr
       if fm_supervision_window_live "$window"; then window_live=true; else window_live=false; fi
       scout_report_exists=false
@@ -796,7 +853,7 @@ fm_supervision_collect() {
           treehouse_ok=false
         fi
       fi
-      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$last_status" "$pr_url" "$pr_state" "$ci_state" "$scout_report_exists")
+      class_data=$(fm_supervision_classify_task "$id" "$kind" "$mode" "$yolo" "$window_live" "$worktree" "$classification_status" "$pr_url" "$pr_state" "$ci_state" "$scout_report_exists" "$paused_is_current")
       classification=$(printf '%s' "$class_data" | awk -F '\t' '{ print $1 }')
       severity=$(printf '%s' "$class_data" | awk -F '\t' '{ print $2 }')
       owner=$(printf '%s' "$class_data" | awk -F '\t' '{ print $3 }')

@@ -34,6 +34,8 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # absorbs them only with positive provably-working evidence, while the daemon uses
 # its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
 # needs a custom verb vocabulary; absent, this default applies.
+# paused: is intentionally absent: it is a declared external wait, not a
+# captain-relevant wedge. U6 owns bounded re-surfacing after its review cadence.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # Return the last non-blank line of a status file (empty if missing/blank).

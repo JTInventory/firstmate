@@ -62,7 +62,7 @@ Owner: `AGENTS.md` sections 2, 6, and 7; `bin/fm-spawn.sh`; `bin/fm-tmux-lib.sh`
 ## 8. Status And Current State
 
 `state/<id>.status` is an append-only event log, not the current state by itself.
-Firstmate reads current state through `fm-crew-state.sh`, which reconciles no-mistakes run state, pane state, and the latest status line; an active CI monitor with a current green-check marker reports PR-ready while it continues watching for merge or close.
+Firstmate reads current state through `fm-crew-state.sh`, which reconciles no-mistakes run state, pane state, and the latest status line; an active CI monitor with a current green-check marker reports PR-ready while it continues watching for merge or close. A valid `paused: <reason>` status names an external wait only if no authoritative run supersedes it; a blank pause reason is not a current state.
 
 Owner: `AGENTS.md` sections 2 and 8; `bin/fm-crew-state.sh`; `bin/fm-classify-lib.sh`.
 
@@ -78,6 +78,7 @@ Owner: `AGENTS.md` section 8; `bin/fm-watch.sh`; `bin/fm-watch-arm.sh`; `bin/fm-
 When a display or operator needs the shared state model, `fm-supervise.sh` emits either a checklist or the `firstmate.supervision.v1.1` JSON contract.
 The JSON includes task classifications, worktree checks, external reminders, watcher source status, and `backlog_consistency` drift findings based on the same audit vocabulary as `fm-backlog-audit.sh`.
 The model invokes the shared HOME-local tool-path normalization before optional GitHub reads, so non-interactive shells can still report GitHub runtime health when `gh-axi` is installed under NVM or `.local/bin`.
+For valid paused statuses, it shares `FM_SUPERVISION_PAUSE_RECONCILE_SECS` across current-state reads in one collection; a matching active or terminal run wins, otherwise the task is `worker_external_wait` with `external` ownership.
 
 Owner: `AGENTS.md` sections 8 and 10; `bin/fm-supervise.sh`; `bin/fm-supervision-model.sh`; `bin/fm-backlog-audit.sh`; `bin/fm-backlog-audit-lib.sh`.
 

@@ -79,7 +79,13 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ "${TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
+[ -z "${FM_FAKE_TREEHOUSE_DELAY:-}" ] || sleep "$FM_FAKE_TREEHOUSE_DELAY"
 printf 'ok\n'
+SH
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none}"
 SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -135,7 +141,7 @@ case "$3" in
     ;;
 esac
 SH
-  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/gh-axi"
+  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/fm-crew-state.sh" "$fakebin/gh-axi"
 }
 
 write_meta() {
@@ -307,6 +313,165 @@ test_live_secondmate_done_status_surfaces_response() {
   pass "live secondmate done statuses surface without retiring the secondmate"
 }
 
+test_paused_status_is_an_external_wait() {
+  local home fakebin out
+  home=$(make_home paused)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-worker 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  write_meta "$home" paused-secondmate 'paused: waiting for captain confirmation' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
+  out=$(run_json "$home" "$fakebin") || fail "paused status json failed"
+  assert_json_valid "$out" "paused status output"
+  assert_task_classification "$out" paused-worker worker_external_wait "paused worker should not be reported as running"
+  assert_task_classification "$out" paused-secondmate worker_external_wait "paused secondmate should not be reported as idle"
+  assert_contains "$out" '"owner": "external", "action": "Review the declared external wait before continuing."' "paused wait should show external review action"
+  assert_contains "$out" 'paused: waiting for vendor response' "paused reason should be preserved"
+  pass "paused statuses are explicit external waits"
+}
+
+test_paused_status_requires_reason() {
+  local home fakebin out
+  home=$(make_home paused-empty)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-bare 'paused:' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  write_meta "$home" paused-whitespace 'paused:    ' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  write_meta "$home" secondmate-paused-bare 'paused:' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
+  write_meta "$home" secondmate-paused-whitespace 'paused:    ' \
+    "project=firstmate" "window=live" "kind=secondmate" "mode=secondmate"
+  out=$(run_json "$home" "$fakebin") || fail "empty paused status json failed"
+  assert_json_valid "$out" "empty paused status output"
+  assert_task_classification "$out" paused-bare running "bare paused worker should remain running"
+  assert_task_classification "$out" paused-whitespace running "whitespace paused worker should remain running"
+  assert_task_classification "$out" secondmate-paused-bare persistent_secondmate_idle "bare paused secondmate should remain idle"
+  assert_task_classification "$out" secondmate-paused-whitespace persistent_secondmate_idle "whitespace paused secondmate should remain idle"
+  assert_not_contains "$out" 'worker_external_wait' "empty paused reasons never become external waits"
+  pass "paused statuses require a non-whitespace reason"
+}
+
+test_paused_status_superseded_by_active_run() {
+  local home fakebin out
+  home=$(make_home paused-superseded)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-resumed 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=direct-PR"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' run_json "$home" "$fakebin") || fail "superseded paused status json failed"
+  assert_json_valid "$out" "superseded paused status output"
+  assert_task_classification "$out" paused-resumed running "active matched run should supersede paused status"
+  assert_not_contains "$out" 'paused-resumed:worker_external_wait' "active matched run should not remain an external wait"
+  pass "active run supersedes paused status"
+}
+
+test_paused_status_superseded_by_terminal_run() {
+  local home fakebin out
+  home=$(make_home paused-terminal)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-terminal 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed' run_json "$home" "$fakebin") || fail "terminal paused status json failed"
+  assert_json_valid "$out" "terminal paused status output"
+  assert_task_classification "$out" paused-terminal worker_failed "terminal matched run should surface its failure"
+  assert_not_contains "$out" 'paused-terminal:worker_external_wait' "terminal run should not remain an external wait"
+  pass "terminal run supersedes paused status"
+}
+
+test_terminal_pause_keeps_status_pr_url() {
+  local home fakebin out
+  home=$(make_home paused-terminal-pr)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-terminal-pr 'paused: waiting for vendor response; PR https://github.com/o/r/pull/2' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' run_json "$home" "$fakebin") || fail "terminal paused PR json failed"
+  assert_json_valid "$out" "terminal paused PR output"
+  assert_task_classification "$out" paused-terminal-pr pr_open_ci_green "terminal run should retain the paused status PR URL"
+  assert_contains "$out" '"pr_url": "https://github.com/o/r/pull/2"' "terminal run should preserve the paused status PR URL"
+  pass "terminal pause reconciliation preserves status PR URL"
+}
+
+test_paused_status_superseded_by_parked_run() {
+  local home fakebin out
+  home=$(make_home paused-parked)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-parked 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review (ask-user: captain decision)' run_json "$home" "$fakebin") || fail "parked paused status json failed"
+  assert_json_valid "$out" "parked paused status output"
+  assert_task_classification "$out" paused-parked worker_needs_decision "parked matched run should surface a captain decision"
+  assert_contains "$out" 'paused-parked:worker_needs_decision' "parked run should create a captain-owned checklist item"
+  assert_contains "$out" '"owner": "captain", "action": "Make the requested decision."' "parked run should retain the captain decision action"
+  assert_not_contains "$out" 'paused-parked:worker_external_wait' "parked run should not remain an external wait"
+  pass "parked run supersedes paused status"
+}
+
+test_paused_reconciliation_has_a_fleet_budget() {
+  local home fakebin log out
+  home=$(make_home paused-budget)
+  fakebin="$home/fakebin"
+  log="$home/crew-state.log"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-budget 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$log" FM_SUPERVISION_PAUSE_RECONCILE_SECS=0 run_json "$home" "$fakebin") || fail "paused budget json failed"
+  assert_json_valid "$out" "paused budget output"
+  assert_task_classification "$out" paused-budget worker_external_wait "unreconciled pause remains visible"
+  [ ! -e "$log" ] || fail "exhausted pause budget should skip crew-state reads"
+  pass "paused reconciliation has a fleet budget"
+}
+
+test_paused_reconciliation_ignores_prior_task_delay() {
+  local home fakebin project out
+  home=$(make_home paused-prior-delay)
+  fakebin="$home/fakebin"
+  project="$home/projects/slow-project"
+  mkdir -p "$project"
+  write_fakebin "$fakebin"
+  write_meta "$home" a-slow 'working: checking remote state' \
+    "project=$project" "window=live" "kind=ship" "mode=no-mistakes"
+  write_meta "$home" z-paused 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' FM_FAKE_TREEHOUSE_DELAY=2 FM_SUPERVISION_PAUSE_RECONCILE_SECS=1 run_json "$home" "$fakebin") \
+    || fail "prior task delay should not exhaust paused reconciliation budget"
+  assert_json_valid "$out" "prior task delay output"
+  assert_task_classification "$out" z-paused worker_done_no_pr "paused reconciliation should retain its budget after an earlier slow task"
+  assert_not_contains "$out" 'z-paused:worker_external_wait' "later paused worker should reconcile after earlier slow task"
+  pass "paused reconciliation ignores prior non-paused task delay"
+}
+
+test_paused_reconciliation_invalid_budget_uses_default() {
+  local home fakebin out
+  home=$(make_home paused-invalid-budget)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-invalid-budget 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' FM_SUPERVISION_PAUSE_RECONCILE_SECS=5s run_json "$home" "$fakebin") || fail "invalid paused budget should not abort supervision"
+  assert_json_valid "$out" "invalid paused budget output"
+  assert_task_classification "$out" paused-invalid-budget worker_done_no_pr "invalid paused budget should use the default reconciliation budget"
+  pass "invalid paused reconciliation budget uses default"
+}
+
+test_paused_reconciliation_oversized_budget_uses_default() {
+  local home fakebin out
+  home=$(make_home paused-oversized-budget)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" paused-oversized-budget 'paused: waiting for vendor response' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: done · source: run-step · run completed' FM_SUPERVISION_PAUSE_RECONCILE_SECS=9999999999999999999 run_json "$home" "$fakebin") || fail "oversized paused budget should not abort supervision"
+  assert_json_valid "$out" "oversized paused budget output"
+  assert_task_classification "$out" paused-oversized-budget worker_done_no_pr "oversized paused budget should use the default reconciliation budget"
+  pass "oversized paused reconciliation budget uses default"
+}
+
 test_completed_scout_with_report_is_not_pr_worker() {
   local home fakebin out
   home=$(make_home scout-report)
@@ -452,6 +617,16 @@ test_backlog_drift_is_structured_in_json
 test_task_classifications_and_route_metadata
 test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response
+test_paused_status_is_an_external_wait
+test_paused_status_requires_reason
+test_paused_status_superseded_by_active_run
+test_paused_status_superseded_by_terminal_run
+test_paused_reconciliation_invalid_budget_uses_default
+test_paused_reconciliation_oversized_budget_uses_default
+test_terminal_pause_keeps_status_pr_url
+test_paused_status_superseded_by_parked_run
+test_paused_reconciliation_has_a_fleet_budget
+test_paused_reconciliation_ignores_prior_task_delay
 test_completed_scout_with_report_is_not_pr_worker
 test_scout_report_requires_done_status
 test_local_failure_paths_degrade_to_actions_or_unknown
