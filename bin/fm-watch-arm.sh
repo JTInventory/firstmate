@@ -208,8 +208,17 @@ if [ "$mode" = restart ]; then
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   lock_start=$(cat "$WATCH_LOCK/pid-start" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
-    if [ -n "$lock_start" ] && watch_lock_matches_pid "$lock_pid"; then
-      fm_detach_kill "$lock_pid" "$lock_start" || true
+    if watch_lock_matches_pid "$lock_pid"; then
+      if [ -z "$lock_start" ]; then
+        echo "watcher: FAILED - watcher identity is not safely pinned for restart"
+        exit 1
+      fi
+      if ! fm_detach_kill "$lock_pid" "$lock_start"; then
+        if fm_pid_alive "$lock_pid" && ! fm_pid_is_zombie "$lock_pid"; then
+          echo "watcher: FAILED - watcher identity is not safely pinned for restart"
+          exit 1
+        fi
+      fi
       # Wait for it to actually exit before relaunching, so the fresh watcher
       # either takes a released lock or reclaims a stale dead-pid/reused-pid lock
       # instead of seeing the dying one as a live holder and no-opping.
@@ -218,6 +227,10 @@ if [ "$mode" = restart ]; then
         sleep 0.1
         i=$((i + 1))
       done
+      if fm_pid_alive "$lock_pid" && ! fm_pid_is_zombie "$lock_pid"; then
+        echo "watcher: FAILED - watcher did not stop for restart"
+        exit 1
+      fi
     else
       clear_stale_recorded_watcher_lock
     fi

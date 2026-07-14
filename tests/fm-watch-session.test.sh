@@ -179,6 +179,36 @@ test_watch_session_stop_waits_for_starting_watcher() {
   pass "watch-session stop waits through delayed watcher lock startup"
 }
 
+test_watch_session_stop_fails_for_unpinned_legacy_watcher() {
+  local dir fakebin state live identity out status
+  dir=$(make_case session-stop-legacy-no-start)
+  fakebin=$(install_fake_tmux "$dir")
+  state="$dir/home/state"
+  mkdir -p "$state"
+  out="$dir/stop.out"
+
+  sleep 300 &
+  live=$!
+  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not identify the legacy watcher"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$dir/home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+
+  status=0
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_WATCH_SESSION_STOP_POLLS=3 "$WATCH_SESSION" stop > "$out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "watch-session stop claimed success for an unpinned legacy watcher"
+  grep -F 'watcher identity is not safely pinned' "$out" >/dev/null \
+    || fail "watch-session stop did not explain the unpinned legacy watcher: $(cat "$out")"
+  is_live_non_zombie "$live" || fail "watch-session stop killed an unpinned legacy watcher"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch-session stop fails closed for an unpinned legacy watcher"
+}
+
 test_watch_session_delays_only_after_failed_rearm() {
   local dir fakebin state out runner
   dir=$(make_case session-rearm-delay)
@@ -229,5 +259,6 @@ test_watch_session_status_reports_runner_not_inner_arm_health() {
 
 test_watch_session_start_status_stop_are_home_scoped
 test_watch_session_stop_waits_for_starting_watcher
+test_watch_session_stop_fails_for_unpinned_legacy_watcher
 test_watch_session_delays_only_after_failed_rearm
 test_watch_session_status_reports_runner_not_inner_arm_health

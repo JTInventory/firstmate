@@ -81,6 +81,7 @@ fm_detach_follow() {
 fm_detach_kill() {
   local pid=$1 start=${2:-} sig=${3:-TERM}
   [ -n "$start" ] || return 1
+  fm_pid_start_is_cleanup_safe "$start" || return 1
   fm_pid_alive "$pid" || return 1
   fm_pid_start_matches_stored "$pid" "$start" || return 1
   kill -"$sig" "$pid" 2>/dev/null

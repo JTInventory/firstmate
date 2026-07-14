@@ -119,29 +119,47 @@ status_runner() {
 }
 
 stop_home_watcher() {
-  local pid start i=0
+  local pid start i=0 stop_failed=0
   [ -e "$STATE/.afk" ] && return 0
   while [ "$i" -lt "$STOP_WATCH_POLLS" ]; do
     pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
     if [ -n "$pid" ] && fm_pid_alive "$pid" \
       && fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
       start=$(cat "$WATCH_LOCK/pid-start" 2>/dev/null || true)
-      [ -z "$start" ] || fm_detach_kill "$pid" "$start" || true
+      if [ -z "$start" ]; then
+        stop_failed=1
+      elif ! fm_detach_kill "$pid" "$start"; then
+        if fm_pid_alive "$pid" && ! fm_pid_is_zombie "$pid"; then
+          stop_failed=1
+        fi
+      fi
     fi
     sleep 0.1
     i=$((i + 1))
   done
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && fm_pid_alive "$pid" \
+    && fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
+    stop_failed=1
+  fi
+  [ "$stop_failed" -eq 0 ]
 }
 
 stop_runner() {
   touch "$STOP_FILE" 2>/dev/null || true
   if tmux_window_exists; then
     tmux kill-window -t "$TARGET"
-    stop_home_watcher
+    if ! stop_home_watcher; then
+      echo "watch-session: FAILED - watcher identity is not safely pinned for stop" >&2
+      return 1
+    fi
     echo "watch-session: stopped target=$TARGET home=$FM_HOME"
     return 0
   fi
-  stop_home_watcher
+  if ! stop_home_watcher; then
+    echo "watch-session: FAILED - watcher identity is not safely pinned for stop" >&2
+    return 1
+  fi
   echo "watch-session: stopped home=$FM_HOME"
   return 0
 }
@@ -151,7 +169,7 @@ case "$mode" in
   start|--start) start_runner ;;
   status|--status) status_runner ;;
   stop|--stop) stop_runner ;;
-  restart|--restart) stop_runner >/dev/null; start_runner ;;
+  restart|--restart) stop_runner >/dev/null || exit 1; start_runner ;;
   -h|--help|help) usage; exit 0 ;;
   *) usage; exit 2 ;;
 esac

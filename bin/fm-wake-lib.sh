@@ -124,6 +124,14 @@ fm_pid_start_matches_stored() {
   return 1
 }
 
+fm_pid_start_is_cleanup_safe() {
+  case "$1" in
+    proc:*) return 0 ;;
+    ps:v1:*--fm-detach-token=*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_pid_identity_matches_stored() {
   local pid=$1 stored_identity=$2 current_identity
   [ -n "$stored_identity" ] || return 1

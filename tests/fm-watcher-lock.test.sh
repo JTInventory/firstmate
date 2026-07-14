@@ -12,6 +12,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+DETACH_LIB="$ROOT/bin/fm-detach-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 trap fm_test_watch_cleanup_exit EXIT
@@ -730,6 +731,22 @@ SH
       || fail "fallback start token was not compatible with legacy format '$start'"
   done
   pass "fallback start identity accepts and distinguishes prior formats"
+}
+
+test_detach_kill_rejects_legacy_start_token() {
+  local dir live
+  dir=$(make_case detach-legacy-start)
+  sleep 300 &
+  live=$!
+  if FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; . "$2"; fm_detach_kill "$3" "ps:legacy-start"' _ "$LIB" "$DETACH_LIB" "$live"; then
+    kill "$live" 2>/dev/null || true
+    wait "$live" 2>/dev/null || true
+    fail "detach cleanup accepted a legacy start token"
+  fi
+  is_live_non_zombie "$live" || fail "legacy cleanup token killed the live process"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "detach cleanup rejects legacy start tokens"
 }
 
 test_arm_reclaims_legacy_follower_reused_pid() {
@@ -1475,6 +1492,7 @@ test_lock_reclaims_zombie_owner
 test_lock_reclaims_legacy_zombie_owner
 test_pid_start_fallback_uses_process_group_identity
 test_pid_start_accepts_previous_fallback_formats
+test_detach_kill_rejects_legacy_start_token
 test_arm_reclaims_legacy_follower_reused_pid
 test_watcher_lock_match_rejects_zombie
 test_grok_protocol_treats_existing_follower_as_live
