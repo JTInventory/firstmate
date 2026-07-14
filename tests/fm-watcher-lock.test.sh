@@ -749,6 +749,39 @@ test_detach_kill_rejects_legacy_start_token() {
   pass "detach cleanup rejects legacy start tokens"
 }
 
+test_detach_spawn_waits_for_exec_handshake() {
+  local dir fakebin output pid count
+  dir=$(make_case detach-exec-handshake)
+  fakebin="$dir/fakebin"
+  output="$dir/detached.out"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+[ -e "${FM_FAKE_PS_COUNT:?}" ] && count=$(cat "$FM_FAKE_PS_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_FAKE_PS_COUNT"
+case "$*" in
+  *'command='*)
+    if [ "$count" -lt 2 ]; then
+      printf '%s\n' 'sh -c launcher'
+    else
+      printf '%s\n' "${FM_EXPECTED_DETACH_PATH:?} --fm-detach-token=ready"
+    fi
+    ;;
+  *) printf '%s\n' 'S' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  pid=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_PS_COUNT="$dir/ps.count" \
+    FM_EXPECTED_DETACH_PATH=/bin/sleep bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" /bin/sleep 30' \
+    _ "$LIB" "$DETACH_LIB" "$output") || fail "detached spawn did not wait for exec visibility"
+  count=$(cat "$dir/ps.count" 2>/dev/null || true)
+  [ "$count" -ge 2 ] || fail "detached spawn returned before the exec handshake"
+  kill "$pid" 2>/dev/null || true
+  pass "detached spawn waits for the target after exec"
+}
+
 test_arm_reclaims_legacy_follower_reused_pid() {
   local dir state fakebin out reused arm_pid watcher_pid i
   dir=$(make_case arm-legacy-follower-reuse)
@@ -1493,6 +1526,7 @@ test_lock_reclaims_legacy_zombie_owner
 test_pid_start_fallback_uses_process_group_identity
 test_pid_start_accepts_previous_fallback_formats
 test_detach_kill_rejects_legacy_start_token
+test_detach_spawn_waits_for_exec_handshake
 test_arm_reclaims_legacy_follower_reused_pid
 test_watcher_lock_match_rejects_zombie
 test_grok_protocol_treats_existing_follower_as_live

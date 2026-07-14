@@ -8,18 +8,32 @@
 # session/process group, then let the caller follow it by pid.
 
 fm_detach_spawn() {
-  local output=$1
+  local output=$1 pid command
   shift
   [ "$#" -gt 0 ] || return 2
+  command=$1
   if command -v setsid >/dev/null 2>&1; then
-    fm_detach_spawn_setsid "$output" "$@"
+    pid=$(fm_detach_spawn_setsid "$output" "$@") || return 1
   elif command -v perl >/dev/null 2>&1; then
-    fm_detach_spawn_perl "$output" "$@"
+    pid=$(fm_detach_spawn_perl "$output" "$@") || return 1
   else
     printf '%s\n' 'fm_detach_spawn: cannot detach supervision: neither setsid(1) nor perl is available.' >&2
     printf '%s\n' 'fm_detach_spawn: install perl or util-linux (setsid(1)) before arming the watcher.' >&2
     return 127
   fi
+  fm_detach_wait_for_exec "$pid" "$command" || return 1
+  printf '%s\n' "$pid"
+}
+
+fm_detach_wait_for_exec() {
+  local pid=$1 command=$2 i=0
+  while [ "$i" -lt 100 ]; do
+    fm_pid_command_matches_path "$pid" "$command" && return 0
+    fm_pid_alive "$pid" || return 1
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
 }
 
 fm_detach_spawn_setsid() {
