@@ -24,6 +24,15 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+fm_pid_is_zombie() {
+  local pid=$1 state
+  state=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null) || return 1
+  case "$state" in
+    Z*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_pid_identity_for_locale() {
   local pid=$1 locale=$2 out
   case "$pid" in
@@ -62,7 +71,7 @@ fm_pid_start() {
       fi
     fi
   fi
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o pgid= -o tty= 2>/dev/null) || return 1
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o pgid= -o tty= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf 'ps:%s\n' "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
 }
@@ -128,6 +137,8 @@ fm_lock_migrate_legacy_watcher_identity() {
 
 fm_watcher_lock_matches_pid() {
   local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 lock_home lock_path lock_identity lock_start current_start
+  fm_pid_alive "$pid" || return 1
+  fm_pid_is_zombie "$pid" && return 1
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
@@ -318,12 +329,9 @@ fm_lock_mid_acquire_is_fresh() {
 }
 
 fm_lock_live_pid_has_mismatched_identity() {
-  local lockdir=$1 pid=$2 stored_identity stored_start current_start state
+  local lockdir=$1 pid=$2 stored_identity stored_start current_start
   fm_pid_alive "$pid" || return 1
-  state=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null || true)
-  case "$state" in
-    Z*) return 0 ;;
-  esac
+  fm_pid_is_zombie "$pid" && return 0
   stored_start=$(cat "$lockdir/pid-start" 2>/dev/null || true)
   if [ -n "$stored_start" ]; then
     current_start=$(fm_pid_start "$pid") || return 1

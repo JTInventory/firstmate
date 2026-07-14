@@ -146,6 +146,39 @@ test_watch_session_start_status_stop_are_home_scoped() {
   pass "watch-session start/status/stop are scoped to one FM_HOME and never use broad pkill"
 }
 
+test_watch_session_stop_waits_for_starting_watcher() {
+  local dir fakebin state live identity start racer
+  dir=$(make_case session-stop-start-race)
+  fakebin=$(install_fake_tmux "$dir")
+  state="$dir/home/state"
+  mkdir -p "$state"
+
+  sleep 300 &
+  live=$!
+  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not identify the starting home watcher"
+  start=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not pin the starting home watcher"
+  (
+    sleep 0.2
+    mkdir "$state/.watch.lock"
+    printf '%s\n' "$live" > "$state/.watch.lock/pid"
+    printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
+    printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+    printf '%s\n' "$dir/home" > "$state/.watch.lock/fm-home"
+    printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  ) &
+  racer=$!
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" FM_WATCH_SESSION_STOP_POLLS=30 "$WATCH_SESSION" stop >/dev/null \
+    || fail "watch-session stop failed during watcher startup"
+  wait "$racer" 2>/dev/null || true
+  ! is_live_non_zombie "$live" || fail "watch-session stop returned before killing a delayed watcher lock"
+  wait "$live" 2>/dev/null || true
+  pass "watch-session stop waits through delayed watcher lock startup"
+}
+
 test_watch_session_delays_only_after_failed_rearm() {
   local dir fakebin state out runner
   dir=$(make_case session-rearm-delay)
@@ -195,5 +228,6 @@ test_watch_session_status_reports_runner_not_inner_arm_health() {
 }
 
 test_watch_session_start_status_stop_are_home_scoped
+test_watch_session_stop_waits_for_starting_watcher
 test_watch_session_delays_only_after_failed_rearm
 test_watch_session_status_reports_runner_not_inner_arm_health

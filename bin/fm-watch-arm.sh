@@ -60,6 +60,14 @@ CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 FOLLOWER_CLAIM_TIMEOUT=${FM_ARM_FOLLOWER_CLAIM_TIMEOUT:-10}
 
+new_detach_token() {
+  local token_file token
+  token_file=$(mktemp "${TMPDIR:-/tmp}/firstmate-watch-token.XXXXXX") || return 1
+  token=${token_file##*/}
+  rm -f "$token_file"
+  printf '%s\n' "$token"
+}
+
 watch_lock_matches_pid() {
   fm_watcher_lock_matches_pid "$WATCH_LOCK" "$1" "$FM_HOME" "$WATCH"
 }
@@ -261,6 +269,7 @@ fi
 # read by whichever follower attaches to the still-live watcher next.
 child=
 child_start=
+child_token=
 cleanup_detached_child() {
   # This is only the bounded startup-confirmation failure path. HUP/TERM traps
   # intentionally do not call it: a harness reap must leave the detached watcher
@@ -276,7 +285,11 @@ trap 'exit 143' TERM INT
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-child=$(fm_detach_spawn "$WATCH_OUT" "$WATCH") || {
+child_token=$(new_detach_token) || {
+  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  exit 1
+}
+child=$(fm_detach_spawn "$WATCH_OUT" "$WATCH" "--fm-detach-token=$child_token") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }

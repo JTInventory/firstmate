@@ -690,11 +690,11 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-case "$args" in
-  *'pgid='*)
+  case "$args" in
+  *'pgid='*'command='*)
     case "$pid" in
-      987654) printf '%s\n' 'same-second-start 101 ?' ;;
-      *) printf '%s\n' 'same-second-start 102 ?' ;;
+      987654) printf '%s\n' 'same-second-start 101 ? --fm-detach-token=first' ;;
+      *) printf '%s\n' 'same-second-start 101 ? --fm-detach-token=second' ;;
     esac
     ;;
   *) printf '%s\n' 'same-second-start' ;;
@@ -704,7 +704,69 @@ SH
   first=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start 987654' _ "$LIB") || fail "fallback start identity failed for first pid"
   second=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start 987655' _ "$LIB") || fail "fallback start identity failed for second pid"
   [ "$first" != "$second" ] || fail "fallback process identity still collapses same-second process starts"
-  pass "fallback process identity includes stable process-group data"
+  pass "fallback process identity includes stable process-group and command data"
+}
+
+test_watcher_lock_match_rejects_zombie() {
+  local dir state lockdir reaper zombie stat i identity
+  dir=$(make_case watcher-zombie-health)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  perl -e '
+    my ($lib, $lock) = @ARGV;
+    my $pid = fork();
+    die "fork failed: $!\n" unless defined $pid;
+    if (!$pid) {
+      exec("bash", "-c", q{. "$1"; fm_lock_try_acquire "$2" || exit 7}, "_", $lib, $lock);
+      die "exec failed: $!\n";
+    }
+    sleep 30;
+  ' "$LIB" "$lockdir" &
+  reaper=$!
+  zombie=
+  i=0
+  while [ "$i" -lt 50 ]; do
+    zombie=$(cat "$lockdir/pid" 2>/dev/null || true)
+    [ -n "$zombie" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  stat=
+  i=0
+  while [ "$i" -lt 50 ]; do
+    stat=$(ps -p "$zombie" -o stat= 2>/dev/null | tr -d '[:space:]' || true)
+    case "$stat" in
+      Z*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  case "$stat" in
+    Z*) ;;
+    *) kill "$reaper" 2>/dev/null || true; wait "$reaper" 2>/dev/null || true; fail "watcher test owner did not become a zombie" ;;
+  esac
+  identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  printf '%s\n' "$dir" > "$lockdir/fm-home"
+  printf '%s\n' "$WATCH" > "$lockdir/watcher-path"
+  touch "$state/.last-watcher-beat"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' _ "$LIB" "$lockdir" "$zombie" "$dir" "$WATCH"; then
+    kill "$reaper" 2>/dev/null || true
+    wait "$reaper" 2>/dev/null || true
+    fail "zombie watcher lock was accepted as healthy"
+  fi
+  kill "$reaper" 2>/dev/null || true
+  wait "$reaper" 2>/dev/null || true
+  [ -n "$identity" ] || fail "zombie watcher test did not create process identity"
+  pass "watcher health rejects a zombie lock owner"
+}
+
+test_grok_protocol_treats_existing_follower_as_live() {
+  local protocol="$ROOT/docs/supervision-protocols/grok.md"
+  grep -F 'watcher: follower already waiting' "$protocol" >/dev/null \
+    || fail "Grok protocol omitted the existing-follower status"
+  grep -F 're-arm after `follower already waiting`' "$protocol" >/dev/null \
+    || fail "Grok protocol did not suppress re-arm after an existing follower"
+  pass "Grok treats an existing follower as a live cycle"
 }
 
 test_lock_empty_pid_uses_minimum_grace() {
@@ -1358,6 +1420,8 @@ test_lock_without_pid_identity_keeps_existing_live_held_behavior
 test_lock_reclaims_zombie_owner
 test_lock_reclaims_legacy_zombie_owner
 test_pid_start_fallback_uses_process_group_identity
+test_watcher_lock_match_rejects_zombie
+test_grok_protocol_treats_existing_follower_as_live
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal

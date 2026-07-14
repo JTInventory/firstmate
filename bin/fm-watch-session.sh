@@ -123,12 +123,11 @@ stop_home_watcher() {
   [ -e "$STATE/.afk" ] && return 0
   while [ "$i" -lt "$STOP_WATCH_POLLS" ]; do
     pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-    [ -n "$pid" ] || return 0
-    fm_pid_alive "$pid" || return 0
-    fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH" || return 0
-    start=$(fm_pid_start "$pid" 2>/dev/null || true)
-    [ -n "$start" ] || return 0
-    fm_detach_kill "$pid" "$start" || return 0
+    if [ -n "$pid" ] && fm_pid_alive "$pid" \
+      && fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
+      start=$(fm_pid_start "$pid" 2>/dev/null || true)
+      [ -z "$start" ] || fm_detach_kill "$pid" "$start" || true
+    fi
     sleep 0.1
     i=$((i + 1))
   done

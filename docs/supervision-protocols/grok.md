@@ -10,8 +10,10 @@ For a home with work in flight:
 1. Run `bin/fm-wake-drain.sh` at the start of the wake-handling turn.
 2. Start `bin/fm-watch-arm.sh` as Grok's own tracked background task, by itself.
    Do not put it in a larger shell command and do not use `command &`.
-3. Treat `watcher: started ...` and `watcher: attached ...` as a live cycle.
-   Do not re-arm while either arm is still waiting.
+3. Treat `watcher: started ...`, `watcher: attached ...`, and
+   `watcher: follower already waiting ...` as live-cycle results. Do not
+   re-arm after `follower already waiting`: another arm already owns this
+   cycle's follower slot.
 4. On Grok's `task_completed` notification, drain the queue and inspect the
    completion output. If it reports a wake reason (`signal`, `stale`, `check`,
    or `heartbeat`), handle the wake and then start exactly one new arm. If the
