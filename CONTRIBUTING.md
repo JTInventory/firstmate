@@ -62,12 +62,8 @@ It allows `origin` to fetch from upstream `kunchenguid/firstmate` only in a cont
 
 ### Local behavior-test runner
 
-The local no-mistakes test step invokes `bin/fm-run-behavior-tests.sh`.
-It runs the PR-target guard first, requires `tmux`, runs every `tests/*.test.sh`, and fails if any test fails.
-By default it uses up to four parallel jobs, bounded by the host CPU count.
-Set `FM_TEST_JOBS=1` for the legacy serial behavior, or choose another positive job count for a local timing tradeoff.
-Each test receives a private `TMPDIR` and `GOTMPDIR`, so tests that use temporary state do not share a job directory.
-The CI workflow still runs the complete `tests/*.test.sh` loop independently and does not skip docs-only changes or any other test category.
+Run `FM_TEST_JOBS=1 bash bin/fm-run-behavior-tests.sh` for the serial local gate replay, or choose another positive `FM_TEST_JOBS` value for bounded local parallelism.
+See [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml) for the runner's guard, isolation, failure-aggregation, and CI-boundary contract.
 
 Check and test the toolbelt before pushing:
 
