@@ -48,6 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-detach-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+ARM_PATH="$SCRIPT_DIR/fm-watch-arm.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 WATCH_OUT="$STATE/.watch.out"
@@ -150,7 +151,7 @@ trap 'release_arm_lock' EXIT
 claim_arm_follower() {
   local deadline=$(( $(date +%s) + FOLLOWER_CLAIM_TIMEOUT ))
   while :; do
-    if fm_lock_try_acquire "$ARM_LOCK"; then
+    if fm_lock_try_acquire "$ARM_LOCK" "$ARM_PATH"; then
       ARM_LOCK_HELD=1
       return 0
     fi
@@ -165,7 +166,7 @@ claim_arm_follower() {
 claim_arm_follower_after_handoff() {
   local deadline=$(( $(date +%s) + FOLLOWER_CLAIM_TIMEOUT ))
   while :; do
-    if fm_lock_try_acquire "$ARM_LOCK"; then
+    if fm_lock_try_acquire "$ARM_LOCK" "$ARM_PATH"; then
       ARM_LOCK_HELD=1
       return 0
     fi
@@ -205,9 +206,10 @@ if [ "$mode" = restart ]; then
   fi
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  lock_start=$(cat "$WATCH_LOCK/pid-start" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
-    if watch_lock_matches_pid "$lock_pid"; then
-      kill -TERM "$lock_pid" 2>/dev/null || true
+    if [ -n "$lock_start" ] && watch_lock_matches_pid "$lock_pid"; then
+      fm_detach_kill "$lock_pid" "$lock_start" || true
       # Wait for it to actually exit before relaunching, so the fresh watcher
       # either takes a released lock or reclaims a stale dead-pid/reused-pid lock
       # instead of seeing the dying one as a live holder and no-opping.

@@ -79,10 +79,9 @@ fm_detach_follow() {
 
 # Signal only a process whose start time still matches the pinned launch.
 fm_detach_kill() {
-  local pid=$1 start=${2:-} sig=${3:-TERM} current
+  local pid=$1 start=${2:-} sig=${3:-TERM}
   [ -n "$start" ] || return 1
   fm_pid_alive "$pid" || return 1
-  current=$(fm_pid_start "$pid") || return 1
-  [ "$current" = "$start" ] || return 1
+  fm_pid_start_matches_stored "$pid" "$start" || return 1
   kill -"$sig" "$pid" 2>/dev/null
 }

@@ -26,7 +26,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 RETRY_DELAY=${FM_WATCH_SESSION_REARM_DELAY:-${FM_WATCH_SESSION_RETRY_DELAY:-1}}
 AFK_DELAY=${FM_WATCH_SESSION_AFK_DELAY:-15}
-STOP_WATCH_POLLS=${FM_WATCH_SESSION_STOP_POLLS:-20}
+STOP_WATCH_POLLS=${FM_WATCH_SESSION_STOP_POLLS:-60}
 
 usage() {
   echo "usage: $(basename "$0") [start|--status|status|stop|restart]" >&2
@@ -125,7 +125,7 @@ stop_home_watcher() {
     pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
     if [ -n "$pid" ] && fm_pid_alive "$pid" \
       && fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
-      start=$(fm_pid_start "$pid" 2>/dev/null || true)
+      start=$(cat "$WATCH_LOCK/pid-start" 2>/dev/null || true)
       [ -z "$start" ] || fm_detach_kill "$pid" "$start" || true
     fi
     sleep 0.1

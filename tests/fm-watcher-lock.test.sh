@@ -707,6 +707,60 @@ SH
   pass "fallback process identity includes stable process-group and command data"
 }
 
+test_pid_start_accepts_previous_fallback_formats() {
+  local dir fakebin raw ps1 ps2 ps3
+  dir=$(make_case pid-start-format-migration)
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+args="$*"
+case "$args" in
+  *'command='*) printf '%s\n' 'same-second-start 101 ? --fm-detach-token=current' ;;
+  *'pgid='*) printf '%s\n' 'same-second-start 101 ?' ;;
+  *) printf '%s\n' 'same-second-start' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  raw='same-second-start'
+  ps1='ps:same-second-start'
+  ps2='ps:same-second-start 101 ?'
+  ps3='ps:same-second-start 101 ? --fm-detach-token=current'
+  for start in "$raw" "$ps1" "$ps2" "$ps3"; do
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start_matches_stored 987654 "$2"' _ "$LIB" "$start" \
+      || fail "fallback start token was not compatible with legacy format '$start'"
+  done
+  pass "fallback start identity accepts and distinguishes prior formats"
+}
+
+test_arm_reclaims_legacy_follower_reused_pid() {
+  local dir state fakebin out reused arm_pid watcher_pid i
+  dir=$(make_case arm-legacy-follower-reuse)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  sleep 300 &
+  reused=$!
+  mkdir "$state/.watch-arm.lock"
+  printf '%s\n' "$reused" > "$state/.watch-arm.lock/pid"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$out" &
+  arm_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$out" || fail "arm did not reclaim a reused legacy follower lock: $(cat "$out")"
+  ! grep -qF 'watcher: follower already waiting' "$out" || fail "arm treated a reused legacy follower pid as live"
+  kill "$watcher_pid" 2>/dev/null || true
+  kill "$reused" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$reused" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  pass "arm reclaims a legacy follower lock whose pid was reused"
+}
+
 test_watcher_lock_match_rejects_zombie() {
   local dir state lockdir reaper zombie stat i identity
   dir=$(make_case watcher-zombie-health)
@@ -764,7 +818,7 @@ test_grok_protocol_treats_existing_follower_as_live() {
   local protocol="$ROOT/docs/supervision-protocols/grok.md"
   grep -F 'watcher: follower already waiting' "$protocol" >/dev/null \
     || fail "Grok protocol omitted the existing-follower status"
-  grep -F 're-arm after `follower already waiting`' "$protocol" >/dev/null \
+  grep -F "re-arm after \`follower already waiting\`" "$protocol" >/dev/null \
     || fail "Grok protocol did not suppress re-arm after an existing follower"
   pass "Grok treats an existing follower as a live cycle"
 }
@@ -1420,6 +1474,8 @@ test_lock_without_pid_identity_keeps_existing_live_held_behavior
 test_lock_reclaims_zombie_owner
 test_lock_reclaims_legacy_zombie_owner
 test_pid_start_fallback_uses_process_group_identity
+test_pid_start_accepts_previous_fallback_formats
+test_arm_reclaims_legacy_follower_reused_pid
 test_watcher_lock_match_rejects_zombie
 test_grok_protocol_treats_existing_follower_as_live
 test_lock_empty_pid_uses_minimum_grace
