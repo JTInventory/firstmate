@@ -25,11 +25,15 @@ Homes may also carry a `## Secondmate Backlogs` inventory section with `- <secon
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes first runs `bin/fm-no-mistakes-pr-target-guard.sh`, then runs firstmate's bash behavior suite directly.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bash bin/fm-run-behavior-tests.sh`.
 The guard fails closed if direct push resolution, the no-mistakes gate, or no-mistakes status would target `kunchenguid/firstmate`; this captain-owned lane must target `JTInventory/firstmate`.
 It does not treat an upstream-owner `origin` fetch URL as a PR target by itself when controlled-fork proof shows delivery through `fork/main`, no-mistakes status, the no-mistakes gate, and a safe resolved `origin` push target.
-After the guard passes, that command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
+The runner executes the guard first, requires `tmux` on `PATH`, prints `tmux -V`, and discovers every `tests/*.test.sh` file in sorted order.
+It runs up to four tests in parallel by default, bounded by the host CPU count.
+Set `FM_TEST_JOBS=1` to preserve the legacy serial behavior, or set another positive integer for bounded local parallelism.
+Each test runs with a private `TMPDIR` and `GOTMPDIR`, and the runner removes inherited `FM_HOME`, `FM_ROOT_OVERRIDE`, `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_CONFIG_OVERRIDE`, and `FM_PROJECTS_OVERRIDE` so tests do not share a supervisor home.
+The runner waits for each scheduled test, reports every failure, and exits non-zero after the batch completes if any test failed.
+The CI workflow remains an independent full `tests/*.test.sh` loop in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), so local parallelism does not change CI coverage or its serial execution boundary.
 
 ## Captain preferences (data/captain.md)
 
