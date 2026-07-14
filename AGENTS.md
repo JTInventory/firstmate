@@ -109,10 +109,11 @@ backups/             root-local preservation files; not a canonical tracked surf
   x-poll.error       generated X-mode relay diagnostic dedupe marker
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
-  .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .watch.lock .watch-arm.lock .wake-queue.lock watcher singleton, one-arm follower, and queue serialization locks
   .hash-* .count-* .stale-* .stale-since-* .paused-* .paused-rechecked-* .paused-resurfaced-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); fm-guard.sh reads it
+  .watch.out         detached watcher output for the current cycle; the arm reads it after the detached process exits
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
@@ -611,6 +612,7 @@ From there the task is an ordinary ship task through its mode-specific validatio
 The watcher is the backbone.
 Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through a harness-tracked `bin/fm-watch-arm.sh` background task.
 In a harness lane where tracked background tasks are not durable enough, run `bin/fm-watch-session.sh start` instead; it keeps a home-scoped tmux runner alive and re-arms through the same verified `fm-watch-arm.sh` path, immediately after wake output and with the retry delay only after failed or quiet healthy no-op arms.
+For Grok's background-notify path, read [docs/supervision-protocols/grok.md](docs/supervision-protocols/grok.md): the arm now detaches the watcher so a harness reap ends only the follower, and `fm-watch-session.sh start` remains the fallback when native background notification is unreliable.
 It costs zero tokens while running.
 **Always-on wake triage (absorb only when provably working).**
 The watcher classifies every wake it detects in bash and absorbs the benign majority without ever waking you, but it never absorbs a crewmate that has stopped.
@@ -634,9 +636,9 @@ Arm or re-arm the watcher only through the harness's own tracked background mech
 Never fire-and-forget the watcher with a shell `&` inside another call: that backgrounded child is reaped when the call returns, so supervision silently stops, and worse, the dying process reports a false "already running" that hides the gap.
 **Standalone, never bundled.**
 Run `bin/fm-watch-arm.sh` as its OWN background task with nothing else in that bash, never tacked onto the tail of a multi-command call: bundled, its self-verifying status line is buried in unrelated output and it can silently no-op as a side effect of those other commands, so no fresh cycle gets established and supervision lapses unnoticed.
-`bin/fm-watch-arm.sh` is self-verifying: it confirms a genuinely live watcher with a fresh beacon and prints exactly one honest status line - `watcher: started ...`, `watcher: attached ...`, restart-only `watcher: healthy ...`, or `watcher: FAILED - no live watcher with a fresh beacon` (which exits non-zero) - so treat that line, not a process count or an unverified `already running`, as the source of truth for watcher state.
+`bin/fm-watch-arm.sh` is self-verifying: it confirms a genuinely live watcher with a fresh beacon and prints exactly one honest status line - `watcher: started ...`, `watcher: attached ...`, `watcher: follower already waiting ...`, restart-only `watcher: healthy ...`, or `watcher: FAILED - no live watcher with a fresh beacon` (which exits non-zero) - so treat that line, not a process count or an unverified `already running`, as the source of truth for watcher state.
 **Re-arm after each FIRE; do not churn on a no-op.**
-Read that line to know whether a cycle is already live: `started` launches the live cycle and blocks for the next wake; `attached` means this arm found a verified live cycle and stays alive until it ends; restart-only `healthy` means a peer held the lock after the restart child stood down. All three mean a cycle is live, so do NOT start another. `FAILED` means no live cycle, so arm one only after draining queued wakes.
+Read that line to know whether a cycle is already live: `started` launches the live cycle and blocks for the next wake; `attached` means this arm found a verified live cycle and normally stays alive until it ends; `follower already waiting` means another arm owns that wait and this invocation exits; restart-only `healthy` means a peer held the lock after the restart child stood down. All four mean a cycle is live, so do NOT start another. `FAILED` means no live cycle, so arm one only after draining queued wakes.
 A cycle is down only when its background task completes carrying a WAKE REASON (`signal`/`stale`/`check`/`heartbeat`): that is the watcher firing, and that is the one moment to handle the wake and then start exactly one fresh cycle.
 The watcher is singleton-safe: acquisition is race-proof, so under any number of concurrent arms at most one watcher ever holds this home's lock, and a duplicate that somehow starts self-evicts within one poll once it sees the lock no longer names it.
 If one is already alive with a fresh liveness beacon, an arm invocation attaches to that verified cycle instead of creating a duplicate watcher and stays live until the cycle ends; if the lock records a stale watcher identity for a reused PID, a fresh arm may reclaim that lock without signaling the unrelated process; if a live holder cannot be proven stale by identity, a stale beacon still exits with an actionable failure.
@@ -654,7 +656,7 @@ bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked backgr
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch-session.sh start   # durable home-scoped tmux runner; immediate re-arm after wake output
 bin/fm-watch-session.sh --status  # report whether this home's runner window is live
-bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
+bin/fm-watch.sh            # the detached watcher itself; exits with: signal|stale|check|heartbeat
 bin/fm-supervise.sh        # read-only checklist/JSON view of current work; never mutates state, tmux, git, treehouse, or GitHub; normalizes HOME-local Axi tool paths for non-interactive shells
 bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
 bin/fm-crew-state.sh <id>  # one-line current-state read; reconciles matching run-step, pane, and status log

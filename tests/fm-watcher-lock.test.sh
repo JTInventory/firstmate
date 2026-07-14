@@ -660,11 +660,11 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "v1:stale watcher identity" > "$state/.watch.lock/pid-identity"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
-  # The honest arm forks the fresh watcher as a tracked child and waits on it, so
-  # the lock now names that child, not the arm invocation. The property is the
-  # same: the stale reused-pid lock is replaced by a genuinely live watcher, which
-  # the arm confirms before reporting it. Wait for that confirmation, not just for
-  # the lock pid to appear (identity and beacon land a beat later).
+  # The honest arm launches the fresh watcher detached and follows it, so the lock
+  # names that watcher, not the arm invocation. The property is the same: the
+  # stale reused-pid lock is replaced by a genuinely live watcher, which the arm
+  # confirms before reporting it. Wait for that confirmation, not just for the
+  # lock pid to appear (identity and beacon land a beat later).
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
@@ -905,7 +905,7 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
-test_arm_hup_cleans_child_and_temp_output() {
+test_arm_hup_stands_down_without_killing_the_watcher() {
   local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
@@ -925,14 +925,93 @@ test_arm_hup_cleans_child_and_temp_output() {
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  is_live_non_zombie "$lock_pid" || fail "HUP cleanup killed the detached watcher"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "detached watcher lock changed after arm HUP"
+  [ -e "$state/.last-watcher-beat" ] || fail "detached watcher lost its liveness beacon after arm HUP"
+  kill "$lock_pid" 2>/dev/null || true
+  wait "$lock_pid" 2>/dev/null || true
+  pass "arm stands down on HUP while the detached watcher keeps its lock and beacon"
+}
+
+test_watcher_survives_arm_process_group_sigterm() {
+  local dir state fakebin armout armpid lock_pid pgid status
+  dir=$(make_case arm-process-group-reap)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  # setsid gives the arm the same process-group shape as a harness-tracked task,
+  # so SIGTERM to the whole arm group is the reap we must survive.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 setsid "$WATCH_ARM" > "$armout" &
+  armpid=$!
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
-  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
-  pass "arm cleans child watcher and temp output on HUP"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before process-group reap check"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  pgid=$(ps -p "$armpid" -o pgid= 2>/dev/null | tr -d '[:space:]')
+  [ "$pgid" = "$armpid" ] || fail "test arm is not its own process-group leader (pid=$armpid pgid=$pgid)"
+  kill -TERM -- "-$pgid" 2>/dev/null || fail "could not reap the arm process group"
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm process group did not exit after SIGTERM"
+  is_live_non_zombie "$lock_pid" || fail "process-group reap killed the detached watcher"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$lock_pid" ] \
+    || fail "detached watcher lock changed after process-group reap"
+  [ -e "$state/.last-watcher-beat" ] || fail "detached watcher beacon missing after process-group reap"
+  kill "$lock_pid" 2>/dev/null || true
+  wait "$lock_pid" 2>/dev/null || true
+  pass "watcher survives SIGTERM of the arm's entire process group"
+}
+
+test_arm_does_not_stack_attach_waiters() {
+  local dir state fakebin out first_out second_out wpid first_pid second_pid status i
+  dir=$(make_case arm-single-follower)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  first_out="$dir/first-arm.out"
+  second_out="$dir/second-arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$first_out" &
+  first_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$first_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$first_out" || fail "first arm did not attach to the healthy watcher"
+  is_live_non_zombie "$first_pid" || fail "first arm stopped waiting on the healthy watcher"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$second_out" &
+  second_pid=$!
+  wait_for_exit "$second_pid" 40
+  status=$?
+  [ "$status" -eq 0 ] || fail "second arm stacked another attach waiter (status $status): $(cat "$second_out")"
+  grep -qF "watcher: attached pid=$wpid" "$second_out" || fail "second arm did not report the existing healthy cycle"
+  is_live_non_zombie "$first_pid" || fail "second arm caused the existing follower to stop"
+
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  wait_for_exit "$first_pid" 80
+  status=$?
+  [ "$status" -eq 0 ] || fail "first arm did not finish after the watcher cycle ended (status $status)"
+  pass "a healthy cycle keeps one attach waiter and duplicate arms exit without stacking"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -989,7 +1068,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not wait for and attach to the peer watcher: $(cat "$armout")"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm falsely reported FAILED during peer startup race"
   is_live_non_zombie "$armpid" || fail "arm exited while the peer was still healthy"
-  # After the peer dies, the attached arm must exit 0 (same as pre-fork attach).
+  # After the peer dies, the attached arm must exit 0 (same as detached attach).
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
   wait_for_exit "$armpid" 80
@@ -1053,7 +1132,9 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_migrates_live_legacy_watcher_lock
 test_arm_rejects_unverified_legacy_watcher_lock
 test_arm_starts_and_self_heals
-test_arm_hup_cleans_child_and_temp_output
+test_arm_hup_stands_down_without_killing_the_watcher
+test_watcher_survives_arm_process_group_sigterm
+test_arm_does_not_stack_attach_waiters
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

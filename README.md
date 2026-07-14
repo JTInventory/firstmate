@@ -57,7 +57,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the crew windows.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, tmux for the crew windows, and `perl` or `setsid(1)` for reaping-safe supervision.
 The first mate detects and offers to install everything else.
 
 ```sh

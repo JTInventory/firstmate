@@ -41,6 +41,20 @@ fm_pid_identity() {
   printf 'v1:%s\n' "$identity"
 }
 
+# The process start time is stable across exec, unlike the command text in
+# fm_pid_identity. Detached supervision followers pin this value before they
+# begin polling so a recycled pid cannot keep an arm waiting on an unrelated
+# process.
+fm_pid_start() {
+  local pid=$1 out
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
 fm_pid_identity_matches_stored() {
   local pid=$1 stored_identity=$2 current_identity
   [ -n "$stored_identity" ] || return 1
