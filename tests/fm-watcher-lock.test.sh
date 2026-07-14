@@ -1233,7 +1233,9 @@ test_pid_start_distinguishes_same_second_processes() {
       kill "$first" "$second" 2>/dev/null || true
       wait "$first" 2>/dev/null || true
       wait "$second" 2>/dev/null || true
-      [ -n "$first_start" ] && [ -n "$second_start" ] || fail "process start identity was not readable"
+      if [ -z "$first_start" ] || [ -z "$second_start" ]; then
+        fail "process start identity was not readable"
+      fi
       [ "$first_start" != "$second_start" ] || fail "same-second processes received the same start identity"
       pass "process start identity distinguishes same-second processes"
       return 0
