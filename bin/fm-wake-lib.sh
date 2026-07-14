@@ -62,7 +62,7 @@ fm_pid_start() {
       fi
     fi
   fi
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o pgid= -o tty= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf 'ps:%s\n' "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
 }
@@ -320,14 +320,14 @@ fm_lock_mid_acquire_is_fresh() {
 fm_lock_live_pid_has_mismatched_identity() {
   local lockdir=$1 pid=$2 stored_identity stored_start current_start state
   fm_pid_alive "$pid" || return 1
+  state=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$state" in
+    Z*) return 0 ;;
+  esac
   stored_start=$(cat "$lockdir/pid-start" 2>/dev/null || true)
   if [ -n "$stored_start" ]; then
     current_start=$(fm_pid_start "$pid") || return 1
     [ "$current_start" = "$stored_start" ] || return 0
-    state=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null || true)
-    case "$state" in
-      Z*) return 0 ;;
-    esac
   fi
   stored_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ -n "$stored_identity" ] || return 1

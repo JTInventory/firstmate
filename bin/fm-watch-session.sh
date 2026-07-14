@@ -11,6 +11,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
 
 SESSION_NAME=${FM_WATCH_SESSION_TMUX_SESSION:-firstmate-watch}
 HASH=$(printf '%s\n%s\n' "$FM_HOME" "$STATE" | cksum | awk '{print $1}')
@@ -20,8 +22,11 @@ SESSION_DIR="$STATE/.watch-session"
 ENV_FILE="$SESSION_DIR/env.sh"
 RUNNER_FILE="$SESSION_DIR/runner.sh"
 STOP_FILE="$SESSION_DIR/stop"
+WATCH="$SCRIPT_DIR/fm-watch.sh"
+WATCH_LOCK="$STATE/.watch.lock"
 RETRY_DELAY=${FM_WATCH_SESSION_REARM_DELAY:-${FM_WATCH_SESSION_RETRY_DELAY:-1}}
 AFK_DELAY=${FM_WATCH_SESSION_AFK_DELAY:-15}
+STOP_WATCH_POLLS=${FM_WATCH_SESSION_STOP_POLLS:-20}
 
 usage() {
   echo "usage: $(basename "$0") [start|--status|status|stop|restart]" >&2
@@ -113,13 +118,31 @@ status_runner() {
   return 1
 }
 
+stop_home_watcher() {
+  local pid start i=0
+  [ -e "$STATE/.afk" ] && return 0
+  while [ "$i" -lt "$STOP_WATCH_POLLS" ]; do
+    pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+    [ -n "$pid" ] || return 0
+    fm_pid_alive "$pid" || return 0
+    fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH" || return 0
+    start=$(fm_pid_start "$pid" 2>/dev/null || true)
+    [ -n "$start" ] || return 0
+    fm_detach_kill "$pid" "$start" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
 stop_runner() {
   touch "$STOP_FILE" 2>/dev/null || true
   if tmux_window_exists; then
     tmux kill-window -t "$TARGET"
+    stop_home_watcher
     echo "watch-session: stopped target=$TARGET home=$FM_HOME"
     return 0
   fi
+  stop_home_watcher
   echo "watch-session: stopped home=$FM_HOME"
   return 0
 }

@@ -620,6 +620,93 @@ test_lock_reclaims_zombie_owner() {
   pass "zombie follower lock is reclaimed using its stored process identity"
 }
 
+test_lock_reclaims_legacy_zombie_owner() {
+  local dir state lockdir reaper zombie stat i out lockpid
+  dir=$(make_case lock-legacy-zombie-owner)
+  state="$dir/state"
+  lockdir="$state/.watch-arm.lock"
+  perl -e '
+    my ($lib, $lock) = @ARGV;
+    my $pid = fork();
+    die "fork failed: $!\n" unless defined $pid;
+    if (!$pid) {
+      exec("bash", "-c", q{. "$1"; fm_lock_try_acquire "$2" || exit 7}, "_", $lib, $lock);
+      die "exec failed: $!\n";
+    }
+    sleep 30;
+  ' "$LIB" "$lockdir" &
+  reaper=$!
+  zombie=
+  i=0
+  while [ "$i" -lt 50 ]; do
+    zombie=$(cat "$lockdir/pid" 2>/dev/null || true)
+    [ -n "$zombie" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  rm -f "$lockdir/pid-identity" "$lockdir/pid-start"
+  stat=
+  i=0
+  while [ "$i" -lt 50 ]; do
+    stat=$(ps -p "$zombie" -o stat= 2>/dev/null | tr -d '[:space:]' || true)
+    case "$stat" in
+      Z*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  case "$stat" in
+    Z*) ;;
+    *) kill "$reaper" 2>/dev/null || true; wait "$reaper" 2>/dev/null || true; fail "legacy lock owner did not become a zombie" ;;
+  esac
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s pid=%s\n" "$rc" "$(cat "$2/pid" 2>/dev/null || true)"
+    [ "$rc" -eq 0 ] && fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir")
+  kill "$reaper" 2>/dev/null || true
+  wait "$reaper" 2>/dev/null || true
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "legacy zombie follower lock was treated as live-held: $out" ;;
+  esac
+  lockpid=${out#*pid=}
+  [ -n "$lockpid" ] || fail "reclaimed legacy zombie follower lock recorded no replacement pid"
+  pass "legacy zombie follower lock is reclaimed without new metadata"
+}
+
+test_pid_start_fallback_uses_process_group_identity() {
+  local dir fakebin first second
+  dir=$(make_case pid-start-fallback)
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+args="$*"
+pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$args" in
+  *'pgid='*)
+    case "$pid" in
+      987654) printf '%s\n' 'same-second-start 101 ?' ;;
+      *) printf '%s\n' 'same-second-start 102 ?' ;;
+    esac
+    ;;
+  *) printf '%s\n' 'same-second-start' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  first=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start 987654' _ "$LIB") || fail "fallback start identity failed for first pid"
+  second=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start 987655' _ "$LIB") || fail "fallback start identity failed for second pid"
+  [ "$first" != "$second" ] || fail "fallback process identity still collapses same-second process starts"
+  pass "fallback process identity includes stable process-group data"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1059,7 +1146,7 @@ test_arm_does_not_stack_attach_waiters() {
   wait_for_exit "$second_pid" 40
   status=$?
   [ "$status" -eq 0 ] || fail "second arm stacked another attach waiter (status $status): $(cat "$second_out")"
-  grep -qF "watcher: attached pid=$wpid" "$second_out" || fail "second arm did not report the existing healthy cycle"
+  grep -qF "watcher: follower already waiting pid=$first_pid" "$second_out" || fail "second arm did not report the existing follower"
   is_live_non_zombie "$first_pid" || fail "second arm caused the existing follower to stop"
 
   kill "$wpid" 2>/dev/null || true
@@ -1267,6 +1354,8 @@ test_lock_reclaims_expired_legacy_pid_identity
 test_watcher_preserves_matching_expired_legacy_watcher_lock
 test_lock_without_pid_identity_keeps_existing_live_held_behavior
 test_lock_reclaims_zombie_owner
+test_lock_reclaims_legacy_zombie_owner
+test_pid_start_fallback_uses_process_group_identity
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal

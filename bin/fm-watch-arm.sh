@@ -234,8 +234,12 @@ if [ "$mode" = arm ]; then
       attach_and_wait "$HEALTHY_PID"
     fi
     if healthy_watcher; then
-      report_attached
-      exit 0
+      if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
+        echo "watcher: follower already waiting pid=$FM_LOCK_HELD_PID"
+        exit 0
+      fi
+      echo "watcher: FAILED - no follower slot available"
+      exit 1
     fi
     echo "watcher: FAILED - no live watcher with a fresh beacon"
     exit 1

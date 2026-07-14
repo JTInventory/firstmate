@@ -90,7 +90,7 @@ SH
 }
 
 test_watch_session_start_status_stop_are_home_scoped() {
-  local dir fakebin state_a state_b out_a out_b status_a status_b after_stop log
+  local dir fakebin state_a state_b out_a out_b status_a status_b after_stop log live identity start
   dir=$(make_case session-home-scope)
   fakebin=$(install_fake_tmux "$dir")
   log="$dir/tmux.log"
@@ -113,12 +113,28 @@ test_watch_session_start_status_stop_are_home_scoped() {
   [ "$(find "$dir/tmux-state/firstmate-watch" -type f | wc -l | tr -d '[:space:]')" = 2 ] \
     || fail "expected separate tmux windows for two FM_HOME values"
 
+  sleep 300 &
+  live=$!
+  identity=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not identify the home A watcher"
+  start=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not pin the home A watcher start"
+  mkdir "$state_a/.watch.lock"
+  printf '%s\n' "$live" > "$state_a/.watch.lock/pid"
+  printf '%s\n' "$start" > "$state_a/.watch.lock/pid-start"
+  printf '%s\n' "$identity" > "$state_a/.watch.lock/pid-identity"
+  printf '%s\n' "$dir/home-a" > "$state_a/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state_a/.watch.lock/watcher-path"
+  touch "$state_a/.last-watcher-beat"
+
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" FM_HOME="$dir/home-a" "$WATCH_SESSION" --status > "$status_a" \
     || fail "watch-session status failed for home A"
   grep -F 'watch-session: running target=' "$status_a" >/dev/null || fail "home A status did not report running"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" FM_HOME="$dir/home-a" "$WATCH_SESSION" stop >/dev/null \
     || fail "watch-session stop failed for home A"
+  ! is_live_non_zombie "$live" || fail "watch-session stop left the detached home A watcher alive"
+  wait "$live" 2>/dev/null || true
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" FM_HOME="$dir/home-a" "$WATCH_SESSION" --status > "$after_stop" \
     && fail "home A status succeeded after stop"
   grep -F 'watch-session: stopped' "$after_stop" >/dev/null || fail "home A status after stop did not report stopped"
