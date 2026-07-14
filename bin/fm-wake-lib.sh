@@ -46,13 +46,25 @@ fm_pid_identity() {
 # begin polling so a recycled pid cannot keep an arm waiting on an unrelated
 # process.
 fm_pid_start() {
-  local pid=$1 out
+  local pid=$1 out proc_stat
+  local -a proc_fields
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if [ -r "/proc/$pid/stat" ]; then
+    proc_stat=$(cat "/proc/$pid/stat" 2>/dev/null || true)
+    if [ -n "$proc_stat" ]; then
+      proc_stat=${proc_stat##*) }
+      read -r -a proc_fields <<< "$proc_stat"
+      if [ "${#proc_fields[@]}" -ge 20 ]; then
+        printf 'proc:%s\n' "${proc_fields[19]}"
+        return 0
+      fi
+    fi
+  fi
   out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  printf 'ps:%s\n' "$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')"
 }
 
 fm_pid_identity_matches_stored() {
@@ -115,12 +127,17 @@ fm_lock_migrate_legacy_watcher_identity() {
 }
 
 fm_watcher_lock_matches_pid() {
-  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 lock_home lock_path lock_identity
+  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 lock_home lock_path lock_identity lock_start current_start
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  lock_start=$(cat "$lockdir/pid-start" 2>/dev/null || true)
   [ "$lock_home" = "$expected_home" ] || return 1
   [ "$lock_path" = "$expected_path" ] || return 1
+  if [ -n "$lock_start" ]; then
+    current_start=$(fm_pid_start "$pid") || return 1
+    [ "$current_start" = "$lock_start" ] || return 1
+  fi
   [ -n "$lock_identity" ] || return 1
   if fm_pid_identity_matches_stored "$pid" "$lock_identity"; then
     return 0
@@ -148,6 +165,7 @@ fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
     "$lockdir/pid" \
+    "$lockdir/pid-start" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
@@ -169,11 +187,15 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
+  local ownerdir=$1 mypid back identity start
   mypid=${BASHPID:-$$}
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ "$back" = "$mypid" ] || return 1
+  identity=$(fm_pid_identity "$mypid" 2>/dev/null || true)
+  [ -z "$identity" ] || printf '%s\n' "$identity" > "$ownerdir/pid-identity"
+  start=$(fm_pid_start "$mypid" 2>/dev/null || true)
+  [ -z "$start" ] || printf '%s\n' "$start" > "$ownerdir/pid-start"
 }
 
 fm_lock_link_owner() {
@@ -296,8 +318,17 @@ fm_lock_mid_acquire_is_fresh() {
 }
 
 fm_lock_live_pid_has_mismatched_identity() {
-  local lockdir=$1 pid=$2 stored_identity
+  local lockdir=$1 pid=$2 stored_identity stored_start current_start state
   fm_pid_alive "$pid" || return 1
+  stored_start=$(cat "$lockdir/pid-start" 2>/dev/null || true)
+  if [ -n "$stored_start" ]; then
+    current_start=$(fm_pid_start "$pid") || return 1
+    [ "$current_start" = "$stored_start" ] || return 0
+    state=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null || true)
+    case "$state" in
+      Z*) return 0 ;;
+    esac
+  fi
   stored_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ -n "$stored_identity" ] || return 1
   fm_pid_identity_matches_stored "$pid" "$stored_identity" && return 1

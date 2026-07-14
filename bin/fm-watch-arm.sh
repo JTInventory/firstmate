@@ -125,6 +125,7 @@ attach_and_wait() {
 }
 
 ARM_LOCK_HELD=0
+FOLLOWER_CLAIMED=0
 # shellcheck disable=SC2317 # called indirectly by the EXIT trap
 release_arm_lock() {
   [ "$ARM_LOCK_HELD" -eq 1 ] || return 0
@@ -147,6 +148,18 @@ claim_arm_follower() {
     fi
     if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
       return 1
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 0.1
+  done
+}
+
+claim_arm_follower_after_handoff() {
+  local deadline=$(( $(date +%s) + FOLLOWER_CLAIM_TIMEOUT ))
+  while :; do
+    if fm_lock_try_acquire "$ARM_LOCK"; then
+      ARM_LOCK_HELD=1
+      return 0
     fi
     [ "$(date +%s)" -ge "$deadline" ] && return 1
     sleep 0.1
@@ -179,6 +192,9 @@ case "${1:-}" in
 esac
 
 if [ "$mode" = restart ]; then
+  if claim_arm_follower; then
+    FOLLOWER_CLAIMED=1
+  fi
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
@@ -196,6 +212,13 @@ if [ "$mode" = restart ]; then
       clear_stale_recorded_watcher_lock
     fi
   fi
+  if [ "$FOLLOWER_CLAIMED" -eq 0 ]; then
+    if ! claim_arm_follower_after_handoff; then
+      echo "watcher: FAILED - no follower slot available for restart"
+      exit 1
+    fi
+    FOLLOWER_CLAIMED=1
+  fi
 fi
 
 # A normal arm owns the one follower slot. If another arm already owns it, a
@@ -206,6 +229,7 @@ fi
 if [ "$mode" = arm ]; then
   if healthy_watcher; then
     if claim_arm_follower; then
+      FOLLOWER_CLAIMED=1
       report_attached
       attach_and_wait "$HEALTHY_PID"
     fi
@@ -224,6 +248,7 @@ if [ "$mode" = arm ]; then
     echo "watcher: FAILED - no live watcher with a fresh beacon"
     exit 1
   fi
+  FOLLOWER_CLAIMED=1
 fi
 
 # Start the watcher detached and confirm it before settling in. The arm follows
@@ -260,8 +285,12 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
-      echo "watcher: started pid=$child (beacon fresh)"
-      attach_and_wait "$child"
+      if [ "$FOLLOWER_CLAIMED" -eq 1 ]; then
+        echo "watcher: started pid=$child (beacon fresh)"
+        attach_and_wait "$child"
+      fi
+      report_healthy
+      exit 0
     fi
     # Another watcher won the singleton; this detached process stood down.
     if [ "$mode" = arm ]; then

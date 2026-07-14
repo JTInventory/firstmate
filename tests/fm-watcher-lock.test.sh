@@ -564,6 +564,62 @@ test_lock_without_pid_identity_keeps_existing_live_held_behavior() {
   pass "live-held lock without pid identity remains live-held"
 }
 
+test_lock_reclaims_zombie_owner() {
+  local dir state lockdir reaper zombie stat i out lockpid
+  dir=$(make_case lock-zombie-owner)
+  state="$dir/state"
+  lockdir="$state/.watch-arm.lock"
+  perl -e '
+    my ($lib, $lock) = @ARGV;
+    my $pid = fork();
+    die "fork failed: $!\n" unless defined $pid;
+    if (!$pid) {
+      exec("bash", "-c", q{. "$1"; fm_lock_try_acquire "$2" || exit 7}, "_", $lib, $lock);
+      die "exec failed: $!\n";
+    }
+    sleep 30;
+  ' "$LIB" "$lockdir" &
+  reaper=$!
+  zombie=
+  i=0
+  while [ "$i" -lt 50 ]; do
+    zombie=$(cat "$lockdir/pid" 2>/dev/null || true)
+    [ -n "$zombie" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  stat=
+  i=0
+  while [ "$i" -lt 50 ]; do
+    stat=$(ps -p "$zombie" -o stat= 2>/dev/null | tr -d '[:space:]' || true)
+    case "$stat" in
+      Z*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  case "$stat" in
+    Z*) ;;
+    *) kill "$reaper" 2>/dev/null || true; wait "$reaper" 2>/dev/null || true; fail "lock owner did not become a zombie" ;;
+  esac
+  [ -s "$lockdir/pid-identity" ] || fail "new lock owner did not record process identity"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s pid=%s\n" "$rc" "$(cat "$2/pid" 2>/dev/null || true)"
+    [ "$rc" -eq 0 ] && fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir")
+  kill "$reaper" 2>/dev/null || true
+  wait "$reaper" 2>/dev/null || true
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "zombie follower lock was treated as live-held: $out" ;;
+  esac
+  lockpid=${out#*pid=}
+  [ -n "$lockpid" ] || fail "reclaimed zombie follower lock recorded no replacement pid"
+  pass "zombie follower lock is reclaimed using its stored process identity"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1014,6 +1070,94 @@ test_arm_does_not_stack_attach_waiters() {
   pass "a healthy cycle keeps one attach waiter and duplicate arms exit without stacking"
 }
 
+test_restart_handoffs_existing_follower() {
+  local dir state fakebin out first_out restart_out wpid first_pid restart_pid status i lock_pid
+  dir=$(make_case restart-single-follower)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  first_out="$dir/first-arm.out"
+  restart_out="$dir/restart.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" > "$first_out" &
+  first_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$first_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$first_out" || fail "first arm did not attach to the healthy watcher"
+  is_live_non_zombie "$first_pid" || fail "first arm stopped waiting on the healthy watcher"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" --restart > "$restart_out" &
+  restart_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch-arm.lock/pid" 2>/dev/null || true)" = "$restart_pid" ] \
+      && grep -qF 'watcher: started pid=' "$restart_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$restart_out" || fail "restart did not claim the follower slot after handoff"
+  is_live_non_zombie "$restart_pid" || fail "restart did not remain the sole follower"
+  ! is_live_non_zombie "$first_pid" || fail "restart left two live followers after handoff"
+  [ "$(cat "$state/.watch-arm.lock/pid" 2>/dev/null || true)" = "$restart_pid" ] \
+    || fail "restart did not own the follower lock after handoff: $(cat "$state/.watch-arm.lock/pid" 2>/dev/null || true)"
+
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$lock_pid" "$wpid" 2>/dev/null || true
+  wait "$lock_pid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+  kill "$restart_pid" 2>/dev/null || true
+  wait "$restart_pid" 2>/dev/null || true
+  wait "$first_pid" 2>/dev/null || true
+  pass "restart hands off the follower slot without stacking waiters"
+}
+
+test_pid_start_distinguishes_same_second_processes() {
+  local first second first_lstart second_lstart first_start second_start i
+  first=
+  second=
+  for i in $(seq 1 40); do
+    sleep 30 &
+    first=$!
+    sleep 0.1
+    sleep 30 &
+    second=$!
+    first_lstart=$(LC_ALL=C ps -p "$first" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//' || true)
+    second_lstart=$(LC_ALL=C ps -p "$second" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//' || true)
+    if [ -n "$first_lstart" ] && [ "$first_lstart" = "$second_lstart" ]; then
+      first_start=$(FM_STATE_OVERRIDE="$TMP_ROOT" bash -c '. "$1"; fm_pid_start "$2"' _ "$LIB" "$first") || first_start=
+      second_start=$(FM_STATE_OVERRIDE="$TMP_ROOT" bash -c '. "$1"; fm_pid_start "$2"' _ "$LIB" "$second") || second_start=
+      kill "$first" "$second" 2>/dev/null || true
+      wait "$first" 2>/dev/null || true
+      wait "$second" 2>/dev/null || true
+      [ -n "$first_start" ] && [ -n "$second_start" ] || fail "process start identity was not readable"
+      [ "$first_start" != "$second_start" ] || fail "same-second processes received the same start identity"
+      pass "process start identity distinguishes same-second processes"
+      return 0
+    fi
+    kill "$first" "$second" 2>/dev/null || true
+    wait "$first" 2>/dev/null || true
+    wait "$second" 2>/dev/null || true
+  done
+  fail "could not create two same-second processes for the start identity test"
+}
+
 test_arm_propagates_immediate_wake_before_confirmation() {
   local dir state fakebin armout drain_out check_file rc
   dir=$(make_case arm-immediate-wake)
@@ -1122,6 +1266,7 @@ test_lock_preserves_live_lock_with_legacy_pid_identity
 test_lock_reclaims_expired_legacy_pid_identity
 test_watcher_preserves_matching_expired_legacy_watcher_lock
 test_lock_without_pid_identity_keeps_existing_live_held_behavior
+test_lock_reclaims_zombie_owner
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
@@ -1135,6 +1280,8 @@ test_arm_starts_and_self_heals
 test_arm_hup_stands_down_without_killing_the_watcher
 test_watcher_survives_arm_process_group_sigterm
 test_arm_does_not_stack_attach_waiters
+test_restart_handoffs_existing_follower
+test_pid_start_distinguishes_same_second_processes
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
