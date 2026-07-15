@@ -214,7 +214,7 @@ test_drain_dedupes_obvious_duplicates() {
 # when work is in flight with no live watcher, and stay silent right after a
 # normal fire (a fresh beacon within grace), so it never false-alarms every wake.
 test_drain_asserts_watcher_liveness() {
-  local dir state err peer identity
+  local dir state err peer identity start
   dir=$(make_case drain-liveness)
   state="$dir/state"
   err="$dir/drain.err"
@@ -230,8 +230,10 @@ test_drain_asserts_watcher_liveness() {
   sleep 300 &
   peer=$!
   identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$peer") || fail "could not identify drain peer pid"
+  start=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$peer") || fail "could not identify drain peer start"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"

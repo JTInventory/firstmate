@@ -90,7 +90,7 @@ SH
 }
 
 test_watch_session_start_status_stop_are_home_scoped() {
-  local dir fakebin state_a state_b out_a out_b status_a status_b after_stop log
+  local dir fakebin state_a state_b out_a out_b status_a status_b after_stop log live identity start
   dir=$(make_case session-home-scope)
   fakebin=$(install_fake_tmux "$dir")
   log="$dir/tmux.log"
@@ -113,12 +113,28 @@ test_watch_session_start_status_stop_are_home_scoped() {
   [ "$(find "$dir/tmux-state/firstmate-watch" -type f | wc -l | tr -d '[:space:]')" = 2 ] \
     || fail "expected separate tmux windows for two FM_HOME values"
 
+  sleep 300 &
+  live=$!
+  identity=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not identify the home A watcher"
+  start=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not pin the home A watcher start"
+  mkdir "$state_a/.watch.lock"
+  printf '%s\n' "$live" > "$state_a/.watch.lock/pid"
+  printf '%s\n' "$start" > "$state_a/.watch.lock/pid-start"
+  printf '%s\n' "$identity" > "$state_a/.watch.lock/pid-identity"
+  printf '%s\n' "$dir/home-a" > "$state_a/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state_a/.watch.lock/watcher-path"
+  touch "$state_a/.last-watcher-beat"
+
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" FM_HOME="$dir/home-a" "$WATCH_SESSION" --status > "$status_a" \
     || fail "watch-session status failed for home A"
   grep -F 'watch-session: running target=' "$status_a" >/dev/null || fail "home A status did not report running"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" FM_HOME="$dir/home-a" "$WATCH_SESSION" stop >/dev/null \
     || fail "watch-session stop failed for home A"
+  ! is_live_non_zombie "$live" || fail "watch-session stop left the detached home A watcher alive"
+  wait "$live" 2>/dev/null || true
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" FM_HOME="$dir/home-a" "$WATCH_SESSION" --status > "$after_stop" \
     && fail "home A status succeeded after stop"
   grep -F 'watch-session: stopped' "$after_stop" >/dev/null || fail "home A status after stop did not report stopped"
@@ -128,6 +144,69 @@ test_watch_session_start_status_stop_are_home_scoped() {
   grep -F 'watch-session: running target=' "$status_b" >/dev/null || fail "home B did not remain running"
   ! grep -F 'pkill -f' "$WATCH_SESSION" >/dev/null || fail "watch-session contains broad pkill -f"
   pass "watch-session start/status/stop are scoped to one FM_HOME and never use broad pkill"
+}
+
+test_watch_session_stop_waits_for_starting_watcher() {
+  local dir fakebin state live identity start racer
+  dir=$(make_case session-stop-start-race)
+  fakebin=$(install_fake_tmux "$dir")
+  state="$dir/home/state"
+  mkdir -p "$state"
+
+  sleep 300 &
+  live=$!
+  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not identify the starting home watcher"
+  start=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not pin the starting home watcher"
+  (
+    sleep 0.2
+    mkdir "$state/.watch.lock"
+    printf '%s\n' "$live" > "$state/.watch.lock/pid"
+    printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
+    printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+    printf '%s\n' "$dir/home" > "$state/.watch.lock/fm-home"
+    printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  ) &
+  racer=$!
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" FM_WATCH_SESSION_STOP_POLLS=30 "$WATCH_SESSION" stop >/dev/null \
+    || fail "watch-session stop failed during watcher startup"
+  wait "$racer" 2>/dev/null || true
+  ! is_live_non_zombie "$live" || fail "watch-session stop returned before killing a delayed watcher lock"
+  wait "$live" 2>/dev/null || true
+  pass "watch-session stop waits through delayed watcher lock startup"
+}
+
+test_watch_session_stop_fails_for_unpinned_legacy_watcher() {
+  local dir fakebin state live identity out status
+  dir=$(make_case session-stop-legacy-no-start)
+  fakebin=$(install_fake_tmux "$dir")
+  state="$dir/home/state"
+  mkdir -p "$state"
+  out="$dir/stop.out"
+
+  sleep 300 &
+  live=$!
+  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+    || fail "could not identify the legacy watcher"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$dir/home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+
+  status=0
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_WATCH_SESSION_STOP_POLLS=3 "$WATCH_SESSION" stop > "$out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "watch-session stop claimed success for an unpinned legacy watcher"
+  grep -F 'watcher identity is not safely pinned' "$out" >/dev/null \
+    || fail "watch-session stop did not explain the unpinned legacy watcher: $(cat "$out")"
+  is_live_non_zombie "$live" || fail "watch-session stop killed an unpinned legacy watcher"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch-session stop fails closed for an unpinned legacy watcher"
 }
 
 test_watch_session_delays_only_after_failed_rearm() {
@@ -179,5 +258,7 @@ test_watch_session_status_reports_runner_not_inner_arm_health() {
 }
 
 test_watch_session_start_status_stop_are_home_scoped
+test_watch_session_stop_waits_for_starting_watcher
+test_watch_session_stop_fails_for_unpinned_legacy_watcher
 test_watch_session_delays_only_after_failed_rearm
 test_watch_session_status_reports_runner_not_inner_arm_health
