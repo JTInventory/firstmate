@@ -8,8 +8,7 @@
 # This is intentionally a script-only backstop in JT. fm-spawn does not install
 # live harness hooks for it. A harness or session wrapper may call it with a
 # JSON stop payload on stdin. Exit 0 allows the turn; exit 2 blocks a blind turn
-# and prints the bounded re-arm instruction. Missing or malformed transport is
-# fail-open so a broken optional guard cannot wedge a session.
+# and prints the bounded re-arm instruction.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,21 +21,16 @@ GRACE="${FM_TURNEND_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 # Harness stop payloads are JSON. A direct CLI invocation has no stdin and is
-# treated as the first stop attempt. Bad/missing jq input is fail-open.
+# treated as the first stop attempt.
 PAYLOAD=
 if [ ! -t 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
-fi
-if ! command -v jq >/dev/null 2>&1; then
-  exit 0
 fi
 if [ -n "$PAYLOAD" ]; then
   STOP_INPUT=$PAYLOAD
 else
   STOP_INPUT='{}'
 fi
-STOP_HOOK_ACTIVE=$(printf '%s' "$STOP_INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
-[ "$STOP_HOOK_ACTIVE" = true ] && exit 0
 
 # Return 0 only for a genuine seeded secondmate marker. The marker is local and
 # gitignored, so child worktrees do not inherit it. Validate its shape to avoid
@@ -72,6 +66,18 @@ for meta in "$STATE"/*.meta; do
   in_flight=$((in_flight + 1))
 done
 [ "$in_flight" -gt 0 ] || exit 0
+
+stop_hook_active_from_payload() {
+  local value
+  if command -v jq >/dev/null 2>&1; then
+    value=$(printf '%s' "$1" | jq -er 'if type == "object" and (.stop_hook_active | type) == "boolean" then .stop_hook_active else empty end' 2>/dev/null) || return 1
+    [ "$value" = true ]
+    return
+  fi
+  [[ "$1" =~ ^[[:space:]]*\{[[:space:]]*\"stop_hook_active\"[[:space:]]*:[[:space:]]*true[[:space:]]*\}[[:space:]]*$ ]]
+}
+
+stop_hook_active_from_payload "$STOP_INPUT" && exit 0
 
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -f %m "$1" 2>/dev/null; }
