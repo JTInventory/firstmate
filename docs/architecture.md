@@ -62,7 +62,7 @@ Generated ship and scout briefs carry a shared no-mistakes daemon ownership boun
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.
-For ship and scout work, `fm-spawn.sh` waits for `treehouse get` and then refuses to launch unless the pane resolves to a real git worktree root that is distinct from the project primary checkout.
+For ship and scout work, `fm-spawn.sh` waits for `treehouse get` and then refuses to launch unless the pane resolves to a real git worktree root of the target project: its physical git common dir must match the target project and its HEAD must exist in that repo. A different git root is not an acceptable isolation result; the fresh window is killed and no task meta is recorded on refusal.
 It creates each tmux window as `fm-<id>`, disables automatic and application-driven renaming, restores and verifies that title, then targets every post-create tmux operation by the immutable window ID rather than the mutable title.
 If tmux does not return a valid ID or cannot retain the canonical title, spawn cleans up a uniquely identified newly created window and aborts before it sends a pane command.
 
@@ -74,6 +74,8 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
 `fm-guard.sh` prints the repair command on the next fleet action, while `fm-bootstrap.sh` reports the same condition as a `TANGLE:` line at session start.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+
+The callable `bin/fm-turnend-guard.sh` is the script-only "no turn ends blind" backstop for a primary firstmate checkout and a genuinely marked secondmate home. It blocks with exit 2 only when child metadata is in flight and this home's watcher cannot be proved live by matching PID identity, home/path lock fields, and a fresh beacon. Linked child crew/scout worktrees are exempt because their git-dir differs from git-common-dir and they do not carry the secondmate marker. JT deliberately does not install live PreToolUse or harness hooks for this guard in Phase B; callers must invoke it explicitly.
 
 ## No-mistakes gate authority boundary
 
@@ -119,7 +121,7 @@ Seeding is transactional: if validation, cloning, initialization, or registry up
 The same project may appear in multiple secondmate homes when their scopes differ, such as issue triage versus feature development.
 Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
 `fm-send.sh` accepts a bare target only as a recorded `fm-<id>` from this home; it refuses other bare window names, which avoids ambiguous cross-home sends.
-Bare `fm-send.sh fm-<id>` requests to a live `kind=secondmate` are prefixed with the from-firstmate marker from `bin/fm-marker-lib.sh`, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
+Bare `fm-send.sh fm-<id>` requests to a live `kind=secondmate` are prefixed with the terminal-safe U+2063 from-firstmate marker from `bin/fm-marker-lib.sh`; the transform is idempotent and preserves trailing newlines, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
 Explicit `session:window` sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
 After seeding a secondmate, `fm-backlog-handoff.sh` moves each already-judged in-scope queued item block, including its indented context, from the main backlog into that secondmate home so the domain queue starts in the right place.
 Idle secondmate panes are healthy; teardown is explicit, emits no main-backlog completion reminder, and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.

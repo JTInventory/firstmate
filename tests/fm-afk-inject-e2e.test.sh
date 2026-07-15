@@ -110,6 +110,7 @@ submit_line() {
 }
 
 redraw
+: > "${LOG}.ready"
 while IFS= read -r -n 1 _ch; do
   if [ -z "$_ch" ]; then
     submit_line
@@ -127,7 +128,14 @@ chmod +x "$LOOP_SCRIPT"
 # Start the loop in the supervisor pane.
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" \
   "bash '$LOOP_SCRIPT' '$LOG_FILE'" Enter
-sleep 1  # let the loop start and settle
+# Wait for the loop itself to initialize. A fixed delay is flaky when the
+# behavior suite starts several tests in parallel.
+i=0
+while [ "$i" -lt 100 ] && [ ! -e "${LOG_FILE}.ready" ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+[ -e "${LOG_FILE}.ready" ] || fail "supervisor loop did not start"
 
 # tmux shim: redirects bare `tmux` to the private socket. Optionally swallows
 # the first Enter (file-based flag) for Scenario B.

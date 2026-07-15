@@ -38,7 +38,8 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
-#   path is a real git worktree root distinct from the primary project checkout.
+#   path is a real git worktree root of the TARGET project (same git common dir,
+#   HEAD present in the target repo) distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -695,6 +696,94 @@ cleanup_unidentified_spawn_window() {
   [ "$candidate_count" -eq 1 ] && cleanup_spawn_window "$candidate"
 }
 
+# Spawn-time isolation guard: the resolved pane path must be the root of a real
+# worktree OF THE TARGET project. A different git root is not enough: a raced
+# treehouse shell can briefly land in an unrelated repository, which would put
+# an autonomous agent in the wrong project. Compare physical git common dirs,
+# then confirm the candidate HEAD exists in the target repo.
+real_path_or_raw() {  # <path>
+  if [ -n "$1" ] && [ -d "$1" ]; then
+    (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+git_common_dir_real() {  # <dir> -> physical absolute common dir, or fail
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
+PROJ_ABS_REAL=$(real_path_or_raw "$PROJ_ABS")
+PROJ_GIT_COMMON_REAL=
+PROJ_GIT_COMMON_RESOLVED=0
+proj_git_common_real() {
+  if [ "$PROJ_GIT_COMMON_RESOLVED" -eq 0 ]; then
+    PROJ_GIT_COMMON_REAL=$(git_common_dir_real "$PROJ_ABS" || true)
+    PROJ_GIT_COMMON_RESOLVED=1
+  fi
+  printf '%s\n' "$PROJ_GIT_COMMON_REAL"
+}
+
+SPAWN_WT_FAIL=
+spawn_worktree_check() {  # <candidate>; sets SPAWN_WT_FAIL (empty = valid)
+  local candidate=$1 candidate_real worktree_root worktree_root_real
+  local project_common worktree_common worktree_head
+  SPAWN_WT_FAIL=
+  candidate_real=$(real_path_or_raw "$candidate")
+  worktree_root=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || true)
+  worktree_root_real=$(real_path_or_raw "$worktree_root")
+  if [ -z "$candidate_real" ] || [ -z "$worktree_root_real" ] \
+    || [ "$candidate_real" != "$worktree_root_real" ]; then
+    SPAWN_WT_FAIL="resolved path is not the root of a git worktree (worktree root '${worktree_root:-none}')"
+    return 0
+  fi
+  if [ "$candidate_real" = "$PROJ_ABS_REAL" ]; then
+    SPAWN_WT_FAIL="resolved path is the primary project checkout itself"
+    return 0
+  fi
+  project_common=$(proj_git_common_real)
+  if [ -z "$project_common" ]; then
+    SPAWN_WT_FAIL="cannot resolve the target project's git common dir from '$PROJ_ABS'"
+    return 0
+  fi
+  worktree_common=$(git_common_dir_real "$candidate_real" || true)
+  if [ "$worktree_common" != "$project_common" ]; then
+    SPAWN_WT_FAIL="resolved worktree belongs to a DIFFERENT repo (its git common dir is '${worktree_common:-unresolvable}', expected '$project_common')"
+    return 0
+  fi
+  worktree_head=$(git -C "$candidate_real" rev-parse HEAD 2>/dev/null || true)
+  if [ -z "$worktree_head" ] \
+    || ! git -C "$PROJ_ABS" cat-file -e "$worktree_head^{commit}" 2>/dev/null; then
+    SPAWN_WT_FAIL="worktree HEAD '${worktree_head:-unresolvable}' does not exist in the target repo"
+  fi
+}
+
+worktree_of_target_repo() {  # <candidate> -> 0 iff fully valid
+  spawn_worktree_check "$1"
+  [ -z "$SPAWN_WT_FAIL" ]
+}
+
+validate_spawn_worktree() {  # <source> <inspect-target>
+  spawn_worktree_check "$WT"
+  [ -z "$SPAWN_WT_FAIL" ] || {
+    {
+      echo "error: $1 did not yield an isolated worktree of the target project; refusing to launch. $SPAWN_WT_FAIL"
+      echo "  resolved: '$WT'"
+      echo "  expected: a linked worktree of '$PROJ_ABS' (git common dir '$(proj_git_common_real)')"
+      echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $2 before respawning. The just-created window is killed and no meta is recorded."
+    } >&2
+    cleanup_spawn_window "$WID"
+    exit 1
+  }
+}
+
 WINDOW_IDS_BEFORE=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
 WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS") || exit 1
 if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
@@ -726,43 +815,29 @@ if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$WID" 'treehouse get' Enter
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  for _ in $(seq 1 60); do
+  # Accept a pane cwd only once it passes the complete target-repo check. A
+  # transient foreign cwd is retained only for the eventual diagnostic.
+  WT_CANDIDATE=
+  for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
     p=$(tmux display-message -p -t "$WID" '#{pane_current_path}' 2>/dev/null || true)
-    if [ -n "$p" ] && [ "$p" != "$PROJ_ABS" ]; then
-      WT="$p"
-      break
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+      WT_CANDIDATE="$p"
+      if worktree_of_target_repo "$p"; then
+        WT="$p"
+        break
+      fi
     fi
     sleep 1
   done
+  if [ -z "$WT" ] && [ -n "$WT_CANDIDATE" ]; then
+    WT="$WT_CANDIDATE"
+  fi
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${FM_SPAWN_WT_WAIT_SECS:-60}s; inspect window $T" >&2
     exit 1
   fi
 
-  # Isolation guard: refuse to launch unless WT is a genuine, ISOLATED worktree -
-  # a real git worktree root, distinct from the project's primary checkout
-  # (PROJ_ABS). Firstmate is a treehouse-pooled repo of itself, so a treehouse-get
-  # misfire can leave the pane in (or in a subdir of, or a symlink to) the primary
-  # checkout; branching/committing there would tangle the primary onto a feature
-  # branch (see fm-tangle-lib.sh). The wait loop above only proves the pane left
-  # PROJ_ABS's exact path; this proves it landed in a true, separate worktree.
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=
-  if ! proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P); then
-    proj_real=
-  fi
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: treehouse get did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect window $T" >&2
-    exit 1
-  fi
+  validate_spawn_worktree "treehouse get" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

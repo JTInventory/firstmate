@@ -7,7 +7,9 @@
 # is a crewmate branching/committing in the primary instead of its own worktree,
 # stranding the primary on a feature branch. Two guards cover it:
 #   GUARD 1 (prevention) - the brief asserts isolation before its branch step, and
-#            fm-spawn refuses to launch unless the resolved worktree is isolated.
+#            fm-spawn refuses to launch unless the resolved worktree is isolated
+#            AND belongs to the target project (same git common dir - a mere
+#            "git root distinct from the primary" can be an unrelated repo).
 #   GUARD 2 (detection)  - fm-guard and fm-bootstrap alarm when the primary is on
 #            a feature branch, and stay silent on the default branch or detached.
 # These cases pin: the shared lib's branch classification, the fm-guard banner,
@@ -151,7 +153,15 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_SEQ:-}" ] && [ -s "$FM_FAKE_PANE_SEQ" ]; then
+      head -n 1 "$FM_FAKE_PANE_SEQ"
+      if [ "$(wc -l < "$FM_FAKE_PANE_SEQ")" -gt 1 ]; then
+        tail -n +2 "$FM_FAKE_PANE_SEQ" > "$FM_FAKE_PANE_SEQ.next" && mv "$FM_FAKE_PANE_SEQ.next" "$FM_FAKE_PANE_SEQ"
+      fi
+      exit 0
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message)
@@ -162,6 +172,7 @@ case "${1:-}" in
     exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|send-keys) exit 0 ;;
+  kill-window) printf 'kill-window\n' >> "${FM_TMUX_REC:-/dev/null}"; exit 0 ;;
   new-window) printf '%s\n' '@42'; exit 0 ;;
   set-window-option) exit 0 ;;
   rename-window) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE"; exit 0 ;;
@@ -180,7 +191,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_TMUX_STATE="$home/tmux-window-name" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_PANE_SEQ="${FM_FAKE_PANE_SEQ:-}" \
+    FM_SPAWN_WT_WAIT_SECS=3 FM_FAKE_TMUX_STATE="$home/tmux-window-name" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
@@ -214,8 +226,58 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
+test_spawn_wrong_project_worktree_aborts() {
+  local home proj unrelated unrelated_wt fakebin rec out status
+  home="$TMP_ROOT/spawn-wrong-project-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-target-project")
+  unrelated=$(make_repo "$TMP_ROOT/spawn-unrelated-project")
+  unrelated_wt="$TMP_ROOT/spawn-unrelated-worktree"
+  git -C "$unrelated" worktree add -q --detach "$unrelated_wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-wrong-project-fake")
+  rec="$TMP_ROOT/spawn-wrong-project-tmux.log"
+
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" wrong-project-gg7 "$proj" "$unrelated" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into an unrelated project checkout should abort"
+  assert_contains "$out" "DIFFERENT repo" "wrong-project abort lacked the repo identity reason"
+  assert_contains "$out" "spawn-target-project" "wrong-project abort lacked expected project identity"
+  assert_absent "$home/state/wrong-project-gg7.meta" "wrong-project abort must not record meta"
+  assert_grep "kill-window" "$rec" "wrong-project abort must kill the fresh window"
+
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" wrong-project-wt-hh8 "$proj" "$unrelated_wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into an unrelated project's linked worktree should abort"
+  assert_contains "$out" "DIFFERENT repo" "wrong-project worktree abort lacked the repo identity reason"
+  assert_absent "$home/state/wrong-project-wt-hh8.meta" "wrong-project worktree abort must not record meta"
+  assert_grep "kill-window" "$rec" "wrong-project worktree abort must kill the fresh window"
+  pass "fm-spawn: rejects unrelated project checkouts and linked worktrees"
+}
+
+test_spawn_transient_wrong_project_path_recovers() {
+  local home proj unrelated target_wt fakebin rec seq out status
+  home="$TMP_ROOT/spawn-transient-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-transient-target")
+  unrelated=$(make_repo "$TMP_ROOT/spawn-transient-unrelated")
+  target_wt="$TMP_ROOT/spawn-transient-wt"
+  git -C "$proj" worktree add -q --detach "$target_wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-transient-fake")
+  rec="$TMP_ROOT/spawn-transient-tmux.log"
+  seq="$TMP_ROOT/spawn-transient-pane-seq"
+  printf '%s\n%s\n' "$unrelated" "$target_wt" > "$seq"
+
+  out=$(FM_FAKE_PANE_SEQ="$seq" FM_TMUX_REC="$rec" run_spawn "$home" transient-project-ii9 "$proj" "" "$fakebin"); status=$?
+  expect_code 0 "$status" "a transient unrelated path must be ignored until the target worktree settles"
+  assert_contains "$out" "spawned transient-project-ii9" "transient-path spawn did not report success"
+  assert_grep "worktree=$target_wt" "$home/state/transient-project-ii9.meta" \
+    "spawn must record the settled target worktree"
+  pass "fm-spawn: transient unrelated cwd is not accepted before target worktree"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_wrong_project_worktree_aborts
+test_spawn_transient_wrong_project_path_recovers

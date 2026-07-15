@@ -12,8 +12,9 @@
 #   2. A send to a crewmate (kind=ship) target sends the bare text, no marker.
 #   3. An explicit session:window target (no meta) is never marked.
 #   4. The --key path never carries the marker.
-#   5. The marker is exactly the label "[fm-from-firstmate]" + ASCII 0x1f, and the
-#      fm_message_from_firstmate detector keys on that untypable sequence.
+#   5. The marker is exactly the label "[fm-from-firstmate]" + U+2063, and the
+#      fm_message_from_firstmate detector keys on that terminal-safe sequence.
+#   6. Marked payloads preserve trailing newline bytes end-to-end.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -151,16 +152,17 @@ test_key_path_is_not_marked() {
   pass "fm-send: the --key path carries no marker (no literal text is typed)"
 }
 
-test_marker_is_label_plus_unit_separator() {
-  local us hex
-  us=$(printf '\037')
-  [ "$FM_FROMFIRST_MARK" = "[fm-from-firstmate]$us" ] \
-    || fail "marker is not the expected label + 0x1f sequence"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -c)"
-  # The last byte must be ASCII unit separator 0x1f, the untypable guarantee.
+test_marker_is_label_plus_invisible_separator() {
+  local separator hex expected
+  separator=$(printf '\342\201\243')
+  expected="[fm-from-firstmate]$separator"
+  [ "$FM_FROMFIRST_MARK" = "$expected" ] \
+    || fail "marker is not the expected label + U+2063 sequence"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -c)"
+  # U+2063's UTF-8 bytes are terminal-safe text, not a C0 control byte.
   hex=$(printf '%s' "$FM_FROMFIRST_MARK" | od -An -tx1 | tr -d ' \n')
   case "$hex" in
-    *1f) : ;;
-    *) fail "marker does not end in a 0x1f byte; bytes were: $hex" ;;
+    *e281a3) : ;;
+    *) fail "marker does not end in U+2063 bytes e2 81 a3; bytes were: $hex" ;;
   esac
   # The detector keys on that exact untypable sequence.
   fm_message_from_firstmate "${FM_FROMFIRST_MARK}do the work" \
@@ -169,12 +171,44 @@ test_marker_is_label_plus_unit_separator() {
     && fail "detector must reject an unmarked message"
   # The bare label without the separator (the typable part) is NOT a match.
   fm_message_from_firstmate "[fm-from-firstmate]do the work" \
-    && fail "detector must reject the label without the 0x1f separator"
-  pass "fm-send: the marker is exactly '[fm-from-firstmate]' + ASCII 0x1f, detector keys on it"
+    && fail "detector must reject the label without the U+2063 separator"
+  pass "fm-send: the marker is exactly '[fm-from-firstmate]' + U+2063, detector keys on it"
+}
+
+test_secondmate_marked_payload_preserves_trailing_newlines() {
+  local dir fb log home payload expected
+  dir="$TMP_ROOT/sm-trailing"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-trailing)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  payload=$'audit the build\n\n'
+  expected="$dir/expected.log"
+  printf '%s' "${FM_FROMFIRST_MARK}${payload}" > "$expected"
+  run_send "$fb" "$home" "$log" "fm-domain" "$payload"
+  cmp -s "$expected" "$log" \
+    || fail "secondmate send stripped trailing newlines or changed marker bytes"$'\n'"expected=$(od -An -tx1 "$expected")"$'\n'"got=$(od -An -tx1 "$log")"
+  pass "fm-send: marked secondmate payload preserves trailing newline bytes"
+}
+
+test_marker_transform_is_idempotent_and_newline_safe() {
+  local payload marked transformed expected
+  payload=$'work next\n\n'
+  fm_message_mark_from_firstmate "$payload" transformed \
+    || fail "marker transform rejected an unmarked payload"
+  expected="${FM_FROMFIRST_MARK}${payload}"
+  [ "$transformed" = "$expected" ] \
+    || fail "marker transform changed an unmarked payload"
+  fm_message_mark_from_firstmate "$transformed" marked \
+    || fail "marker transform rejected an already marked payload"
+  [ "$marked" = "$expected" ] \
+    || fail "marker transform double-prefixed an already marked payload"
+  pass "fm-marker-lib: marker transformation is idempotent and newline-safe"
 }
 
 test_secondmate_target_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked
-test_marker_is_label_plus_unit_separator
+test_marker_is_label_plus_invisible_separator
+test_secondmate_marked_payload_preserves_trailing_newlines
+test_marker_transform_is_idempotent_and_newline_safe
