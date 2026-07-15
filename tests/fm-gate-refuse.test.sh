@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Behavior tests for the no-mistakes gate-agent fleet-lifecycle refusal.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+unset FM_GATE_REFUSE_BYPASS
+
+GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
+TMP_ROOT=$(fm_test_tmproot fm-gate-refuse)
+
+make_normal_repo() {
+  local dir=$1
+  git init -q -b main "$dir"
+  git -C "$dir" -c user.name=tests -c user.email=tests@example.invalid commit -qm init --allow-empty
+  printf '%s\n' "$dir"
+}
+
+make_gate_worktree() {
+  local root=$1 seed bare wt
+  seed="$root/seed"
+  bare="$root/.no-mistakes/repos/fixture.git"
+  wt="$root/.no-mistakes/worktrees/fixture/run"
+  mkdir -p "$root/.no-mistakes/repos"
+  git init -q -b main "$seed"
+  git -C "$seed" -c user.name=tests -c user.email=tests@example.invalid commit -qm init --allow-empty
+  git clone -q --bare "$seed" "$bare"
+  mkdir -p "$(dirname "$wt")"
+  git --git-dir="$bare" worktree add --detach -q "$wt" main
+  printf '%s\n' "$wt"
+}
+
+run_helper() {
+  local cwd=$1 marker=${2:-unset}
+  (
+    cd "$cwd" || exit 1
+    unset NO_MISTAKES_GATE FM_GATE_REFUSE_BYPASS
+    case "$marker" in
+      set) export NO_MISTAKES_GATE=1 ;;
+      empty) export NO_MISTAKES_GATE= ;;
+    esac
+    # shellcheck source=bin/fm-gate-refuse-lib.sh
+    . "$GATE_LIB"
+    fm_refuse_if_gate_agent
+  ) 2>&1
+}
+
+run_entrypoint() {
+  local script=$1 cwd=$2 marker=$3 rc out
+  set +e
+  if [ "$marker" = unset ]; then
+    out=$(cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      bash "$script" 2>&1)
+  else
+    out=$(cd "$cwd" && env -u FM_GATE_REFUSE_BYPASS NO_MISTAKES_GATE="$marker" \
+      bash "$script" 2>&1)
+  fi
+  rc=$?
+  set -e
+  printf '%s\n%s\n' "$rc" "$out"
+}
+
+NORMAL_CWD=$(make_normal_repo "$TMP_ROOT/normal")
+GATE_CWD=$(make_gate_worktree "$TMP_ROOT/gate")
+
+test_helper_signals() {
+  local out rc
+  out=$(run_helper "$NORMAL_CWD" set); rc=$?
+  expect_code 3 "$rc" "set marker must refuse"
+  assert_contains "$out" 'NO_MISTAKES_GATE set' "set marker message missing"
+
+  out=$(run_helper "$NORMAL_CWD" empty); rc=$?
+  expect_code 3 "$rc" "empty marker must refuse"
+  assert_contains "$out" 'NO_MISTAKES_GATE set' "empty marker message missing"
+
+  out=$(run_helper "$GATE_CWD"); rc=$?
+  expect_code 3 "$rc" "gate worktree must refuse with marker unset"
+  assert_contains "$out" 'no-mistakes gate worktree' "gate path backstop message missing"
+
+  out=$(run_helper "$NORMAL_CWD"); rc=$?
+  expect_code 0 "$rc" "normal worktree must be unaffected"
+  [ -z "$out" ] || fail "normal worktree printed a refusal: $out"
+  pass "gate refusal helper covers marker, empty marker, path backstop, and normal session"
+}
+
+test_entrypoints_refuse() {
+  local script out rc first
+  for script in "$ROOT/bin/fm-spawn.sh" "$ROOT/bin/fm-send.sh" "$ROOT/bin/fm-teardown.sh"; do
+    out=$(run_entrypoint "$script" "$NORMAL_CWD" set)
+    first=${out%%$'\n'*}
+    rc=$first
+    expect_code 3 "$rc" "$(basename "$script") must refuse the gate marker"
+    assert_contains "$out" 'NO_MISTAKES_GATE set' "$(basename "$script") marker refusal missing"
+
+    out=$(run_entrypoint "$script" "$GATE_CWD" unset)
+    first=${out%%$'\n'*}
+    rc=$first
+    expect_code 3 "$rc" "$(basename "$script") must refuse the gate path backstop"
+    assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") path refusal missing"
+  done
+  pass "spawn, send, and teardown refuse both gate signals before lifecycle work"
+}
+
+test_tracked_contracts() {
+  assert_grep 'disable_project_settings: true' "$ROOT/.no-mistakes.yaml" \
+    "tracked no-mistakes config must disable gate project settings"
+  for script in fm-spawn.sh fm-send.sh fm-teardown.sh; do
+    assert_grep 'fm-gate-refuse-lib.sh' "$ROOT/bin/$script" \
+      "$script must source the shared gate refusal helper"
+    assert_grep 'fm_refuse_if_gate_agent' "$ROOT/bin/$script" \
+      "$script must call the shared gate refusal helper"
+  done
+  pass "tracked gate-refusal wiring and trusted no-mistakes config are present"
+}
+
+test_helper_signals
+test_entrypoints_refuse
+test_tracked_contracts
+echo '# all fm-gate-refuse tests passed'

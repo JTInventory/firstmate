@@ -1,5 +1,9 @@
 # Per-repo no-mistakes overrides.
 
+# Gate agents must not load firstmate's project-level captain instructions. The
+# lifecycle entrypoints also refuse the stamped gate marker and gate-repo path.
+disable_project_settings: true
+
 # Run the firstmate PR-target guard and bash behavior suite through the local
 # runner instead of delegating to an agent (an agent-driven test step has
 # crashed the daemon). The runner keeps every test and failure gate intact

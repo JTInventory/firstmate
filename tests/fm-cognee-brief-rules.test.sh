@@ -31,6 +31,18 @@ assert_cognee_rules() {
     "brief does not forbid memory-authorized external actions"
 }
 
+assert_no_mistakes_daemon_rule() {
+  local brief=$1
+  # shellcheck disable=SC2016 # Backticks are literal expected brief text.
+  assert_grep 'Never stop, restart, or update the shared `no-mistakes` daemon' "$brief" \
+    "brief must forbid lifecycle changes to the shared no-mistakes daemon"
+  assert_grep 'every lane/home' "$brief" \
+    "brief must explain that the no-mistakes daemon is shared"
+  # shellcheck disable=SC2016 # Backticks are literal expected brief text.
+  assert_grep 'append `blocked: {the daemon error}` and stop' "$brief" \
+    "brief must route daemon errors to blocked"
+}
+
 test_ship_brief_has_cognee_rules() {
   local home brief
   home="$TMP_ROOT/ship-home"
@@ -42,6 +54,7 @@ test_ship_brief_has_cognee_rules() {
 
   assert_present "$brief" "ship brief was not scaffolded"
   assert_cognee_rules "$brief"
+  assert_no_mistakes_daemon_rule "$brief"
   pass "fm-brief: ship briefs include Cognee attachment rules"
 }
 
@@ -56,6 +69,7 @@ test_scout_brief_has_cognee_rules() {
 
   assert_present "$brief" "scout brief was not scaffolded"
   assert_cognee_rules "$brief"
+  assert_no_mistakes_daemon_rule "$brief"
   pass "fm-brief: scout briefs include Cognee attachment rules"
 }
 

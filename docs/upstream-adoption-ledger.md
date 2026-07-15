@@ -39,6 +39,15 @@ All changes were first characterized in the clean clone and delivered only to th
 4. Runtime proof comes from backlog, state files, tmux, Treehouse, watcher, GitHub, and read-only supervisor output.
 5. Deferred and rejected capabilities must remain unavailable in the supported tmux/Codex runtime.
 
+## Phase A safety train (U1-U5)
+
+| Upstream owner | Capability | Decision | JT adaptation and boundary | JT PR |
+| --- | --- | --- | --- | --- |
+| #518 | No-mistakes gate lifecycle refusal | Adapt | Add a shared fail-closed marker/path guard to spawn, send, and teardown; keep JT identity and use a fixture-only test bypass. | Pending this branch |
+| #267 | Shared no-mistakes daemon ownership in briefs | Adapt | Add the rule to ship and scout scaffolds; daemon lifecycle remains firstmate-owned. | Pending this branch |
+| #453 | Orphaned packed-refs lock recovery | Adapt | Retry only the packed-refs lock signature, remove only a provably stale lock, and leave live/uncertain/non-lock failures untouched. | Pending this branch |
+| #527 | Grok reasoning-effort ceiling | Adapt | Match installed Grok 0.2.101: low/medium/high only; retain requested xhigh/max in metadata but omit invalid launch flags. Codex xhigh remains unchanged. | Pending this branch |
+
 ## Phase II closeout (2026-07-13)
 
 The selective transition is complete for the accepted reliability and operator-truth families.
