@@ -25,11 +25,6 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
-# Firstmate's own behavior suite runs inside the no-mistakes gate worktree.
-# Keep those fixture subprocesses usable while the dedicated refusal suite
-# explicitly unsets this bypass and tests the real boundary.
-export FM_GATE_REFUSE_BYPASS=1
-
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

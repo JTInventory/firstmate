@@ -4,7 +4,6 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-unset FM_GATE_REFUSE_BYPASS
 
 GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-gate-refuse)
@@ -34,7 +33,7 @@ run_helper() {
   local cwd=$1 marker=${2:-unset}
   (
     cd "$cwd" || exit 1
-    unset NO_MISTAKES_GATE FM_GATE_REFUSE_BYPASS
+    unset NO_MISTAKES_GATE
     case "$marker" in
       set) export NO_MISTAKES_GATE=1 ;;
       empty) export NO_MISTAKES_GATE= ;;
@@ -49,10 +48,10 @@ run_entrypoint() {
   local script=$1 cwd=$2 marker=$3 rc out
   set +e
   if [ "$marker" = unset ]; then
-    out=$(cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+    out=$(cd "$cwd" && env -u NO_MISTAKES_GATE \
       bash "$script" 2>&1)
   else
-    out=$(cd "$cwd" && env -u FM_GATE_REFUSE_BYPASS NO_MISTAKES_GATE="$marker" \
+    out=$(cd "$cwd" && env NO_MISTAKES_GATE="$marker" \
       bash "$script" 2>&1)
   fi
   rc=$?
@@ -110,6 +109,9 @@ test_tracked_contracts() {
     assert_grep 'fm_refuse_if_gate_agent' "$ROOT/bin/$script" \
       "$script must call the shared gate refusal helper"
   done
+  if grep -F 'FM_GATE_REFUSE_BYPASS' "$ROOT/bin/fm-gate-refuse-lib.sh" >/dev/null; then
+    fail "gate refusal library must not expose a bypass variable"
+  fi
   pass "tracked gate-refusal wiring and trusted no-mistakes config are present"
 }
 

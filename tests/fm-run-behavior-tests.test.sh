@@ -58,6 +58,10 @@ printf 'fixture pass\n'
 SH
     chmod +x "$fixture/tests/$test_name.test.sh"
   done
+  git -C "$fixture" init -q -b main
+  git -C "$fixture" add .
+  git -C "$fixture" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm fixture
   printf '%s\n' "$fixture"
 }
 

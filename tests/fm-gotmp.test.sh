@@ -11,11 +11,6 @@
 # the contract lines) and behaviorally (the mkdir + meta-write pattern it uses).
 set -u
 
-# This standalone fixture does not source tests/lib.sh, but it invokes the real
-# teardown script from fake homes while the gate may run the suite in a gate
-# worktree. The dedicated gate-refusal test strips this bypass.
-export FM_GATE_REFUSE_BYPASS=1
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"

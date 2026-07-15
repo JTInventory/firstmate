@@ -10,15 +10,9 @@
 # The second signal is the path-based backstop when an agent tampers with the
 # environment marker. Normal primary and treehouse worktrees match neither case.
 #
-# Firstmate's own tests run from a gate worktree during no-mistakes validation.
-# tests/lib.sh exports FM_GATE_REFUSE_BYPASS=1 for those hermetic fixtures; the
-# dedicated refusal test removes it so the real boundary remains covered.
-
 FM_GATE_REFUSE_EXIT=3
 
 fm_refuse_if_gate_agent() {
-  [ "${FM_GATE_REFUSE_BYPASS:-}" = 1 ] && return 0
-
   if [ "${NO_MISTAKES_GATE+x}" = x ]; then
     echo "error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)" >&2
     exit "$FM_GATE_REFUSE_EXIT"

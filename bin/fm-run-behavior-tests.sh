@@ -67,11 +67,17 @@ suite_tmp=$(mktemp -d "$base_tmp/fm-behavior-tests.XXXXXX") || {
   printf 'FAIL: could not create an isolated behavior-test root\n' >&2
   exit 1
 }
+test_root="$suite_tmp/repo"
+if ! git clone --quiet --no-hardlinks "$ROOT" "$test_root"; then
+  printf 'FAIL: could not create a normal behavior-test clone\n' >&2
+  exit 1
+fi
 cleanup() {
   rm -rf -- "$suite_tmp"
 }
 trap cleanup EXIT
 
+mapfile -t tests < <(cd "$test_root" && compgen -G 'tests/*.test.sh' | sort)
 total=${#tests[@]}
 active_jobs=$jobs
 [ "$active_jobs" -le "$total" ] || active_jobs=$total
@@ -80,12 +86,13 @@ printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_j
 run_one() {
   local test_path=$1 job_root=$2 log_path=$3
   (
-    cd "$ROOT" || exit 1
+    cd "$test_root" || exit 1
     # A Firstmate supervisor may export its operational home into the shell that
     # launches this gate. Do not let tests share that live state; fixture tests
     # that need a home set their own FM_* overrides explicitly.
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
       FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+    unset NO_MISTAKES_GATE
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
     bash "$test_path"
