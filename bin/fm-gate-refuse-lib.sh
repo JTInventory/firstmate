@@ -15,6 +15,10 @@ FM_GATE_REFUSE_EXIT=3
 
 fm_gate_common_dir() {
   local dir=$1 common
+  [ -n "$dir" ] || return 0
+  while [ ! -d "$dir" ] && [ "$dir" != "/" ]; do
+    dir=$(dirname "$dir")
+  done
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   [ -n "$common" ] || return 0
   (cd "$common" 2>/dev/null && pwd -P) || true
@@ -38,7 +42,9 @@ fm_refuse_if_gate_agent() {
 
   local candidate common
   for candidate in "$(fm_gate_source_dir)" "$PWD" \
-    "${FM_ROOT_OVERRIDE:-}" "${FM_HOME:-}"; do
+    "${FM_ROOT_OVERRIDE:-}" "${FM_HOME:-}" \
+    "${FM_PROJECTS_OVERRIDE:-}" "${FM_STATE_OVERRIDE:-}" \
+    "${FM_DATA_OVERRIDE:-}" "${FM_CONFIG_OVERRIDE:-}"; do
     [ -n "$candidate" ] || continue
     common=$(fm_gate_common_dir "$candidate")
     case "$common" in

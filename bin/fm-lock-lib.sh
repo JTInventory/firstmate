@@ -100,19 +100,16 @@ fm_lock_remove_if_provably_stale() {
   fi
 
   if [ -e "$lock" ] || [ -L "$lock" ]; then
-    rm -f "$quarantine" "$identity" || return 1
+    rm -f "$identity" || true
+    fm_lock_log "replacement Git lock appeared; retaining recovery quarantine $quarantine"
     return 1
   fi
   if ln "$quarantine" "$lock" 2>/dev/null; then
     rm -f "$quarantine" "$identity" || return 1
     return 1
   fi
-  if [ -e "$lock" ] || [ -L "$lock" ]; then
-    rm -f "$quarantine" "$identity" || return 1
-    return 1
-  fi
 
-  fm_lock_log "could not restore a replaced Git lock from recovery quarantine"
+  fm_lock_log "could not restore a replaced Git lock from recovery quarantine; retaining $quarantine"
   rm -f "$identity" || true
   return 1
 }

@@ -140,9 +140,14 @@ make_racing_mv() {
 real_mv='$real_mv'
 if [ "\$#" -eq 2 ] && [[ "\$1" == */packed-refs.lock ]]; then
   source="\$1"
+  target="\$2"
   replacement="\$source.race"
   printf '%s\n' replacement > "\$replacement"
   "\$real_mv" -f "\$replacement" "\$source"
+  "\$real_mv" "\$source" "\$target"
+  printf '%s\n' "\$target" > "\$source.race-target"
+  printf '%s\n' live > "\$source"
+  exit 0
 fi
 exec "\$real_mv" "\$@"
 SH
@@ -256,7 +261,7 @@ test_linked_worktree_packed_refs_lock_recovers() {
 }
 
 test_racing_packed_refs_lock_is_left_in_place() {
-  local home clone fakebin out err lock
+  local home clone fakebin out err lock quarantine
   home=$(new_home)
   clone=$(build_packed_lock_case "$home" lock-race)
   fakebin="$home/fakebin"; make_lsof_none "$fakebin"; make_racing_mv "$fakebin"
@@ -271,9 +276,13 @@ test_racing_packed_refs_lock_is_left_in_place() {
     "racing packed-refs lock did not remain blocked"
   assert_grep 'atomically quarantine' "$err" \
     "racing packed-refs lock refusal was not explained"
-  assert_contains "$(cat "$lock")" replacement \
-    "replacement packed-refs lock was removed by stale recovery"
-  pass "fleet-sync leaves a replacement packed-refs lock after the atomic race check"
+  assert_contains "$(cat "$lock")" live \
+    "new live packed-refs lock was removed by stale recovery"
+  quarantine=$(cat "$lock.race-target")
+  [ -e "$quarantine" ] || fail "replacement packed-refs lock quarantine was deleted"
+  assert_contains "$(cat "$quarantine")" replacement \
+    "replacement packed-refs lock contents were not retained"
+  pass "fleet-sync retains a replacement packed-refs lock after the atomic race check"
 }
 
 test_non_signature_fetch_failure_is_not_retried() {

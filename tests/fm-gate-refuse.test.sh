@@ -40,7 +40,8 @@ run_helper() {
   lib=${3:-$cwd/bin/fm-gate-refuse-lib.sh}
   (
     cd "$cwd" || exit 1
-    unset NO_MISTAKES_GATE FM_ROOT_OVERRIDE FM_HOME
+    unset NO_MISTAKES_GATE FM_ROOT_OVERRIDE FM_HOME FM_PROJECTS_OVERRIDE \
+      FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE
     case "$marker" in
       set) export NO_MISTAKES_GATE=1 ;;
       empty) export NO_MISTAKES_GATE= ;;
@@ -51,25 +52,17 @@ run_helper() {
   ) 2>&1
 }
 
-run_helper_with_overrides() {
-  local cwd root_override home_override lib
+run_helper_with_override() {
+  local cwd name path lib
   cwd=$1
-  root_override=$2
-  home_override=$3
+  name=$2
+  path=$3
   lib=${4:-$cwd/bin/fm-gate-refuse-lib.sh}
   (
     cd "$cwd" || exit 1
-    unset NO_MISTAKES_GATE
-    if [ -n "$root_override" ]; then
-      export FM_ROOT_OVERRIDE="$root_override"
-    else
-      unset FM_ROOT_OVERRIDE
-    fi
-    if [ -n "$home_override" ]; then
-      export FM_HOME="$home_override"
-    else
-      unset FM_HOME
-    fi
+    unset NO_MISTAKES_GATE FM_ROOT_OVERRIDE FM_HOME FM_PROJECTS_OVERRIDE \
+      FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE
+    export "$name=$path"
     # shellcheck source=bin/fm-gate-refuse-lib.sh
     . "$lib"
     fm_refuse_if_gate_agent
@@ -81,9 +74,13 @@ run_entrypoint() {
   set +e
   if [ "$marker" = unset ]; then
     out=$(cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_ROOT_OVERRIDE -u FM_HOME \
+      -u FM_PROJECTS_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+      -u FM_CONFIG_OVERRIDE \
       bash "$script" 2>&1)
   else
-    out=$(cd "$cwd" && env NO_MISTAKES_GATE="$marker" \
+    out=$(cd "$cwd" && env -u FM_ROOT_OVERRIDE -u FM_HOME \
+      -u FM_PROJECTS_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+      -u FM_CONFIG_OVERRIDE NO_MISTAKES_GATE="$marker" \
       bash "$script" 2>&1)
   fi
   rc=$?
@@ -91,11 +88,12 @@ run_entrypoint() {
   printf '%s\n%s\n' "$rc" "$out"
 }
 
-run_entrypoint_with_overrides() {
-  local script=$1 cwd=$2 root_override=$3 home_override=$4 rc out
+run_entrypoint_with_override() {
+  local script=$1 cwd=$2 name=$3 path=$4 rc out
   set +e
-  out=$(cd "$cwd" && env -u NO_MISTAKES_GATE \
-    FM_ROOT_OVERRIDE="$root_override" FM_HOME="$home_override" \
+  out=$(cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_ROOT_OVERRIDE -u FM_HOME \
+    -u FM_PROJECTS_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+    -u FM_CONFIG_OVERRIDE "$name=$path" \
     bash "$script" 2>&1)
   rc=$?
   set -e
@@ -123,13 +121,12 @@ test_helper_signals() {
   expect_code 3 "$rc" "gate library must refuse when called from outside the checkout"
   assert_contains "$out" 'no-mistakes gate worktree' "gate library source-path refusal missing"
 
-  out=$(run_helper_with_overrides "$NORMAL_CWD" "$GATE_CWD" ""); rc=$?
-  expect_code 3 "$rc" "gate root override must refuse with marker unset"
-  assert_contains "$out" 'no-mistakes gate worktree' "gate root override refusal missing"
-
-  out=$(run_helper_with_overrides "$NORMAL_CWD" "" "$GATE_CWD"); rc=$?
-  expect_code 3 "$rc" "gate home override must refuse with marker unset"
-  assert_contains "$out" 'no-mistakes gate worktree' "gate home override refusal missing"
+  for override in FM_ROOT_OVERRIDE FM_HOME FM_PROJECTS_OVERRIDE FM_STATE_OVERRIDE \
+    FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE; do
+    out=$(run_helper_with_override "$NORMAL_CWD" "$override" "$GATE_CWD/nonexistent"); rc=$?
+    expect_code 3 "$rc" "$override must refuse with marker unset"
+    assert_contains "$out" 'no-mistakes gate worktree' "$override refusal missing"
+  done
 
   out=$(run_helper "$NORMAL_CWD"); rc=$?
   expect_code 0 "$rc" "normal worktree must be unaffected"
@@ -158,17 +155,16 @@ test_entrypoints_refuse() {
     expect_code 3 "$rc" "$(basename "$script") must refuse when called from outside the checkout"
     assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") source-path refusal missing"
 
-    out=$(run_entrypoint_with_overrides "$script" "$NORMAL_CWD" "$GATE_CWD" "")
-    first=${out%%$'\n'*}
-    rc=$first
-    expect_code 3 "$rc" "$(basename "$script") must refuse a gate root override"
-    assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") root override refusal missing"
-
-    out=$(run_entrypoint_with_overrides "$script" "$NORMAL_CWD" "" "$GATE_CWD")
-    first=${out%%$'\n'*}
-    rc=$first
-    expect_code 3 "$rc" "$(basename "$script") must refuse a gate home override"
-    assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") home override refusal missing"
+    for override in FM_ROOT_OVERRIDE FM_HOME FM_PROJECTS_OVERRIDE FM_STATE_OVERRIDE \
+      FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE; do
+      out=$(run_entrypoint_with_override "$script" "$NORMAL_CWD" "$override" \
+        "$GATE_CWD/nonexistent")
+      first=${out%%$'\n'*}
+      rc=$first
+      expect_code 3 "$rc" "$(basename "$script") must refuse $override"
+      assert_contains "$out" 'no-mistakes gate worktree' \
+        "$(basename "$script") $override refusal missing"
+    done
   done
   pass "spawn, send, and teardown refuse both gate signals before lifecycle work"
 }
