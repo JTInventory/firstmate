@@ -104,7 +104,7 @@ json_parse_string() {
           '"'|'/'|b|f|n|r|t|\\) json_pos=$((json_pos + 1)) ;;
           u)
             json_pos=$((json_pos + 1))
-            for i in 1 2 3 4; do
+            for ((i = 0; i < 4; i++)); do
               [ "$json_pos" -lt "$json_len" ] || return 1
               [[ "${json_input:json_pos:1}" =~ ^[0-9A-Fa-f]$ ]] || return 1
               json_pos=$((json_pos + 1))
