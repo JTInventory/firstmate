@@ -23,10 +23,15 @@ GRACE="${FM_TURNEND_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}"
 # Harness stop payloads are JSON. A direct CLI invocation has no stdin and is
 # treated as the first stop attempt.
 PAYLOAD=
+PAYLOAD_HAS_NUL=false
 if [ ! -t 0 ]; then
-  PAYLOAD=$(cat 2>/dev/null || true)
+  if IFS= read -r -d '' PAYLOAD; then
+    PAYLOAD_HAS_NUL=true
+  fi
 fi
-if [ -n "$PAYLOAD" ]; then
+if [ "$PAYLOAD_HAS_NUL" = true ]; then
+  STOP_INPUT=
+elif [ -n "$PAYLOAD" ]; then
   STOP_INPUT=$PAYLOAD
 else
   STOP_INPUT='{}'
@@ -267,7 +272,9 @@ stop_hook_active_from_payload() {
   stop_hook_active_without_jq "$1"
 }
 
-stop_hook_active_from_payload "$STOP_INPUT" && exit 0
+if [ "$PAYLOAD_HAS_NUL" = false ] && stop_hook_active_from_payload "$STOP_INPUT"; then
+  exit 0
+fi
 
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -f %m "$1" 2>/dev/null; }

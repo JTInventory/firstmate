@@ -58,6 +58,14 @@ run_guard_with_path() {
   return "$status"
 }
 
+run_guard_with_path_nul() {
+  local path=$1 home=$2 payload=$3 status=0
+  printf '%s\0' "$payload" | \
+    PATH="$path" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$GUARD" 2>&1 || status=$?
+  return "$status"
+}
+
 test_main_primary_blocks_with_child_in_flight() {
   local home out status
   home=$(make_primary_repo "$TMP_ROOT/main-primary")
@@ -174,6 +182,9 @@ test_missing_jq_rejects_invalid_stop_payload() {
   out=$(run_guard_with_path "$path" "$home" '[{"stop_hook_active":true}]'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject non-object stop payload"
   assert_contains "$out" "TURN WOULD END BLIND" "non-object fallback payload guard lacked its alarm banner"
+  out=$(run_guard_with_path_nul "$path" "$home" '{"stop_hook_active":true}'); status=$?
+  expect_code 2 "$status" "missing jq fallback must reject NUL-terminated stop payload"
+  assert_contains "$out" "TURN WOULD END BLIND" "NUL-terminated fallback payload guard lacked its alarm banner"
   out=$(run_guard_with_path "$path" "$home" '{"stop_hook_act\u0069ve":false,"stop_hook_active":true}'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject escaped stop_hook_active keys"
   assert_contains "$out" "TURN WOULD END BLIND" "escaped duplicate-key fallback guard lacked its alarm banner"
