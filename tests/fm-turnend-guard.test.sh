@@ -36,7 +36,7 @@ make_secondmate_linked_home() {
 make_path_without_jq() {
   local dir=$1 tool
   mkdir -p "$dir"
-  for tool in bash cat date dirname git iconv mkdir ps stat uname; do
+  for tool in bash cat date dirname git mkdir ps stat uname; do
     ln -s "$(command -v "$tool")" "$dir/$tool"
   done
   printf '%s\n' "$dir"

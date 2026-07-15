@@ -259,9 +259,83 @@ stop_hook_active_without_jq() {
   [ "$json_stop_valid" = true ] && [ "$json_stop_active" = true ]
 }
 
+json_utf8_continuation() {
+  [ "$1" -ge 128 ] && [ "$1" -le 191 ]
+}
+
 json_payload_is_valid_utf8() {
-  command -v iconv >/dev/null 2>&1 || return 1
-  printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+  local LC_ALL=C input=$1 pos=0 len byte next next2 next3
+  len=${#input}
+  while [ "$pos" -lt "$len" ]; do
+    printf -v byte '%d' "'${input:pos:1}"
+    case "$byte" in
+      [0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])
+        pos=$((pos + 1))
+        ;;
+      19[4-9]|2[0-1][0-9]|22[0-3])
+        [ $((pos + 1)) -lt "$len" ] || return 1
+        printf -v next '%d' "'${input:pos+1:1}"
+        json_utf8_continuation "$next" || return 1
+        pos=$((pos + 2))
+        ;;
+      224)
+        [ $((pos + 2)) -lt "$len" ] || return 1
+        printf -v next '%d' "'${input:pos+1:1}"
+        printf -v next2 '%d' "'${input:pos+2:1}"
+        [ "$next" -ge 160 ] && [ "$next" -le 191 ] || return 1
+        json_utf8_continuation "$next2" || return 1
+        pos=$((pos + 3))
+        ;;
+      237)
+        [ $((pos + 2)) -lt "$len" ] || return 1
+        printf -v next '%d' "'${input:pos+1:1}"
+        printf -v next2 '%d' "'${input:pos+2:1}"
+        [ "$next" -ge 128 ] && [ "$next" -le 159 ] || return 1
+        json_utf8_continuation "$next2" || return 1
+        pos=$((pos + 3))
+        ;;
+      225|226|227|228|229|230|231|232|233|234|235|236|238|239)
+        [ $((pos + 2)) -lt "$len" ] || return 1
+        printf -v next '%d' "'${input:pos+1:1}"
+        printf -v next2 '%d' "'${input:pos+2:1}"
+        json_utf8_continuation "$next" || return 1
+        json_utf8_continuation "$next2" || return 1
+        pos=$((pos + 3))
+        ;;
+      240)
+        [ $((pos + 3)) -lt "$len" ] || return 1
+        printf -v next '%d' "'${input:pos+1:1}"
+        printf -v next2 '%d' "'${input:pos+2:1}"
+        printf -v next3 '%d' "'${input:pos+3:1}"
+        [ "$next" -ge 144 ] && [ "$next" -le 191 ] || return 1
+        json_utf8_continuation "$next2" || return 1
+        json_utf8_continuation "$next3" || return 1
+        pos=$((pos + 4))
+        ;;
+      241|242|243)
+        [ $((pos + 3)) -lt "$len" ] || return 1
+        printf -v next '%d' "'${input:pos+1:1}"
+        printf -v next2 '%d' "'${input:pos+2:1}"
+        printf -v next3 '%d' "'${input:pos+3:1}"
+        json_utf8_continuation "$next" || return 1
+        json_utf8_continuation "$next2" || return 1
+        json_utf8_continuation "$next3" || return 1
+        pos=$((pos + 4))
+        ;;
+      244)
+        [ $((pos + 3)) -lt "$len" ] || return 1
+        printf -v next '%d' "'${input:pos+1:1}"
+        printf -v next2 '%d' "'${input:pos+2:1}"
+        printf -v next3 '%d' "'${input:pos+3:1}"
+        [ "$next" -ge 128 ] && [ "$next" -le 143 ] || return 1
+        json_utf8_continuation "$next2" || return 1
+        json_utf8_continuation "$next3" || return 1
+        pos=$((pos + 4))
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
 }
 
 stop_hook_active_from_payload() {
