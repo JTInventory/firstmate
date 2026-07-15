@@ -252,7 +252,7 @@ stop_hook_active_without_jq() {
 stop_hook_active_from_payload() {
   local value
   if command -v jq >/dev/null 2>&1; then
-    value=$(printf '%s' "$1" | jq -er 'if type == "object" and (.stop_hook_active | type) == "boolean" then .stop_hook_active else empty end' 2>/dev/null) || return 1
+    value=$(printf '%s' "$1" | jq -e -s 'if length == 1 and (.[0] | type == "object") and (.[0].stop_hook_active | type == "boolean") then .[0].stop_hook_active else empty end' 2>/dev/null) || return 1
     [ "$value" = true ]
     return
   fi

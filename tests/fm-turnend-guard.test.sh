@@ -127,6 +127,11 @@ test_malformed_stop_payload_blocks_primary() {
   out=$(run_guard "$home" '{"stop_hook_active":'); status=$?
   expect_code 2 "$status" "malformed stop payload must not bypass an in-flight primary guard"
   assert_contains "$out" "TURN WOULD END BLIND" "malformed payload guard lacked its alarm banner"
+  if command -v jq >/dev/null 2>&1; then
+    out=$(run_guard "$home" '{}{"stop_hook_active":true}'); status=$?
+    expect_code 2 "$status" "jq path must reject multi-document stop payload"
+    assert_contains "$out" "TURN WOULD END BLIND" "multi-document payload guard lacked its alarm banner"
+  fi
   pass "fm-turnend-guard: malformed stop payload fails closed for an unproved primary"
 }
 
