@@ -78,12 +78,12 @@ shift
 # secondmate then routes its reply via the status path (see fm-marker-lib.sh).
 # An explicit session:window target (the escape hatch for windows outside this
 # home) and any crewmate/scout target are left unmarked, and so is the --key path.
-MARK_PREFIX=""
+MARK_FROM_FIRSTMATE=0
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ] && grep -q '^kind=secondmate$' "$meta" 2>/dev/null; then
-      MARK_PREFIX="$FM_FROMFIRST_MARK"
+      MARK_FROM_FIRSTMATE=1
     fi
     ;;
 esac
@@ -105,6 +105,10 @@ esac
 if [ "${1:-}" = "--key" ]; then
   tmux send-keys -t "$T" "$2"
 else
+  MESSAGE=$*
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+    fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+  fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
   # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
@@ -122,7 +126,7 @@ else
       if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
       ;;
     *)
-      if [ -n "$MARK_PREFIX" ] && [ "$TARGET_HARNESS" = codex ]; then
+      if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$TARGET_HARNESS" = codex ]; then
         settle=1.2
       else
         settle=0.3
@@ -133,8 +137,8 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  verdict=$(fm_tmux_submit_core "$T" "$MARK_PREFIX$*" "$retries" "$sleep_s" "$settle")
-  if [ "$verdict" = pending ] && [ -n "$MARK_PREFIX" ] && [ "$TARGET_HARNESS" = codex ]; then
+  verdict=$(fm_tmux_submit_core "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle")
+  if [ "$verdict" = pending ] && [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$TARGET_HARNESS" = codex ]; then
     # Live Codex secondmate panes have accepted a later manual Enter after the
     # normal retry loop left the marked request in the composer. Do exactly that
     # once, and only on the marked Codex secondmate path.
