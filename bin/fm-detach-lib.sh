@@ -33,10 +33,12 @@ fm_detach_spawn() {
   pid_start=$(fm_pid_start "$pid" 2>/dev/null || true)
   if [ "$spawn_status" -ne 0 ]; then
     fm_detach_cleanup_unconfirmed "$pid" "$pid_start" "$command" "$detach_token" "$marker" || true
+    printf '%s\n' "$pid"
     return "$spawn_status"
   fi
   if ! fm_detach_wait_for_exec "$pid" "$command" "$marker"; then
     fm_detach_cleanup_unconfirmed "$pid" "$pid_start" "$command" "$detach_token" "$marker" || true
+    printf '%s\n' "$pid"
     return 1
   fi
   printf '%s\n' "$pid"

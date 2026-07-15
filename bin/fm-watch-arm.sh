@@ -315,8 +315,9 @@ cleanup_detached_child() {
   # This is only the bounded startup-confirmation failure path. HUP/TERM traps
   # intentionally do not call it: a harness reap must leave the detached watcher
   # and its durable queue alive.
-  if [ -n "$child" ] && [ -n "$child_start" ]; then
-    fm_detach_kill "$child" "$child_start" || true
+  if [ -n "$child" ]; then
+    fm_detach_cleanup_unconfirmed "$child" "$child_start" "$WATCH" \
+      "--fm-detach-token=$child_token" "__fm_detach_launcher__" || true
   fi
 }
 trap 'exit 129' HUP
@@ -330,10 +331,13 @@ child_token=$(new_detach_token) || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-child=$(fm_detach_spawn "$WATCH_OUT" "$WATCH" "--fm-detach-token=$child_token") || {
+detach_status=0
+child=$(fm_detach_spawn "$WATCH_OUT" "$WATCH" "--fm-detach-token=$child_token") || detach_status=$?
+if [ "$detach_status" -ne 0 ]; then
+  cleanup_detached_child
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
-}
+fi
 child_start=$(fm_pid_start "$child" 2>/dev/null || true)
 
 # Verify the outcome: poll until this detached watcher is the confirmed healthy

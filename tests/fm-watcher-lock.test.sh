@@ -787,7 +787,7 @@ SH
 }
 
 test_detach_spawn_cleans_pidfile_timeout() {
-  local dir fakebin output pidfile pid status
+  local dir fakebin output pidfile pid recorded_pid status
   dir=$(make_case detach-pidfile-timeout)
   fakebin="$dir/fakebin"
   output="$dir/detached.out"
@@ -799,12 +799,12 @@ exec sleep 300
 SH
   chmod +x "$fakebin/setsid"
   status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_LAUNCHER_PID="$pidfile" \
+  pid=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_LAUNCHER_PID="$pidfile" \
     bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" /bin/sleep 30' \
-    _ "$LIB" "$DETACH_LIB" "$output" || status=$?
+    _ "$LIB" "$DETACH_LIB" "$output") || status=$?
   [ "$status" -ne 0 ] || fail "detached spawn succeeded without a pid file"
-  pid=$(cat "$pidfile" 2>/dev/null || true)
-  [ -n "$pid" ] || fail "fake detached launcher did not record its pid"
+  recorded_pid=$(cat "$pidfile" 2>/dev/null || true)
+  [ "$pid" = "$recorded_pid" ] || fail "detached spawn did not return the launcher pid"
   ! is_live_non_zombie "$pid" || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -814,7 +814,7 @@ SH
 }
 
 test_detach_spawn_cleans_exec_timeout() {
-  local dir fakebin output target target_pid pid status
+  local dir fakebin output target target_pid pid recorded_pid status
   dir=$(make_case detach-exec-timeout)
   fakebin="$dir/fakebin"
   output="$dir/detached.out"
@@ -835,12 +835,12 @@ esac
 SH
   chmod +x "$fakebin/ps"
   status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_TARGET_PID_FILE="$target_pid" \
+  pid=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_TARGET_PID_FILE="$target_pid" \
     FM_EXPECTED_DETACH_PATH="$target" bash -c '. "$1"; . "$2"; fm_pid_start() { return 1; }; fm_detach_spawn "$3" "$4" --fm-detach-token=timeout' \
-    _ "$LIB" "$DETACH_LIB" "$output" "$target" || status=$?
+    _ "$LIB" "$DETACH_LIB" "$output" "$target") || status=$?
   [ "$status" -ne 0 ] || fail "detached spawn succeeded without an exec transition"
-  pid=$(cat "$target_pid" 2>/dev/null || true)
-  [ -n "$pid" ] || fail "exec-timeout target did not start"
+  recorded_pid=$(cat "$target_pid" 2>/dev/null || true)
+  [ "$pid" = "$recorded_pid" ] || fail "detached spawn did not return the target pid"
   ! is_live_non_zombie "$pid" || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
