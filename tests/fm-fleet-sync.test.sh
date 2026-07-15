@@ -73,11 +73,272 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+git_common_dir() {
+  local project=$1 dir
+  dir=$(git -C "$project" rev-parse --git-common-dir)
+  case "$dir" in
+    /*) ;;
+    *) dir="$project/$dir" ;;
+  esac
+  (cd "$dir" && pwd -P)
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
   shift
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+}
+
+make_lsof_none() {
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/lsof"
+}
+
+make_lsof_live() {
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'git 1234 fmtest 3r REG 0,0 0 0 %s\n' "${*: -1}"
+exit 0
+SH
+  chmod +x "$fakebin/lsof"
+}
+
+make_transient_git() {
+  local fakebin=$1 clone=$2 counter real_git
+  mkdir -p "$fakebin"
+  counter="$fakebin/fetch-count"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${3:-}" = fetch ]; then
+  if [ ! -e "$counter" ]; then
+    touch "$counter"
+    rm -f -- "$clone/.git/packed-refs.lock"
+    echo "fatal: Unable to create '$clone/.git/packed-refs.lock': File exists" >&2
+    exit 1
+  fi
+fi
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+make_split_signature_git() {
+  local fakebin=$1 real_git
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${3:-}" = fetch ]; then
+  printf '%s\n' 'fatal: unrelated packed-refs.lock text' >&2
+  printf '%s\n' 'fatal: File exists' >&2
+  exit 1
+fi
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+make_racing_mv() {
+  local fakebin=$1 real_mv
+  mkdir -p "$fakebin"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+real_mv='$real_mv'
+if [ "\$#" -eq 2 ] && [[ "\$1" == */packed-refs.lock ]]; then
+  source="\$1"
+  target="\$2"
+  replacement="\$source.race"
+  printf '%s\n' replacement > "\$replacement"
+  "\$real_mv" -f "\$replacement" "\$source"
+  "\$real_mv" "\$source" "\$target"
+  printf '%s\n' "\$target" > "\$source.race-target"
+  printf '%s\n' live > "\$source"
+  exit 0
+fi
+exec "\$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+}
+
+build_packed_lock_case() {
+  local home=$1 name=$2 clone work
+  clone=$(build_pair "$home" "$name")
+  work="$home/work-$name"
+  # Give the clone a remote-tracking feature ref that the next --prune must
+  # delete. Pack all refs so that deletion takes the packed-refs rewrite path.
+  git -C "$work" checkout -q -b feature
+  commit_file "$work" feature.txt feature FEATURE
+  git -C "$work" push -q origin feature
+  git -C "$work" checkout -q main
+  git -C "$clone" fetch -q origin feature:refs/remotes/origin/feature
+  git -C "$clone" branch --track feature origin/feature >/dev/null
+  git -C "$clone" pack-refs --all
+  git -C "$work" push -q origin --delete feature
+  advance_origin "$home" "$name" C1
+  touch "$clone/.git/packed-refs.lock"
+  printf '%s\n' "$clone"
+}
+
+build_linked_packed_lock_case() {
+  local home=$1 name=$2 clone linked common_dir
+  clone=$(build_packed_lock_case "$home" "$name")
+  common_dir=$(git_common_dir "$clone")
+  rm -f "$common_dir/packed-refs.lock"
+  git -C "$clone" checkout --detach --quiet
+  linked="$home/projects/$name-linked"
+  git -C "$clone" worktree add --quiet "$linked" main
+  touch "$common_dir/packed-refs.lock"
+  printf '%s\n' "$linked"
+}
+
+test_orphaned_stale_packed_refs_lock_recovers() {
+  local home clone fakebin out err
+  home=$(new_home)
+  clone=$(build_packed_lock_case "$home" lock-stale)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-stale: recovered: removed a stale packed-refs lock' \
+    "stale packed-refs lock recovery was not relayed on stdout"
+  assert_grep 'removed provably-stale packed-refs lock' "$err" \
+    "stale packed-refs lock removal was not explained"
+  assert_absent "$clone/.git/packed-refs.lock" "stale packed-refs lock was not removed"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "clone did not sync to origin/main after stale lock recovery"
+  pass "fleet-sync removes only a provably-stale packed-refs.lock and syncs"
+}
+
+test_live_packed_refs_lock_is_never_removed() {
+  local home clone fakebin out err
+  home=$(new_home)
+  clone=$(build_packed_lock_case "$home" lock-live)
+  fakebin="$home/fakebin"; make_lsof_live "$fakebin"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-live: skipped: fetch failed' \
+    "live packed-refs lock did not keep the existing fetch-failure behavior"
+  assert_grep 'not provably stale' "$err" "live packed-refs lock refusal was not explained"
+  [ -e "$clone/.git/packed-refs.lock" ] || fail "live packed-refs lock was removed"
+  pass "fleet-sync never removes a live packed-refs.lock"
+}
+
+test_transient_packed_refs_lock_self_clears() {
+  local home clone fakebin out err
+  home=$(new_home)
+  clone=$(build_packed_lock_case "$home" lock-transient)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"; make_transient_git "$fakebin" "$clone"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-transient: recovered: packed-refs lock cleared on its own' \
+    "transient packed-refs lock recovery was not relayed"
+  assert_not_contains "$(cat "$err")" 'removed provably-stale packed-refs lock' \
+    "transient lock was force-removed instead of retried"
+  pass "fleet-sync retries a transient packed-refs lock without force-removing it"
+}
+
+test_linked_worktree_packed_refs_lock_recovers() {
+  local home linked fakebin out common_lock
+  home=$(new_home)
+  linked=$(build_linked_packed_lock_case "$home" lock-linked)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"
+  common_lock="$(git_common_dir "$linked")/packed-refs.lock"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$linked" 2>/dev/null)
+  assert_contains "$out" 'lock-linked-linked: recovered: removed a stale packed-refs lock' \
+    "linked worktree lock recovery was not relayed"
+  assert_absent "$common_lock" "linked worktree stale packed-refs lock was not removed"
+  [ "$(head_sha "$linked")" = "$(git -C "$linked" rev-parse origin/main)" ] \
+    || fail "linked worktree did not sync after stale lock recovery"
+  pass "fleet-sync recovers packed-refs.lock from a linked worktree's common git dir"
+}
+
+test_racing_packed_refs_lock_is_left_in_place() {
+  local home clone fakebin out err lock quarantine
+  home=$(new_home)
+  clone=$(build_packed_lock_case "$home" lock-race)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"; make_racing_mv "$fakebin"
+  lock="$clone/.git/packed-refs.lock"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-race: skipped: fetch failed' \
+    "racing packed-refs lock did not remain blocked"
+  assert_grep 'atomically quarantine' "$err" \
+    "racing packed-refs lock refusal was not explained"
+  assert_contains "$(cat "$lock")" live \
+    "new live packed-refs lock was removed by stale recovery"
+  quarantine=$(cat "$lock.race-target")
+  [ -e "$quarantine" ] || fail "replacement packed-refs lock quarantine was deleted"
+  assert_contains "$(cat "$quarantine")" replacement \
+    "replacement packed-refs lock contents were not retained"
+  pass "fleet-sync retains a replacement packed-refs lock after the atomic race check"
+}
+
+test_split_lock_and_file_exists_lines_do_not_match() {
+  local home clone fakebin out err lock
+  home=$(new_home)
+  clone=$(build_packed_lock_case "$home" lock-split)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"; make_split_signature_git "$fakebin"
+  lock="$clone/.git/packed-refs.lock"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-split: skipped: fetch failed' \
+    "separate lock and File exists lines were treated as a lock signature"
+  assert_not_contains "$(cat "$err")" waiting \
+    "separate lock and File exists lines triggered a retry"
+  assert_not_contains "$(cat "$err")" 'removed provably-stale packed-refs lock' \
+    "separate lock and File exists lines triggered lock removal"
+  [ -e "$lock" ] || fail "unmatched packed-refs lock was removed"
+  pass "fleet-sync requires the packed-refs lock signature on one Git error line"
+}
+
+test_non_signature_fetch_failure_is_not_retried() {
+  local home clone fakebin out err
+  home=$(new_home)
+  clone=$(build_pair "$home" lock-other)
+  git -C "$clone" remote set-url origin "file://$home/missing.git"
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-other: skipped: fetch failed' \
+    "non-lock fetch failure was not reported"
+  assert_not_contains "$(cat "$err")" 'waiting' \
+    "non-packed-refs fetch failure was incorrectly retried"
+  pass "fleet-sync does not retry unrelated fetch failures"
 }
 
 # --- tests ------------------------------------------------------------------
@@ -373,3 +634,10 @@ test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
+test_orphaned_stale_packed_refs_lock_recovers
+test_live_packed_refs_lock_is_never_removed
+test_transient_packed_refs_lock_self_clears
+test_linked_worktree_packed_refs_lock_recovers
+test_racing_packed_refs_lock_is_left_in_place
+test_split_lock_and_file_exists_lines_do_not_match
+test_non_signature_fetch_failure_is_not_retried

@@ -15,6 +15,8 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
+# When fetch hits an orphaned .git/packed-refs.lock, it uses bounded retries and
+# removes the lock only when the shared staleness proof can prove it abandoned.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -29,7 +31,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+# shellcheck source=bin/fm-lock-lib.sh
+. "$SCRIPT_DIR/fm-lock-lib.sh"
+FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
+
+FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=${FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES:-3}
+FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=${FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS:-1}
+FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=${FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS:-30}
+case "$FLEET_SYNC_PACKED_REFS_LOCK_RETRIES" in ''|*[!0-9]*) FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3 ;; esac
+case "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS" in ''|*[!0-9]*) FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30 ;; esac
+if ! [[ "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+  echo "fleet-sync: invalid packed-refs lock retry wait '$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS'; using 1s" >&2
+  FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1
+fi
 
 usage() {
   echo "usage: fm-fleet-sync.sh [<project-dir-or-name>]" >&2
@@ -174,6 +189,69 @@ stuck_state() {
   printf '%s\n' "$s"
 }
 
+packed_refs_lock_error() {
+  printf '%s\n' "$1" \
+    | grep -Eiq "(Unable to create|cannot lock ref).*packed-refs[.]lock['\"]?:[[:space:]]+File exists"
+}
+
+git_common_dir_abs() {
+  local dir
+  dir=$(git -C "$PROJ" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$dir" in
+    /*) printf '%s\n' "$dir" ;;
+    *) (cd "$PROJ/$dir" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+# Globals FETCH_ERROR and FETCH_RECOVERY carry the result without swallowing
+# recovery summaries that bootstrap relays on stdout.
+fetch_with_packed_refs_lock_guard() {
+  local git_common_dir lock output attempt=0
+  FETCH_ERROR=
+  FETCH_RECOVERY=
+  git_common_dir=$(git_common_dir_abs) || {
+    FETCH_ERROR='cannot determine git common directory'
+    return 1
+  }
+  lock="$git_common_dir/packed-refs.lock"
+
+  while :; do
+    if output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
+      if [ "$attempt" -gt 0 ]; then
+        FETCH_RECOVERY='packed-refs lock cleared on its own'
+      fi
+      return 0
+    fi
+    FETCH_ERROR=$output
+    if ! packed_refs_lock_error "$output"; then
+      return 1
+    fi
+    if [ "$attempt" -lt "$FLEET_SYNC_PACKED_REFS_LOCK_RETRIES" ]; then
+      attempt=$((attempt + 1))
+      fm_lock_log "waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s before retrying packed-refs lock ($attempt/$FLEET_SYNC_PACKED_REFS_LOCK_RETRIES)"
+      sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
+      continue
+    fi
+    break
+  done
+
+  if fm_lock_is_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
+    if fm_lock_remove_if_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
+      fm_lock_log "removed provably-stale packed-refs lock $lock (no live holder); retrying fetch"
+      if output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
+        FETCH_RECOVERY='removed a stale packed-refs lock (no live holder)'
+        return 0
+      fi
+      FETCH_ERROR=$output
+    else
+      fm_lock_log "could not atomically quarantine provably-stale packed-refs lock $lock; leaving it in place"
+    fi
+  else
+    fm_lock_log "packed-refs lock $lock is not provably stale; leaving it in place"
+  fi
+  return 1
+}
+
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
 # how far behind origin/<default> it is, so a chronically-stuck clone is visibly
 # distinct from a benign one-off skip.
@@ -206,14 +284,15 @@ sync_project() {
     return 0
   fi
 
-  if ! fetch_output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
+  if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
-    if [ -n "$fetch_output" ]; then
-      reason="$reason: $(first_line "$fetch_output")"
+    if [ -n "$FETCH_ERROR" ]; then
+      reason="$reason: $(first_line "$FETCH_ERROR")"
     fi
     echo "$label: skipped: $reason"
     return 0
   fi
+  [ -n "$FETCH_RECOVERY" ] && echo "$label: recovered: $FETCH_RECOVERY"
 
   prune_gone_branches || true
 

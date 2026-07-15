@@ -90,8 +90,9 @@ tests/fm-gitignore-boundary.test.sh       # local fleet directory ignore boundar
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
 tests/fm-no-mistakes-required-workflow.test.sh # required-workflow guard for live PR-body lookup and the no-mistakes marker
 tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
+tests/fm-gate-refuse.test.sh              # no-mistakes gate marker/path refusal for spawn, send, and teardown
 tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, session-lock detection, and immutable tmux-window targeting fixture tests
-tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, deterministic single-clone resolution, and bootstrap relay
+tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, packed-refs lock recovery, benign skips, deterministic single-clone resolution, and bootstrap relay
 tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings, persistent secondmate inventory, and no-change contract
 tests/fm-route.test.sh                    # deterministic route profiles, overrides, risk flags, and downgrade handling
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests

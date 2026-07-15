@@ -58,6 +58,12 @@ if [ "${#tests[@]}" -eq 0 ]; then
   exit 1
 fi
 
+gate_test="$ROOT/tests/fm-gate-refuse.test.sh"
+if [ -f "$gate_test" ] && ! bash "$gate_test"; then
+  printf '%s\n' 'FAIL: gate-refusal test failed; tests were not started' >&2
+  exit 1
+fi
+
 base_tmp=${TMPDIR:-/tmp}
 if ! mkdir -p "$base_tmp"; then
   printf 'FAIL: could not create temporary base %s\n' "$base_tmp" >&2
@@ -67,11 +73,55 @@ suite_tmp=$(mktemp -d "$base_tmp/fm-behavior-tests.XXXXXX") || {
   printf 'FAIL: could not create an isolated behavior-test root\n' >&2
   exit 1
 }
+test_root="$suite_tmp/repo"
+if ! git clone --quiet --no-hardlinks "$ROOT" "$test_root"; then
+  printf 'FAIL: could not create a normal behavior-test clone\n' >&2
+  exit 1
+fi
+delta_manifest="$suite_tmp/worktree-delta"
+if ! {
+  git -C "$ROOT" diff --name-only -z HEAD &&
+  git -C "$ROOT" ls-files --others --exclude-standard -z
+} >"$delta_manifest"; then
+  printf 'FAIL: could not enumerate current working-tree contents\n' >&2
+  exit 1
+fi
+copy_worktree_delta() {
+  local path src dst
+  while IFS= read -r -d '' path; do
+    src="$ROOT/$path"
+    dst="$test_root/$path"
+    if [ -e "$src" ] || [ -L "$src" ]; then
+      mkdir -p "$(dirname "$dst")" || return 1
+      rm -rf -- "$dst" || return 1
+      cp -a -- "$src" "$dst" || return 1
+    else
+      rm -rf -- "$dst" || return 1
+    fi
+  done <"$delta_manifest"
+}
+if ! copy_worktree_delta; then
+  printf 'FAIL: could not overlay current working-tree contents\n' >&2
+  exit 1
+fi
+if [ -f "$test_root/bin/fm-gate-refuse-lib.sh" ]; then
+  cat > "$test_root/bin/fm-gate-refuse-lib.sh" <<'SH'
+FM_GATE_REFUSE_EXIT=3
+fm_refuse_if_gate_agent() { return 0; }
+SH
+fi
 cleanup() {
   rm -rf -- "$suite_tmp"
 }
 trap cleanup EXIT
 
+mapfile -t tests < <(
+  cd "$test_root" || exit 1
+  for test_path in tests/*.test.sh; do
+    [ -f "$test_path" ] || continue
+    [ "$test_path" = tests/fm-gate-refuse.test.sh ] || printf '%s\n' "$test_path"
+  done
+)
 total=${#tests[@]}
 active_jobs=$jobs
 [ "$active_jobs" -le "$total" ] || active_jobs=$total
@@ -80,7 +130,7 @@ printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_j
 run_one() {
   local test_path=$1 job_root=$2 log_path=$3
   (
-    cd "$ROOT" || exit 1
+    cd "$test_root" || exit 1
     # A Firstmate supervisor may export its operational home into the shell that
     # launches this gate. Do not let tests share that live state; fixture tests
     # that need a home set their own FM_* overrides explicitly.

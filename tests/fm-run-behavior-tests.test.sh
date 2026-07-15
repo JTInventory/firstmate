@@ -58,6 +58,17 @@ printf 'fixture pass\n'
 SH
     chmod +x "$fixture/tests/$test_name.test.sh"
   done
+  git -C "$fixture" init -q -b main
+  git -C "$fixture" add .
+  git -C "$fixture" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm fixture
+  cat > "$fixture/tests/working-tree.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ -z "${FM_HOME:-}" ] || exit 22
+printf 'working-tree fixture pass\n'
+SH
+  chmod +x "$fixture/tests/working-tree.test.sh"
   printf '%s\n' "$fixture"
 }
 
@@ -90,6 +101,7 @@ test_parallel_isolation_and_failure_aggregation() {
   set -u
   expect_code 1 "$rc" "parallel fixture run aggregates a failed test"
   assert_grep "PASS: tests/pass-a.test.sh" "$output" "parallel run did not report the passing fixture"
+  assert_grep "PASS: tests/working-tree.test.sh" "$output" "parallel run omitted the untracked working-tree fixture"
   assert_grep "FAIL: tests/fail-b.test.sh (exit 7)" "$output" "parallel run did not report the failing fixture"
   assert_grep "1 test(s) failed" "$output" "parallel run did not summarize failures"
   [ -e "$fixture_output/guard-ran" ] || fail "parallel run did not execute the target guard"
@@ -115,9 +127,21 @@ test_serial_mode_remains_serial() {
   assert_not_contains "$(cat "$fixture_output"/parallel-overlap 2>/dev/null || true)" "overlap" \
     "FM_TEST_JOBS=1 allowed fixture overlap"
   assert_grep "PASS: tests/pass-a.test.sh" "$output" "serial run did not report the passing fixture"
+  assert_grep "PASS: tests/working-tree.test.sh" "$output" "serial run omitted the untracked working-tree fixture"
   assert_grep "FAIL: tests/fail-b.test.sh (exit 7)" "$output" "serial run did not report the failing fixture"
   pass "FM_TEST_JOBS=1 preserves serial fixture execution"
 }
 
+test_delta_overlay_contract_is_checked_and_portable() {
+  local source
+  source=$(cat "$HELPER")
+  assert_not_contains "$source" 'sort -z' \
+    "behavior runner must not depend on GNU-only sort -z"
+  assert_contains "$source" 'if ! copy_worktree_delta' \
+    "behavior runner must check the working-tree overlay result"
+  pass "behavior runner checks its portable working-tree overlay"
+}
+
 test_parallel_isolation_and_failure_aggregation
 test_serial_mode_remains_serial
+test_delta_overlay_contract_is_checked_and_portable

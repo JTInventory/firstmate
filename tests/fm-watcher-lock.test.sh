@@ -237,7 +237,7 @@ test_lock_single_winner_under_concurrency() {
   pids=
   i=1
   while [ "$i" -le 40 ]; do
-    FM_STATE_OVERRIDE="$state" bash -c '
+    FM_LOCK_STALE_AFTER=60 FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "$$" >> "$3"
@@ -289,7 +289,7 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   pids=
   i=1
   while [ "$i" -le 40 ]; do
-    FM_STATE_OVERRIDE="$state" bash -c '
+    FM_LOCK_STALE_AFTER=60 FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"

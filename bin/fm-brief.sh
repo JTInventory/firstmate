@@ -175,6 +175,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Never stop, restart, or update the shared \`no-mistakes\` daemon - one instance serves
+   every lane/home, so restarting it can kill another lane's in-flight pipeline. On any
+   no-mistakes daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages it.
 
 $COGNEE_BRIEF_RULES
 
@@ -274,6 +277,9 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. Never stop, restart, or update the shared \`no-mistakes\` daemon - one instance serves
+   every lane/home, so restarting it can kill another lane's in-flight pipeline. On any
+   no-mistakes daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages it.
 
 $COGNEE_BRIEF_RULES
 
