@@ -131,6 +131,9 @@ test_malformed_stop_payload_blocks_primary() {
     out=$(run_guard "$home" '{}{"stop_hook_active":true}'); status=$?
     expect_code 2 "$status" "jq path must reject multi-document stop payload"
     assert_contains "$out" "TURN WOULD END BLIND" "multi-document payload guard lacked its alarm banner"
+    out=$(run_guard "$home" '{"stop_hook_active":false,"stop_hook_active":true}'); status=$?
+    expect_code 2 "$status" "jq path must reject duplicate stop_hook_active keys"
+    assert_contains "$out" "TURN WOULD END BLIND" "duplicate-key payload guard lacked its alarm banner"
   fi
   pass "fm-turnend-guard: malformed stop payload fails closed for an unproved primary"
 }
