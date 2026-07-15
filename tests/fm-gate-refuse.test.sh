@@ -137,21 +137,27 @@ test_helper_signals() {
 }
 
 test_entrypoints_refuse() {
-  local script out rc first
+  local script gate_script out rc first
   for script in "$ROOT/bin/fm-spawn.sh" "$ROOT/bin/fm-send.sh" "$ROOT/bin/fm-teardown.sh"; do
+    # Use a copy rooted in the synthetic gate worktree for path-backstop cases.
+    # The main checkout is ordinary on CI, so its source path is not itself a
+    # no-mistakes gate path as it is in the local gate worktree.
+    gate_script="$GATE_CWD/bin/$(basename "$script")"
+    cp "$script" "$gate_script"
+
     out=$(run_entrypoint "$script" "$NORMAL_CWD" set)
     first=${out%%$'\n'*}
     rc=$first
     expect_code 3 "$rc" "$(basename "$script") must refuse the gate marker"
     assert_contains "$out" 'NO_MISTAKES_GATE set' "$(basename "$script") marker refusal missing"
 
-    out=$(run_entrypoint "$script" "$GATE_CWD" unset)
+    out=$(run_entrypoint "$gate_script" "$GATE_CWD" unset)
     first=${out%%$'\n'*}
     rc=$first
     expect_code 3 "$rc" "$(basename "$script") must refuse the gate path backstop"
     assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") path refusal missing"
 
-    out=$(run_entrypoint "$script" "$TMP_ROOT" unset)
+    out=$(run_entrypoint "$gate_script" "$TMP_ROOT" unset)
     first=${out%%$'\n'*}
     rc=$first
     expect_code 3 "$rc" "$(basename "$script") must refuse when called from outside the checkout"
