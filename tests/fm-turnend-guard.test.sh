@@ -154,6 +154,9 @@ test_missing_jq_preserves_stop_hook_retry() {
   home=$(make_primary_repo "$TMP_ROOT/missing-jq-retry")
   path=$(make_path_without_jq "$TMP_ROOT/path-without-jq-retry")
   : > "$home/state/child.meta"
+  out=$(run_guard_with_path "$path" "$home" '{"session_id":"a\u0062c","stop_hook_active":true}'); status=$?
+  expect_code 0 "$status" "missing jq fallback must preserve valid escaped string values"
+  [ -z "$out" ] || fail "missing jq escaped-value payload produced guard output: $out"
   out=$(run_guard_with_path "$path" "$home" '{ "session_id": "abc", "details": { "attempt": 1, "retriable": true }, "stop_hook_active": true, "hook_event_name": "Stop" }'); status=$?
   expect_code 0 "$status" "missing jq fallback must preserve stop_hook_active retry exemption"
   [ -z "$out" ] || fail "missing jq retry produced guard output: $out"
@@ -171,6 +174,9 @@ test_missing_jq_rejects_invalid_stop_payload() {
   out=$(run_guard_with_path "$path" "$home" '[{"stop_hook_active":true}]'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject non-object stop payload"
   assert_contains "$out" "TURN WOULD END BLIND" "non-object fallback payload guard lacked its alarm banner"
+  out=$(run_guard_with_path "$path" "$home" '{"stop_hook_act\u0069ve":false,"stop_hook_active":true}'); status=$?
+  expect_code 2 "$status" "missing jq fallback must reject escaped stop_hook_active keys"
+  assert_contains "$out" "TURN WOULD END BLIND" "escaped duplicate-key fallback guard lacked its alarm banner"
   out=$(run_guard_with_path "$path" "$home" $'{"stop_hook_active":true\v}'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject vertical-tab whitespace"
   assert_contains "$out" "TURN WOULD END BLIND" "vertical-tab fallback payload guard lacked its alarm banner"

@@ -71,6 +71,7 @@ json_input=
 json_pos=0
 json_len=0
 json_string=
+json_string_had_escape=false
 json_stop_active=false
 json_stop_seen=false
 json_stop_valid=true
@@ -89,6 +90,7 @@ json_parse_string() {
   [ "${json_input:json_pos:1}" = '"' ] || return 1
   json_pos=$((json_pos + 1))
   json_string=
+  json_string_had_escape=false
   while [ "$json_pos" -lt "$json_len" ]; do
     char=${json_input:json_pos:1}
     case "$char" in
@@ -98,6 +100,7 @@ json_parse_string() {
         ;;
       \\)
         json_pos=$((json_pos + 1))
+        json_string_had_escape=true
         [ "$json_pos" -lt "$json_len" ] || return 1
         escape=${json_input:json_pos:1}
         case "$escape" in
@@ -196,6 +199,7 @@ json_parse_object() {
   while :; do
     json_skip_ws
     json_parse_string || return 1
+    [ "$json_string_had_escape" = false ] || return 1
     key=$json_string
     json_skip_ws
     [ "${json_input:json_pos:1}" = ':' ] || return 1
@@ -240,6 +244,7 @@ stop_hook_active_without_jq() {
   json_pos=0
   json_len=${#json_input}
   json_string=
+  json_string_had_escape=false
   json_stop_active=false
   json_stop_seen=false
   json_stop_valid=true
