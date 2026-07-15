@@ -15,8 +15,12 @@ An in-scope home with no `state/*.meta` files is idle and exits silently. With
 child work in flight, the guard allows the turn only when the watcher lock names
 this home and `bin/fm-watch.sh`, its PID is alive and identity-matched, and
 `.last-watcher-beat` is fresh. Otherwise it prints `TURN WOULD END BLIND -
-SUPERVISION IS OFF` and exits 2 so a caller can re-arm supervision. A payload with
-`stop_hook_active=true` is always allowed, preventing a repeated stop-hook loop.
+SUPERVISION IS OFF` and exits 2 so a caller can re-arm supervision. A valid
+single-document JSON object with a unique boolean root field
+`stop_hook_active=true` is allowed, preventing a repeated stop-hook loop.
+Malformed, duplicate-key,
+multi-document, non-object, NUL-tainted, or invalid-UTF-8 input is treated as an
+unproved first stop and follows the blind-turn guard path.
 
 The script is intentionally not wired into `fm-spawn.sh`, PreToolUse, or any
 harness hook in Phase B. This keeps the JT change backend-neutral and avoids

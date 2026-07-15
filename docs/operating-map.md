@@ -45,7 +45,7 @@ Owner: `AGENTS.md` sections 6 and 7; `bin/fm-brief.sh`; `bin/fm-spawn.sh`.
 
 ## 6. Spawn
 
-`fm-spawn.sh` allocates the canonical `fm-<id>` tmux window, validates its immutable window ID and title before issuing pane commands, gets or validates the isolated worktree, writes the task meta record, launches the selected harness with the resolved model and effort when supported, and installs any harness-specific turn-end hooks.
+`fm-spawn.sh` allocates the canonical `fm-<id>` tmux window, validates its immutable window ID and title before issuing pane commands, gets or validates an isolated worktree of the target project, writes the task meta record, launches the selected harness with the resolved model and effort when supported, and installs any harness-specific turn-end hooks. The detailed target-repository containment contract lives in [architecture.md](architecture.md#worktrees-not-branches-in-your-checkout).
 It uses the window ID for all post-create tmux operations, so a mutable title cannot redirect a task command; an unverified ID or title cleans up a uniquely identified new window and aborts the spawn.
 Secondmate spawn uses the same direct-report machinery but points at an isolated firstmate home.
 

@@ -82,9 +82,9 @@ The no-mistakes receipt is anchored by `.no-mistakes.yaml` and `CONTRIBUTING.md`
 
 | Upstream owner | Capability | Decision | JT adaptation and boundary | JT PR |
 | --- | --- | --- | --- | --- |
-| #533 | Secondmate routing markers in terminal sends | Adapt | Use terminal-safe U+2063 in the shared marker owner, preserve trailing newlines with an in-place transform, and keep explicit windows, key sends, direct input, and Herdr paths unmarked. | Pending this branch |
-| #505 | Secondmate primary turn-end guard | Adapt | Add a callable script-only guard for the main primary and marked secondmate homes; exempt linked child worktrees by git-dir/common-dir, keep idle homes silent, and do not wire Herdr/Pi-only hooks. | Pending this branch |
-| #568 | Spawn target-project containment | Adapt | Require the resolved path to be a real worktree of the target project with matching physical git common dir and target-repo HEAD; kill the fresh window and record no meta on refusal. | Pending this branch |
+| #533 | Secondmate routing markers in terminal sends | Adapt | Use terminal-safe U+2063 in the shared marker owner, preserve trailing newlines with an in-place transform, and keep explicit windows, key sends, direct input, and Herdr paths unmarked. | [#67](https://github.com/JTInventory/firstmate/pull/67) |
+| #505 | Secondmate primary turn-end guard | Adapt | Add a callable script-only guard for the main primary and marked secondmate homes; exempt linked child worktrees by git-dir/common-dir, keep idle homes silent, and do not wire Herdr/Pi-only hooks. | [#67](https://github.com/JTInventory/firstmate/pull/67) |
+| #568 | Spawn target-project containment | Adapt | Require the resolved path to be a real worktree of the target project with matching physical git common dir and target-repo HEAD; kill the fresh window and record no meta on refusal. | [#67](https://github.com/JTInventory/firstmate/pull/67) |
 
 Phase B is one JT PR and must preserve tmux-first operation, JT model policy, and the existing no-mistakes PR-target guard. The owner references were comparison-only; no owner branch or Herdr enablement is included.
 
