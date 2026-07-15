@@ -42,6 +42,8 @@ run_helper() {
     cd "$cwd" || exit 1
     unset NO_MISTAKES_GATE FM_ROOT_OVERRIDE FM_HOME FM_PROJECTS_OVERRIDE \
       FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE
+    # The marker is intentionally scoped to this child shell.
+    # shellcheck disable=SC2030
     case "$marker" in
       set) export NO_MISTAKES_GATE=1 ;;
       empty) export NO_MISTAKES_GATE= ;;

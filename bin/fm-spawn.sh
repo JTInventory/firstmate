@@ -825,7 +825,8 @@ EOF
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
     grok*)
-      # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
+      # grok fires a Stop hook at every turn boundary (see the harness-adapters
+      # skill for verification), the
       # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
       # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
       # after the folder is granted hook-trust, which is not automatic and which

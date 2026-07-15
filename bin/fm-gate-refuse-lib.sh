@@ -31,7 +31,11 @@ fm_gate_source_dir() {
     resolved=$(readlink -f "$library" 2>/dev/null || true)
     [ -z "$resolved" ] || library=$resolved
   fi
-  cd "$(dirname "$library")" 2>/dev/null && pwd -P || true
+  if cd "$(dirname "$library")" 2>/dev/null; then
+    pwd -P || true
+  else
+    true
+  fi
 }
 
 fm_refuse_if_gate_agent() {

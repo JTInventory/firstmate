@@ -252,7 +252,7 @@ The verified profile axes are:
 
 - `claude`: model via `--model <name>`, effort via `--effort <low|medium|high|xhigh|max>`.
 - `codex`: model via `--model <name>`, effort via `-c 'model_reasoning_effort="<low|medium|high|xhigh>"'`; `max` is not passed because the installed Codex model catalog advertises only `low`, `medium`, `high`, and `xhigh`.
-- `grok`: model via `--model <name>`, reasoning effort via `--reasoning-effort <low|medium|high>`; `xhigh` and `max` are not passed because Grok rejects them for `--reasoning-effort`.
+- `grok`: use the verified profile in [harness-adapters](.agents/skills/harness-adapters/SKILL.md); omit unsupported reasoning-effort values such as `xhigh` and `max`.
 - `pi`: model via `--model <name>`, effort via `--thinking <low|medium|high|xhigh>`; `max` is not passed because the installed Pi CLI warns that it is invalid.
 - `opencode`: model via `--model <provider/model>`; no verified effort flag for firstmate's interactive `opencode --prompt` launch, so effort is not passed.
 

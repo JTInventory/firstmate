@@ -57,6 +57,8 @@ The read-only supervision model surfaces a non-empty wedge marker as the high-se
 If that marked Codex secondmate path still looks pending after the generic Enter retries, `fm-send.sh` waits once more and sends one final Enter before reporting failure.
 After successful text sends, it adds its own `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay either fm-send-only pause.
 
+Generated ship and scout briefs carry a shared no-mistakes daemon ownership boundary: workers must not stop, restart, or update the daemon; daemon errors are reported as `blocked:` and only firstmate manages the shared instance. The exact generated rule is owned by `bin/fm-brief.sh`.
+
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.

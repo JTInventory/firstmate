@@ -22,7 +22,8 @@ detect_own() {
   # Layer 1: environment markers for verified harnesses.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
-  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
+  # grok sets GROK_AGENT=1 for its child/tool processes (verified; see the
+  # harness-adapters skill for the current adapter evidence).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
