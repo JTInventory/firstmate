@@ -34,11 +34,13 @@ make_gate_worktree() {
 }
 
 run_helper() {
-  local cwd=$1 marker=${2:-unset} lib
+  local cwd marker lib
+  cwd=$1
+  marker=${2:-unset}
   lib=${3:-$cwd/bin/fm-gate-refuse-lib.sh}
   (
     cd "$cwd" || exit 1
-    unset NO_MISTAKES_GATE
+    unset NO_MISTAKES_GATE FM_ROOT_OVERRIDE FM_HOME
     case "$marker" in
       set) export NO_MISTAKES_GATE=1 ;;
       empty) export NO_MISTAKES_GATE= ;;
@@ -49,16 +51,52 @@ run_helper() {
   ) 2>&1
 }
 
+run_helper_with_overrides() {
+  local cwd root_override home_override lib
+  cwd=$1
+  root_override=$2
+  home_override=$3
+  lib=${4:-$cwd/bin/fm-gate-refuse-lib.sh}
+  (
+    cd "$cwd" || exit 1
+    unset NO_MISTAKES_GATE
+    if [ -n "$root_override" ]; then
+      export FM_ROOT_OVERRIDE="$root_override"
+    else
+      unset FM_ROOT_OVERRIDE
+    fi
+    if [ -n "$home_override" ]; then
+      export FM_HOME="$home_override"
+    else
+      unset FM_HOME
+    fi
+    # shellcheck source=bin/fm-gate-refuse-lib.sh
+    . "$lib"
+    fm_refuse_if_gate_agent
+  ) 2>&1
+}
+
 run_entrypoint() {
   local script=$1 cwd=$2 marker=$3 rc out
   set +e
   if [ "$marker" = unset ]; then
-    out=$(cd "$cwd" && env -u NO_MISTAKES_GATE \
+    out=$(cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_ROOT_OVERRIDE -u FM_HOME \
       bash "$script" 2>&1)
   else
     out=$(cd "$cwd" && env NO_MISTAKES_GATE="$marker" \
       bash "$script" 2>&1)
   fi
+  rc=$?
+  set -e
+  printf '%s\n%s\n' "$rc" "$out"
+}
+
+run_entrypoint_with_overrides() {
+  local script=$1 cwd=$2 root_override=$3 home_override=$4 rc out
+  set +e
+  out=$(cd "$cwd" && env -u NO_MISTAKES_GATE \
+    FM_ROOT_OVERRIDE="$root_override" FM_HOME="$home_override" \
+    bash "$script" 2>&1)
   rc=$?
   set -e
   printf '%s\n%s\n' "$rc" "$out"
@@ -84,6 +122,14 @@ test_helper_signals() {
   out=$(run_helper "$TMP_ROOT" unset "$GATE_LIB"); rc=$?
   expect_code 3 "$rc" "gate library must refuse when called from outside the checkout"
   assert_contains "$out" 'no-mistakes gate worktree' "gate library source-path refusal missing"
+
+  out=$(run_helper_with_overrides "$NORMAL_CWD" "$GATE_CWD" ""); rc=$?
+  expect_code 3 "$rc" "gate root override must refuse with marker unset"
+  assert_contains "$out" 'no-mistakes gate worktree' "gate root override refusal missing"
+
+  out=$(run_helper_with_overrides "$NORMAL_CWD" "" "$GATE_CWD"); rc=$?
+  expect_code 3 "$rc" "gate home override must refuse with marker unset"
+  assert_contains "$out" 'no-mistakes gate worktree' "gate home override refusal missing"
 
   out=$(run_helper "$NORMAL_CWD"); rc=$?
   expect_code 0 "$rc" "normal worktree must be unaffected"
@@ -111,6 +157,18 @@ test_entrypoints_refuse() {
     rc=$first
     expect_code 3 "$rc" "$(basename "$script") must refuse when called from outside the checkout"
     assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") source-path refusal missing"
+
+    out=$(run_entrypoint_with_overrides "$script" "$NORMAL_CWD" "$GATE_CWD" "")
+    first=${out%%$'\n'*}
+    rc=$first
+    expect_code 3 "$rc" "$(basename "$script") must refuse a gate root override"
+    assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") root override refusal missing"
+
+    out=$(run_entrypoint_with_overrides "$script" "$NORMAL_CWD" "" "$GATE_CWD")
+    first=${out%%$'\n'*}
+    rc=$first
+    expect_code 3 "$rc" "$(basename "$script") must refuse a gate home override"
+    assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") home override refusal missing"
   done
   pass "spawn, send, and teardown refuse both gate signals before lifecycle work"
 }

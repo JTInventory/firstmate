@@ -194,9 +194,9 @@ packed_refs_lock_error() {
     && printf '%s\n' "$1" | grep -Fq 'File exists'
 }
 
-git_dir_abs() {
+git_common_dir_abs() {
   local dir
-  dir=$(git -C "$PROJ" rev-parse --git-dir 2>/dev/null) || return 1
+  dir=$(git -C "$PROJ" rev-parse --git-common-dir 2>/dev/null) || return 1
   case "$dir" in
     /*) printf '%s\n' "$dir" ;;
     *) (cd "$PROJ/$dir" 2>/dev/null && pwd -P) ;;
@@ -206,14 +206,14 @@ git_dir_abs() {
 # Globals FETCH_ERROR and FETCH_RECOVERY carry the result without swallowing
 # recovery summaries that bootstrap relays on stdout.
 fetch_with_packed_refs_lock_guard() {
-  local git_dir lock output attempt=0
+  local git_common_dir lock output attempt=0
   FETCH_ERROR=
   FETCH_RECOVERY=
-  git_dir=$(git_dir_abs) || {
-    FETCH_ERROR='cannot determine git directory'
+  git_common_dir=$(git_common_dir_abs) || {
+    FETCH_ERROR='cannot determine git common directory'
     return 1
   }
-  lock="$git_dir/packed-refs.lock"
+  lock="$git_common_dir/packed-refs.lock"
 
   while :; do
     if output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
@@ -236,7 +236,7 @@ fetch_with_packed_refs_lock_guard() {
   done
 
   if fm_lock_is_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
-    if rm -f -- "$lock"; then
+    if fm_lock_remove_if_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
       fm_lock_log "removed provably-stale packed-refs lock $lock (no live holder); retrying fetch"
       if output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
         FETCH_RECOVERY='removed a stale packed-refs lock (no live holder)'
@@ -244,7 +244,7 @@ fetch_with_packed_refs_lock_guard() {
       fi
       FETCH_ERROR=$output
     else
-      fm_lock_log "could not remove provably-stale packed-refs lock $lock; leaving it in place"
+      fm_lock_log "could not atomically quarantine provably-stale packed-refs lock $lock; leaving it in place"
     fi
   else
     fm_lock_log "packed-refs lock $lock is not provably stale; leaving it in place"

@@ -132,5 +132,16 @@ test_serial_mode_remains_serial() {
   pass "FM_TEST_JOBS=1 preserves serial fixture execution"
 }
 
+test_delta_overlay_contract_is_checked_and_portable() {
+  local source
+  source=$(cat "$HELPER")
+  assert_not_contains "$source" 'sort -z' \
+    "behavior runner must not depend on GNU-only sort -z"
+  assert_contains "$source" 'if ! copy_worktree_delta' \
+    "behavior runner must check the working-tree overlay result"
+  pass "behavior runner checks its portable working-tree overlay"
+}
+
 test_parallel_isolation_and_failure_aggregation
 test_serial_mode_remains_serial
+test_delta_overlay_contract_is_checked_and_portable

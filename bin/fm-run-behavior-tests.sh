@@ -78,26 +78,32 @@ if ! git clone --quiet --no-hardlinks "$ROOT" "$test_root"; then
   printf 'FAIL: could not create a normal behavior-test clone\n' >&2
   exit 1
 fi
+delta_manifest="$suite_tmp/worktree-delta"
+if ! {
+  git -C "$ROOT" diff --name-only -z HEAD &&
+  git -C "$ROOT" ls-files --others --exclude-standard -z
+} >"$delta_manifest"; then
+  printf 'FAIL: could not enumerate current working-tree contents\n' >&2
+  exit 1
+fi
 copy_worktree_delta() {
   local path src dst
   while IFS= read -r -d '' path; do
     src="$ROOT/$path"
     dst="$test_root/$path"
     if [ -e "$src" ] || [ -L "$src" ]; then
-      mkdir -p "$(dirname "$dst")"
-      rm -rf -- "$dst"
-      cp -a -- "$src" "$dst"
+      mkdir -p "$(dirname "$dst")" || return 1
+      rm -rf -- "$dst" || return 1
+      cp -a -- "$src" "$dst" || return 1
     else
-      rm -rf -- "$dst"
+      rm -rf -- "$dst" || return 1
     fi
-  done < <(
-    {
-      git -C "$ROOT" diff --name-only -z HEAD
-      git -C "$ROOT" ls-files --others --exclude-standard -z
-    } | sort -z -u
-  )
+  done <"$delta_manifest"
 }
-copy_worktree_delta
+if ! copy_worktree_delta; then
+  printf 'FAIL: could not overlay current working-tree contents\n' >&2
+  exit 1
+fi
 if [ -f "$test_root/bin/fm-gate-refuse-lib.sh" ]; then
   cat > "$test_root/bin/fm-gate-refuse-lib.sh" <<'SH'
 FM_GATE_REFUSE_EXIT=3

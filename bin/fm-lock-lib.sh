@@ -74,3 +74,45 @@ fm_lock_is_provably_stale() {
   }
   [ "$age" -ge "$minimum_age" ]
 }
+
+fm_lock_remove_if_provably_stale() {
+  local lock=$1 companion=$2 minimum_age=$3 quarantine identity
+  quarantine="${lock}.fm-recovery.$$.$RANDOM"
+  identity="${quarantine}.identity"
+  [ ! -e "$quarantine" ] && [ ! -e "$identity" ] || return 1
+
+  if ! ln "$lock" "$identity" 2>/dev/null; then
+    return 1
+  fi
+  if ! [ "$lock" -ef "$identity" ] || \
+    ! fm_lock_is_provably_stale "$lock" "$companion" "$minimum_age"; then
+    rm -f "$identity" || true
+    return 1
+  fi
+  if ! mv "$lock" "$quarantine" 2>/dev/null; then
+    rm -f "$identity" "$quarantine" || true
+    return 1
+  fi
+
+  if [ "$quarantine" -ef "$identity" ]; then
+    rm -f "$quarantine" "$identity" || return 1
+    return 0
+  fi
+
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    rm -f "$quarantine" "$identity" || return 1
+    return 1
+  fi
+  if ln "$quarantine" "$lock" 2>/dev/null; then
+    rm -f "$quarantine" "$identity" || return 1
+    return 1
+  fi
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    rm -f "$quarantine" "$identity" || return 1
+    return 1
+  fi
+
+  fm_lock_log "could not restore a replaced Git lock from recovery quarantine"
+  rm -f "$identity" || true
+  return 1
+}

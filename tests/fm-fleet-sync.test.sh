@@ -73,6 +73,16 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+git_common_dir() {
+  local project=$1 dir
+  dir=$(git -C "$project" rev-parse --git-common-dir)
+  case "$dir" in
+    /*) ;;
+    *) dir="$project/$dir" ;;
+  esac
+  (cd "$dir" && pwd -P)
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -121,6 +131,24 @@ SH
   chmod +x "$fakebin/git"
 }
 
+make_racing_mv() {
+  local fakebin=$1 real_mv
+  mkdir -p "$fakebin"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+real_mv='$real_mv'
+if [ "\$#" -eq 2 ] && [[ "\$1" == */packed-refs.lock ]]; then
+  source="\$1"
+  replacement="\$source.race"
+  printf '%s\n' replacement > "\$replacement"
+  "\$real_mv" -f "\$replacement" "\$source"
+fi
+exec "\$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+}
+
 build_packed_lock_case() {
   local home=$1 name=$2 clone work
   clone=$(build_pair "$home" "$name")
@@ -138,6 +166,18 @@ build_packed_lock_case() {
   advance_origin "$home" "$name" C1
   touch "$clone/.git/packed-refs.lock"
   printf '%s\n' "$clone"
+}
+
+build_linked_packed_lock_case() {
+  local home=$1 name=$2 clone linked common_dir
+  clone=$(build_packed_lock_case "$home" "$name")
+  common_dir=$(git_common_dir "$clone")
+  rm -f "$common_dir/packed-refs.lock"
+  git -C "$clone" checkout --detach --quiet
+  linked="$home/projects/$name-linked"
+  git -C "$clone" worktree add --quiet "$linked" main
+  touch "$common_dir/packed-refs.lock"
+  printf '%s\n' "$linked"
 }
 
 test_orphaned_stale_packed_refs_lock_recovers() {
@@ -194,6 +234,46 @@ test_transient_packed_refs_lock_self_clears() {
   assert_not_contains "$(cat "$err")" 'removed provably-stale packed-refs lock' \
     "transient lock was force-removed instead of retried"
   pass "fleet-sync retries a transient packed-refs lock without force-removing it"
+}
+
+test_linked_worktree_packed_refs_lock_recovers() {
+  local home linked fakebin out common_lock
+  home=$(new_home)
+  linked=$(build_linked_packed_lock_case "$home" lock-linked)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"
+  common_lock="$(git_common_dir "$linked")/packed-refs.lock"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$linked" 2>/dev/null)
+  assert_contains "$out" 'lock-linked-linked: recovered: removed a stale packed-refs lock' \
+    "linked worktree lock recovery was not relayed"
+  assert_absent "$common_lock" "linked worktree stale packed-refs lock was not removed"
+  [ "$(head_sha "$linked")" = "$(git -C "$linked" rev-parse origin/main)" ] \
+    || fail "linked worktree did not sync after stale lock recovery"
+  pass "fleet-sync recovers packed-refs.lock from a linked worktree's common git dir"
+}
+
+test_racing_packed_refs_lock_is_left_in_place() {
+  local home clone fakebin out err lock
+  home=$(new_home)
+  clone=$(build_packed_lock_case "$home" lock-race)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"; make_racing_mv "$fakebin"
+  lock="$clone/.git/packed-refs.lock"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-race: skipped: fetch failed' \
+    "racing packed-refs lock did not remain blocked"
+  assert_grep 'atomically quarantine' "$err" \
+    "racing packed-refs lock refusal was not explained"
+  assert_contains "$(cat "$lock")" replacement \
+    "replacement packed-refs lock was removed by stale recovery"
+  pass "fleet-sync leaves a replacement packed-refs lock after the atomic race check"
 }
 
 test_non_signature_fetch_failure_is_not_retried() {
@@ -510,4 +590,6 @@ test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_transient_packed_refs_lock_self_clears
+test_linked_worktree_packed_refs_lock_recovers
+test_racing_packed_refs_lock_is_left_in_place
 test_non_signature_fetch_failure_is_not_retried
