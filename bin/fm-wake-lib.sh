@@ -201,9 +201,8 @@ fm_watcher_lock_matches_pid() {
   lock_start=$(cat "$lockdir/pid-start" 2>/dev/null || true)
   [ "$lock_home" = "$expected_home" ] || return 1
   [ "$lock_path" = "$expected_path" ] || return 1
-  if [ -n "$lock_start" ]; then
-    fm_pid_start_matches_stored "$pid" "$lock_start" || return 1
-  fi
+  [ -n "$lock_start" ] || return 1
+  fm_pid_start_matches_stored "$pid" "$lock_start" || return 1
   [ -n "$lock_identity" ] || return 1
   if fm_pid_identity_matches_stored "$pid" "$lock_identity"; then
     return 0
@@ -235,6 +234,7 @@ fm_lock_clean_known_files() {
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
+    "$lockdir/owner-path" \
     2>/dev/null || true
 }
 
@@ -253,7 +253,7 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back identity start
+  local ownerdir=$1 owner_home=${2:-} owner_path=${3:-} mypid back identity start
   mypid=${BASHPID:-$$}
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
@@ -262,6 +262,12 @@ fm_lock_prepare_owner() {
   [ -z "$identity" ] || printf '%s\n' "$identity" > "$ownerdir/pid-identity"
   start=$(fm_pid_start "$mypid" 2>/dev/null || true)
   [ -z "$start" ] || printf '%s\n' "$start" > "$ownerdir/pid-start"
+  if [ -n "$owner_home" ]; then
+    printf '%s\n' "$owner_home" > "$ownerdir/fm-home" || return 1
+  fi
+  if [ -n "$owner_path" ]; then
+    printf '%s\n' "$owner_path" > "$ownerdir/owner-path" || return 1
+  fi
 }
 
 fm_lock_link_owner() {
@@ -339,14 +345,14 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} owner_home=${3:-} owner_path=${4:-} ownerdir
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ! fm_lock_prepare_owner "$ownerdir"; then
+  if ! fm_lock_prepare_owner "$ownerdir" "$owner_home" "$owner_path"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -391,9 +397,30 @@ fm_lock_mid_acquire_is_fresh() {
 }
 
 fm_lock_live_pid_has_mismatched_identity() {
-  local lockdir=$1 pid=$2 legacy_path=${3:-} stored_identity stored_start start_status
+  local lockdir=$1 pid=$2 legacy_path=${3:-} expected_home=${4:-} expected_path=${5:-}
+  local stored_home stored_path stored_identity stored_start start_status
+  FM_LOCK_LIVE_UNVERIFIED=0
   fm_pid_alive "$pid" || return 1
   fm_pid_is_zombie "$pid" && return 0
+  stored_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  stored_path=$(cat "$lockdir/owner-path" 2>/dev/null || true)
+  if [ -n "$expected_home" ] || [ -n "$expected_path" ]; then
+    if [ -n "$stored_home" ] && [ -n "$stored_path" ]; then
+      if [ "$stored_home" != "$expected_home" ] || [ "$stored_path" != "$expected_path" ]; then
+        return 0
+      fi
+    else
+      fm_pid_command_matches_path "$pid" "$legacy_path"
+      case "$?" in
+        0)
+          FM_LOCK_LIVE_UNVERIFIED=1
+          return 1
+          ;;
+        1) return 0 ;;
+        *) return 1 ;;
+      esac
+    fi
+  fi
   stored_start=$(cat "$lockdir/pid-start" 2>/dev/null || true)
   if [ -n "$stored_start" ]; then
     fm_pid_start_matches_stored "$pid" "$stored_start"
@@ -423,7 +450,8 @@ fm_lock_live_pid_has_mismatched_identity() {
 }
 
 fm_lock_recheck_stale_owner() {
-  local lockdir=$1 expected_owner=$2 expected_pid=$3 legacy_path=${4:-} actual_pid
+  local lockdir=$1 expected_owner=$2 expected_pid=$3 legacy_path=${4:-}
+  local expected_home=${5:-} expected_path=${6:-} actual_pid
   if [ -n "$expected_owner" ]; then
     fm_lock_points_to_owner "$lockdir" "$expected_owner" || return 1
   elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -432,7 +460,8 @@ fm_lock_recheck_stale_owner() {
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
   if fm_pid_alive "$actual_pid"; then
-    fm_lock_live_pid_has_mismatched_identity "$lockdir" "$actual_pid" "$legacy_path" || return 1
+    fm_lock_live_pid_has_mismatched_identity "$lockdir" "$actual_pid" "$legacy_path" \
+      "$expected_home" "$expected_path" || return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
     return 1
@@ -441,20 +470,23 @@ fm_lock_recheck_stale_owner() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 legacy_path=${2:-} pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 legacy_path=${2:-} owner_home=${3:-} owner_path=${4:-}
+  local pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
+  FM_LOCK_HELD_UNVERIFIED=0
   FM_LOCK_OWNER_DIR=
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_try_create "$lockdir" '' "$owner_home" "$owner_path"; then
     return 0
   fi
 
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$pid"; then
-    if fm_lock_live_pid_has_mismatched_identity "$lockdir" "$pid" "$legacy_path"; then
+    if fm_lock_live_pid_has_mismatched_identity "$lockdir" "$pid" "$legacy_path" "$owner_home" "$owner_path"; then
       :
     else
       FM_LOCK_HELD_PID=$pid
+      [ "${FM_LOCK_LIVE_UNVERIFIED:-0}" -eq 1 ] && FM_LOCK_HELD_UNVERIFIED=1
       return 1
     fi
   fi
@@ -473,11 +505,13 @@ fm_lock_try_acquire() {
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$cur"; then
-    if fm_lock_live_pid_has_mismatched_identity "$lockdir" "$cur" "$legacy_path"; then
+    if fm_lock_live_pid_has_mismatched_identity "$lockdir" "$cur" "$legacy_path" "$owner_home" "$owner_path"; then
       :
     else
       fm_lock_release "$steal"
       FM_LOCK_HELD_PID=$cur
+      # shellcheck disable=SC2034
+      [ "${FM_LOCK_LIVE_UNVERIFIED:-0}" -eq 1 ] && FM_LOCK_HELD_UNVERIFIED=1
       FM_LOCK_OWNER_DIR=
       return 1
     fi
@@ -491,6 +525,8 @@ fm_lock_try_acquire() {
   if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    # shellcheck disable=SC2034
+    [ "${FM_LOCK_LIVE_UNVERIFIED:-0}" -eq 1 ] && FM_LOCK_HELD_UNVERIFIED=1
     FM_LOCK_OWNER_DIR=
     return 1
   fi
@@ -500,7 +536,8 @@ fm_lock_try_acquire() {
     primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
   fi
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur" "$legacy_path"; then
+  if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur" "$legacy_path" \
+    "$owner_home" "$owner_path"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
@@ -509,7 +546,7 @@ fm_lock_try_acquire() {
 
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_try_create "$lockdir" "$steal_owner" "$owner_home" "$owner_path"; then
     rc=0
   fi
   if [ "$rc" -ne 0 ]; then

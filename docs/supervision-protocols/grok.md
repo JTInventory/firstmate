@@ -14,6 +14,9 @@ For a home with work in flight:
    `watcher: follower already waiting ...` as live-cycle results. Do not
    re-arm after `follower already waiting`: another arm already owns this
    cycle's follower slot.
+   Treat `watcher: FAILED - follower ownership is unverified` as a
+   fail-closed legacy-lock alarm, not as proof that a follower exists. Stop
+   and recover this home before retrying the arm.
 4. On Grok's `task_completed` notification, drain the queue and inspect the
    completion output. If it reports a wake reason (`signal`, `stale`, `check`,
    or `heartbeat`), handle the wake and then start exactly one new arm. If the

@@ -135,6 +135,7 @@ attach_and_wait() {
 
 ARM_LOCK_HELD=0
 FOLLOWER_CLAIMED=0
+ARM_FOLLOWER_UNVERIFIED=0
 # shellcheck disable=SC2317 # called indirectly by the EXIT trap
 release_arm_lock() {
   [ "$ARM_LOCK_HELD" -eq 1 ] || return 0
@@ -150,10 +151,15 @@ trap 'release_arm_lock' EXIT
 # this is the re-arm path after a harness reaped the previous follower.
 claim_arm_follower() {
   local deadline=$(( $(date +%s) + FOLLOWER_CLAIM_TIMEOUT ))
+  ARM_FOLLOWER_UNVERIFIED=0
   while :; do
-    if fm_lock_try_acquire "$ARM_LOCK" "$ARM_PATH"; then
+    if fm_lock_try_acquire "$ARM_LOCK" "$ARM_PATH" "$FM_HOME" "$ARM_PATH"; then
       ARM_LOCK_HELD=1
       return 0
+    fi
+    if [ "${FM_LOCK_HELD_UNVERIFIED:-0}" -eq 1 ]; then
+      ARM_FOLLOWER_UNVERIFIED=1
+      return 2
     fi
     if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
       return 1
@@ -165,10 +171,15 @@ claim_arm_follower() {
 
 claim_arm_follower_after_handoff() {
   local deadline=$(( $(date +%s) + FOLLOWER_CLAIM_TIMEOUT ))
+  ARM_FOLLOWER_UNVERIFIED=0
   while :; do
-    if fm_lock_try_acquire "$ARM_LOCK" "$ARM_PATH"; then
+    if fm_lock_try_acquire "$ARM_LOCK" "$ARM_PATH" "$FM_HOME" "$ARM_PATH"; then
       ARM_LOCK_HELD=1
       return 0
+    fi
+    if [ "${FM_LOCK_HELD_UNVERIFIED:-0}" -eq 1 ]; then
+      ARM_FOLLOWER_UNVERIFIED=1
+      return 2
     fi
     [ "$(date +%s)" -ge "$deadline" ] && return 1
     sleep 0.1
@@ -203,6 +214,9 @@ esac
 if [ "$mode" = restart ]; then
   if claim_arm_follower; then
     FOLLOWER_CLAIMED=1
+  elif [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
+    echo "watcher: FAILED - follower ownership is unverified"
+    exit 1
   fi
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
@@ -237,6 +251,10 @@ if [ "$mode" = restart ]; then
   fi
   if [ "$FOLLOWER_CLAIMED" -eq 0 ]; then
     if ! claim_arm_follower_after_handoff; then
+      if [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
+        echo "watcher: FAILED - follower ownership is unverified"
+        exit 1
+      fi
       echo "watcher: FAILED - no follower slot available for restart"
       exit 1
     fi
@@ -256,6 +274,10 @@ if [ "$mode" = arm ]; then
       report_attached
       attach_and_wait "$HEALTHY_PID"
     fi
+    if [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
+      echo "watcher: FAILED - follower ownership is unverified"
+      exit 1
+    fi
     if healthy_watcher; then
       if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
         echo "watcher: follower already waiting pid=$FM_LOCK_HELD_PID"
@@ -268,6 +290,10 @@ if [ "$mode" = arm ]; then
     exit 1
   fi
   if ! claim_arm_follower; then
+    if [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
+      echo "watcher: FAILED - follower ownership is unverified"
+      exit 1
+    fi
     if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
       echo "watcher: follower already waiting pid=$FM_LOCK_HELD_PID"
       exit 0

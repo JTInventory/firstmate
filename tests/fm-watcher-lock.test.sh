@@ -103,7 +103,7 @@ test_guard_warnings() {
   #       warning follows it, and the guidance is re-arm-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line peer identity
+  local dir state err first banner_line queue_line peer identity start
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
@@ -139,11 +139,13 @@ test_guard_warnings() {
   sleep 300 &
   peer=$!
   identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify guard peer pid"
+  start=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$LIB" "$peer") || fail "could not identify guard peer start"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
@@ -159,7 +161,7 @@ test_guard_warnings() {
 }
 
 test_guard_requires_live_matching_watch_lock() {
-  local dir state err peer identity
+  local dir state err peer identity start
 
   # A fresh beacon alone is not proof: the previous watcher may have exited
   # cleanly after writing a wake, leaving a fresh .last-watcher-beat behind.
@@ -206,11 +208,13 @@ test_guard_requires_live_matching_watch_lock() {
   sleep 300 &
   peer=$!
   identity=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify matching peer pid"
+  start=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$LIB" "$peer") || fail "could not identify matching peer start"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
   touch "$state/.last-watcher-beat"
   FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || {
     kill "$peer" 2>/dev/null || true
@@ -811,6 +815,39 @@ test_arm_reclaims_legacy_follower_reused_pid() {
   pass "arm reclaims a legacy follower lock whose pid was reused"
 }
 
+test_legacy_follower_scope_is_unverified() {
+  local dir state fakebin lockdir live out
+  dir=$(make_case arm-legacy-follower-scope)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.watch-arm.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'command='*) printf '%s\n' "legacy process ${FM_EXPECTED_ARM_PATH:?}" ;;
+  *'stat='*) printf '%s\n' 'S' ;;
+  *) printf '%s\n' 'legacy process' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" FM_EXPECTED_ARM_PATH="$WATCH_ARM" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2" "$3" "$4" "$3"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s unverified=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_HELD_UNVERIFIED:-0}"
+  ' _ "$LIB" "$lockdir" "$WATCH_ARM" "$dir")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*"held=$live"*"unverified=1"*) ;;
+    *) fail "ambiguous legacy follower lock was not held fail-closed: $out" ;;
+  esac
+  pass "legacy follower locks without home scope fail closed"
+}
+
 test_watcher_lock_match_rejects_zombie() {
   local dir state lockdir reaper zombie stat i identity
   dir=$(make_case watcher-zombie-health)
@@ -864,12 +901,37 @@ test_watcher_lock_match_rejects_zombie() {
   pass "watcher health rejects a zombie lock owner"
 }
 
+test_watcher_lock_match_rejects_unpinned_legacy_watcher() {
+  local dir state lockdir live identity
+  dir=$(make_case watcher-unpinned-health)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  sleep 300 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") || fail "could not identify unpinned watcher pid"
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "$dir" > "$lockdir/fm-home"
+  printf '%s\n' "$WATCH" > "$lockdir/watcher-path"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' _ "$LIB" "$lockdir" "$live" "$dir" "$WATCH"; then
+    kill "$live" 2>/dev/null || true
+    wait "$live" 2>/dev/null || true
+    fail "unpinned legacy watcher lock was accepted as healthy"
+  fi
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watcher health rejects an unpinned legacy lock"
+}
+
 test_grok_protocol_treats_existing_follower_as_live() {
   local protocol="$ROOT/docs/supervision-protocols/grok.md"
   grep -F 'watcher: follower already waiting' "$protocol" >/dev/null \
     || fail "Grok protocol omitted the existing-follower status"
   grep -F "re-arm after \`follower already waiting\`" "$protocol" >/dev/null \
     || fail "Grok protocol did not suppress re-arm after an existing follower"
+  grep -F 'watcher: FAILED - follower ownership is unverified' "$protocol" >/dev/null \
+    || fail "Grok protocol omitted the fail-closed legacy follower status"
   pass "Grok treats an existing follower as a live cycle"
 }
 
@@ -1089,7 +1151,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
 }
 
 test_arm_migrates_live_legacy_watcher_lock() {
-  local dir state fakebin out armout i wpid armpid status identity
+  local dir state fakebin out armout i wpid armpid status identity start
   dir=$(make_case arm-migrate-legacy)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1104,6 +1166,8 @@ test_arm_migrates_live_legacy_watcher_lock() {
     i=$((i + 1))
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  start=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$LIB" "$wpid") || fail "could not identify legacy watcher start"
+  printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
   printf '%s\n' "legacy locale-sensitive watcher identity $WATCH" > "$state/.watch.lock/pid-identity"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -1285,7 +1349,7 @@ test_arm_does_not_stack_attach_waiters() {
   out="$dir/watch.out"
   first_out="$dir/first-arm.out"
   second_out="$dir/second-arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wpid=$!
   i=0
@@ -1296,7 +1360,7 @@ test_arm_does_not_stack_attach_waiters() {
     i=$((i + 1))
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$first_out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$first_out" &
   first_pid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -1305,9 +1369,11 @@ test_arm_does_not_stack_attach_waiters() {
     i=$((i + 1))
   done
   grep -qF "watcher: attached pid=$wpid" "$first_out" || fail "first arm did not attach to the healthy watcher"
+  [ "$(cat "$state/.watch-arm.lock/fm-home" 2>/dev/null || true)" = "$dir" ] || fail "follower lock did not persist its home scope"
+  [ "$(cat "$state/.watch-arm.lock/owner-path" 2>/dev/null || true)" = "$WATCH_ARM" ] || fail "follower lock did not persist its owner path"
   is_live_non_zombie "$first_pid" || fail "first arm stopped waiting on the healthy watcher"
 
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$second_out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$second_out" &
   second_pid=$!
   wait_for_exit "$second_pid" 40
   status=$?
@@ -1437,7 +1503,7 @@ SH
 }
 
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
-  local dir state fakebin armout peer beater identity armpid status i
+  local dir state fakebin armout peer beater identity start armpid status i
   dir=$(make_case arm-peer-startup-race)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1445,11 +1511,13 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   sleep 300 &
   peer=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  start=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$LIB" "$peer") || fail "could not identify peer start"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
   (
     sleep 1
     touch "$state/.last-watcher-beat"
@@ -1528,7 +1596,9 @@ test_pid_start_accepts_previous_fallback_formats
 test_detach_kill_rejects_legacy_start_token
 test_detach_spawn_waits_for_exec_handshake
 test_arm_reclaims_legacy_follower_reused_pid
+test_legacy_follower_scope_is_unverified
 test_watcher_lock_match_rejects_zombie
+test_watcher_lock_match_rejects_unpinned_legacy_watcher
 test_grok_protocol_treats_existing_follower_as_live
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
