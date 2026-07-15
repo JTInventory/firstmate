@@ -67,6 +67,188 @@ for meta in "$STATE"/*.meta; do
 done
 [ "$in_flight" -gt 0 ] || exit 0
 
+json_input=
+json_pos=0
+json_len=0
+json_string=
+json_stop_active=false
+json_stop_seen=false
+json_stop_valid=true
+
+json_skip_ws() {
+  while [ "$json_pos" -lt "$json_len" ]; do
+    case "${json_input:json_pos:1}" in
+      [[:space:]]) json_pos=$((json_pos + 1)) ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+json_parse_string() {
+  local char escape i
+  [ "${json_input:json_pos:1}" = '"' ] || return 1
+  json_pos=$((json_pos + 1))
+  json_string=
+  while [ "$json_pos" -lt "$json_len" ]; do
+    char=${json_input:json_pos:1}
+    case "$char" in
+      '"')
+        json_pos=$((json_pos + 1))
+        return 0
+        ;;
+      \\)
+        json_pos=$((json_pos + 1))
+        [ "$json_pos" -lt "$json_len" ] || return 1
+        escape=${json_input:json_pos:1}
+        case "$escape" in
+          '"'|'/'|b|f|n|r|t|\\) json_pos=$((json_pos + 1)) ;;
+          u)
+            json_pos=$((json_pos + 1))
+            for i in 1 2 3 4; do
+              [ "$json_pos" -lt "$json_len" ] || return 1
+              [[ "${json_input:json_pos:1}" =~ ^[0-9A-Fa-f]$ ]] || return 1
+              json_pos=$((json_pos + 1))
+            done
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      [[:cntrl:]]) return 1 ;;
+      *)
+        json_string+=$char
+        json_pos=$((json_pos + 1))
+        ;;
+    esac
+  done
+  return 1
+}
+
+json_parse_literal() {
+  local literal=$1
+  [ "${json_input:json_pos:${#literal}}" = "$literal" ] || return 1
+  json_pos=$((json_pos + ${#literal}))
+}
+
+json_parse_number() {
+  local rest token
+  rest=${json_input:json_pos}
+  if [[ "$rest" =~ ^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)? ]]; then
+    token=${BASH_REMATCH[0]}
+    json_pos=$((json_pos + ${#token}))
+    return 0
+  fi
+  return 1
+}
+
+json_parse_value() {
+  local depth=$1 char
+  json_skip_ws
+  char=${json_input:json_pos:1}
+  case "$char" in
+    '{') json_parse_object "$depth" ;;
+    '[') json_parse_array "$depth" ;;
+    '"') json_parse_string ;;
+    t) json_parse_literal true ;;
+    f) json_parse_literal false ;;
+    n) json_parse_literal null ;;
+    -|[0-9]) json_parse_number ;;
+    *) return 1 ;;
+  esac
+}
+
+json_parse_array() {
+  local depth=$1 char
+  [ "${json_input:json_pos:1}" = '[' ] || return 1
+  json_pos=$((json_pos + 1))
+  json_skip_ws
+  char=${json_input:json_pos:1}
+  if [ "$char" = ']' ]; then
+    json_pos=$((json_pos + 1))
+    return 0
+  fi
+  while :; do
+    json_parse_value "$((depth + 1))" || return 1
+    json_skip_ws
+    char=${json_input:json_pos:1}
+    case "$char" in
+      ',')
+        json_pos=$((json_pos + 1))
+        ;;
+      ']')
+        json_pos=$((json_pos + 1))
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+json_parse_object() {
+  local depth=$1 char key
+  [ "${json_input:json_pos:1}" = '{' ] || return 1
+  json_pos=$((json_pos + 1))
+  json_skip_ws
+  char=${json_input:json_pos:1}
+  if [ "$char" = '}' ]; then
+    json_pos=$((json_pos + 1))
+    return 0
+  fi
+  while :; do
+    json_skip_ws
+    json_parse_string || return 1
+    key=$json_string
+    json_skip_ws
+    [ "${json_input:json_pos:1}" = ':' ] || return 1
+    json_pos=$((json_pos + 1))
+    if [ "$depth" -eq 0 ] && [ "$key" = stop_hook_active ]; then
+      [ "$json_stop_seen" = false ] || json_stop_valid=false
+      json_stop_seen=true
+      json_skip_ws
+      case "${json_input:json_pos:4}" in
+        true)
+          json_parse_literal true || return 1
+          [ "$json_stop_valid" = true ] && json_stop_active=true
+          ;;
+        false)
+          json_parse_literal false || return 1
+          ;;
+        *)
+          json_stop_valid=false
+          json_parse_value "$((depth + 1))" || return 1
+          ;;
+      esac
+    else
+      json_parse_value "$((depth + 1))" || return 1
+    fi
+    json_skip_ws
+    char=${json_input:json_pos:1}
+    case "$char" in
+      ',')
+        json_pos=$((json_pos + 1))
+        ;;
+      '}')
+        json_pos=$((json_pos + 1))
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+stop_hook_active_without_jq() {
+  json_input=$1
+  json_pos=0
+  json_len=${#json_input}
+  json_string=
+  json_stop_active=false
+  json_stop_seen=false
+  json_stop_valid=true
+  json_parse_object 0 || return 1
+  json_skip_ws
+  [ "$json_pos" -eq "$json_len" ] || return 1
+  [ "$json_stop_valid" = true ] && [ "$json_stop_active" = true ]
+}
+
 stop_hook_active_from_payload() {
   local value
   if command -v jq >/dev/null 2>&1; then
@@ -74,7 +256,7 @@ stop_hook_active_from_payload() {
     [ "$value" = true ]
     return
   fi
-  [[ "$1" =~ ^[[:space:]]*\{[[:space:]]*\"stop_hook_active\"[[:space:]]*:[[:space:]]*true[[:space:]]*\}[[:space:]]*$ ]]
+  stop_hook_active_without_jq "$1"
 }
 
 stop_hook_active_from_payload "$STOP_INPUT" && exit 0

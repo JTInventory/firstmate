@@ -146,10 +146,24 @@ test_missing_jq_preserves_stop_hook_retry() {
   home=$(make_primary_repo "$TMP_ROOT/missing-jq-retry")
   path=$(make_path_without_jq "$TMP_ROOT/path-without-jq-retry")
   : > "$home/state/child.meta"
-  out=$(run_guard_with_path "$path" "$home" '{"stop_hook_active":true}'); status=$?
+  out=$(run_guard_with_path "$path" "$home" '{ "session_id": "abc", "details": { "attempt": 1, "retriable": true }, "stop_hook_active": true, "hook_event_name": "Stop" }'); status=$?
   expect_code 0 "$status" "missing jq fallback must preserve stop_hook_active retry exemption"
   [ -z "$out" ] || fail "missing jq retry produced guard output: $out"
-  pass "fm-turnend-guard: missing jq fallback preserves stop_hook_active retry"
+  pass "fm-turnend-guard: missing jq fallback preserves retry with additional fields"
+}
+
+test_missing_jq_rejects_invalid_stop_payload() {
+  local home path out status
+  home=$(make_primary_repo "$TMP_ROOT/missing-jq-invalid")
+  path=$(make_path_without_jq "$TMP_ROOT/path-without-jq-invalid")
+  : > "$home/state/child.meta"
+  out=$(run_guard_with_path "$path" "$home" '{"session_id":"abc","stop_hook_active":true'); status=$?
+  expect_code 2 "$status" "missing jq fallback must reject malformed stop payload"
+  assert_contains "$out" "TURN WOULD END BLIND" "invalid fallback payload guard lacked its alarm banner"
+  out=$(run_guard_with_path "$path" "$home" '[{"stop_hook_active":true}]'); status=$?
+  expect_code 2 "$status" "missing jq fallback must reject non-object stop payload"
+  assert_contains "$out" "TURN WOULD END BLIND" "non-object fallback payload guard lacked its alarm banner"
+  pass "fm-turnend-guard: missing jq fallback rejects invalid stop payloads"
 }
 
 test_main_primary_blocks_with_child_in_flight
@@ -160,3 +174,4 @@ test_stop_hook_retry_is_allowed
 test_malformed_stop_payload_blocks_primary
 test_missing_jq_blocks_primary_with_in_flight
 test_missing_jq_preserves_stop_hook_retry
+test_missing_jq_rejects_invalid_stop_payload
