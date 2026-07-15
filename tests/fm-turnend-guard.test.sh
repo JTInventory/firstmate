@@ -163,6 +163,12 @@ test_missing_jq_rejects_invalid_stop_payload() {
   out=$(run_guard_with_path "$path" "$home" '[{"stop_hook_active":true}]'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject non-object stop payload"
   assert_contains "$out" "TURN WOULD END BLIND" "non-object fallback payload guard lacked its alarm banner"
+  out=$(run_guard_with_path "$path" "$home" $'{"stop_hook_active":true\v}'); status=$?
+  expect_code 2 "$status" "missing jq fallback must reject vertical-tab whitespace"
+  assert_contains "$out" "TURN WOULD END BLIND" "vertical-tab fallback payload guard lacked its alarm banner"
+  out=$(run_guard_with_path "$path" "$home" $'{"stop_hook_active":true\f}'); status=$?
+  expect_code 2 "$status" "missing jq fallback must reject form-feed whitespace"
+  assert_contains "$out" "TURN WOULD END BLIND" "form-feed fallback payload guard lacked its alarm banner"
   pass "fm-turnend-guard: missing jq fallback rejects invalid stop payloads"
 }
 

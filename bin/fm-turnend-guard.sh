@@ -78,7 +78,7 @@ json_stop_valid=true
 json_skip_ws() {
   while [ "$json_pos" -lt "$json_len" ]; do
     case "${json_input:json_pos:1}" in
-      [[:space:]]) json_pos=$((json_pos + 1)) ;;
+      ' '|$'\t'|$'\n'|$'\r') json_pos=$((json_pos + 1)) ;;
       *) return 0 ;;
     esac
   done
