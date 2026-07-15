@@ -12,6 +12,8 @@ make_normal_repo() {
   local dir=$1
   git init -q -b main "$dir"
   git -C "$dir" -c user.name=tests -c user.email=tests@example.invalid commit -qm init --allow-empty
+  mkdir -p "$dir/bin"
+  cp "$GATE_LIB" "$dir/bin/fm-gate-refuse-lib.sh"
   printf '%s\n' "$dir"
 }
 
@@ -26,11 +28,14 @@ make_gate_worktree() {
   git clone -q --bare "$seed" "$bare"
   mkdir -p "$(dirname "$wt")"
   git --git-dir="$bare" worktree add --detach -q "$wt" main
+  mkdir -p "$wt/bin"
+  cp "$GATE_LIB" "$wt/bin/fm-gate-refuse-lib.sh"
   printf '%s\n' "$wt"
 }
 
 run_helper() {
-  local cwd=$1 marker=${2:-unset}
+  local cwd=$1 marker=${2:-unset} lib
+  lib=${3:-$cwd/bin/fm-gate-refuse-lib.sh}
   (
     cd "$cwd" || exit 1
     unset NO_MISTAKES_GATE
@@ -39,7 +44,7 @@ run_helper() {
       empty) export NO_MISTAKES_GATE= ;;
     esac
     # shellcheck source=bin/fm-gate-refuse-lib.sh
-    . "$GATE_LIB"
+    . "$lib"
     fm_refuse_if_gate_agent
   ) 2>&1
 }
@@ -76,6 +81,10 @@ test_helper_signals() {
   expect_code 3 "$rc" "gate worktree must refuse with marker unset"
   assert_contains "$out" 'no-mistakes gate worktree' "gate path backstop message missing"
 
+  out=$(run_helper "$TMP_ROOT" unset "$GATE_LIB"); rc=$?
+  expect_code 3 "$rc" "gate library must refuse when called from outside the checkout"
+  assert_contains "$out" 'no-mistakes gate worktree' "gate library source-path refusal missing"
+
   out=$(run_helper "$NORMAL_CWD"); rc=$?
   expect_code 0 "$rc" "normal worktree must be unaffected"
   [ -z "$out" ] || fail "normal worktree printed a refusal: $out"
@@ -96,6 +105,12 @@ test_entrypoints_refuse() {
     rc=$first
     expect_code 3 "$rc" "$(basename "$script") must refuse the gate path backstop"
     assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") path refusal missing"
+
+    out=$(run_entrypoint "$script" "$TMP_ROOT" unset)
+    first=${out%%$'\n'*}
+    rc=$first
+    expect_code 3 "$rc" "$(basename "$script") must refuse when called from outside the checkout"
+    assert_contains "$out" 'no-mistakes gate worktree' "$(basename "$script") source-path refusal missing"
   done
   pass "spawn, send, and teardown refuse both gate signals before lifecycle work"
 }

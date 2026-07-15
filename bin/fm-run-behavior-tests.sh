@@ -58,6 +58,12 @@ if [ "${#tests[@]}" -eq 0 ]; then
   exit 1
 fi
 
+gate_test="$ROOT/tests/fm-gate-refuse.test.sh"
+if [ -f "$gate_test" ] && ! bash "$gate_test"; then
+  printf '%s\n' 'FAIL: gate-refusal test failed; tests were not started' >&2
+  exit 1
+fi
+
 base_tmp=${TMPDIR:-/tmp}
 if ! mkdir -p "$base_tmp"; then
   printf 'FAIL: could not create temporary base %s\n' "$base_tmp" >&2
@@ -72,12 +78,44 @@ if ! git clone --quiet --no-hardlinks "$ROOT" "$test_root"; then
   printf 'FAIL: could not create a normal behavior-test clone\n' >&2
   exit 1
 fi
+copy_worktree_delta() {
+  local path src dst
+  while IFS= read -r -d '' path; do
+    src="$ROOT/$path"
+    dst="$test_root/$path"
+    if [ -e "$src" ] || [ -L "$src" ]; then
+      mkdir -p "$(dirname "$dst")"
+      rm -rf -- "$dst"
+      cp -a -- "$src" "$dst"
+    else
+      rm -rf -- "$dst"
+    fi
+  done < <(
+    {
+      git -C "$ROOT" diff --name-only -z HEAD
+      git -C "$ROOT" ls-files --others --exclude-standard -z
+    } | sort -z -u
+  )
+}
+copy_worktree_delta
+if [ -f "$test_root/bin/fm-gate-refuse-lib.sh" ]; then
+  cat > "$test_root/bin/fm-gate-refuse-lib.sh" <<'SH'
+FM_GATE_REFUSE_EXIT=3
+fm_refuse_if_gate_agent() { return 0; }
+SH
+fi
 cleanup() {
   rm -rf -- "$suite_tmp"
 }
 trap cleanup EXIT
 
-mapfile -t tests < <(cd "$test_root" && compgen -G 'tests/*.test.sh' | sort)
+mapfile -t tests < <(
+  cd "$test_root" || exit 1
+  for test_path in tests/*.test.sh; do
+    [ -f "$test_path" ] || continue
+    [ "$test_path" = tests/fm-gate-refuse.test.sh ] || printf '%s\n' "$test_path"
+  done
+)
 total=${#tests[@]}
 active_jobs=$jobs
 [ "$active_jobs" -le "$total" ] || active_jobs=$total
@@ -92,7 +130,6 @@ run_one() {
     # that need a home set their own FM_* overrides explicitly.
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
       FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
-    unset NO_MISTAKES_GATE
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
     bash "$test_path"
