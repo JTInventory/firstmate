@@ -8,7 +8,7 @@
 # session/process group, then let the caller follow it by pid.
 
 fm_detach_spawn() {
-  local output=$1 pid command marker=__fm_detach_launcher__ pid_start spawn_status=0 detach_token
+  local output=$1 pid command marker=__fm_detach_launcher__ pid_start spawn_status=0 detach_token spawn_record
   shift
   [ "$#" -gt 0 ] || return 2
   command=$1
@@ -19,18 +19,21 @@ fm_detach_spawn() {
     esac
   done
   if command -v setsid >/dev/null 2>&1; then
-    pid=$(fm_detach_spawn_setsid "$output" "$marker" "$@") || spawn_status=$?
+    spawn_record=$(fm_detach_spawn_setsid "$output" "$marker" "$@") || spawn_status=$?
   elif command -v perl >/dev/null 2>&1; then
-    pid=$(fm_detach_spawn_perl "$output" "$marker" "$@") || spawn_status=$?
+    spawn_record=$(fm_detach_spawn_perl "$output" "$marker" "$@") || spawn_status=$?
   else
     printf '%s\n' 'fm_detach_spawn: cannot detach supervision: neither setsid(1) nor perl is available.' >&2
     printf '%s\n' 'fm_detach_spawn: install perl or util-linux (setsid(1)) before arming the watcher.' >&2
     return 127
   fi
+  case "$spawn_record" in
+    *$'\t'*) IFS=$'\t' read -r pid pid_start <<< "$spawn_record" ;;
+    *) pid=$spawn_record; pid_start=$(fm_pid_start "$pid" 2>/dev/null || true) ;;
+  esac
   case "$pid" in
     ''|*[!0-9]*) return "$spawn_status" ;;
   esac
-  pid_start=$(fm_pid_start "$pid" 2>/dev/null || true)
   if [ "$spawn_status" -ne 0 ]; then
     fm_detach_cleanup_unconfirmed "$pid" "$pid_start" "$command" "$detach_token" "$marker" || true
     printf '%s\n' "$pid"
@@ -84,7 +87,7 @@ fm_detach_process_is_execed() {
 }
 
 fm_detach_spawn_setsid() {
-  local output=$1 marker=$2 pidfile launcher_pidfile pid i
+  local output=$1 marker=$2 pidfile launcher_pidfile launcher_pid launcher_start pid pid_start i
   shift 2
   pidfile=$(mktemp "${TMPDIR:-/tmp}/firstmate-detach.XXXXXX") || return 1
   launcher_pidfile="$pidfile.launcher"
@@ -97,22 +100,31 @@ fm_detach_spawn_setsid() {
       fm-detach "$pidfile" "$marker" "$@" < /dev/null >>"$output" 2>&1 &
     printf '%s\n' "$!" > "$launcher_pidfile"
   )
+  launcher_pid=$(cat "$launcher_pidfile" 2>/dev/null || true)
+  launcher_start=$(fm_pid_start "$launcher_pid" 2>/dev/null || true)
   pid=
+  pid_start=
   i=0
   while [ "$i" -lt 100 ]; do
     pid=$(cat "$pidfile" 2>/dev/null || true)
-    [ -n "$pid" ] && break
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        pid_start=$(fm_pid_start "$pid" 2>/dev/null || true)
+        [ -n "$pid_start" ] && break
+        ;;
+    esac
     sleep 0.05
     i=$((i + 1))
   done
   case "$pid" in
-    ''|*[!0-9]*) pid=$(cat "$launcher_pidfile" 2>/dev/null || true) ;;
+    ''|*[!0-9]*) pid=$launcher_pid; pid_start=$launcher_start ;;
   esac
   rm -f "$pidfile" "$launcher_pidfile"
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  printf '%s\n' "$pid"
+  printf '%s\t%s\n' "$pid" "$pid_start"
 }
 
 fm_detach_spawn_perl() {
