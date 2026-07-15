@@ -123,10 +123,12 @@ stop_home_watcher() {
   [ -e "$STATE/.afk" ] && return 0
   while [ "$i" -lt "$STOP_WATCH_POLLS" ]; do
     pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-    if [ -n "$pid" ] && fm_pid_alive "$pid" \
-      && fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
+    if [ -n "$pid" ] && fm_pid_alive "$pid" && ! fm_pid_is_zombie "$pid" \
+      && fm_watcher_lock_scope_matches "$WATCH_LOCK" "$FM_HOME" "$WATCH"; then
       start=$(cat "$WATCH_LOCK/pid-start" 2>/dev/null || true)
       if [ -z "$start" ]; then
+        stop_failed=1
+      elif ! fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
         stop_failed=1
       elif ! fm_detach_kill "$pid" "$start"; then
         if fm_pid_alive "$pid" && ! fm_pid_is_zombie "$pid"; then
@@ -138,8 +140,8 @@ stop_home_watcher() {
     i=$((i + 1))
   done
   pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && fm_pid_alive "$pid" \
-    && fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
+  if [ -n "$pid" ] && fm_pid_alive "$pid" && ! fm_pid_is_zombie "$pid" \
+    && fm_watcher_lock_scope_matches "$WATCH_LOCK" "$FM_HOME" "$WATCH"; then
     stop_failed=1
   fi
   [ "$stop_failed" -eq 0 ]

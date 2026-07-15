@@ -191,16 +191,21 @@ fm_lock_migrate_legacy_watcher_identity() {
   fm_lock_migrate_legacy_identity "$lockdir" "$pid"
 }
 
-fm_watcher_lock_matches_pid() {
-  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 lock_home lock_path lock_identity lock_start
-  fm_pid_alive "$pid" || return 1
-  fm_pid_is_zombie "$pid" && return 1
+fm_watcher_lock_scope_matches() {
+  local lockdir=$1 expected_home=$2 expected_path=$3 lock_home lock_path
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  [ "$lock_home" = "$expected_home" ] || return 1
+  [ "$lock_path" = "$expected_path" ]
+}
+
+fm_watcher_lock_matches_pid() {
+  local lockdir=$1 pid=$2 expected_home=$3 expected_path=$4 lock_identity lock_start
+  fm_pid_alive "$pid" || return 1
+  fm_pid_is_zombie "$pid" && return 1
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   lock_start=$(cat "$lockdir/pid-start" 2>/dev/null || true)
-  [ "$lock_home" = "$expected_home" ] || return 1
-  [ "$lock_path" = "$expected_path" ] || return 1
+  fm_watcher_lock_scope_matches "$lockdir" "$expected_home" "$expected_path" || return 1
   [ -n "$lock_start" ] || return 1
   fm_pid_start_matches_stored "$pid" "$lock_start" || return 1
   [ -n "$lock_identity" ] || return 1
