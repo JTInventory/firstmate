@@ -259,6 +259,11 @@ stop_hook_active_without_jq() {
   [ "$json_stop_valid" = true ] && [ "$json_stop_active" = true ]
 }
 
+json_payload_is_valid_utf8() {
+  command -v iconv >/dev/null 2>&1 || return 1
+  printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+}
+
 stop_hook_active_from_payload() {
   local value
   if command -v jq >/dev/null 2>&1; then
@@ -269,6 +274,7 @@ stop_hook_active_from_payload() {
     [ "$value" = true ]
     return
   fi
+  json_payload_is_valid_utf8 "$1" || return 1
   stop_hook_active_without_jq "$1"
 }
 

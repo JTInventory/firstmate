@@ -36,7 +36,7 @@ make_secondmate_linked_home() {
 make_path_without_jq() {
   local dir=$1 tool
   mkdir -p "$dir"
-  for tool in bash cat date dirname git mkdir ps stat uname; do
+  for tool in bash cat date dirname git iconv mkdir ps stat uname; do
     ln -s "$(command -v "$tool")" "$dir/$tool"
   done
   printf '%s\n' "$dir"
@@ -162,6 +162,9 @@ test_missing_jq_preserves_stop_hook_retry() {
   home=$(make_primary_repo "$TMP_ROOT/missing-jq-retry")
   path=$(make_path_without_jq "$TMP_ROOT/path-without-jq-retry")
   : > "$home/state/child.meta"
+  out=$(run_guard_with_path "$path" "$home" '{"note":"café","stop_hook_active":true}'); status=$?
+  expect_code 0 "$status" "missing jq fallback must preserve valid UTF-8 string values"
+  [ -z "$out" ] || fail "missing jq valid UTF-8 payload produced guard output: $out"
   out=$(run_guard_with_path "$path" "$home" '{"session_id":"a\u0062c","stop_hook_active":true}'); status=$?
   expect_code 0 "$status" "missing jq fallback must preserve valid escaped string values"
   [ -z "$out" ] || fail "missing jq escaped-value payload produced guard output: $out"
@@ -179,6 +182,9 @@ test_missing_jq_rejects_invalid_stop_payload() {
   out=$(run_guard_with_path "$path" "$home" '{"session_id":"abc","stop_hook_active":true'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject malformed stop payload"
   assert_contains "$out" "TURN WOULD END BLIND" "invalid fallback payload guard lacked its alarm banner"
+  out=$(run_guard_with_path "$path" "$home" $'{"note":"\xff","stop_hook_active":true}'); status=$?
+  expect_code 2 "$status" "missing jq fallback must reject invalid UTF-8"
+  assert_contains "$out" "TURN WOULD END BLIND" "invalid UTF-8 fallback payload guard lacked its alarm banner"
   out=$(run_guard_with_path "$path" "$home" '[{"stop_hook_active":true}]'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject non-object stop payload"
   assert_contains "$out" "TURN WOULD END BLIND" "non-object fallback payload guard lacked its alarm banner"
