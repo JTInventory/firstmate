@@ -8,20 +8,31 @@
 # session/process group, then let the caller follow it by pid.
 
 fm_detach_spawn() {
-  local output=$1 pid command marker=__fm_detach_launcher__
+  local output=$1 pid command marker=__fm_detach_launcher__ pid_start spawn_status=0
   shift
   [ "$#" -gt 0 ] || return 2
   command=$1
   if command -v setsid >/dev/null 2>&1; then
-    pid=$(fm_detach_spawn_setsid "$output" "$marker" "$@") || return 1
+    pid=$(fm_detach_spawn_setsid "$output" "$marker" "$@") || spawn_status=$?
   elif command -v perl >/dev/null 2>&1; then
-    pid=$(fm_detach_spawn_perl "$output" "$marker" "$@") || return 1
+    pid=$(fm_detach_spawn_perl "$output" "$marker" "$@") || spawn_status=$?
   else
     printf '%s\n' 'fm_detach_spawn: cannot detach supervision: neither setsid(1) nor perl is available.' >&2
     printf '%s\n' 'fm_detach_spawn: install perl or util-linux (setsid(1)) before arming the watcher.' >&2
     return 127
   fi
-  fm_detach_wait_for_exec "$pid" "$command" "$marker" || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return "$spawn_status" ;;
+  esac
+  pid_start=$(fm_pid_start "$pid" 2>/dev/null || true)
+  if [ "$spawn_status" -ne 0 ]; then
+    [ -z "$pid_start" ] || fm_detach_kill "$pid" "$pid_start" || true
+    return "$spawn_status"
+  fi
+  if ! fm_detach_wait_for_exec "$pid" "$command" "$marker"; then
+    [ -z "$pid_start" ] || fm_detach_kill "$pid" "$pid_start" || true
+    return 1
+  fi
   printf '%s\n' "$pid"
 }
 
@@ -50,9 +61,10 @@ fm_detach_process_is_execed() {
 }
 
 fm_detach_spawn_setsid() {
-  local output=$1 marker=$2 pidfile pid i
+  local output=$1 marker=$2 pidfile launcher_pidfile pid i
   shift 2
   pidfile=$(mktemp "${TMPDIR:-/tmp}/firstmate-detach.XXXXXX") || return 1
+  launcher_pidfile="$pidfile.launcher"
   # The inner shell writes its own pid after setsid has created the new session.
   # The short-lived launcher subshell exits immediately, so the target is
   # reparented instead of remaining a child that the arm would need to wait on.
@@ -60,6 +72,7 @@ fm_detach_spawn_setsid() {
   (
     setsid sh -c 'printf "%s\n" "$$" > "$1"; shift 2; exec "$@"' \
       fm-detach "$pidfile" "$marker" "$@" < /dev/null >>"$output" 2>&1 &
+    printf '%s\n' "$!" > "$launcher_pidfile"
   )
   pid=
   i=0
@@ -69,7 +82,10 @@ fm_detach_spawn_setsid() {
     sleep 0.05
     i=$((i + 1))
   done
-  rm -f "$pidfile"
+  case "$pid" in
+    ''|*[!0-9]*) pid=$(cat "$launcher_pidfile" 2>/dev/null || true) ;;
+  esac
+  rm -f "$pidfile" "$launcher_pidfile"
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac

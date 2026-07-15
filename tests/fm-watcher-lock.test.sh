@@ -786,6 +786,69 @@ SH
   pass "detached spawn waits for the target after exec"
 }
 
+test_detach_spawn_cleans_pidfile_timeout() {
+  local dir fakebin output pidfile pid status
+  dir=$(make_case detach-pidfile-timeout)
+  fakebin="$dir/fakebin"
+  output="$dir/detached.out"
+  pidfile="$dir/launcher.pid"
+  cat > "$fakebin/setsid" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "${FM_FAKE_LAUNCHER_PID:?}"
+exec sleep 300
+SH
+  chmod +x "$fakebin/setsid"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_LAUNCHER_PID="$pidfile" \
+    bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" /bin/sleep 30' \
+    _ "$LIB" "$DETACH_LIB" "$output" || status=$?
+  [ "$status" -ne 0 ] || fail "detached spawn succeeded without a pid file"
+  pid=$(cat "$pidfile" 2>/dev/null || true)
+  [ -n "$pid" ] || fail "fake detached launcher did not record its pid"
+  ! is_live_non_zombie "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "detached spawn leaked the launcher after pid-file timeout"
+  }
+  pass "detached spawn cleans the launcher after pid-file timeout"
+}
+
+test_detach_spawn_cleans_exec_timeout() {
+  local dir fakebin output target target_pid pid status
+  dir=$(make_case detach-exec-timeout)
+  fakebin="$dir/fakebin"
+  output="$dir/detached.out"
+  target="$dir/target.sh"
+  target_pid="$dir/target.pid"
+  cat > "$target" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "${FM_TARGET_PID_FILE:?}"
+exec sleep 300
+SH
+  chmod +x "$target"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'command='*) printf '%s\n' "sh -c launcher ${FM_EXPECTED_DETACH_PATH:?} --fm-detach-token=timeout __fm_detach_launcher__" ;;
+  *) printf '%s\n' 'S' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_TARGET_PID_FILE="$target_pid" \
+    FM_EXPECTED_DETACH_PATH="$target" bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" "$4"' \
+    _ "$LIB" "$DETACH_LIB" "$output" "$target" || status=$?
+  [ "$status" -ne 0 ] || fail "detached spawn succeeded without an exec transition"
+  pid=$(cat "$target_pid" 2>/dev/null || true)
+  [ -n "$pid" ] || fail "exec-timeout target did not start"
+  ! is_live_non_zombie "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "detached spawn leaked the target after exec timeout"
+  }
+  pass "detached spawn cleans the target after exec timeout"
+}
+
 test_arm_reclaims_legacy_follower_reused_pid() {
   local dir state fakebin out reused arm_pid watcher_pid i
   dir=$(make_case arm-legacy-follower-reuse)
@@ -1595,6 +1658,8 @@ test_pid_start_fallback_uses_process_group_identity
 test_pid_start_accepts_previous_fallback_formats
 test_detach_kill_rejects_legacy_start_token
 test_detach_spawn_waits_for_exec_handshake
+test_detach_spawn_cleans_pidfile_timeout
+test_detach_spawn_cleans_exec_timeout
 test_arm_reclaims_legacy_follower_reused_pid
 test_legacy_follower_scope_is_unverified
 test_watcher_lock_match_rejects_zombie
