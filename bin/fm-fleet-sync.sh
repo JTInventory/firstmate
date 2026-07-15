@@ -190,8 +190,8 @@ stuck_state() {
 }
 
 packed_refs_lock_error() {
-  printf '%s\n' "$1" | grep -Fq 'packed-refs.lock' \
-    && printf '%s\n' "$1" | grep -Fq 'File exists'
+  printf '%s\n' "$1" \
+    | grep -Eiq "(Unable to create|cannot lock ref).*packed-refs[.]lock['\"]?:[[:space:]]+File exists"
 }
 
 git_common_dir_abs() {

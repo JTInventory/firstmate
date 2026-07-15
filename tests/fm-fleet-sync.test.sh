@@ -131,6 +131,22 @@ SH
   chmod +x "$fakebin/git"
 }
 
+make_split_signature_git() {
+  local fakebin=$1 real_git
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${3:-}" = fetch ]; then
+  printf '%s\n' 'fatal: unrelated packed-refs.lock text' >&2
+  printf '%s\n' 'fatal: File exists' >&2
+  exit 1
+fi
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
 make_racing_mv() {
   local fakebin=$1 real_mv
   mkdir -p "$fakebin"
@@ -283,6 +299,28 @@ test_racing_packed_refs_lock_is_left_in_place() {
   assert_contains "$(cat "$quarantine")" replacement \
     "replacement packed-refs lock contents were not retained"
   pass "fleet-sync retains a replacement packed-refs lock after the atomic race check"
+}
+
+test_split_lock_and_file_exists_lines_do_not_match() {
+  local home clone fakebin out err lock
+  home=$(new_home)
+  clone=$(build_packed_lock_case "$home" lock-split)
+  fakebin="$home/fakebin"; make_lsof_none "$fakebin"; make_split_signature_git "$fakebin"
+  lock="$clone/.git/packed-refs.lock"
+  err="$home/err"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$PATH" \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>"$err")
+  assert_contains "$out" 'lock-split: skipped: fetch failed' \
+    "separate lock and File exists lines were treated as a lock signature"
+  assert_not_contains "$(cat "$err")" waiting \
+    "separate lock and File exists lines triggered a retry"
+  assert_not_contains "$(cat "$err")" 'removed provably-stale packed-refs lock' \
+    "separate lock and File exists lines triggered lock removal"
+  [ -e "$lock" ] || fail "unmatched packed-refs lock was removed"
+  pass "fleet-sync requires the packed-refs lock signature on one Git error line"
 }
 
 test_non_signature_fetch_failure_is_not_retried() {
@@ -601,4 +639,5 @@ test_live_packed_refs_lock_is_never_removed
 test_transient_packed_refs_lock_self_clears
 test_linked_worktree_packed_refs_lock_recovers
 test_racing_packed_refs_lock_is_left_in_place
+test_split_lock_and_file_exists_lines_do_not_match
 test_non_signature_fetch_failure_is_not_retried
