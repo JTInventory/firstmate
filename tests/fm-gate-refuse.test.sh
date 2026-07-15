@@ -119,7 +119,7 @@ test_helper_signals() {
   expect_code 3 "$rc" "gate worktree must refuse with marker unset"
   assert_contains "$out" 'no-mistakes gate worktree' "gate path backstop message missing"
 
-  out=$(run_helper "$TMP_ROOT" unset "$GATE_LIB"); rc=$?
+  out=$(run_helper "$TMP_ROOT" unset "$GATE_CWD/bin/fm-gate-refuse-lib.sh"); rc=$?
   expect_code 3 "$rc" "gate library must refuse when called from outside the checkout"
   assert_contains "$out" 'no-mistakes gate worktree' "gate library source-path refusal missing"
 
