@@ -8,45 +8,58 @@
 # session/process group, then let the caller follow it by pid.
 
 fm_detach_spawn() {
-  local output=$1 pid command
+  local output=$1 pid command marker=__fm_detach_launcher__
   shift
   [ "$#" -gt 0 ] || return 2
   command=$1
   if command -v setsid >/dev/null 2>&1; then
-    pid=$(fm_detach_spawn_setsid "$output" "$@") || return 1
+    pid=$(fm_detach_spawn_setsid "$output" "$marker" "$@") || return 1
   elif command -v perl >/dev/null 2>&1; then
-    pid=$(fm_detach_spawn_perl "$output" "$@") || return 1
+    pid=$(fm_detach_spawn_perl "$output" "$marker" "$@") || return 1
   else
     printf '%s\n' 'fm_detach_spawn: cannot detach supervision: neither setsid(1) nor perl is available.' >&2
     printf '%s\n' 'fm_detach_spawn: install perl or util-linux (setsid(1)) before arming the watcher.' >&2
     return 127
   fi
-  fm_detach_wait_for_exec "$pid" "$command" || return 1
+  fm_detach_wait_for_exec "$pid" "$command" "$marker" || return 1
   printf '%s\n' "$pid"
 }
 
 fm_detach_wait_for_exec() {
-  local pid=$1 command=$2 i=0
+  local pid=$1 command=$2 marker=$3 i=0
   while [ "$i" -lt 100 ]; do
-    fm_pid_command_matches_path "$pid" "$command" && return 0
-    fm_pid_alive "$pid" || return 1
+    fm_pid_alive "$pid" || return 0
+    fm_detach_process_is_execed "$pid" "$command" "$marker" && return 0
     sleep 0.05
     i=$((i + 1))
   done
   return 1
 }
 
+fm_detach_process_is_execed() {
+  local pid=$1 command=$2 marker=$3 current
+  current=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 2
+  case "$current" in
+    *"$command"*) ;;
+    *) return 1 ;;
+  esac
+  case "$current" in
+    *"$marker"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 fm_detach_spawn_setsid() {
-  local output=$1 pidfile pid i
-  shift
+  local output=$1 marker=$2 pidfile pid i
+  shift 2
   pidfile=$(mktemp "${TMPDIR:-/tmp}/firstmate-detach.XXXXXX") || return 1
   # The inner shell writes its own pid after setsid has created the new session.
   # The short-lived launcher subshell exits immediately, so the target is
   # reparented instead of remaining a child that the arm would need to wait on.
   # shellcheck disable=SC2016 # $$ and $@ must expand in the detached shell.
   (
-    setsid sh -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
-      fm-detach "$pidfile" "$@" < /dev/null >>"$output" 2>&1 &
+    setsid sh -c 'printf "%s\n" "$$" > "$1"; shift 2; exec "$@"' \
+      fm-detach "$pidfile" "$marker" "$@" < /dev/null >>"$output" 2>&1 &
   )
   pid=
   i=0
@@ -64,11 +77,12 @@ fm_detach_spawn_setsid() {
 }
 
 fm_detach_spawn_perl() {
-  local output=$1
-  shift
+  local output=$1 marker=$2
+  shift 2
   perl -e '
     use POSIX ();
     my $output = shift @ARGV;
+    shift @ARGV;
     my $pid = fork();
     die "fork failed: $!\n" unless defined $pid;
     if (!$pid) {
@@ -79,7 +93,7 @@ fm_detach_spawn_perl() {
       exec { $ARGV[0] } @ARGV or die "exec failed: $!\n";
     }
     print "$pid\n";
-  ' "$output" "$@"
+  ' "$output" "$marker" "$@"
 }
 
 # Follow the process that was started, not whatever later reuses its pid.

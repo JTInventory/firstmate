@@ -764,7 +764,7 @@ printf '%s\n' "$count" > "$FM_FAKE_PS_COUNT"
 case "$*" in
   *'command='*)
     if [ "$count" -lt 2 ]; then
-      printf '%s\n' 'sh -c launcher'
+      printf '%s\n' "sh -c launcher ${FM_EXPECTED_DETACH_PATH:?} --fm-detach-token=ready __fm_detach_launcher__"
     else
       printf '%s\n' "${FM_EXPECTED_DETACH_PATH:?} --fm-detach-token=ready"
     fi
