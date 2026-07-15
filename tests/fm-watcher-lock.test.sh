@@ -836,7 +836,7 @@ SH
   chmod +x "$fakebin/ps"
   status=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_TARGET_PID_FILE="$target_pid" \
-    FM_EXPECTED_DETACH_PATH="$target" bash -c '. "$1"; . "$2"; fm_detach_spawn "$3" "$4"' \
+    FM_EXPECTED_DETACH_PATH="$target" bash -c '. "$1"; . "$2"; fm_pid_start() { return 1; }; fm_detach_spawn "$3" "$4" --fm-detach-token=timeout' \
     _ "$LIB" "$DETACH_LIB" "$output" "$target" || status=$?
   [ "$status" -ne 0 ] || fail "detached spawn succeeded without an exec transition"
   pid=$(cat "$target_pid" 2>/dev/null || true)

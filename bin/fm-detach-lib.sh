@@ -8,10 +8,16 @@
 # session/process group, then let the caller follow it by pid.
 
 fm_detach_spawn() {
-  local output=$1 pid command marker=__fm_detach_launcher__ pid_start spawn_status=0
+  local output=$1 pid command marker=__fm_detach_launcher__ pid_start spawn_status=0 detach_token
   shift
   [ "$#" -gt 0 ] || return 2
   command=$1
+  for detach_token in "$@"; do
+    case "$detach_token" in
+      --fm-detach-token=*) break ;;
+      *) detach_token= ;;
+    esac
+  done
   if command -v setsid >/dev/null 2>&1; then
     pid=$(fm_detach_spawn_setsid "$output" "$marker" "$@") || spawn_status=$?
   elif command -v perl >/dev/null 2>&1; then
@@ -26,14 +32,29 @@ fm_detach_spawn() {
   esac
   pid_start=$(fm_pid_start "$pid" 2>/dev/null || true)
   if [ "$spawn_status" -ne 0 ]; then
-    [ -z "$pid_start" ] || fm_detach_kill "$pid" "$pid_start" || true
+    fm_detach_cleanup_unconfirmed "$pid" "$pid_start" "$command" "$detach_token" "$marker" || true
     return "$spawn_status"
   fi
   if ! fm_detach_wait_for_exec "$pid" "$command" "$marker"; then
-    [ -z "$pid_start" ] || fm_detach_kill "$pid" "$pid_start" || true
+    fm_detach_cleanup_unconfirmed "$pid" "$pid_start" "$command" "$detach_token" "$marker" || true
     return 1
   fi
   printf '%s\n' "$pid"
+}
+
+fm_detach_cleanup_unconfirmed() {
+  local pid=$1 start=$2 command=$3 detach_token=$4 marker=$5 current
+  if [ -n "$start" ] && fm_detach_kill "$pid" "$start"; then
+    return 0
+  fi
+  [ -n "$detach_token" ] || return 1
+  current=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$current" in
+    *"$command"*"$detach_token"*) ;;
+    *"$command"*"$marker"*) ;;
+    *) return 1 ;;
+  esac
+  kill -TERM "$pid" 2>/dev/null
 }
 
 fm_detach_wait_for_exec() {
