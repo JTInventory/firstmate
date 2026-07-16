@@ -333,6 +333,21 @@ SH
   pass "AFK transition lock distinguishes I/O failure from contention"
 }
 
+test_afk_transition_lock_handoff_keeps_contention_code() {
+  local dir state lock out
+  dir="$TMP_ROOT/transition-lock-handoff"; state="$dir/state"; lock="$state/.afk-transition.lock"
+  mkdir -p "$state"
+  mkdir "$lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_create() { rmdir "$1"; return 1; }
+    fm_lock_try_acquire "$2"
+    printf "%s\n" "$?"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock")
+  [ "$out" = 1 ] || fail "lock handoff was not classified as contention: $out"
+  pass "AFK transition lock handoff preserves contention return code"
+}
+
 test_afk_transition_lock_times_out_on_contention() {
   local dir state holder out rc
   dir="$TMP_ROOT/transition-lock-contention"; state="$dir/state"; mkdir -p "$state"
@@ -443,6 +458,7 @@ test_afk_status_keeps_unverified_daemon_visible
 test_afk_return_retains_flag_when_removal_fails
 test_afk_transition_lock_rejects_invalid_state
 test_afk_transition_lock_fails_on_io_error
+test_afk_transition_lock_handoff_keeps_contention_code
 test_afk_transition_lock_times_out_on_contention
 test_afk_transition_lock_preserves_replacement_flag
 test_afk_return_clears_flag_after_confirmed_missing_daemon

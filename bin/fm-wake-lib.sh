@@ -352,14 +352,14 @@ fm_lock_claim() {
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} owner_home=${3:-} owner_path=${4:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 2
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir" "$owner_home" "$owner_path"; then
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return 2
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -476,16 +476,19 @@ fm_lock_recheck_stale_owner() {
 
 fm_lock_try_acquire() {
   local lockdir=$1 legacy_path=${2:-} owner_home=${3:-} owner_path=${4:-}
-  local pid steal cur rc steal_rc steal_owner primary_owner
+  local pid steal cur rc create_rc steal_rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_HELD_UNVERIFIED=0
   FM_LOCK_OWNER_DIR=
 
-  if fm_lock_try_create "$lockdir" '' "$owner_home" "$owner_path"; then
+  fm_lock_try_create "$lockdir" '' "$owner_home" "$owner_path"
+  create_rc=$?
+  if [ "$create_rc" -eq 0 ]; then
     return 0
   fi
+  [ "$create_rc" -eq 2 ] && return 2
   if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
-    return 2
+    return 1
   fi
 
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -556,11 +559,9 @@ fm_lock_try_acquire() {
   fi
 
   fm_lock_remove_path "$lockdir" || true
-  rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner" "$owner_home" "$owner_path"; then
-    rc=0
-  fi
-  if [ "$rc" -ne 0 ] && [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+  fm_lock_try_create "$lockdir" "$steal_owner" "$owner_home" "$owner_path"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
     fm_lock_release "$steal"
     return 2
   fi
