@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-detach-lib.sh"
 
 DAEMON="${FM_AFK_DAEMON_PATH:-$SCRIPT_DIR/fm-supervise-daemon.sh}"
+DAEMON_LOCK="$STATE/.supervise-daemon.lock"
 PIDFILE="$STATE/.supervise-daemon.pid"
 PID_START_FILE="$STATE/.supervise-daemon.pid-start"
 PID_IDENTITY_FILE="$STATE/.supervise-daemon.pid-identity"
@@ -47,6 +48,27 @@ daemon_owned() {  # 0 only when the recorded daemon is this live launch
   fm_pid_start_matches_stored "$pid" "$start" || return 1
   fm_pid_identity_matches_stored "$pid" "$identity" || return 1
   fm_pid_command_matches_path "$pid" "$DAEMON"
+}
+
+daemon_process_state() {
+  local process_pid process_command process_list
+  process_list=$(LC_ALL=C ps -e -o pid= -o command= 2>/dev/null) || return 2
+  while read -r process_pid process_command; do
+    [ -n "$process_pid" ] || continue
+    [ "$process_pid" = "$$" ] && continue
+    case "$process_command" in
+      *"$DAEMON"*) return 0 ;;
+    esac
+  done <<< "$process_list"
+  return 1
+}
+
+daemon_confirmed_absent() {
+  local process_state
+  [ ! -e "$DAEMON_LOCK" ] && [ ! -L "$DAEMON_LOCK" ] || return 1
+  daemon_process_state
+  process_state=$?
+  [ "$process_state" -eq 1 ]
 }
 
 wait_for_daemon() {  # <pid returned by fm_detach_spawn>
@@ -101,6 +123,10 @@ stop_afk() {
   local pid start i=0
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -z "$pid" ]; then
+    if ! daemon_confirmed_absent; then
+      printf '%s\n' 'afk: daemon record missing and daemon absence is unverified; away flag retained' >&2
+      return 1
+    fi
     afk_exit "$STATE"
     printf '%s\n' 'afk: stopped (no daemon record)'
     return 0

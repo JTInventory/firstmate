@@ -120,6 +120,7 @@ run:
   id: "01RUN"
   branch: $1
   status: running
+  awaiting_agent: parked 2m10s
   head: "abc1234"
   pr: ""
   findings: none
@@ -135,6 +136,7 @@ run:
   id: "01RUN"
   branch: $1
   status: fixing
+  awaiting_agent: parked 2m10s
   head: "abc1234"
   pr: ""
   findings: none
@@ -147,6 +149,7 @@ run:
   id: "01RUN"
   branch: $1
   status: awaiting_approval
+  awaiting_agent: parked 2m10s
   head: "abc1234"
   pr: ""
   findings[2]{id,severity,file,line,action,description}:
@@ -175,6 +178,7 @@ run:
   id: "01RUN"
   branch: $1
   status: running
+  awaiting_agent: parked 2m10s
   head: "abc1234"
   pr: ""
   findings[1]{id,severity,file,line,action,description}:
@@ -189,6 +193,7 @@ run:
   id: "01RUN"
   branch: $1
   status: running
+  awaiting_agent: parked 2m10s
   head: "abc1234"
   pr: ""
   findings[1]{id,severity,file,line,action,description}:
@@ -235,6 +240,7 @@ run:
   id: "01RUN"
   branch: $1
   status: running
+  awaiting_agent: parked 2m10s
   head: "abc1234"
   pr: "https://github.com/o/r/pull/2"
   findings: none

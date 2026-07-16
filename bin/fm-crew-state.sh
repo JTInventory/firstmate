@@ -23,7 +23,7 @@
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. A valid
-#      paused: <reason> event paired with an explicit parked awaiting_agent run is the
+#      paused: <reason> event paired with a gate-free parked awaiting_agent run is the
 #      declared external-wait exception: report paused while retaining the
 #      run-step source and parked gate detail.
 #   3. Reconcile the status log: if its last line says needs-decision/paused/blocked but
@@ -331,6 +331,13 @@ if [ "$HAVE_RUN" = 1 ]; then
   gate_status=$(nm_gate_status)
   has_gate=0
   nm_has_gate && has_gate=1
+  awaiting_agent_external_park=0
+  if [ "$awaiting_agent_parked" = 1 ] && \
+    [ "$status" != running ] && [ "$status" != fixing ] && [ "$status" != ci ] && \
+    [ "$status" != awaiting_approval ] && [ "$status" != fix_review ] && \
+    [ -z "$gate_status" ] && [ "$has_gate" = 0 ]; then
+    awaiting_agent_external_park=1
+  fi
 
   RUN_STATE=working
   RUN_DETAIL=""
@@ -342,7 +349,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
       *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
     esac
-  elif [ "$awaiting_agent_parked" = 1 ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+  elif [ "$awaiting_agent_external_park" = 1 ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
     if [ "$has_gate" = 1 ]; then
       gate=$(nm_gate_line_name)
     else
@@ -351,7 +358,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     [ -n "$gate" ] || gate=$status
     [ -n "$gate" ] || gate=gate
     RUN_STATE=parked
-    if [ "$awaiting_agent_parked" = 1 ]; then
+    if [ "$awaiting_agent_external_park" = 1 ]; then
       RUN_DETAIL="parked at awaiting_agent"
       [ -n "$gate" ] && [ "$gate" != awaiting_agent ] && RUN_DETAIL="$RUN_DETAIL${SEP}gate $gate"
     else
@@ -385,12 +392,12 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
 
   # A parked gate is normally a captain decision. When the crew explicitly
-  # declared a non-empty paused reason paired with awaiting_agent, however, the
-  # parked run-step is the
-  # authoritative shape of an external wait and must not become a wedge/nag.
+  # declared a non-empty paused reason paired with a gate-free awaiting_agent,
+  # the parked run-step is the authoritative shape of an external wait and
+  # must not become a wedge/nag.
   # Active running/fixing/ci states remain working and retain authority over a
   # stale paused event.
-  if [ "$RUN_STATE" = parked ] && [ "$awaiting_agent_parked" = 1 ] && log_declares_pause; then
+  if [ "$RUN_STATE" = parked ] && [ "$awaiting_agent_external_park" = 1 ] && log_declares_pause; then
     RUN_STATE=paused
     RUN_DETAIL="$RUN_DETAIL${SEP}declared external wait"
   fi

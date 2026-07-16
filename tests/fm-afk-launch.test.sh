@@ -153,6 +153,38 @@ test_afk_return_keeps_flag_on_identity_failure() {
   pass "AFK return retains the away flag when identity verification fails"
 }
 
+test_afk_return_keeps_flag_on_missing_record_for_live_daemon() {
+  local dir state daemon pid out
+  dir="$TMP_ROOT/missing-record-live"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start) \
+    || fail "AFK launch failed: $out"
+  pid=$(daemon_pid "$state")
+  AFK_TEST_PIDS+=("$pid")
+  rm -f "$state/.supervise-daemon.pid"
+  if FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop >/dev/null 2>&1; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "AFK return succeeded without a live daemon record"
+  fi
+  [ -e "$state/.afk" ] || fail "missing live daemon record cleared the durable away flag"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "AFK return retains the away flag when a live daemon record is missing"
+}
+
+test_afk_return_clears_flag_after_confirmed_missing_daemon() {
+  local dir state daemon
+  dir="$TMP_ROOT/missing-record-gone"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  date '+%s' > "$state/.afk"
+  FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop >/dev/null \
+    || fail "AFK return rejected a confirmed-absent daemon"
+  [ ! -e "$state/.afk" ] || fail "confirmed-absent daemon left the durable away flag"
+  pass "AFK return clears the away flag after confirmed daemon absence"
+}
+
 test_afk_return_keeps_flag_on_term_failure() {
   local dir state daemon pid out
   dir="$TMP_ROOT/term-failure"; state="$dir/state"; mkdir -p "$state"
@@ -175,6 +207,8 @@ test_afk_return_keeps_flag_on_term_failure() {
 test_afk_launch_detaches_from_harness_group
 test_afk_launch_return_clears_flag_and_is_idempotent
 test_afk_return_keeps_flag_on_identity_failure
+test_afk_return_keeps_flag_on_missing_record_for_live_daemon
+test_afk_return_clears_flag_after_confirmed_missing_daemon
 test_afk_return_keeps_flag_on_term_failure
 
 echo "all fm-afk-launch tests passed"
