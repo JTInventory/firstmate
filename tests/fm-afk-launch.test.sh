@@ -39,7 +39,11 @@ cleanup() {
     "$state/.supervise-daemon.pid-identity"
   exit 0
 }
-trap cleanup TERM INT
+if [ "${FM_AFK_TEST_IGNORE_TERM:-0}" = 1 ]; then
+  trap ':' TERM INT
+else
+  trap cleanup TERM INT
+fi
 while :; do sleep 0.1; done
 SH
   chmod +x "$daemon"
@@ -123,7 +127,54 @@ test_afk_launch_return_clears_flag_and_is_idempotent() {
   pass "AFK launch is idempotent and return clears the away flag"
 }
 
+test_afk_return_keeps_flag_on_identity_failure() {
+  local dir state daemon pid identity out
+  dir="$TMP_ROOT/identity-failure"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start) \
+    || fail "AFK launch failed: $out"
+  pid=$(daemon_pid "$state")
+  AFK_TEST_PIDS+=("$pid")
+  printf '%s\n' wrong-identity > "$state/.supervise-daemon.pid-identity"
+  if FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop >/dev/null 2>&1; then
+    fail "AFK return succeeded with an unverified daemon identity"
+  fi
+  [ -e "$state/.afk" ] || fail "identity failure cleared the durable away flag"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$pid")
+  printf '%s\n' "$identity" > "$state/.supervise-daemon.pid-identity"
+  FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop >/dev/null \
+    || fail "AFK return failed after restoring the pinned identity"
+  wait_for_file "$state/fake-daemon.returned" 50 || fail "identity recovery did not stop the daemon"
+  [ ! -e "$state/.afk" ] || fail "successful identity recovery left the durable away flag"
+  pass "AFK return retains the away flag when identity verification fails"
+}
+
+test_afk_return_keeps_flag_on_term_failure() {
+  local dir state daemon pid out
+  dir="$TMP_ROOT/term-failure"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" FM_AFK_TEST_IGNORE_TERM=1 "$LAUNCH" start) \
+    || fail "AFK launch failed: $out"
+  pid=$(daemon_pid "$state")
+  AFK_TEST_PIDS+=("$pid")
+  if FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop >/dev/null 2>&1; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "AFK return succeeded after TERM was ignored"
+  fi
+  [ -e "$state/.afk" ] || fail "TERM failure cleared the durable away flag"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "AFK return retains the away flag when TERM does not stop the daemon"
+}
+
 test_afk_launch_detaches_from_harness_group
 test_afk_launch_return_clears_flag_and_is_idempotent
+test_afk_return_keeps_flag_on_identity_failure
+test_afk_return_keeps_flag_on_term_failure
 
 echo "all fm-afk-launch tests passed"

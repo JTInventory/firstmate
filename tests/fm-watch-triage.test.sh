@@ -189,6 +189,21 @@ test_signal_crew_provably_working_classifier() {
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
 
+test_parked_pause_compatibility_requires_awaiting_agent() {
+  local dir state old_state
+  dir=$(make_case parked-pause-compatibility); state="$dir/state"
+  printf 'paused: waiting for vendor window\n' > "$state/gate.status"
+  old_state=${FM_STATE_OVERRIDE:-}
+  export FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  [ "$(crew_absorb_class gate)" = none ] || fail "approval/review parked gate was absorbed as an external wait"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at awaiting_agent'
+  [ "$(crew_absorb_class gate)" = paused ] || fail "awaiting_agent parked run was not absorbed as an external wait"
+  if [ -n "$old_state" ]; then export FM_STATE_OVERRIDE="$old_state"; else unset FM_STATE_OVERRIDE; fi
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
+  pass "parked pause compatibility is limited to awaiting_agent"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -524,7 +539,7 @@ test_paused_parked_run_absorbed_not_wedge() {
   printf '1\n' > "$state/.count-$key"
   # This is the current-state shape before/without the compatibility remap in
   # fm-crew-state; the shared classifier must combine it with the pause log.
-  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at awaiting_agent'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -760,6 +775,7 @@ test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_signal_crew_provably_working_classifier
+test_parked_pause_compatibility_requires_awaiting_agent
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced

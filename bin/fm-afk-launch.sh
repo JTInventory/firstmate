@@ -99,22 +99,26 @@ start_afk() {
 
 stop_afk() {
   local pid start i=0
-  afk_exit "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  [ -n "$pid" ] || { printf '%s\n' 'afk: stopped (no daemon record)'; return 0; }
-  daemon_owned || {
+  if [ -z "$pid" ]; then
+    afk_exit "$STATE"
+    printf '%s\n' 'afk: stopped (no daemon record)'
+    return 0
+  fi
+  if ! daemon_owned; then
     if fm_pid_alive "$pid"; then
       printf 'afk: daemon identity unverified; not signaling pid=%s\n' "$pid" >&2
       return 1
     fi
+    afk_exit "$STATE"
     printf '%s\n' 'afk: stopped (daemon already gone)'
     return 0
-  }
+  fi
   start=$(cat "$PID_START_FILE")
-  fm_detach_kill "$pid" "$start" || {
+  if ! fm_detach_kill "$pid" "$start"; then
     printf 'afk: daemon stop refused by pinned identity check (pid=%s)\n' "$pid" >&2
     return 1
-  }
+  fi
   while [ "$i" -lt 100 ] && fm_pid_alive "$pid" && ! fm_pid_is_zombie "$pid"; do
     sleep 0.05
     i=$((i + 1))
@@ -123,6 +127,7 @@ stop_afk() {
     printf 'afk: daemon did not stop after TERM (pid=%s)\n' "$pid" >&2
     return 1
   fi
+  afk_exit "$STATE"
   printf 'afk: stopped daemon pid=%s\n' "$pid"
 }
 

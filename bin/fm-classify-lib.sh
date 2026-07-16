@@ -128,9 +128,9 @@ status_file_kind() {  # <status-file>
 # Read the canonical crew-state once and classify the two safe absorb reasons.
 # This is intentionally separate from the captain-relevant status regex: a
 # declared pause is expected idle work, while a stopped/unknown crew remains loud.
-# Older/current-state fixtures may still expose a parked run-step; combine that
-# state with the task's valid paused event so the external-wait contract remains
-# stable across the reconciliation boundary.
+# Older/current-state fixtures may still expose a parked awaiting_agent run-step;
+# combine that state with the task's valid paused event so the external-wait
+# contract remains stable across the reconciliation boundary.
 crew_absorb_class() {  # <id>
   local id=$1 line state src status_root last
   [ -n "$id" ] || { printf 'none'; return; }
@@ -141,7 +141,7 @@ crew_absorb_class() {  # <id>
     printf 'paused'
     return
   fi
-  if [ "$state" = parked ]; then
+  if [ "$state" = parked ] && [[ "$line" == *"source: run-step"* && "$line" == *"parked at awaiting_agent"* ]]; then
     status_root=${FM_STATE_OVERRIDE:-${FM_HOME:-${_FM_CLASSIFY_LIB_DIR%/bin}}/state}
     last=$(last_status_line "$status_root/$id.status")
     if status_is_paused "$last"; then

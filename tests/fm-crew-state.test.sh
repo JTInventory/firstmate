@@ -147,13 +147,25 @@ run:
   id: "01RUN"
   branch: $1
   status: awaiting_approval
-  awaiting_agent: parked 2m10s
   head: "abc1234"
   pr: ""
   findings[2]{id,severity,file,line,action,description}:
     r1,warning,a.go,,auto-fix,ignored error
     r2,error,b.go,,ask-user,changes product behavior
 gate: review
+EOF
+}
+
+run_awaiting_agent() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_agent
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
+  pr: ""
+  findings: none
 EOF
 }
 
@@ -311,13 +323,45 @@ test_declared_pause_with_parked_run_is_external_wait() {
   fm_write_meta "$d/state/feat-paused-parked.meta" \
     "window=fm:fm-feat-paused-parked" "worktree=$d/wt" "kind=ship"
   printf 'paused: waiting for vendor window\n' > "$d/state/feat-paused-parked.status"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-paused-parked)"
+  FM_FAKE_AXI_STATUS="$(run_awaiting_agent fm/feat-paused-parked)"
   local out; out=$(run_crew_state "$d" feat-paused-parked)
   assert_contains "$out" "state: paused" "declared pause + parked run -> paused external wait"
   assert_contains "$out" "source: run-step" "declared pause remains sourced from run-step"
-  assert_contains "$out" "parked at review" "declared pause preserves parked gate detail"
+  assert_contains "$out" "parked at awaiting_agent" "declared pause preserves awaiting_agent detail"
   assert_not_contains "$out" "state: parked" "declared pause is not exposed as a pure captain gate"
   pass "declared pause with parked run is an external wait"
+}
+
+test_declared_pause_with_approval_gate_stays_parked() {
+  reset_fakes
+  local d; d=$(new_case paused-approval-gate)
+  make_repo_on_branch "$d/wt" fm/feat-paused-approval
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-paused-approval.meta" \
+    "window=fm:fm-feat-paused-approval" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting for vendor window\n' > "$d/state/feat-paused-approval.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-paused-approval)"
+  local out; out=$(run_crew_state "$d" feat-paused-approval)
+  assert_contains "$out" "state: parked" "approval gate remains parked despite paused log"
+  assert_contains "$out" "parked at review" "approval gate remains visible"
+  assert_not_contains "$out" "state: paused" "approval gate is not remapped to external wait"
+  pass "declared pause does not hide an approval gate"
+}
+
+test_declared_pause_with_fix_review_gate_stays_parked() {
+  reset_fakes
+  local d; d=$(new_case paused-fix-review)
+  make_repo_on_branch "$d/wt" fm/feat-paused-fix-review
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-paused-fix-review.meta" \
+    "window=fm:fm-feat-paused-fix-review" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting for vendor window\n' > "$d/state/feat-paused-fix-review.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_in_gate_block fm/feat-paused-fix-review)"
+  local out; out=$(run_crew_state "$d" feat-paused-fix-review)
+  assert_contains "$out" "state: parked" "fix review gate remains parked despite paused log"
+  assert_contains "$out" "parked at review" "fix review gate remains visible"
+  assert_not_contains "$out" "state: paused" "fix review gate is not remapped to external wait"
+  pass "declared pause does not hide a fix review gate"
 }
 
 test_scalar_gate_parked_not_superseded() {
@@ -724,6 +768,8 @@ test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_declared_pause_with_parked_run_is_external_wait
+test_declared_pause_with_approval_gate_stays_parked
+test_declared_pause_with_fix_review_gate_stays_parked
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
