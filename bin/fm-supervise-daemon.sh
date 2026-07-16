@@ -56,7 +56,7 @@
 # backoff, pane-gone guard, and a signal-trapped shutdown that flushes buffered
 # escalations before exit.
 #
-# Usage: fm-supervise-daemon.sh
+# Usage: fm-supervise-daemon.sh [--fm-detach-token=<token>]
 #          Long-lived background loop. Normally started by the /afk skill, which
 #          sets state/.afk first. Env knobs:
 #          FM_SUPERVISOR_TARGET     supervisor tmux target (override; otherwise
@@ -325,12 +325,21 @@ classify_stale() {  # <window> <state>
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
     # A status log is append-only: an authoritative run can supersede its old
-    # pause line. Terminal or parked canonical states must surface immediately;
-    # only a declared pause with no active/actionable proof enters its cadence.
+    # pause line. Terminal states must surface immediately. A parked run remains
+    # actionable unless the same task still has a valid declared pause, which is
+    # the external-wait exception handled by crew_absorb_class.
     canonical=$(crew_state_value "$task")
     case "$canonical" in
-      done|failed|blocked|parked)
+      done|failed|blocked)
         printf 'escalate|stale + canonical %s supersedes pause: %s' "$canonical" "$last"
+        return
+        ;;
+      parked)
+        if [ "$(crew_absorb_class "$task")" = paused ]; then
+          printf 'pause|paused (awaiting external): %s' "$last"
+        else
+          printf 'escalate|stale + canonical %s supersedes pause: %s' "$canonical" "$last"
+        fi
         return
         ;;
       working)
@@ -841,6 +850,22 @@ fm_super_main() {
   STATE="$(_state_root)"
   mkdir -p "$STATE"
 
+  local detach_token="" arg
+  for arg in "$@"; do
+    case "$arg" in
+      --fm-detach-token=*) detach_token=${arg#*=} ;;
+      --help|-h)
+        printf '%s\n' 'usage: fm-supervise-daemon.sh [--fm-detach-token=<token>]' \
+          'The detach token is internal to bin/fm-afk-launch.sh.'
+        return 0
+        ;;
+      *)
+        printf 'error: unknown option: %s\n' "$arg" >&2
+        return 2
+        ;;
+    esac
+  done
+
   # Source the portable lock helpers (works on macOS where flock is absent).
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
   # shellcheck source=bin/fm-wake-lib.sh
@@ -851,6 +876,9 @@ fm_super_main() {
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
   local LOCK="$STATE/.supervise-daemon.lock"
   local PIDFILE="$STATE/.supervise-daemon.pid"
+  local PID_START_FILE="$STATE/.supervise-daemon.pid-start"
+  local PID_IDENTITY_FILE="$STATE/.supervise-daemon.pid-identity"
+  local PID_PATH_FILE="$STATE/.supervise-daemon.pid-path"
   local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
   local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
   local CRASH_WINDOW=${FM_CRASH_WINDOW:-$CRASH_WINDOW_DEFAULT}
@@ -869,6 +897,9 @@ fm_super_main() {
     exit 1
   fi
   echo "$$" > "$PIDFILE"
+  fm_pid_start "$$" > "$PID_START_FILE" 2>/dev/null || true
+  fm_pid_identity "$$" > "$PID_IDENTITY_FILE" 2>/dev/null || true
+  printf '%s\n' "$FM_DAEMON_DIR/fm-supervise-daemon.sh" > "$PID_PATH_FILE"
 
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (inherited from the
@@ -896,14 +927,14 @@ fm_super_main() {
   if ! tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1; then
     echo "error: supervisor target '$TARGET' does not resolve to a tmux pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found"
+    rm -f "$PIDFILE" "$PID_START_FILE" "$PID_IDENTITY_FILE" "$PID_PATH_FILE" 2>/dev/null || true
     fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; afk=$afk_status; detached=$([ -n "$detach_token" ] && echo yes || echo no); inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
@@ -917,8 +948,8 @@ fm_super_main() {
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
+    rm -f "$PIDFILE" "$PID_START_FILE" "$PID_IDENTITY_FILE" "$PID_PATH_FILE" 2>/dev/null || true
     fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
     log "daemon shutting down"
     exit 0
   }

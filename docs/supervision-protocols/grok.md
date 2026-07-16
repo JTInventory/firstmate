@@ -42,7 +42,8 @@ bin/fm-watch-session.sh --status
 The runner uses the same detached arm path and re-arms immediately after wake
 output. Stop only this home's runner with `bin/fm-watch-session.sh stop`.
 
-Away mode remains a separate residual on this fork. It has
-`bin/fm-supervise-daemon.sh` and the `afk` skill, but no `fm-afk-start.sh`
-detached entrypoint. This change covers the watcher and normal Grok background
-arms only; it does not claim that reaping an away-mode daemon is fixed.
+Away mode uses the JT-owned `bin/fm-afk-launch.sh` entrypoint. It applies the
+same detached session/process-group boundary and pinned pid/start/identity
+proof; its exact fail-closed start/return contract is owned by the
+[afk skill](../../.agents/skills/afk/SKILL.md). This JT path does not add
+Herdr, cmux, or multi-backend wedge channels.

@@ -85,6 +85,7 @@ tests/fm-send-strict.test.sh              # fm-send refuses unresolved bare targ
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for afk injection: partial-input deferral, swallowed-Enter retry, and single clean digest
+tests/fm-afk-launch.test.sh               # JT AFK launch/return detachment, process-group reap survival, and idempotent start
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
 tests/fm-gitignore-boundary.test.sh       # local fleet directory ignore boundary for config/, reports/, and backups/
 tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output

@@ -189,6 +189,21 @@ test_signal_crew_provably_working_classifier() {
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
 
+test_parked_pause_compatibility_requires_awaiting_agent() {
+  local dir state old_state
+  dir=$(make_case parked-pause-compatibility); state="$dir/state"
+  printf 'paused: waiting for vendor window\n' > "$state/gate.status"
+  old_state=${FM_STATE_OVERRIDE:-}
+  export FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  [ "$(crew_absorb_class gate)" = none ] || fail "approval/review parked gate was absorbed as an external wait"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at awaiting_agent'
+  [ "$(crew_absorb_class gate)" = paused ] || fail "awaiting_agent parked run was not absorbed as an external wait"
+  if [ -n "$old_state" ]; then export FM_STATE_OVERRIDE="$old_state"; else unset FM_STATE_OVERRIDE; fi
+  unset FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
+  pass "parked pause compatibility is limited to awaiting_agent"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -505,6 +520,43 @@ test_paused_stale_absorbed_then_resurfaced() {
   pass "declared pause is absorbed, re-surfaces once after cadence, throttles duplicates, then clears on resume"
 }
 
+# U10: the no-mistakes run can be parked at an awaiting_agent gate while the
+# crew has declared a real external pause. That combination is still an
+# absorbable wait, not a stale-pane wedge. A paused declaration must not turn a
+# parked gate into a pure captain-nag path.
+test_paused_parked_run_absorbed_not_wedge() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case paused-parked-run); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-paused-parked"
+  printf 'idle awaiting external dependency' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-parked.status.meta"
+  printf 'paused: waiting for vendor window\n' > "$state/paused-parked.status"
+  sig=$(seen_sig "$state/paused-parked.status"); printf '%s' "$sig" > "$state/.seen-paused-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external dependency")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # This is the current-state shape before/without the compatibility remap in
+  # fm-crew-state; the shared classifier must combine it with the pause log.
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at awaiting_agent'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "paused+parked external wait was wedge-surfaced: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "paused+parked wait emitted a stale wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "paused+parked wait queued a stale wake"
+  [ -e "$state/.paused-$key" ] || fail "paused+parked wait did not retain pause cadence"
+  [ ! -e "$state/.stale-since-$key" ] || fail "paused+parked wait started a wedge timer"
+  reap "$pid"
+  pass "paused+parked run is absorbed as an external wait, not a wedge"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -723,6 +775,7 @@ test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_signal_crew_provably_working_classifier
+test_parked_pause_compatibility_requires_awaiting_agent
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
@@ -731,6 +784,7 @@ test_actionable_signal_surfaced
 test_paused_secondmate_signal_surfaced
 test_terminal_stale_surfaced
 test_paused_stale_absorbed_then_resurfaced
+test_paused_parked_run_absorbed_not_wedge
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_repairs_missing_or_corrupt_timer

@@ -22,7 +22,10 @@
 #   2. Matching no-mistakes run for this crew's branch, active or terminal?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed.
+#      passed/checks-passed -> done, failed/cancelled -> failed. A valid
+#      paused: <reason> event paired with a gate-free parked awaiting_agent run is the
+#      declared external-wait exception: report paused while retaining the
+#      run-step source and parked gate detail.
 #   3. Reconcile the status log: if its last line says needs-decision/paused/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -99,6 +102,11 @@ log_note_of() {  # <line>
     *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
     *)   printf '%s' "$1" ;;
   esac
+}
+
+log_declares_pause() {
+  [ "$(log_verb_of "$LOG_LINE")" = paused ] || return 1
+  [[ "$(log_note_of "$LOG_LINE")" =~ [^[:space:]] ]]
 }
 # Map a status-log verb onto a canonical state for the fallback path. The
 # paused verb is a declared external wait and remains distinct from actionable
@@ -229,6 +237,9 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+nm_awaiting_agent_parked() {
+  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*awaiting_agent:[[:space:]]*"?parked([[:space:]]|"?$)'
+}
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(log_note_of "$LOG_LINE")" in
@@ -315,10 +326,18 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   status=$(strip_quotes "$(nm_field status)")
   outcome=$(strip_quotes "$(nm_field outcome)")
-  awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
+  awaiting_agent_parked=0
+  nm_awaiting_agent_parked && awaiting_agent_parked=1
   gate_status=$(nm_gate_status)
   has_gate=0
   nm_has_gate && has_gate=1
+  awaiting_agent_external_park=0
+  if [ "$awaiting_agent_parked" = 1 ] && \
+    [ "$status" != running ] && [ "$status" != fixing ] && [ "$status" != ci ] && \
+    [ "$status" != awaiting_approval ] && [ "$status" != fix_review ] && \
+    [ -z "$gate_status" ] && [ "$has_gate" = 0 ]; then
+    awaiting_agent_external_park=1
+  fi
 
   RUN_STATE=working
   RUN_DETAIL=""
@@ -330,7 +349,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
       *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
     esac
-  elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+  elif [ "$awaiting_agent_external_park" = 1 ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
     if [ "$has_gate" = 1 ]; then
       gate=$(nm_gate_line_name)
     else
@@ -339,7 +358,12 @@ if [ "$HAVE_RUN" = 1 ]; then
     [ -n "$gate" ] || gate=$status
     [ -n "$gate" ] || gate=gate
     RUN_STATE=parked
-    RUN_DETAIL="parked at $gate"
+    if [ "$awaiting_agent_external_park" = 1 ]; then
+      RUN_DETAIL="parked at awaiting_agent"
+      [ -n "$gate" ] && [ "$gate" != awaiting_agent ] && RUN_DETAIL="$RUN_DETAIL${SEP}gate $gate"
+    else
+      RUN_DETAIL="parked at $gate"
+    fi
     fcount=$(nm_gate_findings_count)
     [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
     if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
@@ -367,12 +391,24 @@ if [ "$HAVE_RUN" = 1 ]; then
     emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
+  # A parked gate is normally a captain decision. When the crew explicitly
+  # declared a non-empty paused reason paired with a gate-free awaiting_agent,
+  # the parked run-step is the authoritative shape of an external wait and
+  # must not become a wedge/nag.
+  # Active running/fixing/ci states remain working and retain authority over a
+  # stale paused event.
+  if [ "$RUN_STATE" = parked ] && [ "$awaiting_agent_external_park" = 1 ] && log_declares_pause; then
+    RUN_STATE=paused
+    RUN_DETAIL="$RUN_DETAIL${SEP}declared external wait"
+  fi
+
   # Reconcile the status log. A needs-decision/paused/blocked log line that the run-step
-  # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
+  # has moved past (anything but a genuinely parked run or its declared external
+  # wait exception) is deterministically stale: the gate resolved and the run
+  # resumed or finished.
   case "$LOG_VERB" in
     needs-decision|paused|blocked)
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_STATE" != parked ] && [ "$RUN_STATE" != paused ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else
