@@ -309,8 +309,9 @@ test_afk_transition_lock_rejects_invalid_state() {
     FM_AFK_DAEMON_PATH="$ROOT/bin/fm-supervise-daemon.sh" "$LAUNCH" start 2>&1)
   rc=$?
   [ "$rc" -ne 124 ] || fail "AFK start hung when the state path was a file"
-  [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'transition lock parent is not usable' >/dev/null \
-    || fail "AFK start did not reject the invalid transition lock parent: $out"
+  if [ "$rc" -eq 0 ] || ! printf '%s' "$out" | grep -F 'transition lock parent is not usable' >/dev/null; then
+    fail "AFK start did not reject the invalid transition lock parent: $out"
+  fi
   pass "AFK transition lock rejects an invalid state path promptly"
 }
 
@@ -360,8 +361,9 @@ test_afk_transition_lock_times_out_on_contention() {
     FM_AFK_DAEMON_PATH="$ROOT/bin/fm-supervise-daemon.sh" "$LAUNCH" start 2>&1)
   rc=$?
   [ "$rc" -ne 124 ] || fail "AFK start hung on transition-lock contention"
-  [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'transition lock busy' >/dev/null \
-    || fail "AFK start did not report bounded transition-lock contention: $out"
+  if [ "$rc" -eq 0 ] || ! printf '%s' "$out" | grep -F 'transition lock busy' >/dev/null; then
+    fail "AFK start did not report bounded transition-lock contention: $out"
+  fi
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   pass "AFK transition lock bounds contention retries"
