@@ -106,8 +106,8 @@ This ledger remains the Firstmate-side decision record; the Compound document ex
 
 | Upstream owner | Capability | Decision | JT adaptation and boundary | JT PR |
 | --- | --- | --- | --- | --- |
-| #572 | Absorb a declared pause while the no-mistakes run is parked at `awaiting_agent` | Adapt | Reconcile a valid `paused: <reason>` with the parked run-step as an absorbable external wait; active `running`/`fixing`/`ci` remains authoritative, and no-pause idle remains stale/wedge-visible. | Pending this branch |
-| #490, #587; detach foundation from #65 | AFK daemon launch/return detachment | Adapt | Add a JT-only `fm-afk-launch.sh` using the existing `setsid(1)`/Perl detach helper, pinned daemon pid/start/identity proof, and tmux-compatible return; no Herdr, cmux, or multi-backend wedge channels. If neither detach backend exists, launch fails closed and retains the away flag for recovery rather than falling back to an attached child. | Pending this branch |
+| #572 | Absorb a declared pause while the no-mistakes run is parked at `awaiting_agent` | Adapt | Reconcile a valid `paused: <reason>` with the parked run-step as an absorbable external wait; active `running`/`fixing`/`ci` remains authoritative, and no-pause idle remains stale/wedge-visible. | [#68](https://github.com/JTInventory/firstmate/pull/68) |
+| #490, #587; detach foundation from #65 | AFK daemon launch/return detachment | Adapt | Add a JT-only `fm-afk-launch.sh` using the existing `setsid(1)`/Perl detach helper, pinned daemon pid/start/identity proof, and tmux-compatible return; no Herdr, cmux, or multi-backend wedge channels. If neither detach backend exists, launch fails closed and retains the away flag for recovery rather than falling back to an attached child. | [#68](https://github.com/JTInventory/firstmate/pull/68) |
 
 This Phase C train ports only the pause-absorb and AFK-detach halves. Owner `origin` remains comparison-only; no owner main merge or JT identity expansion is included.
 
@@ -118,3 +118,20 @@ This Phase C train ports only the pause-absorb and AFK-detach halves. Owner `ori
 - New upstream Herdr, Orca, cmux, Zellij, and external Slack/SMS/paging variants: rejected by this train as outside the supported JT identity and approval boundary.
   Existing optional Pi harness and opt-in X mode remain available under their existing verified/local contracts; this train neither enables nor broadens them.
 - Grok remains the already-landed optional adapter from JT PR #28 / upstream #143; the open/conflicting Grok-primary proposal (upstream #461) is not adopted.
+
+## 2026-07 selective trains
+
+This summary records the four selective trains and their JT delivery
+boundaries after the historical Phase II work above.
+
+| Phase | Units | JT PR | Boundary |
+| --- | --- | --- | --- |
+| A | U1-U5 safety micro | [#66](https://github.com/JTInventory/firstmate/pull/66) | Gate agents cannot mutate the fleet; daemon ownership, lock recovery, and Grok effort limits remain JT-scoped. |
+| B | U6-U9 secondmate and spawn containment | [#67](https://github.com/JTInventory/firstmate/pull/67) | Routing markers, turn-end safety, and target worktree containment preserve tmux-first JT operation. |
+| C | U10-U12 pause absorb and AFK detach | [#68](https://github.com/JTInventory/firstmate/pull/68) | Paused gate waits and detached away-mode supervision stay fail-closed without Herdr/cmux/zellij adoption. |
+| D | U13-U16 optional operator comfort | Pending this branch | Local bearings/fleet snapshots, pinned lint parity, and an opt-in primary `cd` guard; remote PR reads are opt-in and soft-failing. |
+
+Phase D covers optional comfort in the JT-sized, Linux-primary subset
+represented by U13-U16, with U16 covering the persistent primary `cd` guard.
+The full owner bearings skill prose and stock macOS Bash compatibility work from
+#578 remain residual and are not enabled by this train.

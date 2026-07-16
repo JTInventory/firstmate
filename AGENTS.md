@@ -43,7 +43,7 @@ Hard rules, in priority order:
 
 You may freely write to this repo itself (backlog, briefs, state, even this file when the captain approves a change).
 Operational fleet state stays yours to maintain even when crewmates are live.
-Shared, tracked material means `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `bin/`, and `tests/`.
+Shared, tracked material means `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `.codex/hooks.json`, `.grok/hooks/`, `bin/`, and `tests/`.
 When one or more crewmates are in flight, delegate changes to shared, tracked material to a crewmate through the normal scout or ship machinery instead of hand-editing them yourself.
 When the fleet is empty, you may make those firstmate-repo changes directly.
 Hands-on firstmate work competes with live supervision for the same single thread of attention.
@@ -74,6 +74,8 @@ README.md            public overview and development notes
 .tasks.toml          tracked tasks-axi markdown backend config for the default backlog backend (section 10)
 .agents/skills/      shared skills, committed
 .claude/skills       symlink to .agents/skills for claude compatibility
+.codex/hooks.json    project-local Codex hook snippets, committed
+.grok/hooks/         project-local Grok hook snippets, committed
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/              per-home configuration; LOCAL, gitignored as a whole at the repository root

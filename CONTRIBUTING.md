@@ -35,23 +35,23 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 - This repo is a template for running a firstmate orchestrator agent.
   `AGENTS.md` is the agent's main job description and names when to load bundled skills; `CLAUDE.md` is a symlink to it, and `.claude/skills` is a symlink to `.agents/skills`.
-- Only shared material is tracked: `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `bin/`, and `tests/`.
+- The authoritative shared/tracked surface is listed in `AGENTS.md`.
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
   The repository-root `/config/`, `/reports/`, and `/backups/` rules are anchored, so same-named directories nested under shared surfaces such as `docs/examples/` and `tests/` remain trackable.
   Local report or preservation folders such as `/reports/` and `/backups/` are not canonical tracked surfaces; leave them out of PRs unless a specific artifact is intentionally promoted into shared documentation.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations.
   A local `config/backlog-backend=manual` opt-out forces hand-editing and stays gitignored.
   It does not make `data/` tracked.
-- Helper scripts in `bin/` are plain bash.
-  Each starts with a usage header comment; keep it accurate when you change behavior.
+- Shell entrypoints in `bin/` are Bash; runtime-specific helpers declare their runtime and purpose in a header comment.
+  Keep those headers accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `shellcheck -x -P SCRIPTDIR bin/*.sh tests/*.sh` must pass, and CI enforces it.
+  `bin/fm-lint.sh` must pass; it is the single owner of the ShellCheck pin and file set used by CI and no-mistakes.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `.gitignore`, `assets/`, `docs/`, `.tasks.toml`, `.no-mistakes.yaml`, `.github/workflows/`, `.agents/skills/`, `.claude/`, `bin/`, and `tests/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself - the shared surfaces listed in `AGENTS.md` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
 Firstmate's wrapper still matters: `ask-user` findings route to the captain through firstmate, and crewmates avoid `--yes` because it silently resolves captain-owned decisions without escalation.
@@ -69,7 +69,7 @@ Check and test the toolbelt before pushing:
 
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
-shellcheck -x -P SCRIPTDIR bin/*.sh tests/*.sh # lint the toolbelt and behavior tests; CI enforces this
+bin/fm-lint.sh                              # lint the toolbelt and behavior tests with CI's pinned ShellCheck
 FM_TEST_JOBS=1 bash bin/fm-run-behavior-tests.sh                   # serial local gate replay
 FM_TEST_JOBS=2 bash bin/fm-run-behavior-tests.sh                   # bounded parallel local run
 tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
