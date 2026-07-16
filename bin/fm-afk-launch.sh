@@ -25,12 +25,30 @@ CONFIRM_TIMEOUT=${FM_AFK_LAUNCH_CONFIRM_TIMEOUT:-10}
 # same contract for its pure-function tests, but sourcing the long-lived daemon
 # here would also import its supervisor classifier and runtime globals.
 afk_enter() {
-  mkdir -p "$1"
-  date '+%s' > "$1/.afk"
+  mkdir -p "$1" || return 1
+  date '+%s' > "$1/.afk" || return 1
+  [ -e "$1/.afk" ]
 }
 
 afk_exit() {
-  rm -f "$1/.afk"
+  rm -f "$1/.afk" || return 1
+  [ ! -e "$1/.afk" ] && [ ! -L "$1/.afk" ]
+}
+
+afk_enter_or_fail() {
+  if afk_enter "$STATE"; then
+    return 0
+  fi
+  printf '%s\n' 'afk: could not create or refresh the durable away flag' >&2
+  return 1
+}
+
+afk_exit_or_fail() {
+  if afk_exit "$STATE"; then
+    return 0
+  fi
+  printf '%s\n' 'afk: could not clear the durable away flag; state retained' >&2
+  return 1
 }
 
 usage() {
@@ -96,12 +114,12 @@ start_afk() {
   local token child confirmed child_start
   mkdir -p "$STATE"
   if daemon_owned; then
-    afk_enter "$STATE"
+    afk_enter_or_fail || return 1
     printf 'afk: already running pid=%s\n' "$(cat "$PIDFILE")"
     return 0
   fi
   [ -x "$DAEMON" ] || { printf 'afk: daemon not executable: %s\n' "$DAEMON" >&2; return 1; }
-  afk_enter "$STATE"
+  afk_enter_or_fail || return 1
   token=$(new_detach_token) || { printf '%s\n' 'afk: could not create detach token' >&2; return 1; }
   child=$(fm_detach_spawn "$LAUNCH_LOG" "$DAEMON" "--fm-detach-token=$token") || {
     printf 'afk: detached daemon launch failed (away flag retained): %s\n' "$DAEMON" >&2
@@ -127,7 +145,7 @@ stop_afk() {
       printf '%s\n' 'afk: daemon record missing and daemon absence is unverified; away flag retained' >&2
       return 1
     fi
-    afk_exit "$STATE"
+    afk_exit_or_fail || return 1
     printf '%s\n' 'afk: stopped (no daemon record)'
     return 0
   fi
@@ -140,7 +158,7 @@ stop_afk() {
       printf '%s\n' 'afk: daemon record stale and daemon absence is unverified; away flag retained' >&2
       return 1
     fi
-    afk_exit "$STATE"
+    afk_exit_or_fail || return 1
     printf '%s\n' 'afk: stopped (daemon already gone)'
     return 0
   fi
@@ -157,7 +175,7 @@ stop_afk() {
     printf 'afk: daemon did not stop after TERM (pid=%s)\n' "$pid" >&2
     return 1
   fi
-  afk_exit "$STATE"
+  afk_exit_or_fail || return 1
   printf 'afk: stopped daemon pid=%s\n' "$pid"
 }
 

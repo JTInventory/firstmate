@@ -101,6 +101,19 @@ test_afk_launch_detaches_from_harness_group() {
   pass "AFK daemon survives harness process-group reap and stops on return"
 }
 
+test_afk_start_fails_when_flag_cannot_be_created() {
+  local dir state daemon out
+  dir="$TMP_ROOT/enter-failure"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  mkdir "$state/.afk"
+  if out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start 2>&1); then
+    fail "AFK launch succeeded when the durable away flag could not be created"
+  fi
+  [ ! -e "$state/fake-daemon.started" ] || fail "AFK launch spawned a daemon without a durable away flag"
+  pass "AFK launch fails closed when the durable away flag cannot be created"
+}
+
 test_afk_launch_return_clears_flag_and_is_idempotent() {
   local dir state daemon pid out
   dir="$TMP_ROOT/return"; state="$dir/state"; mkdir -p "$state"
@@ -125,6 +138,27 @@ test_afk_launch_return_clears_flag_and_is_idempotent() {
   wait_for_file "$state/fake-daemon.returned" 50 || fail "AFK return marker missing"
   [ ! -e "$state/.afk" ] || fail "AFK return left the durable away flag"
   pass "AFK launch is idempotent and return clears the away flag"
+}
+
+test_afk_refresh_fails_when_flag_cannot_be_written() {
+  local dir state daemon pid out
+  dir="$TMP_ROOT/refresh-failure"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start) \
+    || fail "AFK launch failed: $out"
+  pid=$(daemon_pid "$state")
+  AFK_TEST_PIDS+=("$pid")
+  rm -f "$state/.afk"
+  mkdir "$state/.afk"
+  if out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start 2>&1); then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "AFK refresh succeeded when the durable away flag could not be written"
+  fi
+  kill -0 "$pid" 2>/dev/null || fail "AFK refresh failure stopped the existing daemon"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "AFK refresh fails closed when the durable away flag cannot be written"
 }
 
 test_afk_return_keeps_flag_on_identity_failure() {
@@ -217,6 +251,26 @@ test_afk_status_keeps_unverified_daemon_visible() {
   pass "AFK status keeps a live unverified daemon visible"
 }
 
+test_afk_return_retains_flag_when_removal_fails() {
+  local dir state daemon pid out
+  dir="$TMP_ROOT/exit-failure"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start) \
+    || fail "AFK launch failed: $out"
+  pid=$(daemon_pid "$state")
+  AFK_TEST_PIDS+=("$pid")
+  rm -f "$state/.afk"
+  mkdir "$state/.afk"
+  if out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop 2>&1); then
+    fail "AFK return succeeded when the durable away flag could not be removed"
+  fi
+  wait_for_file "$state/fake-daemon.returned" 50 || fail "AFK return did not stop the daemon before reporting flag failure"
+  [ -d "$state/.afk" ] || fail "AFK return did not retain the durable away flag after removal failure"
+  pass "AFK return fails closed when the durable away flag cannot be removed"
+}
+
 test_afk_return_clears_flag_after_confirmed_missing_daemon() {
   local dir state daemon
   dir="$TMP_ROOT/missing-record-gone"; state="$dir/state"; mkdir -p "$state"
@@ -249,11 +303,14 @@ test_afk_return_keeps_flag_on_term_failure() {
 }
 
 test_afk_launch_detaches_from_harness_group
+test_afk_start_fails_when_flag_cannot_be_created
 test_afk_launch_return_clears_flag_and_is_idempotent
+test_afk_refresh_fails_when_flag_cannot_be_written
 test_afk_return_keeps_flag_on_identity_failure
 test_afk_return_keeps_flag_on_missing_record_for_live_daemon
 test_afk_return_keeps_flag_on_stale_record_for_live_daemon
 test_afk_status_keeps_unverified_daemon_visible
+test_afk_return_retains_flag_when_removal_fails
 test_afk_return_clears_flag_after_confirmed_missing_daemon
 test_afk_return_keeps_flag_on_term_failure
 

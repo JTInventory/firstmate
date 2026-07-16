@@ -927,8 +927,8 @@ fm_super_main() {
   if ! tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1; then
     echo "error: supervisor target '$TARGET' does not resolve to a tmux pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found"
-    fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" "$PID_START_FILE" "$PID_IDENTITY_FILE" "$PID_PATH_FILE" 2>/dev/null || true
+    fm_lock_release "$LOCK" 2>/dev/null || true
     exit 1
   fi
 
@@ -948,8 +948,8 @@ fm_super_main() {
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
-    fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" "$PID_START_FILE" "$PID_IDENTITY_FILE" "$PID_PATH_FILE" 2>/dev/null || true
+    fm_lock_release "$LOCK" 2>/dev/null || true
     log "daemon shutting down"
     exit 0
   }
