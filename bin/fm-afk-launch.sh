@@ -136,10 +136,6 @@ acquire_transition_lock() {
       printf 'afk: transition lock unavailable: %s\n' "$TRANSITION_LOCK" >&2
       return 1
     fi
-    if [ -z "${FM_LOCK_HELD_PID:-}" ] && [ ! -e "$TRANSITION_LOCK" ] && [ ! -L "$TRANSITION_LOCK" ]; then
-      printf 'afk: transition lock unavailable: %s\n' "$TRANSITION_LOCK" >&2
-      return 1
-    fi
     attempts=$((attempts + 1))
     [ "$attempts" -lt "$TRANSITION_LOCK_ATTEMPTS" ] && sleep 0.1
   done
