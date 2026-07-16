@@ -60,6 +60,18 @@ wait_for_file() {
   return 1
 }
 
+run_bounded() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  else
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", $pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  fi
+}
+
 daemon_pid() { cat "$1/.supervise-daemon.pid" 2>/dev/null || true; }
 
 make_rm_hold_shim() {
@@ -289,6 +301,57 @@ test_afk_return_retains_flag_when_removal_fails() {
   pass "AFK return fails closed when the durable away flag cannot be removed"
 }
 
+test_afk_transition_lock_rejects_invalid_state() {
+  local dir state out rc
+  dir="$TMP_ROOT/transition-lock-invalid-state"; state="$dir/state-file"; mkdir -p "$dir"
+  printf '%s\n' state > "$state"
+  out=$(run_bounded 2 env FM_STATE_OVERRIDE="$state" FM_AFK_TRANSITION_LOCK_ATTEMPTS=3 \
+    FM_AFK_DAEMON_PATH="$ROOT/bin/fm-supervise-daemon.sh" "$LAUNCH" start 2>&1)
+  rc=$?
+  [ "$rc" -ne 124 ] || fail "AFK start hung when the state path was a file"
+  [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'transition lock parent is not usable' >/dev/null \
+    || fail "AFK start did not reject the invalid transition lock parent: $out"
+  pass "AFK transition lock rejects an invalid state path promptly"
+}
+
+test_afk_transition_lock_fails_on_io_error() {
+  local dir state fakebin out
+  dir="$TMP_ROOT/transition-lock-io"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$state" "$fakebin"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/mktemp"
+  if out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_AFK_TRANSITION_LOCK_ATTEMPTS=3 FM_AFK_DAEMON_PATH="$ROOT/bin/fm-supervise-daemon.sh" \
+    "$LAUNCH" start 2>&1); then
+    fail "AFK start succeeded after transition-lock I/O failure"
+  fi
+  printf '%s' "$out" | grep -F 'transition lock unavailable' >/dev/null \
+    || fail "AFK start did not fail closed on transition-lock I/O failure: $out"
+  pass "AFK transition lock distinguishes I/O failure from contention"
+}
+
+test_afk_transition_lock_times_out_on_contention() {
+  local dir state holder out rc
+  dir="$TMP_ROOT/transition-lock-contention"; state="$dir/state"; mkdir -p "$state"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2" || exit 1; while :; do sleep 0.1; done' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$state/.afk-transition.lock" &
+  holder=$!
+  AFK_TEST_PIDS+=("$holder")
+  wait_for_file "$state/.afk-transition.lock" 50 || fail "transition-lock holder did not acquire the lock"
+  out=$(run_bounded 2 env FM_STATE_OVERRIDE="$state" FM_AFK_TRANSITION_LOCK_ATTEMPTS=3 \
+    FM_AFK_DAEMON_PATH="$ROOT/bin/fm-supervise-daemon.sh" "$LAUNCH" start 2>&1)
+  rc=$?
+  [ "$rc" -ne 124 ] || fail "AFK start hung on transition-lock contention"
+  [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'transition lock busy' >/dev/null \
+    || fail "AFK start did not report bounded transition-lock contention: $out"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "AFK transition lock bounds contention retries"
+}
+
 test_afk_transition_lock_preserves_replacement_flag() {
   local dir state daemon control fakebin pid stop_pid start_pid new_pid out
   dir="$TMP_ROOT/transition-lock"; state="$dir/state"; control="$dir/control"; fakebin="$dir/fakebin"
@@ -378,6 +441,9 @@ test_afk_return_keeps_flag_on_missing_record_for_live_daemon
 test_afk_return_keeps_flag_on_stale_record_for_live_daemon
 test_afk_status_keeps_unverified_daemon_visible
 test_afk_return_retains_flag_when_removal_fails
+test_afk_transition_lock_rejects_invalid_state
+test_afk_transition_lock_fails_on_io_error
+test_afk_transition_lock_times_out_on_contention
 test_afk_transition_lock_preserves_replacement_flag
 test_afk_return_clears_flag_after_confirmed_missing_daemon
 test_afk_return_keeps_flag_on_term_failure

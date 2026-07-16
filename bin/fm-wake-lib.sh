@@ -476,13 +476,16 @@ fm_lock_recheck_stale_owner() {
 
 fm_lock_try_acquire() {
   local lockdir=$1 legacy_path=${2:-} owner_home=${3:-} owner_path=${4:-}
-  local pid steal cur rc steal_owner primary_owner
+  local pid steal cur rc steal_rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_HELD_UNVERIFIED=0
   FM_LOCK_OWNER_DIR=
 
   if fm_lock_try_create "$lockdir" '' "$owner_home" "$owner_path"; then
     return 0
+  fi
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 2
   fi
 
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -501,7 +504,10 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  fm_lock_try_acquire "$steal"
+  steal_rc=$?
+  if [ "$steal_rc" -ne 0 ]; then
+    [ "$steal_rc" -eq 2 ] && return 2
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -553,6 +559,10 @@ fm_lock_try_acquire() {
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner" "$owner_home" "$owner_path"; then
     rc=0
+  fi
+  if [ "$rc" -ne 0 ] && [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_lock_release "$steal"
+    return 2
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.

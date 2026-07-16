@@ -21,6 +21,7 @@ PID_START_FILE="$STATE/.supervise-daemon.pid-start"
 PID_IDENTITY_FILE="$STATE/.supervise-daemon.pid-identity"
 LAUNCH_LOG="$STATE/.supervise-daemon.launch.log"
 CONFIRM_TIMEOUT=${FM_AFK_LAUNCH_CONFIRM_TIMEOUT:-10}
+TRANSITION_LOCK_ATTEMPTS=${FM_AFK_TRANSITION_LOCK_ATTEMPTS:-50}
 
 # Keep the launcher's flag operation small and local. The daemon defines the
 # same contract for its pure-function tests, but sourcing the long-lived daemon
@@ -111,6 +112,41 @@ new_detach_token() {
   printf '%s\n' "$token"
 }
 
+transition_lock_parent_usable() {
+  [ -d "$STATE" ] && [ -w "$STATE" ] && [ -x "$STATE" ]
+}
+
+acquire_transition_lock() {
+  local attempts=0 lock_rc
+  if ! transition_lock_parent_usable; then
+    printf 'afk: transition lock parent is not usable: %s\n' "$STATE" >&2
+    return 1
+  fi
+  case "$TRANSITION_LOCK_ATTEMPTS" in
+    ''|*[!0-9]*|0)
+      printf '%s\n' 'afk: invalid transition lock retry budget' >&2
+      return 1
+      ;;
+  esac
+  while [ "$attempts" -lt "$TRANSITION_LOCK_ATTEMPTS" ]; do
+    fm_lock_try_acquire "$TRANSITION_LOCK"
+    lock_rc=$?
+    [ "$lock_rc" -eq 0 ] && return 0
+    if [ "$lock_rc" -ne 1 ]; then
+      printf 'afk: transition lock unavailable: %s\n' "$TRANSITION_LOCK" >&2
+      return 1
+    fi
+    if [ -z "${FM_LOCK_HELD_PID:-}" ] && [ ! -e "$TRANSITION_LOCK" ] && [ ! -L "$TRANSITION_LOCK" ]; then
+      printf 'afk: transition lock unavailable: %s\n' "$TRANSITION_LOCK" >&2
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt "$TRANSITION_LOCK_ATTEMPTS" ] && sleep 0.1
+  done
+  printf 'afk: transition lock busy: %s\n' "$TRANSITION_LOCK" >&2
+  return 1
+}
+
 start_afk_locked() {
   local token child confirmed child_start
   mkdir -p "$STATE"
@@ -181,7 +217,7 @@ stop_afk_locked() {
 }
 
 start_afk() {
-  fm_lock_acquire_wait "$TRANSITION_LOCK" || return 1
+  acquire_transition_lock || return 1
   start_afk_locked
   local rc=$?
   fm_lock_release "$TRANSITION_LOCK" 2>/dev/null || true
@@ -189,7 +225,7 @@ start_afk() {
 }
 
 stop_afk() {
-  fm_lock_acquire_wait "$TRANSITION_LOCK" || return 1
+  acquire_transition_lock || return 1
   stop_afk_locked
   local rc=$?
   fm_lock_release "$TRANSITION_LOCK" 2>/dev/null || true
