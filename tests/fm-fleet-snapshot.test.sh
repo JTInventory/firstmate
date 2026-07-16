@@ -23,6 +23,13 @@ EOF
   printf '%s\n' 'working: fixture is active' > "$HOME_ROOT/state/task-a.status"
 }
 
+test_empty_state_is_empty_snapshot() {
+  local output
+  output=$(FM_HOME="$HOME_ROOT" FM_ROOT_OVERRIDE="$ROOT" "$SNAPSHOT" --json) || fail "empty fleet snapshot failed"
+  printf '%s\n' "$output" | jq -e '.tasks == [] and .summary.tasks_total == 0' >/dev/null || fail "empty fleet snapshot is wrong: $output"
+  pass "empty fleet emits an empty task list"
+}
+
 test_snapshot_contract_is_json_and_local() {
   local fakebin output
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -45,5 +52,6 @@ test_snapshot_help() {
   pass "fleet snapshot documents its machine-readable mode"
 }
 
+test_empty_state_is_empty_snapshot
 test_snapshot_contract_is_json_and_local
 test_snapshot_help

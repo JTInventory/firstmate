@@ -13,9 +13,10 @@ INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 test_owner_and_gate_wiring() {
   assert_present "$LINT" "bin/fm-lint.sh is missing"
   [ -x "$LINT" ] || fail "bin/fm-lint.sh must be executable"
-  assert_grep 'shellcheck --norc -x -P SCRIPTDIR bin/*.sh tests/*.sh' "$LINT" "lint owner does not define the canonical file set"
+  assert_grep 'shellcheck --norc -x -P SCRIPTDIR -S warning bin/*.sh tests/*.sh' "$LINT" "lint owner does not define the canonical file set"
   assert_grep 'run: bin/fm-lint.sh' "$CI" "CI does not invoke the lint owner"
-  assert_grep "lint: 'bin/fm-lint.sh'" "$NM" "no-mistakes does not invoke the lint owner"
+  assert_grep 'fm-install-shellcheck.sh' "$NM" "no-mistakes does not provision pinned ShellCheck"
+  assert_grep 'bin/fm-lint.sh' "$NM" "no-mistakes does not invoke the lint owner"
   assert_grep 'fm-lint.sh" --required-version' "$INSTALLER" "installer does not read the lint owner version"
   pass "CI and no-mistakes share one lint owner"
 }

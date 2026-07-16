@@ -132,6 +132,6 @@ Phase II work above.
 | D | U13-U16 optional operator comfort | [#69](https://github.com/JTInventory/firstmate/pull/69) | Local bearings/fleet snapshots, pinned lint parity, and an opt-in primary `cd` guard; remote PR reads are opt-in and soft-failing. |
 
 Phase D is optional comfort completed in the JT-sized, Linux-primary subset
-represented by U13, U14, and U15.
+represented by U13-U16, with U16 covering the persistent primary `cd` guard.
 The full owner bearings skill prose and stock macOS Bash compatibility work from
 #578 remain residual and are not enabled by this train.

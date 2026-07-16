@@ -120,6 +120,10 @@ function isInside(root, candidate) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function hasDynamicExpansion(target) {
+  return target.startsWith("~") || [...target].some((char) => "$`*?[]{}".includes(char));
+}
+
 function denies(command, home) {
   const projects = normalize(path.join(home, "projects"));
   for (const segment of splitTopLevel(command)) {
@@ -131,7 +135,8 @@ function denies(command, home) {
     let targetIndex = index + 1;
     while (tokens[targetIndex] === "-L" || tokens[targetIndex] === "-P" || tokens[targetIndex] === "--") targetIndex += 1;
     const target = tokens[targetIndex];
-    if (!target || target.startsWith("$")) continue;
+    if (!target) continue;
+    if (hasDynamicExpansion(target)) return true;
     if (isInside(projects, normalize(path.resolve(home, target)))) return true;
   }
   return false;

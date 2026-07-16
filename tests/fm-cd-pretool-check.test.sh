@@ -38,6 +38,14 @@ test_primary_blocks_persistent_project_cd() {
   pass "primary persistent cd into projects is denied"
 }
 
+test_primary_blocks_dynamic_project_cd() {
+  local dynamic_command rc=0
+  dynamic_command='cd "$FM_HOME/projects/widget"'
+  run_guard "$PRIMARY" "$dynamic_command" || rc=$?
+  [ "$rc" -eq 2 ] || fail "dynamic primary project cd was not denied (exit $rc)"
+  pass "dynamic primary project cd is denied"
+}
+
 test_subshell_worktree_and_unrelated_commands_are_allowed() {
   local rc=0
   run_guard "$PRIMARY" '(cd projects/widget && printf ok)' || rc=$?
@@ -66,6 +74,7 @@ test_tracked_hook_snippets_are_present() {
 }
 
 test_primary_blocks_persistent_project_cd
+test_primary_blocks_dynamic_project_cd
 test_subshell_worktree_and_unrelated_commands_are_allowed
 test_stdin_transport_blocks_harness_payload
 test_tracked_hook_snippets_are_present

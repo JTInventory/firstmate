@@ -10,7 +10,7 @@ disable_project_settings: true
 # while allowing bounded parallelism with per-test temp roots. The e2e tests
 # need tmux on PATH, which the firstmate environment provides.
 commands:
-  lint: 'bin/fm-lint.sh'
+  lint: 'bin/fm-install-shellcheck.sh "${TMPDIR:-/tmp}/fm-shellcheck-$$/bin" && PATH="${TMPDIR:-/tmp}/fm-shellcheck-$$/bin:$PATH" bin/fm-lint.sh'
   test: 'bash bin/fm-run-behavior-tests.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.

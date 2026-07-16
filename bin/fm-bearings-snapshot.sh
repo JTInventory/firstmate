@@ -8,6 +8,9 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SNAPSHOT="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+# shellcheck source=bin/fm-tool-path-lib.sh
+. "$SCRIPT_DIR/fm-tool-path-lib.sh"
+fm_normalize_tool_path
 MODE=toon
 INCLUDE_PRS=0
 

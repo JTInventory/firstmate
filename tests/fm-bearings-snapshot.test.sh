@@ -51,5 +51,20 @@ SH
   pass "bearings soft-fails unavailable remote PR data"
 }
 
+test_include_prs_finds_home_tool() {
+  local tool_home output
+  tool_home="$TMP_ROOT/tool-home"
+  mkdir -p "$tool_home/.local/bin"
+  cat > "$tool_home/.local/bin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'remote fixture'
+SH
+  chmod +x "$tool_home/.local/bin/gh-axi"
+  output=$(HOME="$tool_home" PATH=/usr/bin:/bin FM_HOME="$HOME_ROOT" FM_ROOT_OVERRIDE="$ROOT" "$BEARINGS" --json --include-prs) || fail "bearings did not find the HOME-local gh-axi"
+  printf '%s\n' "$output" | jq -e '.prs.state == "ok" and .prs.remote_summary == "remote fixture"' >/dev/null || fail "bearings did not use the HOME-local gh-axi: $output"
+  pass "bearings discovers gh-axi through HOME-local PATH normalization"
+}
+
 test_default_is_toon_and_local_only
 test_include_prs_soft_fails
+test_include_prs_finds_home_tool

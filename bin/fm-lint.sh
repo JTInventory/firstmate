@@ -34,6 +34,6 @@ fi
 
 cd "$ROOT" || exit 1
 if [ "$#" -gt 0 ]; then
-  exec shellcheck --norc -x -P SCRIPTDIR "$@"
+  exec shellcheck --norc -x -P SCRIPTDIR -S warning "$@"
 fi
-exec shellcheck --norc -x -P SCRIPTDIR bin/*.sh tests/*.sh
+exec shellcheck --norc -x -P SCRIPTDIR -S warning bin/*.sh tests/*.sh

@@ -63,7 +63,9 @@ current_from_status() {
 json_tasks=''
 shopt -s nullglob
 meta_files=("$STATE"/*.meta)
-mapfile -t meta_files < <(printf '%s\n' "${meta_files[@]}" | sort)
+if [ "${#meta_files[@]}" -gt 0 ]; then
+  mapfile -t meta_files < <(printf '%s\n' "${meta_files[@]}" | sort)
+fi
 for meta in "${meta_files[@]}"; do
   id=$(basename "$meta" .meta)
   worktree=$(meta_value "$meta" worktree)
