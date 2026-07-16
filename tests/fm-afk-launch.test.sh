@@ -62,6 +62,24 @@ wait_for_file() {
 
 daemon_pid() { cat "$1/.supervise-daemon.pid" 2>/dev/null || true; }
 
+make_rm_hold_shim() {
+  local dir=$1
+  cat > "$dir/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  if [ "$arg" = "${FM_AFK_RM_STATE:?}/.afk" ] && [ -e "${FM_AFK_RM_CONTROL:?}/hold" ]; then
+    : > "$FM_AFK_RM_CONTROL/removal-started"
+    while [ -e "$FM_AFK_RM_CONTROL/hold" ]; do
+      sleep 0.05
+    done
+  fi
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$dir/rm"
+}
+
 test_afk_launch_detaches_from_harness_group() {
   local dir state daemon harness pid group_pid
   dir="$TMP_ROOT/detach"; state="$dir/state"; mkdir -p "$state"
@@ -271,6 +289,55 @@ test_afk_return_retains_flag_when_removal_fails() {
   pass "AFK return fails closed when the durable away flag cannot be removed"
 }
 
+test_afk_transition_lock_preserves_replacement_flag() {
+  local dir state daemon control fakebin pid stop_pid start_pid new_pid out
+  dir="$TMP_ROOT/transition-lock"; state="$dir/state"; control="$dir/control"; fakebin="$dir/fakebin"
+  mkdir -p "$state" "$control" "$fakebin"
+  daemon=$(make_fake_daemon "$dir")
+  make_rm_hold_shim "$fakebin"
+  out=$(PATH="$fakebin:$PATH" FM_AFK_RM_CONTROL="$control" FM_AFK_RM_STATE="$state" \
+    FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start) \
+    || fail "AFK launch failed: $out"
+  pid=$(daemon_pid "$state")
+  AFK_TEST_PIDS+=("$pid")
+  : > "$control/hold"
+  PATH="$fakebin:$PATH" FM_AFK_RM_CONTROL="$control" FM_AFK_RM_STATE="$state" \
+    FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop \
+    > "$dir/stop.out" 2>&1 &
+  stop_pid=$!
+  wait_for_file "$control/removal-started" 80 || {
+    /bin/rm -f "$control/hold"
+    kill "$stop_pid" 2>/dev/null || true
+    fail "AFK return did not reach the guarded flag removal"
+  }
+  PATH="$fakebin:$PATH" FM_AFK_RM_CONTROL="$control" FM_AFK_RM_STATE="$state" \
+    FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start \
+    > "$dir/start.out" 2>&1 &
+  start_pid=$!
+  sleep 1
+  [ ! -e "$state/.supervise-daemon.pid" ] || {
+    /bin/rm -f "$control/hold"
+    kill "$start_pid" "$stop_pid" 2>/dev/null || true
+    fail "replacement AFK start bypassed the transition lock"
+  }
+  /bin/rm -f "$control/hold"
+  wait "$stop_pid" || fail "AFK return failed: $(cat "$dir/stop.out")"
+  wait "$start_pid" || fail "replacement AFK start failed: $(cat "$dir/start.out")"
+  new_pid=$(daemon_pid "$state")
+  [ -n "$new_pid" ] || fail "replacement AFK start did not publish a daemon record"
+  AFK_TEST_PIDS+=("$new_pid")
+  kill -0 "$new_pid" 2>/dev/null || fail "replacement AFK daemon is not live"
+  [ -e "$state/.afk" ] || fail "replacement AFK start lost the durable away flag"
+  PATH="$fakebin:$PATH" FM_AFK_RM_CONTROL="$control" FM_AFK_RM_STATE="$state" \
+    FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop >/dev/null \
+    || fail "replacement AFK daemon could not be stopped"
+  pass "AFK transition lock preserves a replacement daemon and away flag"
+}
+
 test_afk_return_clears_flag_after_confirmed_missing_daemon() {
   local dir state daemon
   dir="$TMP_ROOT/missing-record-gone"; state="$dir/state"; mkdir -p "$state"
@@ -311,6 +378,7 @@ test_afk_return_keeps_flag_on_missing_record_for_live_daemon
 test_afk_return_keeps_flag_on_stale_record_for_live_daemon
 test_afk_status_keeps_unverified_daemon_visible
 test_afk_return_retains_flag_when_removal_fails
+test_afk_transition_lock_preserves_replacement_flag
 test_afk_return_clears_flag_after_confirmed_missing_daemon
 test_afk_return_keeps_flag_on_term_failure
 

@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DAEMON="${FM_AFK_DAEMON_PATH:-$SCRIPT_DIR/fm-supervise-daemon.sh}"
 DAEMON_LOCK="$STATE/.supervise-daemon.lock"
+TRANSITION_LOCK="$STATE/.afk-transition.lock"
 PIDFILE="$STATE/.supervise-daemon.pid"
 PID_START_FILE="$STATE/.supervise-daemon.pid-start"
 PID_IDENTITY_FILE="$STATE/.supervise-daemon.pid-identity"
@@ -110,7 +111,7 @@ new_detach_token() {
   printf '%s\n' "$token"
 }
 
-start_afk() {
+start_afk_locked() {
   local token child confirmed child_start
   mkdir -p "$STATE"
   if daemon_owned; then
@@ -137,7 +138,7 @@ start_afk() {
   printf 'afk: started detached daemon pid=%s\n' "$confirmed"
 }
 
-stop_afk() {
+stop_afk_locked() {
   local pid start i=0
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -z "$pid" ]; then
@@ -177,6 +178,22 @@ stop_afk() {
   fi
   afk_exit_or_fail || return 1
   printf 'afk: stopped daemon pid=%s\n' "$pid"
+}
+
+start_afk() {
+  fm_lock_acquire_wait "$TRANSITION_LOCK" || return 1
+  start_afk_locked
+  local rc=$?
+  fm_lock_release "$TRANSITION_LOCK" 2>/dev/null || true
+  return "$rc"
+}
+
+stop_afk() {
+  fm_lock_acquire_wait "$TRANSITION_LOCK" || return 1
+  stop_afk_locked
+  local rc=$?
+  fm_lock_release "$TRANSITION_LOCK" 2>/dev/null || true
+  return "$rc"
 }
 
 status_afk() {
