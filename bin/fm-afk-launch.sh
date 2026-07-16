@@ -171,8 +171,11 @@ status_afk() {
     fi
   elif daemon_owned; then
     printf 'afk: inactive daemon=running pid=%s\n' "$(cat "$PIDFILE")"
-  else
+  elif daemon_confirmed_absent; then
     printf '%s\n' 'afk: inactive daemon=stopped'
+  else
+    printf '%s\n' 'afk: inactive daemon=not-verified'
+    return 1
   fi
 }
 

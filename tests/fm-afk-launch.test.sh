@@ -193,6 +193,30 @@ test_afk_return_keeps_flag_on_stale_record_for_live_daemon() {
   pass "AFK return retains the away flag when a stale daemon record remains live"
 }
 
+test_afk_status_keeps_unverified_daemon_visible() {
+  local dir state daemon pid out
+  dir="$TMP_ROOT/status-stale-record-live"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" start) \
+    || fail "AFK launch failed: $out"
+  pid=$(daemon_pid "$state")
+  AFK_TEST_PIDS+=("$pid")
+  rm -f "$state/.afk"
+  printf '%s\n' 999999999 > "$state/.supervise-daemon.pid"
+  if out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" status 2>&1); then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "AFK status succeeded with an unverified daemon record"
+  fi
+  printf '%s' "$out" | grep -F 'inactive daemon=not-verified' >/dev/null \
+    || fail "AFK status did not expose the unverified daemon: $out"
+  printf '%s' "$out" | grep -F 'inactive daemon=stopped' >/dev/null \
+    && fail "AFK status hid the live daemon as stopped"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "AFK status keeps a live unverified daemon visible"
+}
+
 test_afk_return_clears_flag_after_confirmed_missing_daemon() {
   local dir state daemon
   dir="$TMP_ROOT/missing-record-gone"; state="$dir/state"; mkdir -p "$state"
@@ -229,6 +253,7 @@ test_afk_launch_return_clears_flag_and_is_idempotent
 test_afk_return_keeps_flag_on_identity_failure
 test_afk_return_keeps_flag_on_missing_record_for_live_daemon
 test_afk_return_keeps_flag_on_stale_record_for_live_daemon
+test_afk_status_keeps_unverified_daemon_visible
 test_afk_return_clears_flag_after_confirmed_missing_daemon
 test_afk_return_keeps_flag_on_term_failure
 
