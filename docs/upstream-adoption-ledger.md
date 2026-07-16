@@ -121,17 +121,17 @@ This Phase C train ports only the pause-absorb and AFK-detach halves. Owner `ori
 
 ## 2026-07 selective trains
 
-This closeout records the four selective trains delivered after the historical
-Phase II work above.
+This summary records the four selective trains and their JT delivery
+boundaries after the historical Phase II work above.
 
 | Phase | Units | JT PR | Boundary |
 | --- | --- | --- | --- |
 | A | U1-U5 safety micro | [#66](https://github.com/JTInventory/firstmate/pull/66) | Gate agents cannot mutate the fleet; daemon ownership, lock recovery, and Grok effort limits remain JT-scoped. |
 | B | U6-U9 secondmate and spawn containment | [#67](https://github.com/JTInventory/firstmate/pull/67) | Routing markers, turn-end safety, and target worktree containment preserve tmux-first JT operation. |
 | C | U10-U12 pause absorb and AFK detach | [#68](https://github.com/JTInventory/firstmate/pull/68) | Paused gate waits and detached away-mode supervision stay fail-closed without Herdr/cmux/zellij adoption. |
-| D | U13-U16 optional operator comfort | [#69](https://github.com/JTInventory/firstmate/pull/69) | Local bearings/fleet snapshots, pinned lint parity, and an opt-in primary `cd` guard; remote PR reads are opt-in and soft-failing. |
+| D | U13-U16 optional operator comfort | Pending this branch | Local bearings/fleet snapshots, pinned lint parity, and an opt-in primary `cd` guard; remote PR reads are opt-in and soft-failing. |
 
-Phase D is optional comfort completed in the JT-sized, Linux-primary subset
+Phase D covers optional comfort in the JT-sized, Linux-primary subset
 represented by U13-U16, with U16 covering the persistent primary `cd` guard.
 The full owner bearings skill prose and stock macOS Bash compatibility work from
 #578 remain residual and are not enabled by this train.

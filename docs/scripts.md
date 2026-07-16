@@ -11,6 +11,8 @@ Each file also starts with a short header comment.
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot into a compact TOON/JSON operator view; local-only by default, with soft-failing live PR discovery only under `--include-prs` |
 | `fm-lint.sh`              | Run the pinned ShellCheck definition shared by CI and the no-mistakes gate |
 | `fm-install-shellcheck.sh` | Install and checksum CI's pinned Linux ShellCheck build |
+| `fm-cd-pretool-check.sh`  | Transport the primary `cd` guard through a hook or direct command invocation |
+| `fm-cd-command-policy.mjs` | Classify shell command text for the primary `cd` guard without executing it |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog item blocks (including indented context) from the main home into a seeded secondmate home                 |
 | `fm-backlog-audit.sh`    | Read-only audit for backlog/state drift between `data/backlog.md`, `data/secondmates.md`, `state/*.meta`, and local adoption signals; registered secondmate meta is persistent inventory, while unregistered secondmate meta stays loud |
