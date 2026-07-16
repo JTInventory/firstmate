@@ -136,6 +136,10 @@ stop_afk() {
       printf 'afk: daemon identity unverified; not signaling pid=%s\n' "$pid" >&2
       return 1
     fi
+    if ! daemon_confirmed_absent; then
+      printf '%s\n' 'afk: daemon record stale and daemon absence is unverified; away flag retained' >&2
+      return 1
+    fi
     afk_exit "$STATE"
     printf '%s\n' 'afk: stopped (daemon already gone)'
     return 0
