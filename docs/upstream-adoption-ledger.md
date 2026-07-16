@@ -102,6 +102,15 @@ It recorded a clean tracked tree, `fm-supervise --json` at `ok` with no high/med
 The durable Compound Engineering explanation is maintained outside this repository, in the JT workspace at `docs/solutions/architecture-patterns/firstmate-selective-upstream-adoption.md`.
 This ledger remains the Firstmate-side decision record; the Compound document explains the reusable pattern and links back here rather than duplicating this table.
 
+## Phase C selective pause / AFK train (U10-U12)
+
+| Upstream owner | Capability | Decision | JT adaptation and boundary | JT PR |
+| --- | --- | --- | --- | --- |
+| #572 | Absorb a declared pause while the no-mistakes run is parked at `awaiting_agent` | Adapt | Reconcile a valid `paused: <reason>` with the parked run-step as an absorbable external wait; active `running`/`fixing`/`ci` remains authoritative, and no-pause idle remains stale/wedge-visible. | Pending this branch |
+| #490, #587; detach foundation from #65 | AFK daemon launch/return detachment | Adapt | Add a JT-only `fm-afk-launch.sh` using the existing `setsid(1)`/Perl detach helper, pinned daemon pid/start/identity proof, and tmux-compatible return; no Herdr, cmux, or multi-backend wedge channels. If neither detach backend exists, launch fails closed and retains the away flag for recovery rather than falling back to an attached child. | Pending this branch |
+
+This Phase C train ports only the pause-absorb and AFK-detach halves. Owner `origin` remains comparison-only; no owner main merge or JT identity expansion is included.
+
 ### Explicitly not enabled by this train
 
 - U5b JT Control Room ingestion of the local wedge marker: deferred because there is no approved JT writer, endpoint, generated-data contract, or demonstrated operator gap.

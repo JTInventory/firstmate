@@ -21,16 +21,16 @@ batched digest rather than per-wake injections.
    This file survives a firstmate restart: recovery re-enters afk if the
    flag is present.
 
-2. **Ensure the sub-supervisor daemon is running.** Check the pid file; start
-   the daemon only if it is dead or absent:
+2. **Ensure the sub-supervisor daemon is running.** Use the JT launcher, which
+   validates the daemon's pinned pid/start/identity record and starts it in a
+   fresh session/process group with `bin/fm-detach-lib.sh`:
    ```sh
-   if [ -f state/.supervise-daemon.pid ] && kill -0 "$(cat state/.supervise-daemon.pid)" 2>/dev/null; then
-     : # daemon already alive - it picks up the flag on its next cycle
-   else
-     nohup bin/fm-supervise-daemon.sh >/dev/null 2>&1 &
-   fi
+   bin/fm-afk-launch.sh start
    ```
-   The daemon is **presence-gated**: it injects escalations only while
+   A plain `nohup ... &` is not a supported AFK launch because a harness may
+   reap the daemon with its process group. The launcher fails closed if neither
+   `setsid(1)` nor `perl` is available; it does not silently fall back to an
+   attached child. The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
@@ -45,7 +45,8 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the sentinel marker and **not** starting with `/afk`
-  -> the captain is back. Clear `state/.afk`, stop the daemon, flush one
+  -> the captain is back. Run `bin/fm-afk-launch.sh stop` to clear
+  `state/.afk` and stop the detached daemon, then flush one
   distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize
   any pending escalations from `state/.subsuper-escalations` and any
   `state/.subsuper-inject-wedged` marker), and resume full per-wake

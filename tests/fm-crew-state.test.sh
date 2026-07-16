@@ -299,6 +299,27 @@ test_genuine_parked_not_superseded() {
   pass "genuine parked run is not flagged superseded"
 }
 
+# A paused declaration is an external wait even when no-mistakes renders the
+# same parked/awaiting_agent gate shape used for a captain approval. The
+# canonical current-state reader must preserve that distinction for the
+# watcher/daemon classifiers.
+test_declared_pause_with_parked_run_is_external_wait() {
+  reset_fakes
+  local d; d=$(new_case paused-parked)
+  make_repo_on_branch "$d/wt" fm/feat-paused-parked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-paused-parked.meta" \
+    "window=fm:fm-feat-paused-parked" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting for vendor window\n' > "$d/state/feat-paused-parked.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-paused-parked)"
+  local out; out=$(run_crew_state "$d" feat-paused-parked)
+  assert_contains "$out" "state: paused" "declared pause + parked run -> paused external wait"
+  assert_contains "$out" "source: run-step" "declared pause remains sourced from run-step"
+  assert_contains "$out" "parked at review" "declared pause preserves parked gate detail"
+  assert_not_contains "$out" "state: parked" "declared pause is not exposed as a pure captain gate"
+  pass "declared pause with parked run is an external wait"
+}
+
 test_scalar_gate_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-scalar-gate)
@@ -702,6 +723,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
+test_declared_pause_with_parked_run_is_external_wait
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run

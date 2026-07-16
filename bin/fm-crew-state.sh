@@ -22,7 +22,10 @@
 #   2. Matching no-mistakes run for this crew's branch, active or terminal?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed.
+#      passed/checks-passed -> done, failed/cancelled -> failed. A valid
+#      paused: <reason> event paired with a parked/awaiting_agent run is the
+#      declared external-wait exception: report paused while retaining the
+#      run-step source and parked gate detail.
 #   3. Reconcile the status log: if its last line says needs-decision/paused/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -99,6 +102,11 @@ log_note_of() {  # <line>
     *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
     *)   printf '%s' "$1" ;;
   esac
+}
+
+log_declares_pause() {
+  [ "$(log_verb_of "$LOG_LINE")" = paused ] || return 1
+  [[ "$(log_note_of "$LOG_LINE")" =~ [^[:space:]] ]]
 }
 # Map a status-log verb onto a canonical state for the fallback path. The
 # paused verb is a declared external wait and remains distinct from actionable
@@ -367,12 +375,23 @@ if [ "$HAVE_RUN" = 1 ]; then
     emit "done" status-log "$(log_note_of "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
+  # A parked gate is normally a captain decision. When the crew explicitly
+  # declared a non-empty paused reason, however, the parked run-step is the
+  # authoritative shape of an external wait and must not become a wedge/nag.
+  # Active running/fixing/ci states remain working and retain authority over a
+  # stale paused event.
+  if [ "$RUN_STATE" = parked ] && log_declares_pause; then
+    RUN_STATE=paused
+    RUN_DETAIL="$RUN_DETAIL${SEP}declared external wait"
+  fi
+
   # Reconcile the status log. A needs-decision/paused/blocked log line that the run-step
-  # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
+  # has moved past (anything but a genuinely parked run or its declared external
+  # wait exception) is deterministically stale: the gate resolved and the run
+  # resumed or finished.
   case "$LOG_VERB" in
     needs-decision|paused|blocked)
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_STATE" != parked ] && [ "$RUN_STATE" != paused ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else
