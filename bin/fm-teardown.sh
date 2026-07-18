@@ -551,12 +551,13 @@ remove_firstmate_home() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -572,20 +573,34 @@ validate_firstmate_home_children_removal() {
   done
 }
 
+validate_child_backend() {
+  local child_id=$1 child_meta=$2 child_backend
+  child_backend=$(fm_backend_of_meta "$child_meta")
+  if ! fm_backend_validate "$child_backend" >/dev/null 2>&1; then
+    echo "REFUSED: child $child_id uses unsupported backend '$child_backend'; refusing force teardown" >&2
+    return 1
+  fi
+  printf '%s\n' "$child_backend"
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_t=$(meta_value "$child_meta" window)
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ -n "$child_t" ]; then
-      fm_backend_kill "$(fm_backend_of_meta "$child_meta")" "$child_t" 2>/dev/null || true
+      if ! fm_backend_kill "$child_backend" "$child_t" 2>/dev/null; then
+        echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
+        return 1
+      fi
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
