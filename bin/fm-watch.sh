@@ -37,6 +37,10 @@ mkdir -p "$STATE"
 # has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# The watcher's poll loop is the tmux backend's event-source implementation:
+# capture plus the existing hash/busy checks. Keep the wake policy unchanged.
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -273,6 +277,12 @@ window_kind() {
   echo unknown
 }
 
+window_backend() {  # <window>
+  local w=$1 meta
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] && fm_backend_of_meta "$meta" || printf 'tmux'
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -502,7 +512,7 @@ EOF
       key=$(printf '%s' "$w" | tr ':/.' '___')
       [ -e "$STATE/.paused-$key" ] || continue
     fi
-    if ! tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null); then
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 2>/dev/null); then
       pause_tracking_clear "$w"
       continue
     fi

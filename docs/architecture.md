@@ -57,6 +57,14 @@ The read-only supervision model surfaces a non-empty wedge marker as the high-se
 If that marked Codex secondmate path still looks pending after the generic Enter retries, `fm-send.sh` waits once more and sends one final Enter before reporting failure.
 After successful text sends, it adds its own `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay either fm-send-only pause.
 
+## Runtime session-provider backend
+
+The runtime backend is the session-provider layer below firstmate's lifecycle scripts.
+`bin/fm-backend.sh` owns selection, metadata helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` owns the tmux command primitives used by spawn, send, peek, watch, teardown, and crew-state.
+New spawns select a backend from `fm-spawn.sh --backend`, then `FM_BACKEND`, then local `config/backend`, then default `tmux`.
+Tmux remains the only verified backend in this phase. Unknown names fail loudly, and default tmux tasks omit `backend=tmux` from metadata; a missing `backend=` still means tmux.
+The watcher's existing poll loop remains the event-source implementation for tmux, so this abstraction does not change wake, stale, or busy detection behavior.
+
 Generated ship and scout briefs carry a shared no-mistakes daemon ownership boundary: workers must not stop, restart, or update the daemon; daemon errors are reported as `blocked:` and only firstmate manages the shared instance. The exact generated rule is owned by `bin/fm-brief.sh`.
 
 For a bounded operator read, `bin/fm-fleet-snapshot.sh --json` is the local

@@ -23,6 +23,13 @@ Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` task sections.
 Homes may also carry a `## Secondmate Backlogs` inventory section with `- <secondmate-id> ...` lines for persistent secondmates; `fm-backlog-audit.sh` treats those ids, plus ids in `data/secondmates.md`, as registered secondmate inventory rather than ordinary In flight work.
 
+## Runtime backend (`config/backend` / `FM_BACKEND`)
+
+The runtime session-provider backend controls where task endpoints are created, captured, sent, watched, and killed.
+Tmux is still the only verified backend. New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, `FM_BACKEND`, the first non-empty line of local gitignored `config/backend`, then default `tmux`.
+Unknown values are rejected. Default tmux task metadata omits `backend=tmux`; readers treat a missing `backend=` as tmux for compatibility.
+The `config/backend` file is local to a firstmate home and is not inherited by secondmate homes.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bash bin/fm-run-behavior-tests.sh`.
@@ -250,6 +257,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_BACKEND=tmux          # runtime session-provider override for new spawns; tmux only in this phase
 FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3   # additional `treehouse return` retries after a matching transient git index.lock error; invalid values use 3
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1   # whole seconds between those retries; 0 disables waiting and invalid values warn then use 1
