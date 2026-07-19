@@ -546,6 +546,132 @@ test_pane_input_pending_honors_idle_override_after_border_strip() {
   pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
 }
 
+test_pane_is_busy_herdr_native_busy_state() {
+  (
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected Herdr busy-state args: $1 $2"
+      printf 'busy'
+    }
+    fm_backend_capture() { fail "capture should not run when Herdr busy-state is conclusive"; }
+    pane_is_busy default:w1:p2 herdr || fail "Herdr busy state was not honored"
+  ) || fail "Herdr native busy-state test failed"
+  pass "pane_is_busy dispatches Herdr native busy state"
+}
+
+test_pane_is_busy_herdr_idle_state_is_conclusive() {
+  (
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected Herdr busy-state args: $1 $2"
+      printf 'idle'
+    }
+    fm_backend_capture() { fail "capture should not run for conclusive Herdr idle state"; }
+    if pane_is_busy default:w1:p2 herdr; then
+      fail "Herdr idle state was treated as busy"
+    fi
+    true
+  ) || fail "Herdr idle-state test failed"
+  pass "pane_is_busy treats Herdr idle state as conclusive"
+}
+
+test_housekeeping_uses_recorded_herdr_endpoint() {
+  local dir state key win
+  dir=$(make_supercase herdr-endpoint-recheck)
+  state="$dir/state"
+  win='lab:w1:p2'
+  printf 'working\n' > "$state/herdr-w7.status"
+  printf 'window=%s\nbackend=herdr\n' "$win" > "$state/herdr-w7.meta"
+  key=$(printf '%s' herdr-w7 | tr ':/.' '___')
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_target_exists() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "stale recheck did not use recorded Herdr endpoint: $1 $2"
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "busy recheck did not use recorded Herdr endpoint: $1 $2"
+      printf 'idle'
+    }
+    fm_backend_capture() { fail "stale recheck used capture fallback for Herdr idle state"; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "Herdr stale endpoint recheck failed"
+  [ -s "$state/.subsuper-escalations" ] || fail "Herdr stale endpoint was not escalated"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "Herdr stale marker was not cleared"
+  pass "housekeeping rechecks stale Herdr tasks through recorded metadata"
+}
+
+test_housekeeping_uses_recorded_herdr_pause_endpoint() {
+  local dir state key win
+  dir=$(make_supercase herdr-pause-endpoint)
+  state="$dir/state"
+  win='lab:w1:p3'
+  printf 'paused: waiting for vendor\n' > "$state/herdr-pause-h8.status"
+  printf 'window=%s\nbackend=herdr\n' "$win" > "$state/herdr-pause-h8.meta"
+  key=$(printf '%s' herdr-pause-h8 | tr ':/.' '___')
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.subsuper-paused-$key"
+  (
+    crew_state_value() { printf 'unknown'; }
+    crew_absorb_class() { printf 'paused'; }
+    fm_backend_target_exists() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "pause recheck did not use recorded Herdr endpoint: $1 $2"
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "pause busy recheck did not use recorded Herdr endpoint: $1 $2"
+      printf 'idle'
+    }
+    fm_backend_capture() { fail "pause recheck used capture fallback for Herdr idle state"; }
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  ) || fail "Herdr pause endpoint recheck failed"
+  grep -F 'paused' "$state/.subsuper-escalations" >/dev/null \
+    || fail "Herdr pause endpoint was not resurfaced"
+  pass "housekeeping rechecks paused Herdr tasks through recorded metadata"
+}
+
+test_pane_input_pending_herdr_dispatch() {
+  (
+    fm_backend_composer_state() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected Herdr composer args: $1 $2"
+      printf 'pending'
+    }
+    pane_input_pending default:w1:p2 herdr || fail "Herdr pending composer was not detected"
+  ) || fail "Herdr pending composer test failed"
+  pass "pane_input_pending dispatches Herdr composer state"
+}
+
+test_inject_msg_herdr_submits_through_backend() {
+  local dir state
+  dir=$(make_supercase inject-herdr-submit)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected target-exists args: $1 $2"
+    }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected submit args: $1 $2"
+      case "$3" in *hello*) : ;; *) fail "submit text omitted the digest: $3" ;; esac
+      printf 'empty'
+    }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p2 \
+      inject_msg hello "$state" || fail "Herdr injection did not use the backend submit path"
+  ) || fail "Herdr backend submit test failed"
+  pass "inject_msg sends Herdr supervisor escalations through backend primitives"
+}
+
+test_daemon_refuses_unsupported_supervisor_backend() {
+  local dir state out
+  dir=$(make_supercase unsupported-supervisor-backend)
+  state="$dir/state"
+  if out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=orca FM_SUPERVISOR_TARGET=firstmate:0 \
+    "$DAEMON" 2>&1); then
+    fail "daemon accepted unsupported supervisor backend"
+  fi
+  assert_contains "$out" "does not support supervisor backend 'orca'" \
+    "unsupported supervisor backend refusal was not explicit"
+  pass "daemon refuses unsupported supervisor backends before injection"
+}
+
 test_classify_signal_dedup_against_scan() {
   # If the catch-all scan already escalated a status (seen marker matches),
   # classify_signal must self-handle to avoid a duplicate in the digest.
@@ -824,6 +950,13 @@ test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_is_not_pending
 test_pane_input_pending_idle_prompt_not_pending
 test_pane_input_pending_honors_idle_override_after_border_strip
+test_pane_is_busy_herdr_native_busy_state
+test_pane_is_busy_herdr_idle_state_is_conclusive
+test_housekeeping_uses_recorded_herdr_endpoint
+test_housekeeping_uses_recorded_herdr_pause_endpoint
+test_pane_input_pending_herdr_dispatch
+test_inject_msg_herdr_submits_through_backend
+test_daemon_refuses_unsupported_supervisor_backend
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending

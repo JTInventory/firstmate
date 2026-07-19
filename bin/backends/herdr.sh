@@ -3,8 +3,9 @@
 #
 # Herdr is a session provider only. Treehouse remains the worktree provider,
 # just as it does for tmux. This JT port targets Herdr protocol >=14 and the
-# 0.7.x CLI. It deliberately uses the pull primitives needed by PR1; native
-# event delivery and AFK/supervisor injection remain PR3 work.
+# 0.7.x CLI. It deliberately uses pull primitives; native event delivery
+# remains deferred, while AFK/supervisor injection uses the adapter's pane
+# send and read primitives when Herdr is selected.
 #
 # One Herdr workspace is kept per firstmate home: `firstmate` for the primary
 # and `2ndmate-<id>` for a seeded secondmate home. Each task is one tab with a

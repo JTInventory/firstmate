@@ -31,6 +31,10 @@ fm_backend_tmux_pane_readable() {  # <target>
   tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
 }
 
+fm_backend_tmux_composer_state() {  # <target>
+  fm_tmux_composer_state "$@"
+}
+
 fm_backend_tmux_container_ensure() {  # <cwd ignored>
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'

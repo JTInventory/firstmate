@@ -81,8 +81,10 @@ bash tests/fm-herdr-lab.test.sh
 
 Real Herdr smoke is opt-in and skips unless Herdr, a live socket, and the
 explicit smoke environment are present. CI therefore remains green without a
-Herdr server. Event-stream supervision and AFK/supervisor injection are
-deferred to PR3.
+Herdr server. The AFK daemon can inject into a Herdr supervisor when
+`FM_SUPERVISOR_BACKEND=herdr` and a `<session>:<pane-id>` target are selected;
+unsupported supervisor backends fail closed. The gated coverage lives in
+`tests/fm-afk-inject-herdr-e2e.test.sh` and uses only `fm-lab-*` sessions.
 
 Changes for this JT fork ship through the `JTInventory/firstmate` PR target;
 the owner repository is comparison-only during the port.
