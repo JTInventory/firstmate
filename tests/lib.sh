@@ -30,6 +30,33 @@ FM_TEST_LIB_SOURCED=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# --- ambient Herdr isolation ------------------------------------------------
+#
+# A captain who runs behavior tests from inside a live Herdr pane inherits
+# HERDR_ENV=1 (and related pane ids). fm_backend_name then auto-selects the
+# experimental herdr backend for any spawn that does not pin --backend/FM_BACKEND,
+# and secondmate fixtures create real 2ndmate-* workspaces on the default
+# session (cwd under /tmp/fm-behavior-tests...). Scrub ambient Herdr runtime
+# markers here so single-file and suite runs stay hermetic. Opt-in real-lab
+# tests re-export HERDR_SESSION (and may set FM_HERDR_E2E/FM_HERDR_SMOKE) after
+# preparing a private fm-lab-* session; they never rely on the captain pane.
+#
+# Skip the scrub when the caller already opted into a real-lab run so their
+# environment can still see HERDR_ENV if they set it deliberately before
+# sourcing this library (rare; lab scripts set HERDR_SESSION themselves).
+if [ "${FM_HERDR_E2E:-0}" != 1 ] \
+  && [ "${FM_HERDR_SMOKE:-0}" != 1 ] \
+  && [ "${FM_SEND_MARKER_HERDR_E2E:-0}" != 1 ] \
+  && [ "${FM_HERDR_ALLOW_AMBIENT:-0}" != 1 ]; then
+  unset HERDR_ENV HERDR_SESSION HERDR_PANE_ID HERDR_TAB_ID \
+    HERDR_WORKSPACE_ID HERDR_SOCKET_PATH
+  # Prefer an explicit outer FM_BACKEND (including deliberate herdr lab runs).
+  # When unset, pin hermetic fixtures to tmux so ambient detection cannot win.
+  if [ -z "${FM_BACKEND:-}" ]; then
+    export FM_BACKEND=tmux
+  fi
+fi
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

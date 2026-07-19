@@ -36,6 +36,11 @@ printf '%s\n' "$GOTMPDIR" > "$FM_FIXTURE_OUTPUT_DIR/$name.gotmpdir"
 [ -d "$TMPDIR" ] || exit 20
 [ -d "$GOTMPDIR" ] || exit 21
 [ -z "${FM_HOME:-}" ] || exit 22
+# Ambient Herdr from a live captain pane must not leak into hermetic fixtures.
+[ -z "${HERDR_ENV:-}" ] || exit 23
+[ -z "${HERDR_PANE_ID:-}" ] || exit 24
+[ -z "${HERDR_SESSION:-}" ] || exit 25
+[ "${FM_BACKEND:-}" = tmux ] || exit 26
 printf 'start\n' > "$FM_FIXTURE_OUTPUT_DIR/$name.started"
 owns_active=0
 if mkdir "$FM_FIXTURE_OUTPUT_DIR/active" 2>/dev/null; then
@@ -66,6 +71,8 @@ SH
 #!/usr/bin/env bash
 set -eu
 [ -z "${FM_HOME:-}" ] || exit 22
+[ -z "${HERDR_ENV:-}" ] || exit 23
+[ "${FM_BACKEND:-}" = tmux ] || exit 26
 printf 'working-tree fixture pass\n'
 SH
   chmod +x "$fixture/tests/working-tree.test.sh"
@@ -79,9 +86,17 @@ run_fixture() {
   set +e
   (
     cd "$fixture" || exit 1
+    # Simulate launching the suite from inside a live Herdr pane: ambient
+    # HERDR_* and a shared FM_HOME must not reach hermetic child tests.
     PATH="$fixture/bin:$PATH" \
       FM_TEST_JOBS="$jobs" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
+      HERDR_ENV=1 \
+      HERDR_SESSION=default \
+      HERDR_PANE_ID=w9:p9 \
+      HERDR_TAB_ID=w9:t9 \
+      HERDR_WORKSPACE_ID=w9 \
+      HERDR_SOCKET_PATH=/tmp/fake-herdr.sock \
       FM_FIXTURE_OUTPUT_DIR="$fixture_output" \
       bash "$fixture/bin/fm-run-behavior-tests.sh"
   ) >"$output" 2>&1
@@ -139,9 +154,36 @@ test_delta_overlay_contract_is_checked_and_portable() {
     "behavior runner must not depend on GNU-only sort -z"
   assert_contains "$source" 'if ! copy_worktree_delta' \
     "behavior runner must check the working-tree overlay result"
+  assert_contains "$source" 'unset HERDR_ENV HERDR_SESSION HERDR_PANE_ID' \
+    "behavior runner must scrub ambient Herdr pane markers"
+  assert_contains "$source" 'export FM_BACKEND=tmux' \
+    "behavior runner must pin hermetic jobs to tmux when FM_BACKEND is unset"
   pass "behavior runner checks its portable working-tree overlay"
+}
+
+test_lib_scrubs_ambient_herdr_for_hermetic_sources() {
+  local out
+  out=$(
+    HERDR_ENV=1 HERDR_SESSION=default HERDR_PANE_ID=w1:p1 \
+      bash -c '
+        set -eu
+        # Fresh shell: re-source lib with ambient Herdr set, as a single-file
+        # test would when launched from a captain Herdr pane.
+        FM_TEST_LIB_SOURCED=
+        # shellcheck source=tests/lib.sh
+        . "'"$ROOT"'/tests/lib.sh"
+        [ -z "${HERDR_ENV:-}" ] || { echo "HERDR_ENV leaked"; exit 1; }
+        [ -z "${HERDR_SESSION:-}" ] || { echo "HERDR_SESSION leaked"; exit 1; }
+        [ -z "${HERDR_PANE_ID:-}" ] || { echo "HERDR_PANE_ID leaked"; exit 1; }
+        [ "${FM_BACKEND:-}" = tmux ] || { echo "FM_BACKEND=${FM_BACKEND:-}"; exit 1; }
+        echo ok
+      '
+  ) || fail "tests/lib.sh did not scrub ambient Herdr for hermetic sources: $out"
+  [ "$out" = ok ] || fail "unexpected lib scrub output: $out"
+  pass "tests/lib.sh scrubs ambient Herdr for hermetic single-file runs"
 }
 
 test_parallel_isolation_and_failure_aggregation
 test_serial_mode_remains_serial
 test_delta_overlay_contract_is_checked_and_portable
+test_lib_scrubs_ambient_herdr_for_hermetic_sources
