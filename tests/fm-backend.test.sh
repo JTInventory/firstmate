@@ -94,7 +94,7 @@ test_spawn_rejects_unknown_selection() {
   assert_contains "$out" "unknown backend 'herdr'" "FM_BACKEND refusal did not name the backend"
 
   printf 'herdr\n' > "$config/backend"
-  out=$(FM_SPAWN_NO_GUARD=1 FM_BACKEND= FM_CONFIG_OVERRIDE="$config" \
+  out=$(FM_SPAWN_NO_GUARD=1 FM_BACKEND='' FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-spawn.sh" 2>&1) \
     && fail "config/backend=herdr should stop spawn before argument/project validation"
   assert_contains "$out" "unknown backend 'herdr'" "config/backend refusal did not name the backend"
@@ -146,7 +146,7 @@ test_backend_failures_propagate() {
   fi
 
   if out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" FM_FAKE_TMUX_NO_SESSION=1 \
-    FM_FAKE_TMUX_NEW_SESSION_FAIL=1 TMUX= fm_backend_container_ensure tmux /tmp); then
+    FM_FAKE_TMUX_NEW_SESSION_FAIL=1 TMUX='' fm_backend_container_ensure tmux /tmp); then
     fail "new-session failure was swallowed by container ensure"
   fi
   assert_contains "$(cat "$log")" $'\x1f''new-session' \

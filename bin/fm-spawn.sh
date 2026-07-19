@@ -279,7 +279,7 @@ case "$ARG3" in
     done
     ROUTE_HARNESS=${HARNESS:-raw}
     ROUTE_REASON="raw launch command selected for adapter verification"
-    ROUTE_OVERRIDE=raw-launch
+    ROUTE_OVERRIDE='raw-launch'
     ;;
   '')
     # Deferred until BRIEF/PROJ_ABS are known, so the route can read task text.
