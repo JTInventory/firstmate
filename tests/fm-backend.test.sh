@@ -165,7 +165,62 @@ test_backend_failures_propagate() {
   pass "tmux adapter propagates kill and container-creation failures"
 }
 
+test_teardown_preserves_state_on_kill_failure() {
+  local dir fakebin fake_root log state out
+  dir="$TMP_ROOT/teardown-kill-failure"
+  fake_root="$dir/root"
+  state="$fake_root/state"
+  mkdir -p "$fake_root/bin/backends" "$state"
+  fakebin=$(make_fake_tmux "$dir")
+  log="$dir/tmux.log"; : > "$log"
+
+  ln -s "$ROOT/bin/fm-teardown.sh" "$fake_root/bin/fm-teardown.sh"
+  ln -s "$ROOT/bin/fm-backend.sh" "$fake_root/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/backends/tmux.sh" "$fake_root/bin/backends/tmux.sh"
+  ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake_root/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake_root/bin/fm-tool-path-lib.sh"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake_root/bin/fm-gate-refuse-lib.sh"
+  cat > "$fake_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh"
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+  cat > "$fake_root/bin/fm-tasks-axi-lib.sh" <<'SH'
+fm_tasks_axi_backend_available() { return 1; }
+SH
+  cat > "$fake_root/bin/fm-task-identity-lib.sh" <<'SH'
+fm_assert_task_branch_matches_meta() { return 0; }
+SH
+
+  fm_write_meta "$state/kill-fail.meta" \
+    "window=firstmate:fm-demo" \
+    "worktree=$dir/nonexistent-worktree" \
+    "project=$dir/nonexistent-project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working\n' > "$state/kill-fail.status"
+
+  if out=$(cd "$fake_root" && PATH="$fakebin:$PATH" FM_HOME="$fake_root" \
+    FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" \
+    FM_TMUX_LOG="$log" FM_FAKE_TMUX_KILL_FAIL=1 \
+    "$fake_root/bin/fm-teardown.sh" kill-fail --force 2>&1); then
+    fail "teardown swallowed a backend kill failure"
+  fi
+  assert_contains "$out" \
+    "REFUSED: could not kill task kill-fail window firstmate:fm-demo; refusing to delete task state" \
+    "teardown did not report the failed backend kill"
+  [ -f "$state/kill-fail.meta" ] || fail "teardown deleted metadata after kill failure"
+  [ -f "$state/kill-fail.status" ] || fail "teardown deleted status after kill failure"
+  pass "teardown preserves task state when backend kill fails"
+}
+
 test_selection_and_metadata
 test_spawn_rejects_unknown_selection
 test_selector_and_dispatch
 test_backend_failures_propagate
+test_teardown_preserves_state_on_kill_failure
