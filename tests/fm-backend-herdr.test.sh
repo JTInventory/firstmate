@@ -102,7 +102,7 @@ test_version_gate() {
 }
 
 test_workspace_labels_and_container() {
-  local lines dir log resp fb out
+  local lines dir log resp fb out status=0
   [ "$(FM_HOME="$ROOT" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")" = firstmate ] \
     || fail "primary home label should be firstmate"
   dir="$TMP_ROOT/labels"; mkdir -p "$dir/home" "$dir/responses"
@@ -120,6 +120,15 @@ test_workspace_labels_and_container() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT")
   [ "$out" = fmtest:w1 ] || fail "container ensure returned '$out'"
   assert_contains "$(cat "$log")" $'\x1fworkspace\x1fcreate' "container ensure did not create a workspace"
+
+  find "$resp" -maxdepth 1 -type f -delete
+  : > "$log"
+  printf '93\n' > "$resp/1.exit"
+  status=0
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "workspace list failure was treated as an empty workspace list"
+  assert_not_contains "$(cat "$log")" $'\x1fworkspace\x1fcreate' "workspace list failure proceeded to create"
   pass "Herdr container ensure is version-gated and workspace-per-home"
 }
 
@@ -146,6 +155,16 @@ test_task_and_target_primitives() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" fm-seeded /tmp seeded' "$ROOT" $'fmtest:w1\tseeded')
   [ "$out" = 'w1:t3 w1:p3' ] || fail "seeded create task returned '$out'"
   assert_contains "$(cat "$log")" $'\x1f--workspace\x1fw1' "seeded workspace id was not stripped before tab listing"
+
+  find "$resp" -maxdepth 1 -type f -delete
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t4"}}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-malformed"}]}}' > "$resp/3.out"
+  status=0
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-malformed /tmp' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "malformed tab create output unexpectedly succeeded"
+  assert_contains "$(cat "$log")" $'\x1ftab\x1fclose' "malformed tab create output left the created tab open"
   [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_parse_target default:w1:p2; printf "%s|%s" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"' "$ROOT")" = 'default|w1:p2' ] \
     || fail "target parser did not split on the first colon"
   [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_key C-c' "$ROOT")" = ctrl+c ] \
@@ -165,6 +184,17 @@ test_kill_requires_verified_absence() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill default:w1:p2' "$ROOT" >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "Herdr kill swallowed pane-close failure"
   assert_not_contains "$(cat "$log")" $'\x1fserver' "Herdr target teardown unexpectedly started the server"
+
+  find "$resp" -maxdepth 1 -type f -delete
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/3.out"
+  : > "$resp/4.out"
+  printf '%s\n' '{}' > "$resp/5.out"
+  status=0
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill default:w1:p2' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "malformed pane list was treated as verified absence"
   pass "Herdr kill propagates close failures and avoids server creation"
 }
 
@@ -196,16 +226,16 @@ test_submit_retry_verdicts() {
   printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
   : > "$resp/3.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/4.out"
-  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/5.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/5.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/6.out"
-  : > "$resp/7.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/8.out"
-  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/9.out"
+  printf '%s\n' 'prompt>' > "$resp/7.out"
   fb=$(make_fake_herdr "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 hello 2 0 0' "$ROOT")
-  [ "$out" = empty ] || fail "changed capture should report empty, got '$out'"
-  pass "Herdr text submit types once and confirms the Enter transition"
+  [ "$out" = empty ] || fail "composer clear should report empty, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1fpane\x1fread' "submit acknowledgement did not inspect the composer"
+  assert_not_contains "$(cat "$log")" $'\x1fagent\x1fget' "submit acknowledgement used unrelated agent state"
+  pass "Herdr text submit confirms the composer cleared"
 }
 
 test_dispatch_and_meta_routing() {

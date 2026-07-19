@@ -773,15 +773,14 @@ fm_supervision_collect() {
   # shellcheck source=bin/fm-backlog-audit-lib.sh
   . "$FM_SUPERVISION_ROOT/bin/fm-backlog-audit-lib.sh"
   local records="" source_records="" checklist_records="" task_records="" worktree_records="" external_records="" backlog_records=""
-  local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
+  local state_ok=true backlog_ok=true tmux_ok=true herdr_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
   local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window backend worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
-  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false
+  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false tmux_used=false herdr_used=false tmux_detail="tmux not used by active task metadata" herdr_detail="Herdr not used by active task metadata"
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
   [ -f "$FM_SUPERVISION_DATA/backlog.md" ] || backlog_ok=false
-  command -v tmux >/dev/null 2>&1 || tmux_ok=false
   command -v treehouse >/dev/null 2>&1 || treehouse_ok=false
   command -v git >/dev/null 2>&1 || git_ok=false
   if ! command -v gh-axi >/dev/null 2>&1; then
@@ -802,6 +801,10 @@ fm_supervision_collect() {
       mode=$(fm_supervision_meta_value "$meta" mode); [ -n "$mode" ] || mode=no-mistakes
       yolo=$(fm_supervision_meta_value "$meta" yolo); [ -n "$yolo" ] || yolo=off
       backend=$(fm_supervision_meta_value "$meta" backend); [ -n "$backend" ] || backend=tmux
+      case "$backend" in
+        tmux) tmux_used=true ;;
+        herdr) herdr_used=true ;;
+      esac
       harness=$(fm_supervision_meta_value "$meta" harness); [ -n "$harness" ] || harness=unknown
       route_profile=$(fm_supervision_meta_value "$meta" route_profile); [ -n "$route_profile" ] || route_profile=unknown
       route_harness=$(fm_supervision_meta_value "$meta" route_harness); [ -n "$route_harness" ] || route_harness=unknown
@@ -893,6 +896,23 @@ fm_supervision_collect() {
         [ "$severity" = medium ] && medium_count=$((medium_count + 1))
       fi
     done
+  fi
+
+  if [ "$tmux_used" = true ]; then
+    if command -v tmux >/dev/null 2>&1; then
+      tmux_detail="tmux display-message only"
+    else
+      tmux_ok=false
+      tmux_detail="tmux missing for active tmux task metadata"
+    fi
+  fi
+  if [ "$herdr_used" = true ]; then
+    if fm_backend_source herdr >/dev/null 2>&1 && fm_backend_herdr_version_check >/dev/null 2>&1; then
+      herdr_detail="Herdr status and pane reads only"
+    else
+      herdr_ok=false
+      herdr_detail="Herdr unavailable or outside the verified 0.7.x protocol 14+ range"
+    fi
   fi
 
   # A failed away-mode injection is durable local supervision truth. Surface
@@ -1039,10 +1059,11 @@ EOF
   if [ "$high_count" -gt 0 ]; then level=action
   elif [ "$medium_count" -gt 0 ]; then level=watch
   fi
-  source_records=$(printf 'source\tstate\t%s\t%s\nsource\tbacklog\t%s\t%s\nsource\ttmux\t%s\t%s\nsource\ttreehouse\t%s\t%s\nsource\tgit\t%s\t%s\nsource\tgithub\t%s\t%s\nsource\twatcher\t%s\t%s' \
+  source_records=$(printf 'source\tstate\t%s\t%s\nsource\tbacklog\t%s\t%s\nsource\ttmux\t%s\t%s\nsource\therdr\t%s\t%s\nsource\ttreehouse\t%s\t%s\nsource\tgit\t%s\t%s\nsource\tgithub\t%s\t%s\nsource\twatcher\t%s\t%s' \
     "$state_ok" "state/meta/status read only" \
     "$backlog_ok" "data/backlog.md read only" \
-    "$tmux_ok" "tmux display-message only" \
+    "$tmux_ok" "$tmux_detail" \
+    "$herdr_ok" "$herdr_detail" \
     "$treehouse_ok" "treehouse status only" \
     "$git_ok" "git branch/status/worktree reads only" \
     "$github_ok" "$github_detail" \
