@@ -117,7 +117,7 @@ test_version_gate() {
 }
 
 test_workspace_labels_and_container() {
-  local lines dir log resp fb out status=0
+  local lines dir log resp fb out live_pid status=0
   [ "$(FM_HOME="$ROOT" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")" = firstmate ] \
     || fail "primary home label should be firstmate"
   dir="$TMP_ROOT/labels"; mkdir -p "$dir/home" "$dir/responses"
@@ -166,7 +166,9 @@ test_workspace_labels_and_container() {
   [ -d "$dir/home/.fm-herdr-workspace.lock" ] || fail "ambiguous legacy workspace lock was removed"
 
   mkdir -p "$dir/home/.fm-herdr-workspace.lock"
-  printf '1\n' > "$dir/home/.fm-herdr-workspace.lock/pid"
+  # PID 1 is not guaranteed to be a live, non-zombie process in CI containers.
+  live_pid=$$
+  printf '%s\n' "$live_pid" > "$dir/home/.fm-herdr-workspace.lock/pid"
   status=0
   FM_HOME="$dir/home" PATH="$fb:$PATH" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_lock_owner_status "$FM_HOME/.fm-herdr-workspace.lock"' "$ROOT" \
