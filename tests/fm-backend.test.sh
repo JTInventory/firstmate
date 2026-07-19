@@ -136,6 +136,8 @@ test_backend_failures_propagate() {
     FM_FAKE_TMUX_NEW_SESSION_FAIL=1 TMUX= fm_backend_container_ensure tmux /tmp); then
     fail "new-session failure was swallowed by container ensure"
   fi
+  assert_contains "$(cat "$log")" $'\x1f''new-session' \
+    "container ensure did not attempt new-session after has-session failed"
   pass "tmux adapter propagates kill and container-creation failures"
 }
 

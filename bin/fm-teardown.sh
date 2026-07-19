@@ -733,7 +733,10 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   teardown_treehouse_return "$WT" "$PROJ" "worktree"
 fi
 
-fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
+  echo "REFUSED: could not kill task $ID window $T; refusing to delete task state" >&2
+  exit 1
+fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
