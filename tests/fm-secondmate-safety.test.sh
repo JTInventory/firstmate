@@ -1431,6 +1431,49 @@ EOF
   pass "force teardown validates subhome before child cleanup"
 }
 
+test_secondmate_force_teardown_refuses_unknown_child_backend() {
+  local home subhome fakebin err log
+  home="$TMP_ROOT/unknown-backend-teardown-home"
+  subhome="$TMP_ROOT/unknown-backend-teardown-subhome"
+  err="$TMP_ROOT/unknown-backend-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/data"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$TMP_ROOT/unknown-backend-child-worktree
+project=$TMP_ROOT/unknown-backend-child-project
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+backend=herdr
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/unknown-backend-teardown-fake")
+  log="$TMP_ROOT/unknown-backend-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unknown-backend-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown accepted a child with an unknown backend"
+  fi
+  [ -d "$subhome" ] || fail "force teardown removed the subhome after unknown-backend refusal"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown removed child metadata after unknown-backend refusal"
+  grep -F "REFUSED: child child uses unsupported backend 'herdr'" "$err" >/dev/null \
+    || fail "force teardown did not explain unknown child backend"
+  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed a window before unknown-backend refusal"
+  pass "force teardown refuses unknown child backends before cleanup"
+}
+
 test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/child-active-descendant-home"
@@ -1784,6 +1827,7 @@ test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home
 test_secondmate_teardown_refuses_child_registry_nested_home
 test_secondmate_force_teardown_prevalidates_before_child_cleanup
+test_secondmate_force_teardown_refuses_unknown_child_backend
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
 test_secondmate_force_teardown_refuses_unregistered_child_worktree

@@ -11,8 +11,9 @@
 # Enter is positively confirmed (the text is still sitting in the composer after
 # all retries), fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction (incident afk-invx-i5).
-# The composer/submit logic is shared with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# The tmux composer/submit logic remains shared with the away-mode daemon via
+# bin/fm-tmux-lib.sh, behind the session-provider backend API. Tune with
+# FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, codex `$...` skill invocations resolved through harness meta,
 # and marked codex secondmate text get a longer pre-Enter settle so completion or
 # input timing does not swallow Enter. If that marked Codex secondmate path still
@@ -42,35 +43,26 @@ fm_refuse_if_gate_agent
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
-# shellcheck source=bin/fm-tmux-lib.sh
-. "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
-resolve() {
-  case "$1" in
-    *:*) echo "$1" ;;
-    fm-*)
-      meta="$STATE/${1#fm-}.meta"
-      if [ ! -f "$meta" ]; then
-        echo "error: no metadata for $1 in $STATE; pass session:window to target a window outside this firstmate home" >&2
-        exit 1
-      fi
-      window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; exit 1; }
-      echo "$window"
-      ;;
-    *)
-      echo "error: target '$1' is not resolvable; use fm-<id> for a recorded task or session:window for an explicit target" >&2
-      exit 1
-      ;;
-  esac
-}
-
 RAW_TARGET=$1
-T=$(resolve "$1")
+# JT send semantics intentionally stay strict: only a recorded fm-<id> or an
+# explicit session:window target is accepted. The backend selector also has a
+# bare live-inventory form for fm-peek compatibility, but send must not use it.
+case "$RAW_TARGET" in
+  *:*|fm-*) ;;
+  *)
+    echo "error: target '$RAW_TARGET' is not resolvable; use fm-<id> for a recorded task or session:window for an explicit target" >&2
+    exit 1
+    ;;
+esac
+T=$(fm_backend_resolve_selector "$1" "$STATE")
+TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 shift
 
 # Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,
@@ -97,13 +89,13 @@ case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ]; then
-      TARGET_HARNESS=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      TARGET_HARNESS=$(fm_meta_get "$meta" harness)
     fi
     ;;
 esac
 
 if [ "${1:-}" = "--key" ]; then
-  tmux send-keys -t "$T" "$2"
+  fm_backend_send_key "$TARGET_BACKEND" "$T" "$2"
 else
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
@@ -137,13 +129,13 @@ else
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  verdict=$(fm_tmux_submit_core "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle")
+  verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle")
   if [ "$verdict" = pending ] && [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$TARGET_HARNESS" = codex ]; then
     # Live Codex secondmate panes have accepted a later manual Enter after the
     # normal retry loop left the marked request in the composer. Do exactly that
     # once, and only on the marked Codex secondmate path.
     sleep "$settle"
-    verdict=$(fm_tmux_submit_enter_core "$T" 1 "$sleep_s")
+    verdict=$(fm_backend_submit_enter "$TARGET_BACKEND" "$T" 1 "$sleep_s")
   fi
   case "$verdict" in
     pending)

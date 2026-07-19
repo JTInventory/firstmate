@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
 # its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --backend <name> selects the runtime session-provider for this task. Without
+#   it, selection is FM_BACKEND, then config/backend, then tmux. Only tmux is
+#   verified in this PR. Default tmux tasks omit backend= from metadata.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. It also reads fm-route.sh and fills any
 #   omitted --model/--effort axes from the route when the active crew harness still
@@ -43,7 +46,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort applies to every pair.
+#   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -82,6 +85,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-cbm-lib.sh
 . "$SCRIPT_DIR/fm-cbm-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -89,9 +94,11 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+BACKEND_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+BACKEND_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -103,6 +110,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -117,6 +125,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --backend) want_value=backend ;;
+    --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -124,10 +134,22 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# Backend selection: explicit --backend > FM_BACKEND > config/backend > tmux.
+# Validate before project resolution so an unsupported runtime is refused
+# loudly and deterministically.
+if [ "$BACKEND_SET" -eq 1 ]; then
+  BACKEND=$BACKEND_ARG
+else
+  BACKEND=$(fm_backend_name)
+fi
+fm_backend_validate "$BACKEND" || exit 1
+fm_backend_source "$BACKEND" || exit 1
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -147,6 +169,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -256,7 +279,7 @@ case "$ARG3" in
     done
     ROUTE_HARNESS=${HARNESS:-raw}
     ROUTE_REASON="raw launch command selected for adapter verification"
-    ROUTE_OVERRIDE=raw-launch
+    ROUTE_OVERRIDE='raw-launch'
     ;;
   '')
     # Deferred until BRIEF/PROJ_ABS are known, so the route can read task text.
@@ -664,28 +687,20 @@ if [ "$KIND" = secondmate ]; then
   ROUTE_EFFORT=${EFFORT:-default}
 fi
 
-# Same session when firstmate already runs inside tmux; dedicated session otherwise.
-if [ -n "${TMUX:-}" ]; then
-  SES=$(tmux display-message -p '#S')
-else
-  tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
-  SES=firstmate
-fi
+# Same session when firstmate already runs inside the selected backend;
+# dedicated container otherwise.
+SES=$(fm_backend_container_ensure "$BACKEND" "$PROJ_ABS")
 
 W="fm-$ID"
 T="$SES:$W"
-if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
-  echo "error: window $T already exists" >&2
-  exit 1
-fi
 
 cleanup_spawn_window() {
-  tmux kill-window -t "$1" >/dev/null 2>&1 || true
+  fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1 || true
 }
 
 cleanup_unidentified_spawn_window() {
   local window_ids_after window_id candidate='' candidate_count=0
-  window_ids_after=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
+  window_ids_after=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
   while IFS= read -r window_id; do
     [ -n "$window_id" ] || continue
     if ! grep -qxF "$window_id" <<<"$WINDOW_IDS_BEFORE"; then
@@ -784,42 +799,42 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   }
 }
 
-WINDOW_IDS_BEFORE=$(tmux list-windows -t "$SES" -F '#{window_id}' 2>/dev/null || true)
-WID=$(tmux new-window -dP -F '#{window_id}' -t "$SES:" -n "$W" -c "$PROJ_ABS") || exit 1
+WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
+WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS") || exit 1
 if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
   cleanup_unidentified_spawn_window
   echo "error: tmux did not return a window id for $T" >&2
   exit 1
 fi
-if ! tmux set-window-option -t "$WID" automatic-rename off; then
+if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
   cleanup_spawn_window "$WID"
   echo "error: tmux failed to disable automatic window renaming for $T" >&2
   exit 1
 fi
-if ! tmux set-window-option -t "$WID" allow-rename off; then
+if ! fm_backend_set_task_option "$BACKEND" "$WID" allow-rename off; then
   cleanup_spawn_window "$WID"
   echo "error: tmux failed to disable window renaming for $T" >&2
   exit 1
 fi
-if ! tmux rename-window -t "$WID" "$W"; then
+if ! fm_backend_rename_task "$BACKEND" "$WID" "$W"; then
   cleanup_spawn_window "$WID"
   echo "error: tmux failed to restore canonical window name $T" >&2
   exit 1
 fi
-if [ "$(tmux display-message -p -t "$WID" '#{window_name}')" != "$W" ]; then
+if [ "$(fm_backend_task_name "$BACKEND" "$WID")" != "$W" ]; then
   cleanup_spawn_window "$WID"
   echo "error: tmux did not retain canonical window name $T" >&2
   exit 1
 fi
 if [ "$KIND" != secondmate ]; then
-  tmux send-keys -t "$WID" 'treehouse get' Enter
+  fm_backend_send_text_line "$BACKEND" "$WID" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Accept a pane cwd only once it passes the complete target-repo check. A
   # transient foreign cwd is retained only for the eventual diagnostic.
   WT_CANDIDATE=
   for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
-    p=$(tmux display-message -p -t "$WID" '#{pane_current_path}' 2>/dev/null || true)
+    p=$(fm_backend_current_path "$BACKEND" "$WID" 2>/dev/null || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then
@@ -995,6 +1010,9 @@ mkdir -p "$STATE"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Missing backend= is the compatibility spelling for tmux. Record only
+  # non-default backends so existing and new tmux metadata stay unchanged.
+  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -1019,7 +1037,7 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 sq_gotmpdir=$(shell_quote "$TASK_TMP/gotmp")
-tmux send-keys -t "$WID" "export GOTMPDIR=$sq_gotmpdir" Enter
+fm_backend_send_text_line "$BACKEND" "$WID" "export GOTMPDIR=$sq_gotmpdir"
 sleep 0.3
 # Soft CBM env for orientation tools/CLI (cache + resource caps + PATH).
 # Also prefix the launch command so the agent process itself inherits CBM even
@@ -1035,12 +1053,12 @@ if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
   # FM_CBM_TASK_ID tags usage.jsonl lines from fm-cbm-cli.sh for this task.
   # FM_CBM_CLI points agents at the logged CLI wrapper when they shell out.
   cbm_cli_wrap=$(shell_quote "$FM_ROOT/bin/fm-cbm-cli.sh")
-  tmux send-keys -t "$WID" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\"" Enter
+  fm_backend_send_text_line "$BACKEND" "$WID" "export CBM_CACHE_DIR=$(shell_quote "$cbm_cache") CBM_MEM_BUDGET_MB=$(shell_quote "$cbm_mem") CBM_WORKERS=$(shell_quote "$cbm_workers") FM_CBM_TASK_ID=$(shell_quote "$ID") FM_CBM_CLI=$cbm_cli_wrap FM_HOME=$(shell_quote "$FM_HOME") PATH=$(shell_quote "$cbm_path_prefix"):\"\$PATH\""
   sleep 0.2
   LAUNCH="${cbm_prefix}${LAUNCH}"
 fi
-tmux send-keys -t "$WID" -l "$LAUNCH"
+fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
 sleep 0.3
-tmux send-keys -t "$WID" Enter
+fm_backend_send_key "$BACKEND" "$WID" Enter
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

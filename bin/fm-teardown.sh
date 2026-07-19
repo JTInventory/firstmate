@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree or retire a
-# secondmate home, kill the tmux window, clear volatile state, refresh/prune
+# secondmate home, kill the session-provider endpoint, clear volatile state, refresh/prune
 # the project's clone for PR-based ship tasks, then print a backlog-refresh
 # reminder.
 # REFUSES if the worktree holds work that has not LANDED, because treehouse return
@@ -57,6 +57,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-task-identity-lib.sh
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -66,6 +68,8 @@ META="$STATE/$ID.meta"
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+BACKEND=$(fm_backend_of_meta "$META")
+fm_backend_validate "$BACKEND" || exit 1
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
@@ -547,12 +551,13 @@ remove_firstmate_home() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -568,20 +573,34 @@ validate_firstmate_home_children_removal() {
   done
 }
 
+validate_child_backend() {
+  local child_id=$1 child_meta=$2 child_backend
+  child_backend=$(fm_backend_of_meta "$child_meta")
+  if ! fm_backend_validate "$child_backend" >/dev/null 2>&1; then
+    echo "REFUSED: child $child_id uses unsupported backend '$child_backend'; refusing force teardown" >&2
+    return 1
+  fi
+  printf '%s\n' "$child_backend"
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_t=$(meta_value "$child_meta" window)
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ -n "$child_t" ]; then
-      tmux kill-window -t "$child_t" 2>/dev/null || true
+      if ! fm_backend_kill "$child_backend" "$child_t" 2>/dev/null; then
+        echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
+        return 1
+      fi
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
@@ -630,10 +649,6 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
       exit 1
     done
   fi
-fi
-
-if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -698,6 +713,15 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
+  echo "REFUSED: could not kill task $ID window $T; refusing to delete task state" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  cleanup_firstmate_home_children "$HOME_PATH"
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -713,8 +737,6 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # the project.
   teardown_treehouse_return "$WT" "$PROJ" "worktree"
 fi
-
-tmux kill-window -t "$T" 2>/dev/null || true
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
