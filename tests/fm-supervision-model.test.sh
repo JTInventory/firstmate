@@ -153,7 +153,7 @@ case " $* " in
   *) exit 3 ;;
 esac
 case "$1" in
-  status) printf '%s\n' '{"client":{"version":"0.7.4","protocol":14},"server":{"running":true}}' ;;
+  status) printf '{"client":{"version":"0.7.4","protocol":14},"server":{"running":%s}}\n' "${FM_FAKE_HERDR_SERVER_RUNNING:-true}" ;;
   pane) printf '%s\n' '{"result":{"pane":{"pane_id":"p1"}}}' ;;
   *) exit 2 ;;
 esac
@@ -641,6 +641,16 @@ if sources["tmux"]["ok"] is not True:
     raise SystemExit("tmux should not be unhealthy when no active task uses it")
 if sources["herdr"]["ok"] is not True:
     raise SystemExit(f"Herdr source was unhealthy: {sources['herdr']}")
+PY
+  out=$(FM_FAKE_HERDR_SERVER_RUNNING=false PATH="$fakebin:/usr/bin:/bin" FM_HOME="$home" "$CLI" --json --no-default-reminders) \
+    || fail "stopped Herdr supervision json failed"
+  FM_TEST_JSON=$out python3 - <<'PY' || fail "stopped Herdr session was reported healthy"
+import json
+import os
+
+source = json.loads(os.environ["FM_TEST_JSON"])["sources"]["herdr"]
+if source["ok"] is not False:
+    raise SystemExit(f"stopped Herdr session was reported healthy: {source}")
 PY
   pass "Herdr-only supervision reports backend-aware source health"
 }

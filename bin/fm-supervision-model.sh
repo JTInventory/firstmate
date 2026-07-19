@@ -926,6 +926,11 @@ fm_supervision_collect() {
           herdr_detail="Herdr session '$herdr_session' unavailable or outside the verified 0.7.x protocol 14+ range"
           break
         fi
+        if ! fm_backend_herdr_server_available "$herdr_session" >/dev/null 2>&1; then
+          herdr_ok=false
+          herdr_detail="Herdr session '$herdr_session' is unavailable or stopped"
+          break
+        fi
       done
     fi
   fi
