@@ -68,6 +68,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
@@ -172,6 +174,7 @@ secondmate_sync() {
 install_cmd() {
   case "$1" in
     tmux|node|gh|curl|jq) echo "brew install $1  # or the platform's package manager" ;;
+    herdr) echo "see https://herdr.dev for the Herdr 0.7.x install instructions" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -180,7 +183,13 @@ install_cmd() {
   esac
 }
 
-TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+COMMON_TOOLS="node gh no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+BACKEND=$(fm_backend_name)
+if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
+  echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
+  BACKEND_TOOLS="tmux treehouse"
+fi
+TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN_MAJOR=1
 NO_MISTAKES_MIN_MINOR=31
 NO_MISTAKES_MIN_PATCH=2

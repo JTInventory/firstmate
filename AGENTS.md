@@ -122,9 +122,10 @@ backups/             root-local preservation files; not a canonical tracked surf
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The tmux window for a task is always named `fm-<id>`.
+The tmux window for a tmux-backed task is named `fm-<id>`.
 `fm-spawn.sh` creates that window by tmux window ID, disables automatic and application-driven renaming, restores the canonical name, and verifies it before sending any pane commands.
-After creation it targets the immutable window ID, never the mutable `session:window-name` label; if setup cannot prove the ID or canonical name, it cleans up a uniquely identified new window and aborts.
+Herdr-backed tasks instead use a `fm-<id>` tab and record an opaque `session:pane` target; the Herdr workspace is scoped to the firstmate home.
+After creation, tmux targets the immutable window ID rather than the mutable `session:window-name` label; Herdr targets the recorded pane ID. If setup cannot prove the backend endpoint, it cleans up the uniquely identified new endpoint and aborts.
 
 ## 3. Bootstrap (run at every session start)
 
@@ -684,7 +685,7 @@ Heartbeats back off exponentially while they are the only wakes firing (600s dou
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
-tmux is the ground truth.
+Tmux is the default session ground truth. A task whose meta records `backend=herdr` uses its recorded Herdr `session:pane` target for endpoint reads and writes; treehouse remains the worktree ground truth. Herdr is experimental and must be enabled explicitly or through its documented `HERDR_ENV=1` auto-detection.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.

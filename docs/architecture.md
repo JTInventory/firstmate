@@ -62,8 +62,9 @@ After successful text sends, it adds its own `FM_SEND_SETTLE` pause so immediate
 The runtime backend is the session-provider layer below firstmate's lifecycle scripts.
 `bin/fm-backend.sh` owns selection, metadata helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` owns the tmux command primitives used by spawn, send, peek, watch, teardown, and crew-state.
 New spawns select a backend from `fm-spawn.sh --backend`, then `FM_BACKEND`, then local `config/backend`, then default `tmux`.
-Tmux remains the only verified backend in this phase. Unknown names fail loudly, and default tmux tasks omit `backend=tmux` from metadata; a missing `backend=` still means tmux.
-The watcher's existing poll loop remains the event-source implementation for tmux, so this abstraction does not change wake, stale, or busy detection behavior.
+Tmux remains the default and production path. Herdr is an experimental opt-in backend for Herdr 0.7.x/protocol 14+; unknown names fail loudly, and default tmux tasks omit `backend=tmux` from metadata. A missing `backend=` still means tmux.
+When `HERDR_ENV=1` is present without explicit configuration, Herdr is auto-detected; `$TMUX` wins when nested. Herdr tasks use one workspace per firstmate home and one tab per task, while treehouse remains the worktree provider. The Herdr adapter's native event and AFK/supervisor paths are deferred to PR3.
+The watcher's existing poll loop remains the event-source implementation for both this PR's tmux and Herdr paths, so the default wake/stale behavior remains unchanged.
 
 Generated ship and scout briefs carry a shared no-mistakes daemon ownership boundary: workers must not stop, restart, or update the daemon; daemon errors are reported as `blocked:` and only firstmate manages the shared instance. The exact generated rule is owned by `bin/fm-brief.sh`.
 
@@ -76,8 +77,8 @@ remote PR discovery opt-in and soft-failing.
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees so parallel tasks on one repo cannot collide.
 For ship and scout work, `fm-spawn.sh` waits for `treehouse get` and then refuses to launch unless the pane resolves to a real git worktree root of the target project: its physical git common dir must match the target project and its HEAD must exist in that repo. A different git root is not an acceptable isolation result; the fresh window is killed and no task meta is recorded on refusal.
-It creates each tmux window as `fm-<id>`, disables automatic and application-driven renaming, restores and verifies that title, then targets every post-create tmux operation by the immutable window ID rather than the mutable title.
-If tmux does not return a valid ID or cannot retain the canonical title, spawn cleans up a uniquely identified newly created window and aborts before it sends a pane command.
+For tmux it creates each window as `fm-<id>`, disables automatic and application-driven renaming, restores and verifies that title, then targets every post-create operation by the immutable window ID rather than the mutable title. For Herdr it creates a `fm-<id>` tab in the home workspace and targets the recorded `session:pane` endpoint.
+If tmux does not return a valid ID or cannot retain the canonical title, spawn cleans up a uniquely identified newly created window and aborts before it sends a pane command; Herdr likewise aborts if it cannot return a task tab/pane target.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
