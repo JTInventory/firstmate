@@ -50,9 +50,32 @@ Herdr task metadata records `backend=herdr`, `herdr_session=`,
 continues to omit `backend=tmux`; a missing backend field still means tmux.
 
 The adapter avoids focusing new workspaces or tabs where Herdr supports that
-flag. It refuses duplicate task-tab labels and removes only the seeded default
-tab created by a workspace that this spawn itself created. Existing workspaces
-are adopted without pruning their tabs.
+flag. A duplicate label is safe to replace only when its pane is proven to be a
+husk: the pane is gone (`dead`) or the pane exists without a registered agent
+(`no-agent`). A live or ambiguous pane still refuses the duplicate. Replacement
+is create-first, close-second, so a husk is never removed before its replacement
+exists. `agent_alive` reports `alive`, `dead`, or `unknown` with the same
+fail-closed rule.
+
+Herdr seeds a new workspace with a default tab. JT threads the exact tab id
+returned by that same workspace-create call through the spawn path and prunes
+it only after the first real task tab exists. Adopted workspaces carry no seed
+id, so their tabs are never pruned by a later spawn. This is a spawn-safety
+guard, not permission to touch the captain's `default` session.
+
+Composer classification is shared with tmux in `bin/fm-composer-lib.sh`. ANSI
+dim/faint and dark truecolor ghost text is ignored, real typed text stays
+`pending`, and a bare shell prompt (`>`, `$`, `%`, `#`) is `unknown` rather than
+an injection-safe empty agent composer. A bordered agent composer remains
+`empty` when it contains only its own prompt.
+
+On Herdr protocol 16 or newer, the adapter can also wait on the native
+`pane.agent_status_changed` stream. `bin/backends/herdr-eventwait.py` is a
+bounded raw-socket reader; `fm_backend_herdr_wait_transition` normalizes events
+through `bin/fm-transition-lib.sh` and treats only a fresh `blocked` edge as
+immediately actionable. Capability, socket, subscription, and reader failures
+return to the normal polling path. The transition marker is committed only by
+the caller after it handles the wake, so a failed handoff is not lost.
 
 ## Lab and safety
 
@@ -77,6 +100,8 @@ The unit suite uses a fake Herdr client and needs no server:
 ```sh
 bash tests/fm-backend-herdr.test.sh
 bash tests/fm-herdr-lab.test.sh
+python3 tests/fm-backend-herdr-eventwait.test.py
+bash tests/fm-composer-lib.test.sh
 ```
 
 Real Herdr smoke is opt-in and skips unless Herdr, a live socket, and the

@@ -6,6 +6,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
+[ "${FM_HERDR_SMOKE:-0}" = 1 ] || { echo "skip: set FM_HERDR_SMOKE=1 to opt into the real Herdr AFK e2e"; exit 0; }
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 

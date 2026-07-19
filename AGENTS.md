@@ -686,6 +686,7 @@ Due per-task checks run before signal scanning so chatty crewmate status updates
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
 Tmux is the default session ground truth. A task whose meta records `backend=herdr` uses its recorded Herdr `session:pane` target for endpoint reads and writes; treehouse remains the worktree ground truth. Herdr is experimental and must be enabled explicitly or through its documented `HERDR_ENV=1` auto-detection.
+Herdr restore husks are replaceable only when `pane_agent_state` proves `dead` or `no-agent`; live and ambiguous panes still refuse duplicate labels. New-workspace seed pruning is limited to the exact tab id returned by that spawn's workspace-create call. Herdr protocol 16 event waits are an optional fast path and must fail closed to the normal poll loop; `bin/fm-composer-lib.sh` is the shared ghost/empty/pending classifier for tmux and Herdr, with bare shell prompts classified as `unknown`.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.

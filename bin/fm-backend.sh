@@ -235,6 +235,16 @@ fm_backend_busy_state() {  # <backend> <target> -> busy|idle|unknown
   esac
 }
 
+fm_backend_agent_alive() {  # <backend> <target> -> alive|dead|unknown
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf unknown; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_agent_alive "$@" ;;
+    *) printf unknown ;;
+  esac
+}
+
 fm_backend_pane_readable() {  # <backend> <target>
   local backend=$1; shift
   fm_backend_source "$backend" || return 1
@@ -259,6 +269,43 @@ fm_backend_composer_state() {  # <backend> <target> [text] -> empty|pending|unkn
     herdr) fm_backend_herdr_composer_state "${1:-}" "${2:-}" ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# Native event waits are optional. A return code of 2 means the caller must
+# use its normal polling sleep; Herdr remains experimental and this path is
+# fail-closed when protocol/schema/socket capability is absent.
+fm_backend_has_push() { [ "$1" = herdr ]; }
+
+fm_backend_events_capable() {  # <backend> <session>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  fm_backend_herdr_events_capable "$@"
+}
+
+fm_backend_wait_transition() {  # <backend> <session> <timeout> <state> <target...>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 2
+  fm_backend_source "$backend" || return 2
+  fm_backend_herdr_wait_transition "$@"
+}
+
+fm_backend_commit_transition() {  # <backend> <state> <session> <record>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  fm_backend_herdr_commit_transition "$@"
+}
+
+fm_backend_clear_transition() {  # <backend> <state> <window>
+  local backend=$1
+  shift
+  fm_backend_has_push "$backend" || return 0
+  fm_backend_source "$backend" || return 1
+  fm_backend_herdr_clear_transition "$@"
 }
 
 fm_backend_container_ensure() {  # <backend> <cwd>

@@ -288,7 +288,7 @@ escalation_buffer_empty() {
 }
 
 scenario_a_deferred_with_pending_input() {
-  grep -q 'inject deferred: supervisor pane has pending input' "$STATE_DIR/.supervise-daemon.log" 2>/dev/null || return 1
+  grep -q 'inject deferred: supervisor pane composer is pending or unknown' "$STATE_DIR/.supervise-daemon.log" 2>/dev/null || return 1
   [ -s "$STATE_DIR/.subsuper-escalations" ] || return 1
   ! grep -q 'Supervisor escalate' "$LOG_FILE" 2>/dev/null
 }
