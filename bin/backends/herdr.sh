@@ -172,8 +172,24 @@ fm_backend_herdr_lock_owner_status() {
   else
     return 2
   fi
-  if [ -d "$lock" ] && [ -z "$start" ] && fm_backend_herdr_legacy_lock_stale "$lock"; then
-    return 1
+  if [ -d "$lock" ] && [ -z "$start" ]; then
+    case "$pid" in
+      ''|*[!0-9]*)
+        if fm_backend_herdr_legacy_lock_stale "$lock"; then
+          return 1
+        fi
+        return 0
+        ;;
+      *)
+        if ! kill -0 "$pid" 2>/dev/null; then
+          return 1
+        fi
+        case "$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null)" in
+          Z*) return 1 ;;
+        esac
+        return 0
+        ;;
+    esac
   fi
   case "$pid" in
     ''|*[!0-9]*)
