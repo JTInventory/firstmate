@@ -36,11 +36,23 @@ printf '%s\n' "$GOTMPDIR" > "$FM_FIXTURE_OUTPUT_DIR/$name.gotmpdir"
 [ -d "$TMPDIR" ] || exit 20
 [ -d "$GOTMPDIR" ] || exit 21
 [ -z "${FM_HOME:-}" ] || exit 22
-# Ambient Herdr from a live captain pane must not leak into hermetic fixtures.
-[ -z "${HERDR_ENV:-}" ] || exit 23
-[ -z "${HERDR_PANE_ID:-}" ] || exit 24
-[ -z "${HERDR_SESSION:-}" ] || exit 25
-[ "${FM_BACKEND:-}" = tmux ] || exit 26
+if [ "${FM_EXPECT_AMBIENT:-0}" = 1 ]; then
+  [ "${HERDR_ENV:-}" = 1 ] || exit 23
+  [ "${HERDR_SESSION:-}" = default ] || exit 25
+  [ "${HERDR_PANE_ID:-}" = w9:p9 ] || exit 24
+  [ "${HERDR_TAB_ID:-}" = w9:t9 ] || exit 27
+  [ "${HERDR_WORKSPACE_ID:-}" = w9 ] || exit 28
+  [ "${HERDR_SOCKET_PATH:-}" = /tmp/fake-herdr.sock ] || exit 29
+  [ -z "${FM_BACKEND:-}" ] || exit 26
+else
+  [ -z "${HERDR_ENV:-}" ] || exit 23
+  [ -z "${HERDR_PANE_ID:-}" ] || exit 24
+  [ -z "${HERDR_SESSION:-}" ] || exit 25
+  [ -z "${HERDR_TAB_ID:-}" ] || exit 27
+  [ -z "${HERDR_WORKSPACE_ID:-}" ] || exit 28
+  [ -z "${HERDR_SOCKET_PATH:-}" ] || exit 29
+  [ "${FM_BACKEND:-}" = tmux ] || exit 26
+fi
 printf 'start\n' > "$FM_FIXTURE_OUTPUT_DIR/$name.started"
 owns_active=0
 if mkdir "$FM_FIXTURE_OUTPUT_DIR/active" 2>/dev/null; then
@@ -71,8 +83,23 @@ SH
 #!/usr/bin/env bash
 set -eu
 [ -z "${FM_HOME:-}" ] || exit 22
-[ -z "${HERDR_ENV:-}" ] || exit 23
-[ "${FM_BACKEND:-}" = tmux ] || exit 26
+if [ "${FM_EXPECT_AMBIENT:-0}" = 1 ]; then
+  [ "${HERDR_ENV:-}" = 1 ] || exit 23
+  [ "${HERDR_SESSION:-}" = default ] || exit 25
+  [ "${HERDR_PANE_ID:-}" = w9:p9 ] || exit 24
+  [ "${HERDR_TAB_ID:-}" = w9:t9 ] || exit 27
+  [ "${HERDR_WORKSPACE_ID:-}" = w9 ] || exit 28
+  [ "${HERDR_SOCKET_PATH:-}" = /tmp/fake-herdr.sock ] || exit 29
+  [ -z "${FM_BACKEND:-}" ] || exit 26
+else
+  [ -z "${HERDR_ENV:-}" ] || exit 23
+  [ -z "${HERDR_SESSION:-}" ] || exit 25
+  [ -z "${HERDR_PANE_ID:-}" ] || exit 24
+  [ -z "${HERDR_TAB_ID:-}" ] || exit 27
+  [ -z "${HERDR_WORKSPACE_ID:-}" ] || exit 28
+  [ -z "${HERDR_SOCKET_PATH:-}" ] || exit 29
+  [ "${FM_BACKEND:-}" = tmux ] || exit 26
+fi
 printf 'working-tree fixture pass\n'
 SH
   chmod +x "$fixture/tests/working-tree.test.sh"
@@ -80,7 +107,7 @@ SH
 }
 
 run_fixture() {
-  local fixture=$1 jobs=$2 output=$3 fixture_output
+  local fixture=$1 jobs=$2 output=$3 allow_ambient=${4:-0} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -91,12 +118,15 @@ run_fixture() {
     PATH="$fixture/bin:$PATH" \
       FM_TEST_JOBS="$jobs" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
+      FM_BACKEND= \
       HERDR_ENV=1 \
       HERDR_SESSION=default \
       HERDR_PANE_ID=w9:p9 \
       HERDR_TAB_ID=w9:t9 \
       HERDR_WORKSPACE_ID=w9 \
       HERDR_SOCKET_PATH=/tmp/fake-herdr.sock \
+      FM_HERDR_ALLOW_AMBIENT="$allow_ambient" \
+      FM_EXPECT_AMBIENT="$allow_ambient" \
       FM_FIXTURE_OUTPUT_DIR="$fixture_output" \
       bash "$fixture/bin/fm-run-behavior-tests.sh"
   ) >"$output" 2>&1
@@ -104,6 +134,26 @@ run_fixture() {
   set -u
   printf '%s\n' "$fixture_output"
   return "$rc"
+}
+
+test_runner_honors_ambient_opt_in() {
+  local fixture output rc
+  fixture=$(make_fixture_root ambient)
+  output="$TMP_ROOT/ambient.out"
+  set +e
+  run_fixture "$fixture" 1 "$output" 1 >/dev/null
+  rc=$?
+  set -u
+  expect_code 1 "$rc" "ambient opt-in fixture still reports its deliberate failure"
+  assert_grep "PASS: tests/pass-a.test.sh" "$output" \
+    "ambient opt-in did not preserve Herdr markers for a fixture"
+  assert_grep "PASS: tests/working-tree.test.sh" "$output" \
+    "ambient opt-in did not preserve Herdr markers for the working-tree fixture"
+  assert_not_contains "$output" "exit 23" \
+    "ambient opt-in scrubbed HERDR_ENV"
+  assert_not_contains "$output" "exit 26" \
+    "ambient opt-in forced FM_BACKEND"
+  pass "behavior runner honors the ambient Herdr opt-in"
 }
 
 test_parallel_isolation_and_failure_aggregation() {
@@ -164,7 +214,10 @@ test_delta_overlay_contract_is_checked_and_portable() {
 test_lib_scrubs_ambient_herdr_for_hermetic_sources() {
   local out
   out=$(
-    HERDR_ENV=1 HERDR_SESSION=default HERDR_PANE_ID=w1:p1 \
+    FM_BACKEND= FM_HERDR_ALLOW_AMBIENT=0 \
+      HERDR_ENV=1 HERDR_SESSION=default HERDR_PANE_ID=w1:p1 \
+      HERDR_TAB_ID=w1:t1 HERDR_WORKSPACE_ID=w1 \
+      HERDR_SOCKET_PATH=/tmp/fake-herdr.sock \
       bash -c '
         set -eu
         # Fresh shell: re-source lib with ambient Herdr set, as a single-file
@@ -175,6 +228,9 @@ test_lib_scrubs_ambient_herdr_for_hermetic_sources() {
         [ -z "${HERDR_ENV:-}" ] || { echo "HERDR_ENV leaked"; exit 1; }
         [ -z "${HERDR_SESSION:-}" ] || { echo "HERDR_SESSION leaked"; exit 1; }
         [ -z "${HERDR_PANE_ID:-}" ] || { echo "HERDR_PANE_ID leaked"; exit 1; }
+        [ -z "${HERDR_TAB_ID:-}" ] || { echo "HERDR_TAB_ID leaked"; exit 1; }
+        [ -z "${HERDR_WORKSPACE_ID:-}" ] || { echo "HERDR_WORKSPACE_ID leaked"; exit 1; }
+        [ -z "${HERDR_SOCKET_PATH:-}" ] || { echo "HERDR_SOCKET_PATH leaked"; exit 1; }
         [ "${FM_BACKEND:-}" = tmux ] || { echo "FM_BACKEND=${FM_BACKEND:-}"; exit 1; }
         echo ok
       '
@@ -187,3 +243,4 @@ test_parallel_isolation_and_failure_aggregation
 test_serial_mode_remains_serial
 test_delta_overlay_contract_is_checked_and_portable
 test_lib_scrubs_ambient_herdr_for_hermetic_sources
+test_runner_honors_ambient_opt_in

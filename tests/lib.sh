@@ -41,17 +41,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # tests re-export HERDR_SESSION (and may set FM_HERDR_E2E/FM_HERDR_SMOKE) after
 # preparing a private fm-lab-* session; they never rely on the captain pane.
 #
-# Skip the scrub when the caller already opted into a real-lab run so their
-# environment can still see HERDR_ENV if they set it deliberately before
-# sourcing this library (rare; lab scripts set HERDR_SESSION themselves).
-if [ "${FM_HERDR_E2E:-0}" != 1 ] \
-  && [ "${FM_HERDR_SMOKE:-0}" != 1 ] \
-  && [ "${FM_SEND_MARKER_HERDR_E2E:-0}" != 1 ] \
-  && [ "${FM_HERDR_ALLOW_AMBIENT:-0}" != 1 ]; then
+if [ "${FM_HERDR_ALLOW_AMBIENT:-0}" != 1 ]; then
   unset HERDR_ENV HERDR_SESSION HERDR_PANE_ID HERDR_TAB_ID \
     HERDR_WORKSPACE_ID HERDR_SOCKET_PATH
-  # Prefer an explicit outer FM_BACKEND (including deliberate herdr lab runs).
-  # When unset, pin hermetic fixtures to tmux so ambient detection cannot win.
   if [ -z "${FM_BACKEND:-}" ]; then
     export FM_BACKEND=tmux
   fi

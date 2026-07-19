@@ -126,12 +126,15 @@ Without scrubbing those, hermetic spawn and secondmate fixtures auto-select the
 experimental herdr backend and can create real `2ndmate-*` workspaces on the
 captain's `default` session under temp cwd paths such as
 `/tmp/fm-behavior-tests...`.
-`bin/fm-run-behavior-tests.sh` and `tests/lib.sh` therefore unset ambient
-`HERDR_*` markers for hermetic runs and pin `FM_BACKEND=tmux` when the outer
-environment did not already set a backend.
+`bin/fm-run-behavior-tests.sh` and `tests/lib.sh` therefore unset all six
+ambient `HERDR_*` markers for hermetic runs and pin `FM_BACKEND=tmux` when the
+outer environment did not already set a backend. This happens regardless of
+the real-lab opt-in variables.
 Real-lab e2e tests still prepare a private `fm-lab-*` session and export
 `HERDR_SESSION` (or pass `--backend herdr`) after that scrub; set
 `FM_HERDR_ALLOW_AMBIENT=1` only when deliberately testing ambient detection.
+That opt-in preserves ambient `HERDR_*` markers and the caller's
+`FM_BACKEND` for the full suite.
 
 Set `FM_HERDR_E2E=1` to run the four real lab tests:
 
