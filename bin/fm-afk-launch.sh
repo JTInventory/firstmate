@@ -12,6 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-detach-lib.sh
 . "$SCRIPT_DIR/fm-detach-lib.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 
 DAEMON="${FM_AFK_DAEMON_PATH:-$SCRIPT_DIR/fm-supervise-daemon.sh}"
 DAEMON_LOCK="$STATE/.supervise-daemon.lock"
@@ -144,7 +146,7 @@ acquire_transition_lock() {
 }
 
 start_afk_locked() {
-  local token child confirmed child_start
+  local token child confirmed child_start supervisor_target supervisor_backend
   mkdir -p "$STATE"
   if daemon_owned; then
     afk_enter_or_fail || return 1
@@ -154,7 +156,14 @@ start_afk_locked() {
   [ -x "$DAEMON" ] || { printf 'afk: daemon not executable: %s\n' "$DAEMON" >&2; return 1; }
   afk_enter_or_fail || return 1
   token=$(new_detach_token) || { printf '%s\n' 'afk: could not create detach token' >&2; return 1; }
-  child=$(fm_detach_spawn "$LAUNCH_LOG" "$DAEMON" "--fm-detach-token=$token") || {
+  # Resolve the captain pane before detaching. The detached daemon must receive
+  # this exact target/backend pair; otherwise its inherited runtime context can
+  # point at the daemon process rather than firstmate's supervisor pane.
+  supervisor_target=$(discover_supervisor_target) || true
+  supervisor_backend=$(discover_supervisor_backend) || true
+  child=$(FM_SUPERVISOR_TARGET="$supervisor_target" \
+    FM_SUPERVISOR_BACKEND="$supervisor_backend" \
+    fm_detach_spawn "$LAUNCH_LOG" "$DAEMON" "--fm-detach-token=$token") || {
     printf 'afk: detached daemon launch failed (away flag retained): %s\n' "$DAEMON" >&2
     return 1
   }

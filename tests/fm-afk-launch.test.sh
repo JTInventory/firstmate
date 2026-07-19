@@ -32,6 +32,8 @@ mkdir -p "$state"
 printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
 fm_pid_start "$$" > "$state/.supervise-daemon.pid-start"
 fm_pid_identity "$$" > "$state/.supervise-daemon.pid-identity"
+printf '%s\n' "${FM_SUPERVISOR_TARGET:-}" > "$state/fake-daemon.supervisor-target"
+printf '%s\n' "${FM_SUPERVISOR_BACKEND:-}" > "$state/fake-daemon.supervisor-backend"
 printf '%s\n' started > "$state/fake-daemon.started"
 cleanup() {
   printf '%s\n' returned > "$state/fake-daemon.returned"
@@ -168,6 +170,26 @@ test_afk_launch_return_clears_flag_and_is_idempotent() {
   wait_for_file "$state/fake-daemon.returned" 50 || fail "AFK return marker missing"
   [ ! -e "$state/.afk" ] || fail "AFK return left the durable away flag"
   pass "AFK launch is idempotent and return clears the away flag"
+}
+
+test_afk_launch_forwards_herdr_supervisor_context() {
+  local dir state daemon out
+  dir="$TMP_ROOT/herdr-supervisor-context"; state="$dir/state"; mkdir -p "$state"
+  daemon=$(make_fake_daemon "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" HERDR_ENV=1 \
+    HERDR_SESSION=lab HERDR_PANE_ID=w1:p9 "$LAUNCH" start) \
+    || fail "AFK launch failed while resolving Herdr supervisor context: $out"
+  wait_for_file "$state/fake-daemon.supervisor-target" 50 \
+    || fail "fake daemon did not record the forwarded supervisor target"
+  [ "$(cat "$state/fake-daemon.supervisor-target")" = lab:w1:p9 ] \
+    || fail "AFK launch forwarded the wrong Herdr supervisor target"
+  [ "$(cat "$state/fake-daemon.supervisor-backend")" = herdr ] \
+    || fail "AFK launch forwarded the wrong Herdr supervisor backend"
+  FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
+    FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" "$LAUNCH" stop >/dev/null \
+    || fail "AFK return failed after Herdr supervisor-context test"
+  pass "AFK launch forwards the resolved Herdr supervisor target and backend"
 }
 
 test_afk_refresh_fails_when_flag_cannot_be_written() {
@@ -452,6 +474,7 @@ test_afk_return_keeps_flag_on_term_failure() {
 test_afk_launch_detaches_from_harness_group
 test_afk_start_fails_when_flag_cannot_be_created
 test_afk_launch_return_clears_flag_and_is_idempotent
+test_afk_launch_forwards_herdr_supervisor_context
 test_afk_refresh_fails_when_flag_cannot_be_written
 test_afk_return_keeps_flag_on_identity_failure
 test_afk_return_keeps_flag_on_missing_record_for_live_daemon

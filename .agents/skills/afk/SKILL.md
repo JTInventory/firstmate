@@ -202,9 +202,12 @@ the marker lets firstmate distinguish it from a real captain message.
   both check the seen-status marker before escalating, so a status escalated by
   one path is not re-escalated by another in the same digest.
 - **Auto-discovered supervisor pane** - the daemon resolves its injection target
-  from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then a `firstmate:0` fallback
-  with a warning. The resolution source is logged at startup so a
-  wrong-but-resolving fallback is detectable.
+  from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then
+  `$HERDR_SESSION:$HERDR_PANE_ID` when `HERDR_ENV=1`, then a `firstmate:0` tmux
+  fallback with a warning. `FM_SUPERVISOR_BACKEND=tmux|herdr` selects the
+  matching send primitives; unsupported backends are refused at startup. The
+  target/backend resolution source is logged so a wrong-but-resolving fallback
+  is detectable.
 
 ## Reliability properties
 

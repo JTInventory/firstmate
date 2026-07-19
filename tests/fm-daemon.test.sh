@@ -546,6 +546,65 @@ test_pane_input_pending_honors_idle_override_after_border_strip() {
   pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
 }
 
+test_pane_is_busy_herdr_native_busy_state() {
+  (
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected Herdr busy-state args: $1 $2"
+      printf 'busy'
+    }
+    fm_backend_capture() { fail "capture should not run when Herdr busy-state is conclusive"; }
+    pane_is_busy default:w1:p2 herdr || fail "Herdr busy state was not honored"
+  ) || fail "Herdr native busy-state test failed"
+  pass "pane_is_busy dispatches Herdr native busy state"
+}
+
+test_pane_input_pending_herdr_dispatch() {
+  (
+    fm_backend_composer_state() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected Herdr composer args: $1 $2"
+      printf 'pending'
+    }
+    pane_input_pending default:w1:p2 herdr || fail "Herdr pending composer was not detected"
+  ) || fail "Herdr pending composer test failed"
+  pass "pane_input_pending dispatches Herdr composer state"
+}
+
+test_inject_msg_herdr_submits_through_backend() {
+  local dir state
+  dir=$(make_supercase inject-herdr-submit)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected target-exists args: $1 $2"
+    }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected submit args: $1 $2"
+      case "$3" in *hello*) : ;; *) fail "submit text omitted the digest: $3" ;; esac
+      printf 'empty'
+    }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p2 \
+      inject_msg hello "$state" || fail "Herdr injection did not use the backend submit path"
+  ) || fail "Herdr backend submit test failed"
+  pass "inject_msg sends Herdr supervisor escalations through backend primitives"
+}
+
+test_daemon_refuses_unsupported_supervisor_backend() {
+  local dir state out
+  dir=$(make_supercase unsupported-supervisor-backend)
+  state="$dir/state"
+  if out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=orca FM_SUPERVISOR_TARGET=firstmate:0 \
+    "$DAEMON" 2>&1); then
+    fail "daemon accepted unsupported supervisor backend"
+  fi
+  assert_contains "$out" "does not support supervisor backend 'orca'" \
+    "unsupported supervisor backend refusal was not explicit"
+  pass "daemon refuses unsupported supervisor backends before injection"
+}
+
 test_classify_signal_dedup_against_scan() {
   # If the catch-all scan already escalated a status (seen marker matches),
   # classify_signal must self-handle to avoid a duplicate in the digest.
@@ -824,6 +883,10 @@ test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_is_not_pending
 test_pane_input_pending_idle_prompt_not_pending
 test_pane_input_pending_honors_idle_override_after_border_strip
+test_pane_is_busy_herdr_native_busy_state
+test_pane_input_pending_herdr_dispatch
+test_inject_msg_herdr_submits_through_backend
+test_daemon_refuses_unsupported_supervisor_backend
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_pane_input_pending_bordered_idle_not_pending

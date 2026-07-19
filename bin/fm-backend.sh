@@ -245,6 +245,22 @@ fm_backend_pane_readable() {  # <backend> <target>
   esac
 }
 
+# Supervisor callers use this name for the same backend-neutral existence probe.
+fm_backend_target_exists() {  # <backend> <target>
+  fm_backend_pane_readable "$@"
+}
+
+fm_backend_composer_state() {  # <backend> <target> [text] -> empty|pending|unknown
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_composer_state "$@" ;;
+    herdr) fm_backend_herdr_composer_state "${1:-}" "${2:-}" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_backend_container_ensure() {  # <backend> <cwd>
   local backend=$1; shift
   fm_backend_source "$backend" || return 1

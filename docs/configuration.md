@@ -335,7 +335,8 @@ FM_COGNEE_TELEMETRY_FILE=  # default: $FM_HOME/data/cognee/telemetry.jsonl
 FM_COGNEE_EVIDENCE_ROOT=/root/firstmate/data   # local evidence root for fm-cognee-lookup-gate.sh
 FM_COGNEE_AUTO_LOOKUP=0    # must be 1 plus all evidence markers before automatic lookup is allowed
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
-FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
+FM_SUPERVISOR_BACKEND=tmux         # AFK supervisor injection backend; tmux default, herdr experimental opt-in
+FM_SUPERVISOR_TARGET=firstmate:0   # supervisor target (override; auto-discovers tmux or HERDR_SESSION:HERDR_PANE_ID)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
@@ -353,3 +354,8 @@ FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
 
 If a batched away-mode escalation remains undelivered past `FM_MAX_DEFER_SECS`, the daemon preserves the escalation buffer and writes `state/.subsuper-inject-wedged`. The read-only `bin/fm-supervise.sh` checklist and `--json` model surface that non-empty marker as the high-severity `supervision:inject-wedged` finding owned by firstmate; reading it does not clear the marker or retry injection.
+
+The AFK daemon supports `FM_SUPERVISOR_BACKEND=tmux|herdr`. When `herdr` is
+selected, `FM_SUPERVISOR_TARGET` is a Herdr `<session>:<pane-id>` target and
+injection uses Herdr's pane send primitives. Unsupported supervisor backends
+are refused at daemon startup; tmux remains the default.
