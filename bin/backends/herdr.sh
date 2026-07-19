@@ -450,7 +450,7 @@ fm_backend_herdr_cleanup_created_tab() {  # <session> <workspace> <label> <tab> 
 $tabs
 EOF
   case "${#new_tabs[@]}" in
-    0) return 0 ;;
+    0) return 1 ;;
     1) fm_backend_herdr_tab_close_exact "$session" "$wsid" "${new_tabs[0]}" ;;
     *) return 1 ;;
   esac

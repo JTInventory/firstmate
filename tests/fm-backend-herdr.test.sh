@@ -408,6 +408,23 @@ test_create_task_cleans_up_after_postcreate_failure() {
   pass "Herdr create cleanup closes tabs after post-create failures"
 }
 
+test_cleanup_missing_id_fails_closed_when_unobserved() {
+  local dir out status=0
+  dir="$TMP_ROOT/missing-id-unobserved"
+  mkdir -p "$dir"
+  out=$(FM_HOME="$dir" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab list"*) printf "%s" '\''{"result":{"tabs":[]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_cleanup_created_tab session w1 fm-demo "" ""
+  ' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "unobserved missing-id cleanup was treated as verified"
+  pass "Herdr missing-id cleanup fails closed when unobserved"
+}
+
 test_seed_prune_is_exact_and_fail_closed() {
   local dir="$TMP_ROOT/prune" out
   mkdir -p "$dir"
@@ -527,6 +544,7 @@ test_submit_retry_verdicts
 test_wait_for_working_classification
 test_husk_duplicate_is_replaced_after_creation
 test_create_task_cleans_up_after_postcreate_failure
+test_cleanup_missing_id_fails_closed_when_unobserved
 test_seed_prune_is_exact_and_fail_closed
 test_event_capability_uses_named_session
 test_eventwait_returns_fresh_blocked_transition
