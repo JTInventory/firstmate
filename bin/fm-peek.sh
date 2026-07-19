@@ -16,11 +16,5 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 T=$(fm_backend_resolve_selector "$1" "$STATE")
 N=${2:-40}
-BACKEND=tmux
-case "$1" in
-  fm-*)
-    meta="$STATE/${1#fm-}.meta"
-    [ -f "$meta" ] && BACKEND=$(fm_backend_of_meta "$meta")
-    ;;
-esac
+BACKEND=$(fm_backend_of_selector "$1" "$T" "$STATE")
 fm_backend_capture "$BACKEND" "$T" "$N"

@@ -20,6 +20,12 @@ set -u
 log=${FM_TMUX_LOG:?}
 { printf 'tmux'; for arg in "$@"; do printf '\x1f%s' "$arg"; done; printf '\n'; } >> "$log"
 case "${1:-}" in
+  has-session)
+    [ "${FM_FAKE_TMUX_NO_SESSION:-0}" = 1 ] && exit 1
+    ;;
+  new-session)
+    [ "${FM_FAKE_TMUX_NEW_SESSION_FAIL:-0}" = 1 ] && exit 1
+    ;;
   list-windows) printf 'firstmate:adhoc\n' ;;
   capture-pane) printf 'captured line\n' ;;
   display-message)
@@ -33,6 +39,9 @@ case "${1:-}" in
       esac
     done
     printf 'firstmate\n' ;;
+  kill-window)
+    [ "${FM_FAKE_TMUX_KILL_FAIL:-0}" = 1 ] && exit 1
+    ;;
   *) ;;
 esac
 exit 0
@@ -112,6 +121,25 @@ test_selector_and_dispatch() {
   pass "selector resolution and capture/key/readability/kill dispatch use tmux adapter"
 }
 
+test_backend_failures_propagate() {
+  local dir fakebin log out
+  dir="$TMP_ROOT/failures"; mkdir -p "$dir"
+  fakebin=$(make_fake_tmux "$dir")
+  log="$dir/tmux.log"; : > "$log"
+
+  if PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" FM_FAKE_TMUX_KILL_FAIL=1 \
+    fm_backend_kill tmux firstmate:fm-demo; then
+    fail "kill failure was swallowed by the tmux adapter"
+  fi
+
+  if out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" FM_FAKE_TMUX_NO_SESSION=1 \
+    FM_FAKE_TMUX_NEW_SESSION_FAIL=1 TMUX= fm_backend_container_ensure tmux /tmp); then
+    fail "new-session failure was swallowed by container ensure"
+  fi
+  pass "tmux adapter propagates kill and container-creation failures"
+}
+
 test_selection_and_metadata
 test_spawn_rejects_unknown_selection
 test_selector_and_dispatch
+test_backend_failures_propagate

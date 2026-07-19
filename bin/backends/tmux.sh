@@ -35,7 +35,9 @@ fm_backend_tmux_container_ensure() {  # <cwd ignored>
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    if ! tmux has-session -t firstmate 2>/dev/null; then
+      tmux new-session -d -s firstmate || return 1
+    fi
     printf 'firstmate'
   fi
 }
@@ -78,5 +80,5 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 }
 
 fm_backend_tmux_kill() {  # <target>
-  tmux kill-window -t "$1" 2>/dev/null || true
+  tmux kill-window -t "$1" 2>/dev/null
 }

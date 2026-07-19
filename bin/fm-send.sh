@@ -62,6 +62,7 @@ case "$RAW_TARGET" in
     ;;
 esac
 T=$(fm_backend_resolve_selector "$1" "$STATE")
+TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 shift
 
 # Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,
@@ -84,13 +85,11 @@ esac
 # meta; an explicit session:window escape-hatch target has none, so its harness is
 # unknown and treated as non-codex (the safe default that keeps the fast path).
 TARGET_HARNESS=""
-TARGET_BACKEND=tmux
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
     if [ -f "$meta" ]; then
       TARGET_HARNESS=$(fm_meta_get "$meta" harness)
-      TARGET_BACKEND=$(fm_backend_of_meta "$meta")
     fi
     ;;
 esac

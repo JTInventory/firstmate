@@ -512,9 +512,11 @@ EOF
       key=$(printf '%s' "$w" | tr ':/.' '___')
       [ -e "$STATE/.paused-$key" ] || continue
     fi
-    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 2>/dev/null); then
-      pause_tracking_clear "$w"
-      continue
+    backend=$(window_backend "$w")
+    if ! tail40=$(fm_backend_capture "$backend" "$w" 40 2>/dev/null); then
+      reason="check: backend capture failed for $w (backend=$backend); inspect the runtime endpoint and task metadata"
+      fm_wake_append check "$w" "$reason" || exit 1
+      wake "$reason"
     fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
