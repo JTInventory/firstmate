@@ -421,6 +421,14 @@ test_event_capability_uses_named_session() {
     "event capability status probe ignored the named session"
   assert_contains "$(cat "$log")" $'HERDR_SESSION=named-session\x1fapi\x1fschema\x1f--json\x1f--session\x1fnamed-session' \
     "event capability schema probe ignored the named session"
+  find "$resp" -maxdepth 1 -type f -delete
+  printf '%s\n' '{"sessions":[{"name":"named-session","socket_path":"named-socket"}]}' > "$resp/1.out"
+  : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_socket_path named-session' "$ROOT")
+  [ "$out" = named-socket ] || fail "named-session socket lookup returned '$out'"
+  assert_contains "$(cat "$log")" $'HERDR_SESSION=named-session\x1fsession\x1flist\x1f--json\x1f--session\x1fnamed-session' \
+    "socket lookup ignored the named session"
   pass "Herdr event capability probes use the explicit session"
 }
 
