@@ -95,9 +95,9 @@ test_guarded_lifecycle() {
 test_missing_tripwire_blocks_destruction() {
   local name="fm-lab-no-tripwire-$$" before after status=0
   : > "$LOG"
+  before=$(wc -l < "$LOG")
   run_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
   [ "$status" -eq 1 ] || fail "missing tripwire should refuse teardown"
-  before=$(wc -l < "$LOG")
   after=$(wc -l < "$LOG")
   [ "$before" = "$after" ] || fail "missing tripwire made a Herdr call"
   pass "Herdr lab refuses destructive operations without ownership evidence"

@@ -693,9 +693,19 @@ HERDR_SES=
 HERDR_WORKSPACE_ID=
 HERDR_TAB_ID=
 HERDR_PANE_ID=
+HERDR_SPAWN_TARGET=
 
 cleanup_spawn_window() {
   fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1 || true
+}
+
+cleanup_herdr_spawn() {
+  local rc=$?
+  if [ -n "${HERDR_SPAWN_TARGET:-}" ]; then
+    cleanup_spawn_window "$HERDR_SPAWN_TARGET"
+  fi
+  trap - EXIT
+  exit "$rc"
 }
 
 cleanup_unidentified_spawn_window() {
@@ -850,6 +860,8 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     WID="$T"
+    HERDR_SPAWN_TARGET="$T"
+    trap cleanup_herdr_spawn EXIT
     ;;
 esac
 if [ "$KIND" != secondmate ]; then
@@ -1092,5 +1104,8 @@ fi
 fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
 sleep 0.3
 fm_backend_send_key "$BACKEND" "$WID" Enter
+
+HERDR_SPAWN_TARGET=
+trap - EXIT
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

@@ -16,6 +16,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 FM_BACKEND_HERDR_SECONDMATE_MARKER=.fm-secondmate-home
+FM_BACKEND_HERDR_HOME_TOKEN=firstmate_home
+FM_BACKEND_HERDR_VERSION_VERIFIED=0
 
 fm_backend_herdr_workspace_label() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
@@ -47,6 +49,7 @@ fm_backend_herdr_tool_check() {
 }
 
 fm_backend_herdr_version_check() {
+  [ "$FM_BACKEND_HERDR_VERSION_VERIFIED" -eq 1 ] && return 0
   fm_backend_herdr_tool_check || return 1
   local out protocol version
   out=$(herdr status --json 2>/dev/null) || {
@@ -55,6 +58,13 @@ fm_backend_herdr_version_check() {
   }
   protocol=$(printf '%s' "$out" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$out" | jq -r '.client.version // empty' 2>/dev/null)
+  case "$version" in
+    0.7.[0-9]*|v0.7.[0-9]*) ;;
+    *)
+      echo "error: Herdr client version ${version:-unknown} is outside the verified 0.7.x range" >&2
+      return 1
+      ;;
+  esac
   case "$protocol" in
     ''|*[!0-9]*)
       echo "error: could not read Herdr client protocol; refusing an unverified build" >&2
@@ -65,6 +75,16 @@ fm_backend_herdr_version_check() {
     echo "error: Herdr protocol $protocol (version ${version:-unknown}) is older than the verified minimum $FM_BACKEND_HERDR_MIN_PROTOCOL" >&2
     return 1
   fi
+  FM_BACKEND_HERDR_VERSION_VERIFIED=1
+}
+
+fm_backend_herdr_home_identity() {
+  local home=$FM_HOME
+  if [ -d "$home" ]; then
+    home=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  fi
+  command -v sha256sum >/dev/null 2>&1 || return 1
+  printf '%s' "$home" | sha256sum | cut -d' ' -f1
 }
 
 fm_backend_herdr_session() {
@@ -87,12 +107,27 @@ fm_backend_herdr_server_ensure() {  # <session>
   return 1
 }
 
+fm_backend_herdr_server_available() {  # <session>
+  local session=$1 out running
+  out=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
+  running=$(printf '%s' "$out" | jq -r '.server.running // false' 2>/dev/null)
+  [ "$running" = true ]
+}
+
 fm_backend_herdr_workspace_find() {  # <session>
-  local session=$1 out label
+  local session=$1 out label home_id
   label=$(fm_backend_herdr_workspace_label)
+  home_id=$(fm_backend_herdr_home_identity) || return 1
   out=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
-  printf '%s' "$out" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
+  printf '%s' "$out" | jq -r --arg want "$label" --arg home "$home_id" --arg token "$FM_BACKEND_HERDR_HOME_TOKEN" \
+    '.result.workspaces[]? | select(.label == $want and (.tokens[$token] // "") == $home) | .workspace_id' 2>/dev/null | head -1
+}
+
+fm_backend_herdr_workspace_bind_home() {  # <session> <workspace>
+  local session=$1 wsid=$2 home_id
+  home_id=$(fm_backend_herdr_home_identity) || return 1
+  fm_backend_herdr_cli "$session" workspace report-metadata "$wsid" \
+    --source firstmate --token "$FM_BACKEND_HERDR_HOME_TOKEN=$home_id" >/dev/null 2>&1
 }
 
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
@@ -107,6 +142,10 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   seeded=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   [ -n "$wsid" ] || return 1
+  if ! fm_backend_herdr_workspace_bind_home "$session" "$wsid"; then
+    fm_backend_herdr_cli "$session" workspace close "$wsid" >/dev/null 2>&1 || true
+    return 1
+  fi
   if [ -n "$seeded" ]; then
     printf '%s\t%s' "$wsid" "$seeded"
   else
@@ -139,8 +178,8 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
   local container=$1 label=$2 cwd=$3 seeded=${4:-} session wsid tabs dup out tab_id pane_id
   session=${container%%:*}
   wsid=${container#*:}
-  if [[ "$wsid" == *$'\t'* ]] && [ -z "$seeded" ]; then
-    seeded=${wsid#*$'\t'}
+  if [[ "$wsid" == *$'\t'* ]]; then
+    [ -n "$seeded" ] || seeded=${wsid#*$'\t'}
     wsid=${wsid%%$'\t'*}
   fi
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -171,7 +210,8 @@ fm_backend_herdr_parse_target() {  # <session>:<pane-id>
 
 fm_backend_herdr_target_ready() {
   fm_backend_herdr_parse_target "$1" || return 1
-  fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION"
+  fm_backend_herdr_version_check || return 1
+  fm_backend_herdr_server_available "$FM_BACKEND_HERDR_SESSION"
 }
 
 fm_backend_herdr_pane_readable() {
@@ -227,24 +267,51 @@ fm_backend_herdr_capture() {  # <target> <lines>
 }
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 typed after i=0
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 before_status after_status i=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  typed=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
+  before_status=$(fm_backend_herdr_agent_status "$target")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
     sleep "$sleep_s"
-    after=$(fm_backend_herdr_capture "$target" 6) || { printf 'unknown'; return 0; }
-    [ "$after" != "$typed" ] && { printf 'empty'; return 0; }
+    after_status=$(fm_backend_herdr_agent_status "$target")
+    case "$after_status" in
+      working|blocked|done)
+        [ "$after_status" != "$before_status" ] && { printf 'empty'; return 0; }
+        ;;
+    esac
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
 }
 
+fm_backend_herdr_agent_status() {  # <target> -> idle|working|blocked|done|unknown
+  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  local out status
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || { printf 'unknown'; return 0; }
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  case "$status" in
+    idle|working|blocked|done) printf '%s' "$status" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_backend_herdr_kill() {
-  fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane close "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || true
+  local panes
+  fm_backend_herdr_target_ready "$1" || return 1
+  if ! fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1; then
+    panes=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane list 2>/dev/null) || return 1
+    printf '%s' "$panes" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" \
+      '.result.panes[]? | select(.pane_id == $pane)' >/dev/null 2>&1 && return 1
+    return 0
+  fi
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane close "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || return 1
+  panes=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane list 2>/dev/null) || return 1
+  if printf '%s' "$panes" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" \
+    '.result.panes[]? | select(.pane_id == $pane)' >/dev/null 2>&1; then
+    return 1
+  fi
 }
 
 fm_backend_herdr_busy_state() {

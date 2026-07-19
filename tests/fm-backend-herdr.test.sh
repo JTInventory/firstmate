@@ -86,8 +86,19 @@ test_version_gate() {
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1) || status=$?
   [ "$status" -ne 0 ] || fail "protocol 13 should be rejected"
-  assert_contains "$out" "protocol 13" "old protocol error omitted the protocol"
-  pass "Herdr version gate accepts protocol 14 and rejects older protocol"
+  assert_contains "$out" "outside the verified 0.7.x range" "old client error omitted the required version range"
+  rm -f "$resp/1.out" "$resp/.count"
+  printf '%s\n' '{"client":{"version":"0.6.9","protocol":14}}' > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "Herdr 0.6.x should be rejected even with protocol 14"
+  rm -f "$resp/1.out" "$resp/.count"
+  printf '%s\n' '{"client":{"version":"0.8.0","protocol":14}}' > "$resp/1.out"
+  status=0
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "Herdr 0.8.x should be rejected even with protocol 14"
+  pass "Herdr version gate enforces 0.7.x and protocol 14+"
 }
 
 test_workspace_labels_and_container() {
@@ -128,6 +139,13 @@ test_task_and_target_primitives() {
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-new /tmp' "$ROOT")
   [ "$out" = 'w1:t2 w1:p2' ] || fail "create task returned '$out'"
+  find "$resp" -maxdepth 1 -type f -delete
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}' > "$resp/2.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" fm-seeded /tmp seeded' "$ROOT" $'fmtest:w1\tseeded')
+  [ "$out" = 'w1:t3 w1:p3' ] || fail "seeded create task returned '$out'"
+  assert_contains "$(cat "$log")" $'\x1f--workspace\x1fw1' "seeded workspace id was not stripped before tab listing"
   [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_parse_target default:w1:p2; printf "%s|%s" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"' "$ROOT")" = 'default|w1:p2' ] \
     || fail "target parser did not split on the first colon"
   [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_key C-c' "$ROOT")" = ctrl+c ] \
@@ -135,18 +153,36 @@ test_task_and_target_primitives() {
   pass "Herdr task creation, duplicate protection, target parsing, and key mapping work"
 }
 
+test_kill_requires_verified_absence() {
+  local lines dir log resp fb status=0
+  read -r dir log resp < <(herdr_case kill)
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/3.out"
+  printf '93\n' > "$resp/4.exit"
+  fb=$(make_fake_herdr "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill default:w1:p2' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "Herdr kill swallowed pane-close failure"
+  assert_not_contains "$(cat "$log")" $'\x1fserver' "Herdr target teardown unexpectedly started the server"
+  pass "Herdr kill propagates close failures and avoids server creation"
+}
+
 test_capture_send_busy() {
   local lines dir log resp fb out
   read -r dir log resp < <(herdr_case capture)
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/1.out"
-  printf 'one\ntwo\nthree\n' > "$resp/2.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/4.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
+  printf 'one\ntwo\nthree\n' > "$resp/3.out"
   fb=$(make_fake_herdr "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT")
   [ "$out" = $'two\nthree' ] || fail "capture did not trim the requested tail: '$out'"
   assert_contains "$(cat "$log")" $'\x1f--lines\x1f200' "small capture did not use the safe over-fetch"
+  find "$resp" -maxdepth 1 -type f -delete
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/3.out"
   [ "$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state default:w1:p2' "$ROOT")" = busy ] \
     || fail "working agent did not map to busy"
@@ -156,14 +192,15 @@ test_capture_send_busy() {
 test_submit_retry_verdicts() {
   local lines dir log resp fb out
   read -r dir log resp < <(herdr_case submit)
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/1.out"
-  : > "$resp/2.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/3.out"
-  printf '%s\n' 'typed' > "$resp/4.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/5.out"
-  : > "$resp/6.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/7.out"
-  printf '%s\n' 'submitted' > "$resp/8.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
+  : > "$resp/3.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/5.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/6.out"
+  : > "$resp/7.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/8.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/9.out"
   fb=$(make_fake_herdr "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 hello 2 0 0' "$ROOT")
@@ -189,6 +226,7 @@ test_backend_tool_gating
 test_version_gate
 test_workspace_labels_and_container
 test_task_and_target_primitives
+test_kill_requires_verified_absence
 test_capture_send_busy
 test_submit_retry_verdicts
 test_dispatch_and_meta_routing

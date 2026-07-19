@@ -8,6 +8,8 @@ FM_SUPERVISION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-numeric-lib.sh
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-numeric-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$FM_SUPERVISION_SCRIPT_DIR/fm-backend.sh"
 
 fm_supervision_usage() {
   cat <<'USAGE'
@@ -282,10 +284,16 @@ fm_supervision_bool() {
 }
 
 fm_supervision_window_live() {
-  local target=$1
+  local target=$1 backend=${2:-tmux}
   [ -n "$target" ] || return 1
-  command -v tmux >/dev/null 2>&1 || return 1
-  tmux display-message -p -t "$target" "#{window_name}" >/dev/null 2>&1
+  case "$backend" in
+    herdr) fm_backend_pane_readable herdr "$target" ;;
+    tmux)
+      command -v tmux >/dev/null 2>&1 || return 1
+      tmux display-message -p -t "$target" "#{window_name}" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_supervision_worktree_dirty_count() {
@@ -768,7 +776,7 @@ fm_supervision_collect() {
   local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
-  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
+  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window backend worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
   local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
@@ -793,6 +801,7 @@ fm_supervision_collect() {
       kind=$(fm_supervision_meta_value "$meta" kind); [ -n "$kind" ] || kind=ship
       mode=$(fm_supervision_meta_value "$meta" mode); [ -n "$mode" ] || mode=no-mistakes
       yolo=$(fm_supervision_meta_value "$meta" yolo); [ -n "$yolo" ] || yolo=off
+      backend=$(fm_supervision_meta_value "$meta" backend); [ -n "$backend" ] || backend=tmux
       harness=$(fm_supervision_meta_value "$meta" harness); [ -n "$harness" ] || harness=unknown
       route_profile=$(fm_supervision_meta_value "$meta" route_profile); [ -n "$route_profile" ] || route_profile=unknown
       route_harness=$(fm_supervision_meta_value "$meta" route_harness); [ -n "$route_harness" ] || route_harness=unknown
@@ -824,7 +833,7 @@ fm_supervision_collect() {
       [ -e "$FM_SUPERVISION_STATE/$id.turn-ended" ] && turn_ended=true
       pr_url=$(fm_supervision_meta_value "$meta" pr)
       [ -n "$pr_url" ] || pr_url=$status_pr
-      if fm_supervision_window_live "$window"; then window_live=true; else window_live=false; fi
+      if fm_supervision_window_live "$window" "$backend"; then window_live=true; else window_live=false; fi
       scout_report_exists=false
       [ "$kind" = scout ] && [ -f "$FM_SUPERVISION_DATA/$id/report.md" ] && scout_report_exists=true
       branch=$(fm_supervision_branch "$worktree" 2>/dev/null) || branch=unknown

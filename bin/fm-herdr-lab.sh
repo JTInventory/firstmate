@@ -10,6 +10,10 @@
 # the captain's running default session before the lab was provisioned.
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+
 fm_herdr_lab_error() { echo "fm-herdr-lab: $*" >&2; }
 
 fm_herdr_lab_validate_name() {
@@ -85,6 +89,12 @@ fm_herdr_lab_refuse_if_default() {
   [ "$flag" = false ] && return 0
   fm_herdr_lab_error "refusing destructive call for '$name': session is absent or default (default=${flag:-<not found>})"
   return 1
+}
+
+fm_herdr_lab_guard_destructive() {
+  local name=$1
+  fm_herdr_lab_check_tripwire "$name" || return 1
+  fm_herdr_lab_refuse_if_default "$name"
 }
 
 fm_herdr_lab_cli() {
@@ -170,12 +180,12 @@ fm_herdr_lab_stop() {
   local name=$1
   fm_herdr_lab_validate_name "$name" || return 1
   [ -f "$(fm_herdr_lab_tripwire_path "$name")" ] || { fm_herdr_lab_error "missing tripwire for '$name'; refusing stop"; return 1; }
-  fm_herdr_lab_refuse_if_default "$name" || return 1
+  fm_herdr_lab_guard_destructive "$name" || return 1
   fm_herdr_lab_raw "$name" session stop "$name" --json
 }
 
 fm_herdr_lab_teardown() {
-  local name=$1 sessions delete_status=0
+  local name=$1 sessions delete_status=0 stop_status=0
   fm_herdr_lab_validate_name "$name" || return 1
   [ -f "$(fm_herdr_lab_tripwire_path "$name")" ] || { fm_herdr_lab_error "missing tripwire for '$name'; refusing destructive calls"; return 1; }
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || return 1
@@ -183,9 +193,18 @@ fm_herdr_lab_teardown() {
     fm_herdr_lab_verify_tripwire "$name"
     return
   fi
-  fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
+  fm_herdr_lab_stop "$name" >/dev/null 2>&1 || stop_status=$?
+  if [ "$stop_status" -ne 0 ]; then
+    sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || return 1
+    if printf '%s' "$sessions" | jq -e --arg want "$name" '.sessions[]? | select(.name == $want)' >/dev/null 2>&1; then
+      fm_herdr_lab_error "session stop failed for '$name'; refusing delete"
+      return 1
+    fi
+    fm_herdr_lab_verify_tripwire "$name"
+    return
+  fi
   sleep 0.5
-  fm_herdr_lab_refuse_if_default "$name" || return 1
+  fm_herdr_lab_guard_destructive "$name" || return 1
   fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || return 1
   if printf '%s' "$sessions" | jq -e --arg want "$name" '.sessions[]? | select(.name == $want)' >/dev/null 2>&1; then
@@ -222,5 +241,8 @@ fm_herdr_lab_main() {
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -e
+  case "${1:-}" in
+    prepare|provision|stop|teardown|run) fm_refuse_if_gate_agent ;;
+  esac
   fm_herdr_lab_main "$@"
 fi
