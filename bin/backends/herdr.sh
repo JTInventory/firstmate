@@ -18,7 +18,9 @@ FM_BACKEND_HERDR_MIN_PROTOCOL=14
 FM_BACKEND_HERDR_SECONDMATE_MARKER=.fm-secondmate-home
 FM_BACKEND_HERDR_HOME_TOKEN=firstmate_home
 FM_BACKEND_HERDR_VERSION_VERIFIED=0
+FM_BACKEND_HERDR_VERSION_VERIFIED_SESSION=
 FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS=${FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS:-100}
+FM_BACKEND_HERDR_LOCK_STALE_AFTER=${FM_BACKEND_HERDR_LOCK_STALE_AFTER:-2}
 
 fm_backend_herdr_workspace_label() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
@@ -50,11 +52,23 @@ fm_backend_herdr_tool_check() {
 }
 
 fm_backend_herdr_version_check() {
-  [ "$FM_BACKEND_HERDR_VERSION_VERIFIED" -eq 1 ] && return 0
+  local session=${1:-}
+  [ -n "$session" ] && [ "$FM_BACKEND_HERDR_VERSION_VERIFIED_SESSION" = "$session" ] && return 0
   fm_backend_herdr_tool_check || return 1
   local out protocol version
-  out=$(herdr status --json 2>/dev/null) || {
-    echo "error: 'herdr status --json' failed; is Herdr installed correctly?" >&2
+  if [ -n "$session" ]; then
+    out=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+      echo "error: Herdr status --json failed for session '$session'; is Herdr available?" >&2
+      return 1
+    }
+  else
+    out=$(herdr status --json 2>/dev/null) || {
+      echo "error: Herdr status --json failed for the default session; is Herdr installed correctly?" >&2
+      return 1
+    }
+  fi
+  [ -n "$out" ] || {
+    echo "error: Herdr status --json failed for ${session:-the default session}; is Herdr installed correctly?" >&2
     return 1
   }
   protocol=$(printf '%s' "$out" | jq -r '.client.protocol // empty' 2>/dev/null)
@@ -76,7 +90,11 @@ fm_backend_herdr_version_check() {
     echo "error: Herdr protocol $protocol (version ${version:-unknown}) is older than the verified minimum $FM_BACKEND_HERDR_MIN_PROTOCOL" >&2
     return 1
   fi
-  FM_BACKEND_HERDR_VERSION_VERIFIED=1
+  if [ -n "$session" ]; then
+    FM_BACKEND_HERDR_VERSION_VERIFIED_SESSION=$session
+  else
+    FM_BACKEND_HERDR_VERSION_VERIFIED=1
+  fi
 }
 
 fm_backend_herdr_home_identity() {
@@ -96,25 +114,102 @@ fm_backend_herdr_workspace_lock_path() {
   printf '%s/.fm-herdr-workspace.lock' "$FM_HOME"
 }
 
+fm_backend_herdr_pid_start() {
+  local pid=$1 proc_stat out
+  local -a proc_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -r "/proc/$pid/stat" ]; then
+    proc_stat=$(cat "/proc/$pid/stat" 2>/dev/null || true)
+    if [ -n "$proc_stat" ]; then
+      proc_stat=${proc_stat##*) }
+      read -r -a proc_fields <<< "$proc_stat"
+      [ "${#proc_fields[@]}" -ge 20 ] && { printf 'proc:%s\n' "${proc_fields[19]}"; return 0; }
+    fi
+  fi
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//' | awk 'NF { print "ps:" $0; exit }') || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+fm_backend_herdr_lock_age() {
+  local lock=$1 mtime now
+  if [ "$(uname -s)" = Darwin ]; then
+    mtime=$(stat -f %m "$lock" 2>/dev/null) || return 1
+  else
+    mtime=$(stat -c %Y "$lock" 2>/dev/null) || return 1
+  fi
+  now=$(date +%s) || return 1
+  case "$mtime:$now" in
+    *[!0-9:]*|:*) return 1 ;;
+  esac
+  printf '%s\n' "$((now - mtime))"
+}
+
+fm_backend_herdr_lock_owner_status() {
+  local lock=$1 pid start current age
+  pid=$(cat "$lock/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*)
+      age=$(fm_backend_herdr_lock_age "$lock") || return 2
+      [ "$age" -ge "$FM_BACKEND_HERDR_LOCK_STALE_AFTER" ] && return 1
+      return 0
+      ;;
+  esac
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  case "$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null)" in
+    Z*) return 1 ;;
+  esac
+  start=$(cat "$lock/pid-start" 2>/dev/null || true)
+  [ -n "$start" ] || return 0
+  current=$(fm_backend_herdr_pid_start "$pid") || return 2
+  [ "$current" = "$start" ] && return 0
+  return 1
+}
+
 fm_backend_herdr_workspace_lock_acquire() {
-  local lock=$1 attempt=0
+  local lock=$1 attempt=0 stale_status quarantine pid start
   [ -d "$FM_HOME" ] || return 1
   while ! mkdir "$lock" 2>/dev/null; do
+    fm_backend_herdr_lock_owner_status "$lock"
+    stale_status=$?
+    if [ "$stale_status" -eq 1 ]; then
+      quarantine="$lock.stale.${BASHPID:-$$}.${RANDOM}"
+      if [ ! -e "$quarantine" ] && mv "$lock" "$quarantine" 2>/dev/null; then
+        rm -f "$quarantine/pid" "$quarantine/pid-start"
+        rmdir "$quarantine" 2>/dev/null || true
+        continue
+      fi
+    fi
     [ "$attempt" -lt "$FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS" ] || return 1
     sleep 0.1
     attempt=$((attempt + 1))
   done
-  printf '%s\n' "${BASHPID:-$$}" > "$lock/pid" || {
+  pid=${BASHPID:-$$}
+  start=$(fm_backend_herdr_pid_start "$pid") || {
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  }
+  printf '%s\n' "$pid" > "$lock/pid" && printf '%s\n' "$start" > "$lock/pid-start" || {
+    rm -f "$lock/pid" "$lock/pid-start"
     rmdir "$lock" 2>/dev/null || true
     return 1
   }
 }
 
 fm_backend_herdr_workspace_lock_release() {
-  local lock=$1 owner
+  local lock=$1 owner stored_start current_start
   owner=$(cat "$lock/pid" 2>/dev/null || true)
   [ "$owner" = "${BASHPID:-$$}" ] || return 1
-  rm -f "$lock/pid"
+  stored_start=$(cat "$lock/pid-start" 2>/dev/null || true)
+  if [ -n "$stored_start" ]; then
+    current_start=$(fm_backend_herdr_pid_start "$owner") || return 1
+    [ "$stored_start" = "$current_start" ] || return 1
+  fi
+  rm -f "$lock/pid" "$lock/pid-start"
   rmdir "$lock" 2>/dev/null
 }
 
@@ -196,8 +291,8 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
 
 fm_backend_herdr_container_ensure() {  # <cwd> -> session:workspace<TAB>seeded-tab
   local cwd=${1:-$PWD} session ws
-  fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
+  fm_backend_herdr_version_check "$session" || return 1
   fm_backend_herdr_server_ensure "$session" || return 1
   ws=$(fm_backend_herdr_workspace_ensure "$session" "$cwd") || {
     echo "error: failed to ensure Herdr workspace '$(fm_backend_herdr_workspace_label)' in session '$session'" >&2
@@ -215,10 +310,10 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace>
   fm_backend_herdr_cli "$session" tab close "$seeded" >/dev/null 2>&1 || true
 }
 
-fm_backend_herdr_tab_close_by_label() {  # <session> <workspace> <label>
-  local session=$1 wsid=$2 label=$3 tabs tab_id
+fm_backend_herdr_tab_id_for_label() {  # <session> <workspace> <label>
+  local session=$1 wsid=$2 label=$3 tabs
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$label" '
+  printf '%s' "$tabs" | jq -r --arg want "$label" '
     if (.result | type) != "object" or (.result.tabs | type) != "array" then
       error("invalid tab list response")
     elif any(.result.tabs[]; type != "object" or (.tab_id | type) != "string" or (.label | type) != "string") then
@@ -227,36 +322,59 @@ fm_backend_herdr_tab_close_by_label() {  # <session> <workspace> <label>
       [.result.tabs[] | select(.label == $want) | .tab_id] as $matches
       | if ($matches | length) == 1 then $matches[0] elif ($matches | length) == 0 then empty else error("multiple matching tabs") end
     end
-  ' 2>/dev/null)
+  ' 2>/dev/null
+}
+
+fm_backend_herdr_tab_absent() {  # <session> <workspace> <tab>
+  local session=$1 wsid=$2 tab_id=$3 tabs
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg tabid "$tab_id" '
+    (.result | type) == "object"
+    and (.result.tabs | type) == "array"
+    and all(.result.tabs[]; type == "object" and (.tab_id | type) == "string" and (.label | type) == "string")
+    and all(.result.tabs[]; .tab_id != $tabid)
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_tab_close_by_label() {  # <session> <workspace> <label>
+  local session=$1 wsid=$2 label=$3 tab_id
+  tab_id=$(fm_backend_herdr_tab_id_for_label "$session" "$wsid" "$label") || return 1
   [ -n "$tab_id" ] || return 1
-  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_tab_absent "$session" "$wsid" "$tab_id"
 }
 
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
-  local container=$1 label=$2 cwd=$3 seeded=${4:-} session wsid tabs dup out tab_id pane_id
-  session=${container%%:*}
-  wsid=${container#*:}
-  if [[ "$wsid" == *$'\t'* ]]; then
-    [ -n "$seeded" ] || seeded=${wsid#*$'\t'}
-    wsid=${wsid%%$'\t'*}
-  fi
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup=$(printf '%s' "$tabs" | jq -r --arg want "$label" \
-    '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
-  if [ -n "$dup" ]; then
-    echo "error: Herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
-    return 1
-  fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
-  tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
-  pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
-    fm_backend_herdr_tab_close_by_label "$session" "$wsid" "$label" >/dev/null 2>&1 || true
-    echo "error: could not parse Herdr tab/pane id from tab create output" >&2
-    return 1
-  fi
-  fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded"
-  printf '%s %s' "$tab_id" "$pane_id"
+  local container=$1 label=$2 cwd=$3 seeded=${4:-} lock session wsid
+  lock=$(fm_backend_herdr_workspace_lock_path) || return 1
+  (
+    local tabs dup out tab_id pane_id
+    fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
+    trap 'fm_backend_herdr_workspace_lock_release "$lock"' EXIT
+    session=${container%%:*}
+    wsid=${container#*:}
+    if [[ "$wsid" == *$'\t'* ]]; then
+      [ -n "$seeded" ] || seeded=${wsid#*$'\t'}
+      wsid=${wsid%%$'\t'*}
+    fi
+    dup=$(fm_backend_herdr_tab_id_for_label "$session" "$wsid" "$label") || exit 1
+    if [ -n "$dup" ]; then
+      echo "error: Herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+      exit 1
+    fi
+    out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || exit 1
+    tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+    pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+    if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+      if ! fm_backend_herdr_tab_close_by_label "$session" "$wsid" "$label"; then
+        echo "error: could not verify cleanup of malformed Herdr tab '$label'" >&2
+      fi
+      echo "error: could not parse Herdr tab/pane id from tab create output" >&2
+      exit 1
+    fi
+    fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded"
+    printf '%s %s' "$tab_id" "$pane_id"
+  )
 }
 
 fm_backend_herdr_parse_target() {  # <session>:<pane-id>
@@ -269,7 +387,7 @@ fm_backend_herdr_parse_target() {  # <session>:<pane-id>
 
 fm_backend_herdr_target_ready() {
   fm_backend_herdr_parse_target "$1" || return 1
-  fm_backend_herdr_version_check || return 1
+  fm_backend_herdr_version_check "$FM_BACKEND_HERDR_SESSION" || return 1
   fm_backend_herdr_server_available "$FM_BACKEND_HERDR_SESSION"
 }
 
@@ -345,11 +463,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <sleep> <sett
 
 fm_backend_herdr_composer_state() {  # <target> <text> -> empty|pending|unknown
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
-  local text=$2 out last
+  local text=$2 out normalized_text normalized_out
   out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" \
-    --source visible --lines 1 2>/dev/null) || { printf 'unknown'; return 0; }
-  last=$(printf '%s' "$out" | tail -n 1)
-  if [ -n "$text" ] && printf '%s' "$last" | grep -F -- "$text" >/dev/null 2>&1; then
+    --source visible --lines 40 2>/dev/null) || { printf 'unknown'; return 0; }
+  normalized_text=$(printf '%s' "$text" | tr -d '[:space:]')
+  normalized_out=$(printf '%s' "$out" | tr -d '[:space:]')
+  if [ -n "$text" ] && { case "$out" in *"$text"*) true ;; *) false ;; esac; } || \
+    [ -n "$normalized_text" ] && case "$normalized_out" in *"$normalized_text"*) true ;; *) false ;; esac; then
     printf 'pending'
   else
     printf 'empty'

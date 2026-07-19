@@ -81,6 +81,15 @@ test_version_gate() {
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" \
     || fail "protocol 14 should pass the Herdr version gate"
+  assert_contains "$(cat "$log")" $'HERDR_SESSION=\x1fstatus\x1f--json' "bare version check changed its default invocation"
+  assert_not_contains "$(cat "$log")" $'\x1f--session' "bare version check unexpectedly selected a target session"
+  rm -f "$resp/1.out" "$resp/.count"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
+  : > "$log"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check fmtest' "$ROOT" \
+    || fail "session-aware protocol 14 should pass the Herdr version gate"
+  assert_contains "$(cat "$log")" $'HERDR_SESSION=fmtest\x1fstatus\x1f--json\x1f--session\x1ffmtest' "target version check did not select the target session"
   rm -f "$resp/1.out" "$resp/.count"
   printf '%s\n' '{"client":{"version":"0.6.0","protocol":13}}' > "$resp/1.out"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -129,6 +138,17 @@ test_workspace_labels_and_container() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT" >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "workspace list failure was treated as an empty workspace list"
   assert_not_contains "$(cat "$log")" $'\x1fworkspace\x1fcreate' "workspace list failure proceeded to create"
+
+  find "$resp" -maxdepth 1 -type f -delete
+  mkdir -p "$dir/home/.fm-herdr-workspace.lock"
+  printf '999999\n' > "$dir/home/.fm-herdr-workspace.lock/pid"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2","label":"firstmate"}}}' > "$resp/2.out"
+  : > "$resp/3.out"
+  out=$(FM_HOME="$dir/home" PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT")
+  [ "$out" = w2 ] || fail "stale workspace lock was not recovered"
+  [ ! -e "$dir/home/.fm-herdr-workspace.lock" ] || fail "workspace lock was not released after stale recovery"
   pass "Herdr container ensure is version-gated and workspace-per-home"
 }
 
@@ -141,6 +161,15 @@ test_task_and_target_primitives() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup /tmp' "$ROOT" 2>&1) || status=$?
   [ "$status" -ne 0 ] || fail "duplicate Herdr tab label was not rejected"
   assert_contains "$out" "already exists" "duplicate label error was unclear"
+
+  find "$resp" -maxdepth 1 -type f -delete
+  : > "$log"
+  printf '%s\n' '{}' > "$resp/1.out"
+  status=0
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-invalid /tmp' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "malformed tab list was treated as an empty list"
+  assert_not_contains "$(cat "$log")" $'\x1ftab\x1fcreate' "malformed tab list proceeded to create a tab"
 
   find "$resp" -maxdepth 1 -type f -delete
   printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/1.out"
@@ -160,6 +189,8 @@ test_task_and_target_primitives() {
   printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t4"}}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-malformed"}]}}' > "$resp/3.out"
+  : > "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[]}}' > "$resp/5.out"
   status=0
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-malformed /tmp' "$ROOT" >/dev/null 2>&1 || status=$?
@@ -235,6 +266,19 @@ test_submit_retry_verdicts() {
   [ "$out" = empty ] || fail "composer clear should report empty, got '$out'"
   assert_contains "$(cat "$log")" $'\x1fpane\x1fread' "submit acknowledgement did not inspect the composer"
   assert_not_contains "$(cat "$log")" $'\x1fagent\x1fget' "submit acknowledgement used unrelated agent state"
+  find "$resp" -maxdepth 1 -type f -delete
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
+  : > "$resp/3.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/4.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/5.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/6.out"
+  printf 'he\nllo\n' > "$resp/7.out"
+  status=0
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 hello 1 0 0' "$ROOT") || status=$?
+  [ "$status" -eq 0 ] && [ "$out" = pending ] || fail "wrapped composer text was not retained as pending"
+  assert_contains "$(cat "$log")" $'\x1f--lines\x1f40' "submit acknowledgement did not inspect the full composer region"
   pass "Herdr text submit confirms the composer cleared"
 }
 
