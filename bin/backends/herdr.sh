@@ -309,6 +309,24 @@ fm_backend_herdr_workspace_bind_home() {  # <session> <workspace>
     --source firstmate --token "$FM_BACKEND_HERDR_HOME_TOKEN=$home_id" >/dev/null 2>&1
 }
 
+fm_backend_herdr_workspace_absent() {  # <session> <workspace>
+  local session=$1 wsid=$2 out
+  out=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg workspace "$wsid" '
+    (.result | type) == "object"
+    and (.result.workspaces | type) == "array"
+    and all(.result.workspaces[]; type == "object" and (.workspace_id | type) == "string")
+    and all(.result.workspaces[]; .workspace_id != $workspace)
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_workspace_close_exact() {  # <session> <workspace>
+  local session=$1 wsid=$2 close_status=0
+  fm_backend_herdr_cli "$session" workspace close "$wsid" >/dev/null 2>&1 || close_status=$?
+  fm_backend_herdr_workspace_absent "$session" "$wsid" || return 1
+  return "$close_status"
+}
+
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   local session=$1 cwd=$2 lock
   lock=$(fm_backend_herdr_workspace_lock_path) || return 1
@@ -327,7 +345,9 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
     seeded=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
     [ -n "$wsid" ] || exit 1
     if ! fm_backend_herdr_workspace_bind_home "$session" "$wsid"; then
-      fm_backend_herdr_cli "$session" workspace close "$wsid" >/dev/null 2>&1 || true
+      if ! fm_backend_herdr_workspace_close_exact "$session" "$wsid"; then
+        printf 'error: failed to verify cleanup of Herdr workspace %s\n' "$wsid" >&2
+      fi
       exit 1
     fi
     if [ -n "$seeded" ]; then
@@ -499,15 +519,16 @@ fm_backend_herdr_agent_alive() {  # <target> -> alive|dead|unknown
 }
 
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
-  local container=$1 label=$2 cwd=$3 seeded=${4:-} lock session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs created_tab_committed
+  local container=$1 label=$2 cwd=$3 seeded=${4:-} lock session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs created_tab_committed create_attempted
   lock=$(fm_backend_herdr_workspace_lock_path) || return 1
   (
     local -a husks=()
     fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
     created_tab_committed=0
+    create_attempted=0
     cleanup_created_tab() {
       local status=$?
-      if [ "$created_tab_committed" -ne 1 ]; then
+      if [ "$create_attempted" -eq 1 ] && [ "$created_tab_committed" -ne 1 ]; then
         if ! fm_backend_herdr_cleanup_created_tab "$session" "$wsid" "$label" "${tab_id:-}" "$dup_tabs"; then
           printf 'error: failed to verify cleanup of Herdr tab label %s\n' "$label" >&2
           status=1
@@ -539,6 +560,7 @@ $dup_tabs
 EOF
     # Create first. This keeps the workspace alive even if the husk is its only
     # tab, and means a failed create never destroys a recoverable husk.
+    create_attempted=1
     out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || exit 1
     tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
     pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)

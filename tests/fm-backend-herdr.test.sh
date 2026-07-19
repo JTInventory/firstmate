@@ -178,6 +178,31 @@ test_workspace_labels_and_container() {
   pass "Herdr container ensure is version-gated and workspace-per-home"
 }
 
+test_workspace_bind_failure_verifies_cleanup() {
+  local dir out log status=0
+  dir="$TMP_ROOT/workspace-bind-cleanup"; log="$dir/log"
+  mkdir -p "$dir"
+  out=$(FM_HOME="$dir" FM_HERDR_TEST_LOG="$log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_lock_acquire() { :; }
+    fm_backend_herdr_workspace_lock_release() { :; }
+    fm_backend_herdr_workspace_find() { :; }
+    fm_backend_herdr_workspace_bind_home() { return 1; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"workspace create"*) printf "%s" '\''{"result":{"workspace":{"workspace_id":"w-new"},"tab":{"tab_id":"seed"}}}'\'' ;;
+        *"workspace close"*) printf "%s\n" "$*" >> "$FM_HERDR_TEST_LOG"; return 1 ;;
+        *"workspace list"*) printf "%s" '\''{"result":{"workspaces":[{"workspace_id":"w-new"}]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_workspace_ensure session /tmp
+  ' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "workspace bind failure unexpectedly succeeded"
+  assert_contains "$(cat "$log")" "workspace close w-new" "workspace bind failure did not attempt close"
+  assert_contains "$out" "failed to verify cleanup" "workspace cleanup failure was not surfaced"
+  pass "Herdr workspace bind failures verify cleanup"
+}
+
 test_task_and_target_primitives() {
   local lines dir log resp fb out status=0
   read -r dir log resp < <(herdr_case task)
@@ -230,6 +255,35 @@ test_task_and_target_primitives() {
   [ "$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_key C-c' "$ROOT")" = ctrl+c ] \
     || fail "key normalization failed"
   pass "Herdr task creation, duplicate protection, target parsing, and key mapping work"
+}
+
+test_create_failure_does_not_close_preexisting_tab() {
+  local dir log lookup out status=0
+  dir="$TMP_ROOT/precreate-cleanup"; log="$dir/log"; lookup="$dir/lookup"
+  mkdir -p "$dir"
+  : > "$log"
+  out=$(FM_HOME="$dir" FM_HERDR_TEST_LOG="$log" FM_HERDR_TEST_LOOKUP="$lookup" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_lock_acquire() { :; }
+    fm_backend_herdr_workspace_lock_release() { :; }
+    fm_backend_herdr_tab_ids_for_label() {
+      if [ ! -e "$FM_HERDR_TEST_LOOKUP" ]; then
+        : > "$FM_HERDR_TEST_LOOKUP"
+        return 1
+      fi
+      printf "live-tab"
+    }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab close"*) printf "%s\n" "$*" >> "$FM_HERDR_TEST_LOG" ;;
+        *"tab list"*) printf "%s" '\''{"result":{"tabs":[]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_create_task session:w1 fm-demo /tmp
+  ' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "pre-create lookup failure unexpectedly succeeded"
+  assert_not_contains "$(cat "$log")" "tab close live-tab" "pre-create failure closed a preexisting tab"
+  pass "Herdr pre-create failures preserve existing tabs"
 }
 
 test_kill_requires_verified_absence() {
@@ -537,6 +591,7 @@ test_selection_and_autodetect
 test_backend_tool_gating
 test_version_gate
 test_workspace_labels_and_container
+test_workspace_bind_failure_verifies_cleanup
 test_task_and_target_primitives
 test_kill_requires_verified_absence
 test_capture_send_busy
@@ -545,6 +600,7 @@ test_wait_for_working_classification
 test_husk_duplicate_is_replaced_after_creation
 test_create_task_cleans_up_after_postcreate_failure
 test_cleanup_missing_id_fails_closed_when_unobserved
+test_create_failure_does_not_close_preexisting_tab
 test_seed_prune_is_exact_and_fail_closed
 test_event_capability_uses_named_session
 test_eventwait_returns_fresh_blocked_transition
