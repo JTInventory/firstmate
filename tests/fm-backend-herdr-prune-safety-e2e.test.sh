@@ -29,7 +29,7 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all 1; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -42,17 +42,21 @@ SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
 cleanup_all() {
-  herdr_safe_stop_and_delete "$SESSION"
-  rm -rf "$SCRATCH"
+  local rc=${1:-$?}
+  trap - EXIT
+  herdr_safe_stop_and_delete "$SESSION" || rc=1
+  rm -rf "$SCRATCH" || rc=1
+  return "$rc"
 }
-trap cleanup_all EXIT
+on_exit() { local rc=$?; cleanup_all "$rc"; exit "$?"; }
+trap on_exit EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
-fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
+fm_backend_herdr_version_check "$SESSION" || fail "version_check failed against the real installed herdr"
 
 # --- 1. reproduce the label-collision startup-workspace shape ---------------
 # Explicitly label the startup workspace "firstmate" to create the collision
@@ -166,5 +170,5 @@ pass "happy path: a genuinely fresh workspace's seeded default tab is still prun
 
 fm_backend_herdr_kill "$SESSION:$HAPPY_PANE"
 
-cleanup_all
-trap - EXIT
+cleanup_all 0
+exit $?

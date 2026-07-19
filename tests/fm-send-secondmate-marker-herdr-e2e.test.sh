@@ -26,7 +26,7 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the Her
 # shellcheck source=bin/fm-marker-lib.sh
 . "$ROOT/bin/fm-marker-lib.sh"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all 1; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 SESSION="fm-lab-send-secondmate-marker-$$"
@@ -42,14 +42,15 @@ PANE_ID=
 TARGET=
 
 cleanup_all() {
-  local rc=$?
+  local rc=${1:-$?}
   trap - EXIT
   [ -z "$TARGET" ] || fm_backend_herdr_kill "$TARGET" >/dev/null 2>&1 || true
   herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || rc=1
-  rm -rf "$TMP_ROOT"
-  exit "$rc"
+  rm -rf "$TMP_ROOT" || rc=1
+  return "$rc"
 }
-trap cleanup_all EXIT
+on_exit() { local rc=$?; cleanup_all "$rc"; exit "$?"; }
+trap on_exit EXIT
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config" "$HOME_DIR/projects" "$PROJECT"
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
@@ -131,7 +132,10 @@ marked_line=$(grep -F -- "$REQUEST" "$LOG_FILE" 2>/dev/null | head -n 1 || true)
 marked_hex=${marked_line%%$'\t'*}
 marked_text=${marked_line#*$'\t'}
 expected_hex=$(printf '%s' "${FM_FROMFIRST_MARK}${REQUEST}" | od -An -tx1 | tr -d ' \n')
-[ "$marked_text" = "${FM_FROMFIRST_MARK}${REQUEST}" ] && [ "$marked_hex" = "$expected_hex" ] \
+marked_count=$(grep -F -- "$REQUEST" "$LOG_FILE" 2>/dev/null | wc -l | tr -d '[:space:]')
+submission_count=$(wc -l < "$LOG_FILE" | tr -d '[:space:]')
+[ "$marked_count" = 1 ] && [ "$submission_count" = 1 ] \
+  && [ "$marked_text" = "${FM_FROMFIRST_MARK}${REQUEST}" ] && [ "$marked_hex" = "$expected_hex" ] \
   || fail "fm-send did not deliver exactly one terminal-safe marker through Herdr (expected=$expected_hex got=$marked_hex; text=$(printf '%s' "$marked_text" | od -An -tx1 | tr -d ' \\n'); log=$(od -An -tx1 "$LOG_FILE" 2>/dev/null | tr -d ' \\n'); pane=$(fm_backend_herdr_capture "$TARGET" 40 2>/dev/null || true))"
 pass "real Herdr lab: secondmate fm-send delivers exactly one from-firstmate marker"
 
@@ -150,5 +154,5 @@ expected_direct_hex=$(printf '%s' "$DIRECT" | od -An -tx1 | tr -d ' \n')
   || fail "direct captain input was changed or marked through the Herdr lab (expected=$expected_direct_hex got=$direct_hex)"
 pass "real Herdr lab: direct captain input remains unmarked"
 
-cleanup_all
-trap - EXIT
+cleanup_all 0
+exit $?

@@ -37,7 +37,7 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all 1; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 assert_contains_local() {  # <haystack> <needle> <msg>
   case "$1" in
@@ -70,12 +70,20 @@ SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=
 cleanup_all() {
-  [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
-  [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
-  herdr_safe_stop_and_delete "$SESSION"
-  rm -rf "$TMP_ROOT"
+  local rc=${1:-$?}
+  trap - EXIT
+  if [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1; then
+    treehouse return --force "$WT1" >/dev/null 2>&1 || rc=1
+  fi
+  if [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1; then
+    treehouse return --force "$WT2" >/dev/null 2>&1 || rc=1
+  fi
+  herdr_safe_stop_and_delete "$SESSION" || rc=1
+  rm -rf "$TMP_ROOT" || rc=1
+  return "$rc"
 }
-trap cleanup_all EXIT
+on_exit() { local rc=$?; cleanup_all "$rc"; exit "$?"; }
+trap on_exit EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=bin/fm-backend.sh
@@ -194,17 +202,13 @@ pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands i
 # home boundary before testing teardown.
 
 PRIMARY_TABS=$(herdr tab list --workspace "${CM1_WSID}" --session "$SESSION" 2>&1)
-PRIMARY_LABELS=$(printf '%s' "$PRIMARY_TABS" | jq -r '.result.tabs[]?.label // empty')
-assert_contains_local "$PRIMARY_LABELS" "fm-cm1" "the primary workspace did not retain its own task"
-assert_not_contains_local "$PRIMARY_LABELS" "fm-e2esm1" "the primary workspace contains the secondmate task"
-assert_not_contains_local "$PRIMARY_LABELS" "fm-cm2" "the primary workspace contains the secondmate-owned task"
+PRIMARY_LABELS=$(printf '%s' "$PRIMARY_TABS" | jq -r '.result.tabs[]?.label // empty' | sort)
+[ "$PRIMARY_LABELS" = "fm-cm1" ] || fail "the primary workspace must contain exactly its own task label, got: $PRIMARY_LABELS"
 pass "real herdr E2E: the primary workspace inventory contains only the primary home's task"
 
 SM_TABS=$(herdr tab list --workspace "${SM_WSID}" --session "$SESSION" 2>&1)
-SM_LABELS=$(printf '%s' "$SM_TABS" | jq -r '.result.tabs[]?.label // empty')
-assert_contains_local "$SM_LABELS" "fm-e2esm1" "the secondmate workspace did not retain its own task"
-assert_contains_local "$SM_LABELS" "fm-cm2" "the secondmate workspace did not retain the spawned crewmate"
-assert_not_contains_local "$SM_LABELS" "fm-cm1" "the secondmate workspace contains the primary task"
+SM_LABELS=$(printf '%s' "$SM_TABS" | jq -r '.result.tabs[]?.label // empty' | sort)
+[ "$SM_LABELS" = $'fm-cm2\nfm-e2esm1' ] || fail "the secondmate workspace must contain exactly its two task labels, got: $SM_LABELS"
 pass "real herdr E2E: the secondmate workspace inventory contains its own task and its spawned crewmate only"
 
 # --- 5. teardown closes the RIGHT tab, and no other ------------------------
@@ -253,5 +257,5 @@ pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate'
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE"
 
-cleanup_all
-trap - EXIT
+cleanup_all 0
+exit $?
