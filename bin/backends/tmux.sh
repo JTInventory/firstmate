@@ -80,5 +80,17 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 }
 
 fm_backend_tmux_kill() {  # <target>
-  tmux kill-window -t "$1" 2>/dev/null
+  local target=$1 windows window_id window_target
+  tmux kill-window -t "$target" 2>/dev/null && return 0
+  windows=$(tmux list-windows -a -F '#{window_id}|#{session_name}:#{window_name}' 2>/dev/null) || return 1
+  while IFS='|' read -r window_id window_target; do
+    case "$target" in
+      @*) [ "$window_id" = "$target" ] || continue ;;
+      *) [ "$window_target" = "$target" ] || continue ;;
+    esac
+    return 1
+  done <<EOF
+$windows
+EOF
+  return 0
 }

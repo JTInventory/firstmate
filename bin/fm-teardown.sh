@@ -651,10 +651,6 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
-fi
-
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = secondmate ]; then
     :
@@ -717,6 +713,15 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
+  echo "REFUSED: could not kill task $ID window $T; refusing to delete task state" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  cleanup_firstmate_home_children "$HOME_PATH"
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -731,11 +736,6 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project.
   teardown_treehouse_return "$WT" "$PROJ" "worktree"
-fi
-
-if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
-  echo "REFUSED: could not kill task $ID window $T; refusing to delete task state" >&2
-  exit 1
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT

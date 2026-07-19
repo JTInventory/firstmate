@@ -26,7 +26,20 @@ case "${1:-}" in
   new-session)
     [ "${FM_FAKE_TMUX_NEW_SESSION_FAIL:-0}" = 1 ] && exit 1
     ;;
-  list-windows) printf 'firstmate:adhoc\n' ;;
+  list-windows)
+    for arg in "$@"; do
+      if [ "$arg" = '#{window_id}|#{session_name}:#{window_name}' ]; then
+        [ "${FM_FAKE_TMUX_LIST_FAIL:-0}" = 1 ] && exit 1
+        if [ "${FM_FAKE_TMUX_WINDOW_MISSING:-0}" = 1 ]; then
+          printf '@1|firstmate:other\n'
+        else
+          printf '@1|firstmate:fm-demo\n'
+        fi
+        exit 0
+      fi
+    done
+    printf 'firstmate:adhoc\n'
+    ;;
   capture-pane) printf 'captured line\n' ;;
   display-message)
     for arg in "$@"; do
@@ -138,6 +151,17 @@ test_backend_failures_propagate() {
   fi
   assert_contains "$(cat "$log")" $'\x1f''new-session' \
     "container ensure did not attempt new-session after has-session failed"
+  if PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" FM_FAKE_TMUX_KILL_FAIL=1 \
+    fm_backend_kill tmux firstmate:fm-demo; then
+    fail "kill failure was swallowed while the target was still present"
+  fi
+  PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" FM_FAKE_TMUX_KILL_FAIL=1 \
+    FM_FAKE_TMUX_WINDOW_MISSING=1 fm_backend_kill tmux firstmate:fm-demo \
+    || fail "already-absent target was not idempotent"
+  if PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" FM_FAKE_TMUX_KILL_FAIL=1 \
+    FM_FAKE_TMUX_LIST_FAIL=1 fm_backend_kill tmux firstmate:fm-demo; then
+    fail "tmux inventory failure was treated as an absent target"
+  fi
   pass "tmux adapter propagates kill and container-creation failures"
 }
 

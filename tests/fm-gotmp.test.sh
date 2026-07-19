@@ -39,6 +39,15 @@ trap cleanup EXIT
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 
+install_fake_tmux() {
+  local fake=$1
+  cat > "$fake/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake/bin/tmux"
+}
+
 # Build a fake FM_ROOT so the real fm-teardown.sh (symlinked in) resolves FM_ROOT to
 # it via its BASH_SOURCE computation. Stub the helper scripts fm-teardown calls so no
 # live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
@@ -47,6 +56,7 @@ make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
   mkdir -p "$fake/bin/backends" "$fake/state"
+  install_fake_tmux "$fake"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   # The teardown now routes endpoint cleanup through the backend dispatcher.
@@ -139,7 +149,7 @@ test_teardown_removes_tasktmp_dir() {
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
+  PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
     bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero with a valid tasktmp"
   [ ! -e "$task_tmp" ] \
@@ -153,6 +163,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
   mkdir -p "$fake/bin/backends" "$fake/state"
+  install_fake_tmux "$fake"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
@@ -185,7 +196,7 @@ kind=ship
 mode=no-mistakes
 yolo=off
 META
-  FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
+  PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
     bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp= was absent"
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
@@ -201,7 +212,7 @@ test_teardown_skips_gracefully_when_dir_missing() {
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
   fake=$(make_fake_root "$id" "$task_tmp")
-  FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
+  PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
     bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp dir was missing"
   [ ! -e "$task_tmp" ] || fail "teardown created/left the tasktmp dir unexpectedly"
