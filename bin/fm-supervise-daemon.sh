@@ -311,7 +311,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen absorb_class canonical
-  task=$(window_to_task "$win")
+  task=$(task_for_endpoint "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
     # A status log is append-only: an authoritative run can supersede its old
@@ -386,20 +386,20 @@ _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win")")
+  key=$(_stale_key "$(task_for_endpoint "$win" "$state")")
   marker="$state/.subsuper-stale-$key"
   [ -e "$marker" ] || _now > "$marker"
 }
 
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win")")
+  key=$(_stale_key "$(task_for_endpoint "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
 }
 
 pause_marker_record() {  # <window> <state>
   local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win")")
+  key=$(_stale_key "$(task_for_endpoint "$win" "$state")")
   marker="$state/.subsuper-paused-$key"
   if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
     _now > "$marker"
@@ -409,7 +409,7 @@ pause_marker_record() {  # <window> <state>
 pause_marker_record_status() {  # <status-file> <state>
   local f=$1 state=$2 task win
   task=$(basename "$f"); task=${task%.status}
-  win=$(window_for_task "$task" 2>/dev/null || true)
+  win=$(window_for_task "$task" "$state" 2>/dev/null || true)
   [ -n "$win" ] || return 0
   pause_marker_record "$win" "$state"
 }
@@ -449,7 +449,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
-      task=$(window_to_task "$arg")
+      task=$(task_for_endpoint "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
         && mark_status_seen "$state" "$task" "$last" ;;
@@ -469,7 +469,10 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} busy tail40
   busy=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
-  [ "$busy" = busy ] && return 0
+  case "$busy" in
+    busy) return 0 ;;
+    idle) return 1 ;;
+  esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
@@ -555,7 +558,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest
+  local state=$1 now due f key task win marker age last max_defer oldest endpoint backend
   now=$(_now)
 
   # (1) batch flush
@@ -600,12 +603,15 @@ housekeeping() {  # <state>
     [ -e "$marker" ] || continue
     key=$(basename "$marker")
     key=${key#.subsuper-paused-}
-    win=$(window_for_task "$key" 2>/dev/null || true)
-    if [ -z "$win" ]; then
+    endpoint=$(task_endpoint_for_key "$key" "$state" 2>/dev/null || true)
+    if [ -z "$endpoint" ]; then
       rm -f "$marker"
       continue
     fi
-    task=$(window_to_task "$win")
+    backend=${endpoint%%$'\t'*}
+    endpoint=${endpoint#*$'\t'}
+    win=${endpoint%%$'\t'*}
+    task=${endpoint#*$'\t'}
     last=$(last_status_line "$state/$task.status")
     if ! status_is_paused "$last"; then
       rm -f "$marker"
@@ -640,11 +646,11 @@ housekeeping() {  # <state>
       rm -f "$marker"
       continue
     fi
-    if ! tmux display-message -p -t "$win" '#{pane_id}' >/dev/null 2>&1; then
+    if ! fm_backend_target_exists "$backend" "$win"; then
       rm -f "$marker"
       continue
     fi
-    if pane_is_busy "$win"; then
+    if pane_is_busy "$win" "$backend"; then
       rm -f "$marker"
       continue
     fi
@@ -658,14 +664,15 @@ housekeeping() {  # <state>
     key="${marker##*.subsuper-stale-}"
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
-    # Reconstruct the window name from the key (best-effort: session is unknown,
-    # so probe the live fm-* windows for one whose task matches).
-    win=$(window_for_task "$key" 2>/dev/null || true)
-    if [ -z "$win" ]; then
+    endpoint=$(task_endpoint_for_key "$key" "$state" 2>/dev/null || true)
+    if [ -z "$endpoint" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
     fi
-    if pane_is_busy "$win"; then
+    backend=${endpoint%%$'\t'*}
+    endpoint=${endpoint#*$'\t'}
+    win=${endpoint%%$'\t'*}
+    if pane_is_busy "$win" "$backend"; then
       rm -f "$marker"   # crewmate resumed: benign
     else
       escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
@@ -690,14 +697,44 @@ housekeeping() {  # <state>
   fi
 }
 
-# Find a live fm-* window whose task id matches the given marker key.
-window_for_task() {  # <task-key>
-  local key=$1 w t
+# Resolve a task marker to its recorded backend and runtime target.
+task_endpoint_for_key() {  # <task-key> <state-dir>
+  local key=$1 state=$2 meta id window backend w t
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    [ "$(_stale_key "$id")" = "$key" ] || continue
+    window=$(fm_meta_get "$meta" window)
+    [ -n "$window" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    printf '%s\t%s\t%s' "$backend" "$window" "$id"
+    return 0
+  done
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
     t=$(window_to_task "$w")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+    [ "$(_stale_key "$t")" = "$key" ] && { printf 'tmux\t%s\t%s' "$w" "$t"; return 0; }
   done
   return 1
+}
+
+window_for_task() {  # <task-key> [state-dir]
+  local endpoint state
+  if [ "$#" -ge 2 ]; then state=$2; else state=$(_state_root); fi
+  endpoint=$(task_endpoint_for_key "$1" "$state") || return 1
+  printf '%s\n' "$endpoint" | cut -f2
+}
+
+task_for_endpoint() {  # <target> <state-dir>
+  local target=$1 state=$2 meta window id
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    window=$(fm_meta_get "$meta" window)
+    [ "$window" = "$target" ] || continue
+    id=$(basename "$meta" .meta)
+    printf '%s' "$id"
+    return 0
+  done
+  window_to_task "$target"
 }
 
 # --- injection --------------------------------------------------------------

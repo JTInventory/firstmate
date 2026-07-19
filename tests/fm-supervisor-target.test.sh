@@ -36,6 +36,9 @@ test_target_precedence() {
   out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_target)
   [ "$out" = '%3' ] || fail "TMUX_PANE did not win over nested Herdr target: $out"
 
+  out=$(FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=lab discover_supervisor_target)
+  [ "$out" = lab:w1:p9 ] || fail "selected Herdr backend used the inherited tmux target: $out"
+
   out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_supervisor_target)
   [ "$out" = default:w1:p9 ] || fail "Herdr target did not default the session: $out"
 
@@ -46,6 +49,10 @@ test_target_precedence() {
     fail "fallback target unexpectedly returned success"
   fi
   [ "$out" = firstmate:0 ] || fail "fallback target changed from firstmate:0: $out"
+
+  if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_PANE_ID='' discover_supervisor_target >/dev/null 2>&1; then
+    fail "Herdr target discovery succeeded without a pane marker"
+  fi
   pass "supervisor target precedence composes Herdr session:pane targets"
 }
 

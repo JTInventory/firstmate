@@ -9,25 +9,37 @@
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
-# Resolve the supervisor pane target. An explicit target wins, then tmux's
-# inherited pane marker, then Herdr's session plus pane id, then the legacy
-# tmux fallback. The return code is non-zero only for the fallback so callers
-# can warn while preserving the pre-Herdr behavior.
+# Resolve the supervisor pane target. An explicit target wins, then the marker
+# for the selected backend, then the legacy tmux fallback.
 discover_supervisor_target() {
+  local backend
   if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
     printf '%s' "$FM_SUPERVISOR_TARGET"
     return 0
   fi
-  if [ -n "${TMUX_PANE:-}" ]; then
-    printf '%s' "$TMUX_PANE"
-    return 0
-  fi
-  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-    printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
-    return 0
-  fi
-  printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
-  return 1
+  backend=$(discover_supervisor_backend) || true
+  case "$backend" in
+    herdr)
+      if [ -n "${HERDR_PANE_ID:-}" ]; then
+        printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
+        return 0
+      fi
+      printf '%s\n' 'error: supervisor backend herdr needs HERDR_PANE_ID or FM_SUPERVISOR_TARGET' >&2
+      return 1
+      ;;
+    tmux)
+      if [ -n "${TMUX_PANE:-}" ]; then
+        printf '%s' "$TMUX_PANE"
+        return 0
+      fi
+      printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
+      return 1
+      ;;
+    *)
+      printf 'error: unsupported supervisor backend: %s\n' "$backend" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Resolve the backend used to address the supervisor pane independently from

@@ -558,6 +558,73 @@ test_pane_is_busy_herdr_native_busy_state() {
   pass "pane_is_busy dispatches Herdr native busy state"
 }
 
+test_pane_is_busy_herdr_idle_state_is_conclusive() {
+  (
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = default:w1:p2 ] || fail "unexpected Herdr busy-state args: $1 $2"
+      printf 'idle'
+    }
+    fm_backend_capture() { fail "capture should not run for conclusive Herdr idle state"; }
+    if pane_is_busy default:w1:p2 herdr; then
+      fail "Herdr idle state was treated as busy"
+    fi
+    true
+  ) || fail "Herdr idle-state test failed"
+  pass "pane_is_busy treats Herdr idle state as conclusive"
+}
+
+test_housekeeping_uses_recorded_herdr_endpoint() {
+  local dir state key win
+  dir=$(make_supercase herdr-endpoint-recheck)
+  state="$dir/state"
+  win='lab:w1:p2'
+  printf 'working\n' > "$state/herdr-w7.status"
+  printf 'window=%s\nbackend=herdr\n' "$win" > "$state/herdr-w7.meta"
+  key=$(printf '%s' herdr-w7 | tr ':/.' '___')
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_target_exists() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "stale recheck did not use recorded Herdr endpoint: $1 $2"
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "busy recheck did not use recorded Herdr endpoint: $1 $2"
+      printf 'idle'
+    }
+    fm_backend_capture() { fail "stale recheck used capture fallback for Herdr idle state"; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "Herdr stale endpoint recheck failed"
+  [ -s "$state/.subsuper-escalations" ] || fail "Herdr stale endpoint was not escalated"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "Herdr stale marker was not cleared"
+  pass "housekeeping rechecks stale Herdr tasks through recorded metadata"
+}
+
+test_housekeeping_uses_recorded_herdr_pause_endpoint() {
+  local dir state key win
+  dir=$(make_supercase herdr-pause-endpoint)
+  state="$dir/state"
+  win='lab:w1:p3'
+  printf 'paused: waiting for vendor\n' > "$state/herdr-pause-h8.status"
+  printf 'window=%s\nbackend=herdr\n' "$win" > "$state/herdr-pause-h8.meta"
+  key=$(printf '%s' herdr-pause-h8 | tr ':/.' '___')
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.subsuper-paused-$key"
+  (
+    crew_state_value() { printf 'unknown'; }
+    crew_absorb_class() { printf 'paused'; }
+    fm_backend_target_exists() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "pause recheck did not use recorded Herdr endpoint: $1 $2"
+    }
+    fm_backend_busy_state() {
+      [ "$1" = herdr ] && [ "$2" = "$win" ] || fail "pause busy recheck did not use recorded Herdr endpoint: $1 $2"
+      printf 'idle'
+    }
+    fm_backend_capture() { fail "pause recheck used capture fallback for Herdr idle state"; }
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  ) || fail "Herdr pause endpoint recheck failed"
+  grep -F 'paused' "$state/.subsuper-escalations" >/dev/null \
+    || fail "Herdr pause endpoint was not resurfaced"
+  pass "housekeeping rechecks paused Herdr tasks through recorded metadata"
+}
+
 test_pane_input_pending_herdr_dispatch() {
   (
     fm_backend_composer_state() {
@@ -884,6 +951,9 @@ test_pane_input_pending_blank_is_not_pending
 test_pane_input_pending_idle_prompt_not_pending
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_pane_is_busy_herdr_native_busy_state
+test_pane_is_busy_herdr_idle_state_is_conclusive
+test_housekeeping_uses_recorded_herdr_endpoint
+test_housekeeping_uses_recorded_herdr_pause_endpoint
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_submits_through_backend
 test_daemon_refuses_unsupported_supervisor_backend
