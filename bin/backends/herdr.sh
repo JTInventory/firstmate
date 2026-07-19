@@ -172,11 +172,11 @@ fm_backend_herdr_lock_owner_status() {
   else
     return 2
   fi
+  if [ -d "$lock" ] && [ -z "$start" ] && fm_backend_herdr_legacy_lock_stale "$lock"; then
+    return 1
+  fi
   case "$pid" in
     ''|*[!0-9]*)
-      if [ -d "$lock" ] && fm_backend_herdr_legacy_lock_stale "$lock"; then
-        return 1
-      fi
       return 0
       ;;
   esac
