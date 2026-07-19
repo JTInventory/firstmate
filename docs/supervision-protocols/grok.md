@@ -45,5 +45,7 @@ output. Stop only this home's runner with `bin/fm-watch-session.sh stop`.
 Away mode uses the JT-owned `bin/fm-afk-launch.sh` entrypoint. It applies the
 same detached session/process-group boundary and pinned pid/start/identity
 proof; its exact fail-closed start/return contract is owned by the
-[afk skill](../../.agents/skills/afk/SKILL.md). This JT path does not add
-Herdr, cmux, or multi-backend wedge channels.
+[afk skill](../../.agents/skills/afk/SKILL.md). Tmux remains the default; Herdr
+supervisor injection is the separate experimental path documented in
+[`docs/configuration.md`](../configuration.md), while this JT path does not
+add cmux or zellij wedge channels.

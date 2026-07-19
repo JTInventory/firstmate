@@ -59,10 +59,10 @@
 # Usage: fm-supervise-daemon.sh [--fm-detach-token=<token>]
 #          Long-lived background loop. Normally started by the /afk skill, which
 #          sets state/.afk first. Env knobs:
-#          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
-#                                   auto-discovered from TMUX_PANE, then
-#                                   HERDR_SESSION:HERDR_PANE_ID, then the
-#                                   firstmate:0 tmux fallback)
+#          FM_SUPERVISOR_TARGET     supervisor pane target override; otherwise
+#                                   auto-discovered from the selected backend's
+#                                   runtime marker, with firstmate:0 as the tmux
+#                                   fallback
 #          FM_SUPERVISOR_BACKEND    supervisor pane backend (tmux|herdr;
 #                                   override; otherwise auto-discovered from the
 #                                   runtime markers). Unsupported backends refuse
@@ -115,7 +115,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # Shared tmux pane primitives (busy/composer detection + verify-retry submit).
 # Sourced at top level so BOTH the executed daemon and the unit tests (which
-# source this file for its pure functions) get the corrected composer detection.
+# source this file for its pure functions) get the corrected tmux detection;
+# backend dispatch selects Herdr's native reads and send primitives when needed.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_DAEMON_DIR/fm-tmux-lib.sh"
 

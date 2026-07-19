@@ -51,7 +51,7 @@ The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant statu
 The always-on watcher also uses that library's provably-working predicate on no-verb signal and non-terminal-stale paths, while the daemon keeps its away-mode stale recheck unchanged.
 A valid `paused: <reason>` is absorbed as an intentional external wait, but it is not an indefinite mute: the watcher stores its first-seen `.paused-*` marker and the away-mode daemon stores the corresponding `.subsuper-paused-*` marker in the existing home state directory. Both use `FM_PAUSE_RESURFACE_SECS` (default 3600 seconds) as the shared cadence, emit at most one bounded local re-surface per interval, and clear their markers when the pause ends, the pane disappears, or an authoritative active run wins.
 The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
-Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+Its injection path uses the selected backend's composer detection and verified submit primitive; tmux shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, while Herdr uses its pane reads and send primitives. Stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 The read-only supervision model surfaces a non-empty wedge marker as the high-severity `supervision:inject-wedged` checklist item owned by firstmate, including the marker detail, without clearing the marker or attempting recovery.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands, codex `$...` skill invocations, and marked ordinary text sent to codex secondmates using the target's recorded `harness=` and `kind=` meta.
 If that marked Codex secondmate path still looks pending after the generic Enter retries, `fm-send.sh` waits once more and sends one final Enter before reporting failure.
@@ -200,7 +200,7 @@ Concise replies stay single unnumbered tweets; genuinely long replies are split 
 If an image is attached to a split reply, the relay puts it on the first/opener tweet only and leaves later chunks text-only.
 For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` and `fm-x-dismiss.sh` skip the public post or dismiss call and record the would-be payload under `state/x-outbox/`, including `texts` when the reply would be a thread and an `endpoint` marker when the preview is a completion follow-up or dismiss, while the rest of the poll -> compose -> would-post loop still succeeds.
 Attached images are recorded as compact `{media_type, bytes, source_path}` metadata in dry-run instead of base64 bytes.
-The watcher, wake queue, arm wrapper, and afk daemon are unchanged; X mode is layered on top through the existing check mechanism.
+The watcher, wake queue, and arm wrapper remain the shared foundations; X mode is layered on top through the existing check mechanism.
 
 ## Project memory belongs to projects
 
