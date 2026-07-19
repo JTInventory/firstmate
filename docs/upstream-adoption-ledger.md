@@ -36,7 +36,7 @@ All changes were first characterized in the clean clone and delivered only to th
 1. Every candidate must be marked Adopt, Adapt, Defer, or Reject here before code is enabled.
 2. A controlled upstream fetch is allowed for comparison only; no upstream delivery or push is allowed.
 3. A merge parser may inspect a qualified JT PR URL, but only a captain-approved path may request a merge.
-4. Runtime proof comes from backlog, state files, tmux, Treehouse, watcher, GitHub, and read-only supervisor output.
+4. Runtime proof comes from backlog, state files, tmux or Herdr, Treehouse, watcher, GitHub, and read-only supervisor output.
 5. Deferred and rejected capabilities must remain unavailable in the supported tmux/Codex runtime.
 
 ## Phase A safety train (U1-U5)

@@ -60,8 +60,8 @@ After successful text sends, it adds its own `FM_SEND_SETTLE` pause so immediate
 ## Runtime session-provider backend
 
 The runtime backend is the session-provider layer below firstmate's lifecycle scripts.
-`bin/fm-backend.sh` owns selection, metadata helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` owns the tmux command primitives used by spawn, send, peek, watch, teardown, and crew-state.
-New spawns select a backend from `fm-spawn.sh --backend`, then `FM_BACKEND`, then local `config/backend`, then default `tmux`.
+`bin/fm-backend.sh` owns selection, metadata helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` and `bin/backends/herdr.sh` own the backend-specific command primitives used by spawn, send, peek, watch, teardown, and crew-state.
+New spawns select a backend from `fm-spawn.sh --backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection (`$TMUX` first, `HERDR_ENV=1` second), then default `tmux`.
 Tmux remains the default and production path. Herdr is an experimental opt-in backend for Herdr 0.7.x/protocol 14+; unknown names fail loudly, and default tmux tasks omit `backend=tmux` from metadata. A missing `backend=` still means tmux.
 When `HERDR_ENV=1` is present without explicit configuration, Herdr is auto-detected; `$TMUX` wins when nested. Herdr tasks use one workspace per firstmate home and one tab per task, while treehouse remains the worktree provider. The Herdr adapter's native event and AFK/supervisor paths are deferred to PR3.
 The watcher's existing poll loop remains the event-source implementation for both this PR's tmux and Herdr paths, so the default wake/stale behavior remains unchanged.
@@ -126,7 +126,7 @@ Firstmate does not install CBM or change host MCP configuration. The captain may
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
-`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
+`fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the selected session-provider and shared status-file path as any direct report.
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
 Teardown retries only a transient Git `index.lock`/`File exists` failure from `treehouse return` before leaving the route and home intact for any remaining return failure, rather than hiding a still-held lease.
@@ -232,7 +232,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 ## Restart-proof
 
-Fleet state lives in tmux, no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
+Fleet state lives in the selected session provider (tmux by default or Herdr for marked tasks), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md` and `data/learnings.md`, and persistent secondmate homes.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
 
 ## Development notes

@@ -46,18 +46,18 @@ This is a directory that turns any agent into your firstmate, and you the captai
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you, with bounded reviews for declared external waits.
-- **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux, git, watcher, backlog drift, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1.1` JSON without changing anything, even from non-interactive shells where HOME-local Axi tools are not already on `PATH`.
+- **Read-only supervision view** - `bin/fm-supervise.sh` turns current state, tmux/Herdr, git, watcher, backlog drift, and optional GitHub reads into a stable checklist or `firstmate.supervision.v1.1` JSON without changing anything, even from non-interactive shells where HOME-local Axi tools are not already on `PATH`.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Operational memory stow** - `/stow` sweeps the current session for durable knowledge, routes it to the right local or project home, and tells you when the session is safe to reset.
 - **Optional code orientation** - allowlisted ship and scout workers can receive non-blocking codebase-memory-mcp context for multi-file exploration, with an optional durable local usage meter; normal source reads remain the proof authority.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; PR merges require an explicit captain-approved wrapper that records PR evidence and derives the target repository from the full GitHub URL.
-- **Restart-proof** - all state lives on disk and in tmux; kill the session anytime and the next one reconciles and carries on.
+- **Restart-proof** - all state lives on disk and in the selected session provider; end the session anytime and the next one reconciles and carries on.
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, tmux for the crew windows, and `perl` or `setsid(1)` for reaping-safe supervision.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, tmux for the default crew windows, and `perl` or `setsid(1)` for reaping-safe supervision. The experimental Herdr path additionally needs Herdr 0.7.x with protocol 14 or newer and `jq`.
 The first mate detects and offers to install everything else.
 
 ```sh
@@ -82,8 +82,8 @@ Then just talk:
 > alright merge it
 ```
 
-Run it inside tmux for the best experience: launching your harness from inside tmux puts every crewmate window in your own session, where you can watch the crew work in real time or type into any window to intervene.
-Outside tmux, crewmates land in a detached `firstmate` session you can attach to.
+For the default tmux path, run it inside tmux for the best experience: launching your harness from inside tmux puts every crewmate window in your own session, where you can watch the crew work in real time or type into any window to intervene.
+Outside tmux, tmux-backed crewmates land in a detached `firstmate` session you can attach to; Herdr-backed crewmates use the selected Herdr session.
 
 ## How It Works
 
@@ -96,10 +96,10 @@ Outside tmux, crewmates land in a detached `firstmate` session you can attach to
  │ reads projects/ + firstmate routes  │
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
-    │ tmux send-keys / status files │
+    │ backend sends / status files │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows you can watch
+ │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows by default; Herdr tabs when selected
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
@@ -111,7 +111,7 @@ Outside tmux, crewmates land in a detached `firstmate` session you can attach to
 ```
 
 You chat with the first mate.
-It routes each request to a crewmate in its own tmux window and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
+It routes each request to a crewmate in its own tmux window or experimental Herdr tab and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 When the current fleet state is unclear, `bin/fm-supervise.sh` gives a passive read-only checklist, and `bin/fm-supervise.sh --json` exposes the same shared model for display tools such as Radar.
 Bootstrap, spawn, teardown, and the read-only supervision model share the same tool-path normalization: they append existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories without overriding the caller's earlier `PATH` entries.
 That lets SSH and other clean non-interactive sessions find HOME-installed Axi tools consistently.
