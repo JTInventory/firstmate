@@ -302,6 +302,17 @@ fm_backend_herdr_workspace_find() {  # <session>
   ' 2>/dev/null
 }
 
+fm_backend_herdr_workspace_ids() {  # <session>
+  local session=$1 out
+  out=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e '
+    (.result | type) == "object"
+    and (.result.workspaces | type) == "array"
+    and all(.result.workspaces[]; type == "object" and (.workspace_id | type) == "string")
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$out" | jq -r '.result.workspaces[] | .workspace_id' 2>/dev/null
+}
+
 fm_backend_herdr_workspace_bind_home() {  # <session> <workspace>
   local session=$1 wsid=$2 home_id
   home_id=$(fm_backend_herdr_home_identity) || return 1
@@ -327,29 +338,65 @@ fm_backend_herdr_workspace_close_exact() {  # <session> <workspace>
   return "$close_status"
 }
 
+fm_backend_herdr_cleanup_created_workspace() {  # <session> <workspace> <existing-workspaces>
+  local session=$1 wsid=$2 existing=$3 current candidate
+  local -a new_workspaces=()
+  if [ -n "$wsid" ]; then
+    fm_backend_herdr_workspace_close_exact "$session" "$wsid"
+    return $?
+  fi
+  current=$(fm_backend_herdr_workspace_ids "$session") || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    printf '%s\n' "$existing" | grep -Fqx -- "$candidate" && continue
+    new_workspaces+=("$candidate")
+  done <<EOF
+$current
+EOF
+  case "${#new_workspaces[@]}" in
+    1) fm_backend_herdr_workspace_close_exact "$session" "${new_workspaces[0]}" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   local session=$1 cwd=$2 lock
   lock=$(fm_backend_herdr_workspace_lock_path) || return 1
   (
-    local label wsid out seeded
+    local label wsid out seeded existing_workspaces workspace_committed create_attempted
     fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
-    trap 'fm_backend_herdr_workspace_lock_release "$lock"' EXIT
+    workspace_committed=0
+    create_attempted=0
+    cleanup_created_workspace() {
+      local status=$?
+      if [ "$create_attempted" -eq 1 ] && [ "$workspace_committed" -ne 1 ]; then
+        if ! fm_backend_herdr_cleanup_created_workspace "$session" "${wsid:-}" "$existing_workspaces"; then
+          printf 'error: failed to verify cleanup of Herdr workspace %s\n' "${wsid:-unknown}" >&2
+          status=1
+        fi
+      fi
+      trap - EXIT
+      fm_backend_herdr_workspace_lock_release "$lock"
+      exit "$status"
+    }
+    trap cleanup_created_workspace EXIT
     label=$(fm_backend_herdr_workspace_label)
     wsid=$(fm_backend_herdr_workspace_find "$session") || exit 1
     if [ -n "$wsid" ]; then
       printf '%s' "$wsid"
       exit 0
     fi
+    existing_workspaces=$(fm_backend_herdr_workspace_ids "$session") || exit 1
+    create_attempted=1
     out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || exit 1
     wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
     seeded=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
-    [ -n "$wsid" ] || exit 1
-    if ! fm_backend_herdr_workspace_bind_home "$session" "$wsid"; then
-      if ! fm_backend_herdr_workspace_close_exact "$session" "$wsid"; then
-        printf 'error: failed to verify cleanup of Herdr workspace %s\n' "$wsid" >&2
-      fi
+    [ -n "$wsid" ] || {
+      printf 'error: could not parse Herdr workspace id from workspace create output\n' >&2
       exit 1
-    fi
+    }
+    fm_backend_herdr_workspace_bind_home "$session" "$wsid" || exit 1
+    workspace_committed=1
     if [ -n "$seeded" ]; then
       printf '%s\t%s' "$wsid" "$seeded"
     else

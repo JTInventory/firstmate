@@ -129,7 +129,8 @@ test_workspace_labels_and_container() {
   printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"}}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"}}}' > "$resp/5.out"
   fb=$(make_fake_herdr "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT")
@@ -149,8 +150,8 @@ test_workspace_labels_and_container() {
   mkdir -p "$dir/home/.fm-herdr-workspace.lock"
   printf '999999\n' > "$dir/home/.fm-herdr-workspace.lock/pid"
   printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/1.out"
-  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2","label":"firstmate"}}}' > "$resp/2.out"
-  : > "$resp/3.out"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2","label":"firstmate"}}}' > "$resp/3.out"
   out=$(FM_HOME="$dir/home" PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT")
   [ "$out" = w2 ] || fail "stale workspace lock was not recovered"
@@ -201,6 +202,29 @@ test_workspace_bind_failure_verifies_cleanup() {
   assert_contains "$(cat "$log")" "workspace close w-new" "workspace bind failure did not attempt close"
   assert_contains "$out" "failed to verify cleanup" "workspace cleanup failure was not surfaced"
   pass "Herdr workspace bind failures verify cleanup"
+}
+
+test_workspace_create_missing_id_cleans_up_new_workspace() {
+  local dir out log status=0
+  dir="$TMP_ROOT/workspace-create-missing-id"; log="$dir/log"
+  mkdir -p "$dir"
+  out=$(FM_HOME="$dir" FM_HERDR_TEST_LOG="$log" FM_HERDR_TEST_CREATED="$dir/created" FM_HERDR_TEST_CLOSED="$dir/closed" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_lock_acquire() { :; }
+    fm_backend_herdr_workspace_lock_release() { :; }
+    fm_backend_herdr_workspace_find() { :; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"workspace create"*) : > "$FM_HERDR_TEST_CREATED"; printf "%s" '\''{"result":{"tab":{"tab_id":"seed"}}}'\'' ;;
+        *"workspace close"*) printf "%s\n" "$*" >> "$FM_HERDR_TEST_LOG"; : > "$FM_HERDR_TEST_CLOSED" ;;
+        *"workspace list"*) if [ -e "$FM_HERDR_TEST_CLOSED" ]; then printf "%s" '\''{"result":{"workspaces":[{"workspace_id":"existing"}]}}'\''; elif [ -e "$FM_HERDR_TEST_CREATED" ]; then printf "%s" '\''{"result":{"workspaces":[{"workspace_id":"existing"},{"workspace_id":"w-new"}]}}'\''; else printf "%s" '\''{"result":{"workspaces":[{"workspace_id":"existing"}]}}'\''; fi ;;
+      esac
+    }
+    fm_backend_herdr_workspace_ensure session /tmp
+  ' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "malformed workspace create unexpectedly succeeded"
+  assert_contains "$(cat "$log")" "workspace close w-new" "malformed workspace create did not close the new workspace"
+  pass "Herdr malformed workspace creates clean up new workspaces"
 }
 
 test_task_and_target_primitives() {
@@ -592,6 +616,7 @@ test_backend_tool_gating
 test_version_gate
 test_workspace_labels_and_container
 test_workspace_bind_failure_verifies_cleanup
+test_workspace_create_missing_id_cleans_up_new_workspace
 test_task_and_target_primitives
 test_kill_requires_verified_absence
 test_capture_send_busy
