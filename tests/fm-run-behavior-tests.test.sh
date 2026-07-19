@@ -118,7 +118,7 @@ run_fixture() {
     PATH="$fixture/bin:$PATH" \
       FM_TEST_JOBS="$jobs" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
-      FM_BACKEND= \
+      FM_BACKEND="" \
       HERDR_ENV=1 \
       HERDR_SESSION=default \
       HERDR_PANE_ID=w9:p9 \
@@ -214,7 +214,7 @@ test_delta_overlay_contract_is_checked_and_portable() {
 test_lib_scrubs_ambient_herdr_for_hermetic_sources() {
   local out
   out=$(
-    FM_BACKEND= FM_HERDR_ALLOW_AMBIENT=0 \
+    FM_BACKEND="" FM_HERDR_ALLOW_AMBIENT=0 \
       HERDR_ENV=1 HERDR_SESSION=default HERDR_PANE_ID=w1:p1 \
       HERDR_TAB_ID=w1:t1 HERDR_WORKSPACE_ID=w1 \
       HERDR_SOCKET_PATH=/tmp/fake-herdr.sock \
