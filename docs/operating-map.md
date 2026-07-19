@@ -45,11 +45,11 @@ Owner: `AGENTS.md` sections 6 and 7; `bin/fm-brief.sh`; `bin/fm-spawn.sh`.
 
 ## 6. Spawn
 
-`fm-spawn.sh` allocates the canonical `fm-<id>` tmux window, validates its immutable window ID and title before issuing pane commands, gets or validates an isolated worktree of the target project, writes the task meta record, launches the selected harness with the resolved model and effort when supported, and installs any harness-specific turn-end hooks. The detailed target-repository containment contract lives in [architecture.md](architecture.md#worktrees-not-branches-in-your-checkout).
+`fm-spawn.sh` selects the runtime session-provider backend, then allocates the canonical `fm-<id>` tmux endpoint in the P1 adapter, validates its immutable window ID and title before issuing pane commands, gets or validates an isolated worktree of the target project, writes the task meta record, launches the selected harness with the resolved model and effort when supported, and installs any harness-specific turn-end hooks. The backend selection and compatibility contract lives in [architecture.md](architecture.md#runtime-session-provider-backend); the detailed target-repository containment contract lives in [architecture.md](architecture.md#worktrees-not-branches-in-your-checkout).
 It uses the window ID for all post-create tmux operations, so a mutable title cannot redirect a task command; an unverified ID or title cleans up a uniquely identified new window and aborts the spawn.
 Secondmate spawn uses the same direct-report machinery but points at an isolated firstmate home.
 
-Owner: `AGENTS.md` sections 4 and 7; `bin/fm-spawn.sh`; `bin/fm-harness.sh`; `bin/fm-task-identity-lib.sh`; `bin/fm-home-seed.sh`.
+Owner: `AGENTS.md` sections 4 and 7; `bin/fm-backend.sh`; `bin/backends/tmux.sh`; `bin/fm-spawn.sh`; `bin/fm-harness.sh`; `bin/fm-task-identity-lib.sh`; `bin/fm-home-seed.sh`.
 
 ## 7. Tmux, Worktree, And Meta Identity
 
@@ -57,7 +57,7 @@ Each direct report has a `state/<id>.meta` record with fields such as `window=`,
 The stored `window=` value is the human-facing canonical `session:fm-<id>` label; spawn uses the tmux-assigned immutable window ID internally after creation.
 The tmux window is the live work surface, while the worktree or secondmate home is the filesystem boundary.
 
-Owner: `AGENTS.md` sections 2, 6, and 7; `bin/fm-spawn.sh`; `bin/fm-tmux-lib.sh`; `bin/fm-tangle-lib.sh`.
+Owner: `AGENTS.md` sections 2, 6, and 7; `bin/fm-backend.sh`; `bin/backends/tmux.sh`; `bin/fm-spawn.sh`; `bin/fm-tangle-lib.sh`.
 
 ## 8. Status And Current State
 
