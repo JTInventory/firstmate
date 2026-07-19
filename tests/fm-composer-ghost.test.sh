@@ -94,13 +94,13 @@ test_strip_ghost_keeps_colored_text_with_2_payloads() {
   local out
   out=$(printf '\033[38;5;2mgreen typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "green typed" ] || fail "8-bit color payload 2 was treated as dim: '$out'"
-  out=$(printf '\033[38;2;1;2;3mtruecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[38;2;224;222;244mtruecolor typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "truecolor typed" ] || fail "truecolor payload 2 was treated as dim: '$out'"
   out=$(printf '\033[48;2;4;5;6mbackground typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "background typed" ] || fail "background truecolor payload was treated as dim: '$out'"
   out=$(printf '\033[58;5;2munderline-color typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "underline-color typed" ] || fail "underline color payload 2 was treated as dim: '$out'"
-  out=$(printf '\033[38:2::1:2:3mcolon truecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[38:2::224:222:244mcolon truecolor typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "colon truecolor typed" ] || fail "colon truecolor payload 2 was treated as dim: '$out'"
   out=$(printf '\033[58::5::2mcolon underline typed\033[0m\n' | fm_tmux_strip_ghost)
   [ "$out" = "colon underline typed" ] || fail "colon underline SGR leaked or dimmed text: '$out'"
@@ -161,7 +161,7 @@ test_colored_text_with_2_payload_still_pending() {
   PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_pane_input_pending "fakepane" \
     || fail "8-bit colored typed text was not detected as pending"
-  printf '\xe2\x9d\xaf \033[38;2;1;2;3mtruecolor typed\033[0m\n' > "$capture"
+  printf '\xe2\x9d\xaf \033[38;2;224;222;244mtruecolor typed\033[0m\n' > "$capture"
   PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_pane_input_pending "fakepane" \
     || fail "truecolor typed text was not detected as pending"

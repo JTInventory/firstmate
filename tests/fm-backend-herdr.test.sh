@@ -282,30 +282,140 @@ test_submit_retry_verdicts() {
   printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
   : > "$resp/3.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/5.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/6.out"
-  printf '%s\n' '>' > "$resp/7.out"
+  printf '%s\n' '{}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/7.out"
   fb=$(make_fake_herdr "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 2 0 0' "$ROOT" '*')
   [ "$out" = empty ] || fail "composer clear should report empty, got '$out'"
-  assert_contains "$(cat "$log")" $'\x1fpane\x1fread' "submit acknowledgement did not inspect the composer"
-  assert_not_contains "$(cat "$log")" $'\x1fagent\x1fget' "submit acknowledgement used unrelated agent state"
+  assert_contains "$(cat "$log")" $'\x1fagent\x1fget' "submit acknowledgement did not inspect native agent state"
+  assert_not_contains "$(cat "$log")" $'\x1fpane\x1fread' "native submit confirmation unexpectedly read the composer"
   find "$resp" -maxdepth 1 -type f -delete
   printf '%s\n' '{"client":{"version":"0.7.4","protocol":14}}' > "$resp/1.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/2.out"
   : > "$resp/3.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/4.out"
+  printf '%s\n' '{}' > "$resp/4.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/5.out"
-  printf '%s\n' '{"server":{"running":true}}' > "$resp/6.out"
-  printf 'he\nllo\n' > "$resp/7.out"
+  printf '%s\n' '{}' > "$resp/6.out"
+  printf '%s\n' '{"server":{"running":true}}' > "$resp/7.out"
+  printf 'he\nllo\n' > "$resp/8.out"
   status=0
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 hello 1 0 0' "$ROOT") || status=$?
   [ "$status" -eq 0 ] && [ "$out" = pending ] || fail "wrapped composer text was not retained as pending"
   assert_contains "$(cat "$log")" $'\x1f--lines\x1f1' "submit acknowledgement did not inspect the composer row"
-  pass "Herdr text submit confirms the composer cleared"
+  pass "Herdr text submit uses native confirmation and safe composer fallback"
+}
+
+test_wait_for_working_classification() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    seq_file=$(mktemp)
+    trap "rm -f \"$seq_file\"" EXIT
+    fm_backend_herdr_agent_status_raw() {
+      n=$(( $(cat "$seq_file" 2>/dev/null || printf 0) + 1 ))
+      printf "%s" "$n" > "$seq_file"
+      case "$n" in
+        1) printf idle ;;
+        2) printf working ;;
+      esac
+    }
+    FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
+    fm_backend_herdr_wait_for_working demo pane 0 2
+  ' "$ROOT")
+  [ "$out" = busy ] || fail "wait_for_working missed a later working transition: '$out'"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_agent_status_raw() { printf blocked; }
+    fm_backend_herdr_wait_for_working demo pane 0 1
+  ' "$ROOT")
+  [ "$out" = busy ] || fail "submit classification did not treat blocked as busy: '$out'"
+  pass "Herdr wait_for_working samples native status and classifies blocked submits"
+}
+
+test_husk_duplicate_is_replaced_after_creation() {
+  local dir="$TMP_ROOT/husk" out log
+  mkdir -p "$dir"
+  log="$dir/log"
+  out=$(FM_HOME="$dir" FM_HERDR_PRUNE_CLOSE="$dir/close" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_lock_acquire() { :; }
+    fm_backend_herdr_workspace_lock_release() { :; }
+    fm_backend_herdr_tab_ids_for_label() { printf "husk-tab"; }
+    fm_backend_herdr_pane_for_tab() { printf "husk-pane"; }
+    fm_backend_herdr_tab_is_husk() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab create"*) printf "%s" '\''{"result":{"tab":{"tab_id":"new-tab"},"root_pane":{"pane_id":"new-pane"}}}'\''; printf "\\n"; ;;
+        *"tab close"*) printf "closed\\n" >> "$FM_HERDR_TEST_LOG" ;;
+      esac
+    }
+    fm_backend_herdr_create_task session:w1 fm-demo /tmp
+  ' "$ROOT" 2>/dev/null)
+  [ "$out" = 'new-tab new-pane' ] || fail "husk replacement returned '$out'"
+  pass "Herdr replaces a confirmed husk only after creating the replacement"
+}
+
+test_seed_prune_is_exact_and_fail_closed() {
+  local dir="$TMP_ROOT/prune" out
+  mkdir -p "$dir"
+  out=$(FM_HOME="$dir" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab list"*) printf "%s" '\''{"result":{"tabs":[{"tab_id":"seed","label":"1"},{"tab_id":"task","label":"fm-live"}]}}'\'' ;;
+        *"pane close"*) : > "$FM_HERDR_PRUNE_CLOSE" ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { printf seed-pane; }
+    fm_backend_herdr_pane_agent_state() { printf live; }
+    fm_backend_herdr_workspace_prune_seeded_default_tab demo w1 seed
+  ' "$ROOT")
+  [ -z "$out" ] || fail "live seeded tab was pruned: $out"
+  out=$(FM_HOME="$dir" FM_HERDR_PRUNE_CLOSE="$dir/close" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab list"*) printf "%s" '\''{"result":{"tabs":[{"tab_id":"seed","label":"1"},{"tab_id":"task","label":"fm-live"}]}}'\'' ;;
+        *"pane close"*) : > "$FM_HERDR_PRUNE_CLOSE" ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { printf seed-pane; }
+    fm_backend_herdr_pane_agent_state() { printf no-agent; }
+    fm_backend_herdr_workspace_prune_seeded_default_tab demo w1 seed
+  ' "$ROOT")
+  [ -e "$dir/close" ] || fail "confirmed seed husk was not pruned"
+  pass "Herdr seed pruning uses the exact spawn seed and refuses live panes"
+}
+
+test_eventwait_returns_fresh_blocked_transition() {
+  local dir="$TMP_ROOT/eventwait" state reader out
+  mkdir -p "$dir" "$dir/state"
+  state="$dir/state"
+  reader="$dir/reader"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+printf '@subscribed\n'
+printf 'pane-1\tworkspace-1\tblocked\tclaude\n'
+SH
+  chmod +x "$reader"
+  out=$(FM_HOME="$dir" FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_socket_path() { printf fake-socket; }
+      fm_backend_herdr_agent_status_raw() { :; }
+      record=$(fm_backend_herdr_wait_transition demo 2 "$1" demo:pane-1) || exit $?
+      fm_backend_herdr_commit_transition "$1" demo "$record"
+      printf "%s" "$record"
+    ' "$ROOT" "$state")
+  [ "$out" = $'pane-1\tworkspace-1\t\tblocked\tclaude' ] \
+    || fail "eventwait returned '$out'"
+  [ -e "$state/.herdr-escalated-demo_pane-1" ] || fail "blocked edge was not deduped"
+  pass "Herdr eventwait returns and records a fresh blocked transition"
 }
 
 test_dispatch_and_meta_routing() {
@@ -329,4 +439,8 @@ test_task_and_target_primitives
 test_kill_requires_verified_absence
 test_capture_send_busy
 test_submit_retry_verdicts
+test_wait_for_working_classification
+test_husk_duplicate_is_replaced_after_creation
+test_seed_prune_is_exact_and_fail_closed
+test_eventwait_returns_fresh_blocked_transition
 test_dispatch_and_meta_routing
