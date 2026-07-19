@@ -156,23 +156,19 @@ test_workspace_labels_and_container() {
   [ "$out" = w2 ] || fail "stale workspace lock was not recovered"
   [ ! -e "$dir/home/.fm-herdr-workspace.lock" ] || fail "workspace lock was not released after stale recovery"
 
-  find "$resp" -maxdepth 1 -type f -delete
   rm -rf "$dir/home/.fm-herdr-workspace.lock"
   mkdir -p "$dir/home/.fm-herdr-workspace.lock"
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$dir/fakebin/lsof"
-  chmod +x "$dir/fakebin/lsof"
-  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/1.out"
-  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w3","label":"firstmate"}}}' > "$resp/2.out"
-  : > "$resp/3.out"
-  out=$(FM_HOME="$dir/home" FM_BACKEND_HERDR_LEGACY_LOCK_STALE_AFTER=0 PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT")
-  [ "$out" = w3 ] || fail "stale malformed workspace lock was not recovered"
-  [ ! -e "$dir/home/.fm-herdr-workspace.lock" ] || fail "malformed workspace lock was not released after stale recovery"
+  status=0
+  FM_HOME="$dir/home" PATH="$fb:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_lock_owner_status "$FM_HOME/.fm-herdr-workspace.lock"' "$ROOT" \
+    >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 0 ] || fail "ambiguous legacy workspace lock was treated as stale"
+  [ -d "$dir/home/.fm-herdr-workspace.lock" ] || fail "ambiguous legacy workspace lock was removed"
 
   mkdir -p "$dir/home/.fm-herdr-workspace.lock"
   printf '1\n' > "$dir/home/.fm-herdr-workspace.lock/pid"
   status=0
-  FM_HOME="$dir/home" FM_BACKEND_HERDR_LEGACY_LOCK_STALE_AFTER=0 PATH="$fb:$PATH" \
+  FM_HOME="$dir/home" PATH="$fb:$PATH" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_lock_owner_status "$FM_HOME/.fm-herdr-workspace.lock"' "$ROOT" \
     >/dev/null 2>&1 || status=$?
   [ "$status" -eq 0 ] || fail "live legacy lock without pid-start was treated as stale"

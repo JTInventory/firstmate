@@ -20,7 +20,6 @@ FM_BACKEND_HERDR_HOME_TOKEN=firstmate_home
 FM_BACKEND_HERDR_VERSION_VERIFIED=0
 FM_BACKEND_HERDR_VERSION_VERIFIED_SESSION=
 FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS=${FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS:-100}
-FM_BACKEND_HERDR_LEGACY_LOCK_STALE_AFTER=${FM_BACKEND_HERDR_LEGACY_LOCK_STALE_AFTER:-2}
 
 fm_backend_herdr_workspace_label() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
@@ -137,28 +136,6 @@ fm_backend_herdr_pid_start() {
   printf '%s\n' "$out"
 }
 
-fm_backend_herdr_legacy_lock_stale() {
-  local lock=$1 output status mtime now age
-  [ -d "$lock" ] || return 1
-  command -v lsof >/dev/null 2>&1 || return 1
-  if output=$(lsof -- "$lock" 2>&1); then
-    return 1
-  else
-    status=$?
-  fi
-  [ "$status" -eq 1 ] && [ -z "$output" ] || return 1
-  if [ "$(uname -s)" = Darwin ]; then
-    mtime=$(stat -f %m "$lock" 2>/dev/null) || return 1
-  else
-    mtime=$(stat -c %Y "$lock" 2>/dev/null) || return 1
-  fi
-  now=$(date +%s) || return 1
-  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
-  case "$now" in ''|*[!0-9]*) return 1 ;; esac
-  age=$((now - mtime))
-  [ "$age" -ge "$FM_BACKEND_HERDR_LEGACY_LOCK_STALE_AFTER" ]
-}
-
 fm_backend_herdr_lock_owner_status() {
   local lock=$1 pid start current owner
   if [ -L "$lock" ]; then
@@ -175,9 +152,6 @@ fm_backend_herdr_lock_owner_status() {
   if [ -d "$lock" ] && [ -z "$start" ]; then
     case "$pid" in
       ''|*[!0-9]*)
-        if fm_backend_herdr_legacy_lock_stale "$lock"; then
-          return 1
-        fi
         return 0
         ;;
       *)
