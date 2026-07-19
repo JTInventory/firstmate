@@ -434,6 +434,28 @@ fm_backend_herdr_tab_close_by_label() {  # <session> <workspace> <label>
   fm_backend_herdr_tab_absent "$session" "$wsid" "$tab_id"
 }
 
+fm_backend_herdr_cleanup_created_tab() {  # <session> <workspace> <label> <tab> <existing-tabs>
+  local session=$1 wsid=$2 label=$3 tab_id=$4 existing=$5 tabs candidate
+  local -a new_tabs=()
+  if [ -n "$tab_id" ]; then
+    fm_backend_herdr_tab_close_exact "$session" "$wsid" "$tab_id"
+    return $?
+  fi
+  tabs=$(fm_backend_herdr_tab_ids_for_label "$session" "$wsid" "$label") || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    printf '%s\n' "$existing" | grep -Fqx -- "$candidate" && continue
+    new_tabs+=("$candidate")
+  done <<EOF
+$tabs
+EOF
+  case "${#new_tabs[@]}" in
+    0) return 0 ;;
+    1) fm_backend_herdr_tab_close_exact "$session" "$wsid" "${new_tabs[0]}" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Classify a pane without creating a server or mutating Herdr. Error responses
 # are intentionally read from stderr: Herdr reports pane_not_found and
 # agent_not_found there on real installs. Unknown shapes always fail closed.
@@ -485,8 +507,11 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
     created_tab_committed=0
     cleanup_created_tab() {
       local status=$?
-      if [ -n "${tab_id:-}" ] && [ "$created_tab_committed" -ne 1 ]; then
-        fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
+      if [ "$created_tab_committed" -ne 1 ]; then
+        if ! fm_backend_herdr_cleanup_created_tab "$session" "$wsid" "$label" "${tab_id:-}" "$dup_tabs"; then
+          printf 'error: failed to verify cleanup of Herdr tab label %s\n' "$label" >&2
+          status=1
+        fi
       fi
       trap - EXIT
       fm_backend_herdr_workspace_lock_release "$lock"

@@ -368,16 +368,16 @@ test_create_task_cleans_up_after_postcreate_failure() {
   local dir log out status=0
   dir="$TMP_ROOT/postcreate-cleanup"; log="$dir/log"
   mkdir -p "$dir"
-  out=$(FM_HOME="$dir" FM_HERDR_TEST_LOG="$log" bash -c '
+  out=$(FM_HOME="$dir" FM_HERDR_TEST_LOG="$log" FM_HERDR_TEST_CREATED="$dir/created" FM_HERDR_TEST_CLOSED="$dir/closed" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_workspace_lock_acquire() { :; }
     fm_backend_herdr_workspace_lock_release() { :; }
-    fm_backend_herdr_tab_ids_for_label() { :; }
     fm_backend_herdr_workspace_prune_seeded_default_tab() { return 1; }
     fm_backend_herdr_cli() {
       case "$*" in
-        *"tab create"*) printf "%s" '\''{"result":{"tab":{"tab_id":"new-tab"},"root_pane":{"pane_id":"new-pane"}}}'\'' ;;
-        *"tab close"*) printf "%s\n" "$*" >> "$FM_HERDR_TEST_LOG" ;;
+        *"tab create"*) : > "$FM_HERDR_TEST_CREATED"; printf "%s" '\''{"result":{"root_pane":{"pane_id":"new-pane"}}}'\'' ;;
+        *"tab close"*) printf "%s\n" "$*" >> "$FM_HERDR_TEST_LOG"; : > "$FM_HERDR_TEST_CLOSED" ;;
+        *"tab list"*) if [ -e "$FM_HERDR_TEST_CLOSED" ] || [ ! -e "$FM_HERDR_TEST_CREATED" ]; then printf "%s" '\''{"result":{"tabs":[]}}'\''; else printf "%s" '\''{"result":{"tabs":[{"tab_id":"new-tab","label":"fm-demo"}]}}'\''; fi ;;
       esac
     }
     fm_backend_herdr_create_task session:w1 fm-demo /tmp
