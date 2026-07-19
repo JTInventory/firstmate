@@ -484,6 +484,15 @@ pane_input_pending() {  # <target> [backend]
   [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = pending ]
 }
 
+pane_input_blocked() {  # <target> [backend]
+  local target=$1 backend=${2:-tmux} state
+  state=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  case "$state" in
+    pending|unknown) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
   buf="$state/.subsuper-escalations"
@@ -782,8 +791,8 @@ inject_msg() {  # <message> [state]
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
-  if pane_input_pending "$target" "$backend"; then
-    log "inject deferred: supervisor pane has pending input (non-empty composer)"
+  if pane_input_blocked "$target" "$backend"; then
+    log "inject deferred: supervisor pane composer is pending or unknown"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never

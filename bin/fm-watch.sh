@@ -41,6 +41,8 @@ mkdir -p "$STATE"
 # capture plus the existing hash/busy checks. Keep the wake policy unchanged.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-watch-events-lib.sh
+. "$SCRIPT_DIR/fm-watch-events-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -295,6 +297,48 @@ recorded_windows() {
     seen="$seen|$w|"
     printf '%s\n' "$w"
   done
+}
+
+event_wait_herdr() {
+  local timeout=$1 w backend session first_session='' record rc=0 pane_id to agent window meta task reason
+  local -a windows=()
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    backend=$(window_backend "$w")
+    [ "$backend" = herdr ] || continue
+    session=${w%%:*}
+    [ -n "$session" ] && [ "$session" != "$w" ] || continue
+    if [ -z "$first_session" ]; then
+      first_session=$session
+    fi
+    [ "$session" = "$first_session" ] || continue
+    windows+=("$w")
+  done < <(recorded_windows)
+  [ "${#windows[@]}" -gt 0 ] || return 2
+  fm_watch_herdr_events_capable "$first_session" || return 2
+
+  record=$(fm_watch_wait_herdr_transition "$STATE" "$timeout" "${windows[@]}") || rc=$?
+  case "$rc" in
+    0)
+      pane_id=$(fm_transition_pane_id "$record")
+      to=$(fm_transition_to_status "$record")
+      agent=$(fm_transition_agent "$record")
+      window="$first_session:$pane_id"
+      meta=$(fm_backend_meta_for_window "$window" "$STATE" 2>/dev/null || true)
+      if [ -n "$meta" ]; then
+        task=$(basename "$meta" .meta)
+      else
+        task="$window"
+      fi
+      reason="check: Herdr transition $window -> $to${agent:+ ($agent)}"
+      fm_wake_append check "$task" "$reason" || return 1
+      fm_backend_commit_transition herdr "$STATE" "$first_session" "$record" || return 1
+      wake "$reason"
+      ;;
+    1) return 0 ;;
+    2) return 2 ;;
+    *) return "$rc" ;;
+  esac
 }
 
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
@@ -653,5 +697,11 @@ EOF
     fi
   fi
 
-  sleep "$POLL"
+  event_wait_herdr "$POLL"
+  event_rc=$?
+  case "$event_rc" in
+    0) continue ;;
+    2) sleep "$POLL" ;;
+    *) exit "$event_rc" ;;
+  esac
 done

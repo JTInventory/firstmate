@@ -182,6 +182,9 @@ test_task_and_target_primitives() {
   local lines dir log resp fb out status=0
   read -r dir log resp < <(herdr_case task)
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-dup"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
   fb=$(make_fake_herdr "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup /tmp' "$ROOT" 2>&1) || status=$?
@@ -367,8 +370,8 @@ test_seed_prune_is_exact_and_fail_closed() {
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_cli() {
       case "$*" in
-        *"tab list"*) printf "%s" '\''{"result":{"tabs":[{"tab_id":"seed","label":"1"},{"tab_id":"task","label":"fm-live"}]}}'\'' ;;
-        *"pane close"*) : > "$FM_HERDR_PRUNE_CLOSE" ;;
+        *"tab list"*) if [ -e "$FM_HERDR_PRUNE_CLOSE" ]; then printf "%s" '\''{"result":{"tabs":[{"tab_id":"task","label":"fm-live"}]}}'\''; else printf "%s" '\''{"result":{"tabs":[{"tab_id":"seed","label":"1"},{"tab_id":"task","label":"fm-live"}]}}'\''; fi ;;
+        *"tab close"*) : > "$FM_HERDR_PRUNE_CLOSE" ;;
       esac
     }
     fm_backend_herdr_pane_for_tab() { printf seed-pane; }
@@ -380,8 +383,8 @@ test_seed_prune_is_exact_and_fail_closed() {
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_cli() {
       case "$*" in
-        *"tab list"*) printf "%s" '\''{"result":{"tabs":[{"tab_id":"seed","label":"1"},{"tab_id":"task","label":"fm-live"}]}}'\'' ;;
-        *"pane close"*) : > "$FM_HERDR_PRUNE_CLOSE" ;;
+        *"tab list"*) if [ -e "$FM_HERDR_PRUNE_CLOSE" ]; then printf "%s" '\''{"result":{"tabs":[{"tab_id":"task","label":"fm-live"}]}}'\''; else printf "%s" '\''{"result":{"tabs":[{"tab_id":"seed","label":"1"},{"tab_id":"task","label":"fm-live"}]}}'\''; fi ;;
+        *"tab close"*) : > "$FM_HERDR_PRUNE_CLOSE" ;;
       esac
     }
     fm_backend_herdr_pane_for_tab() { printf seed-pane; }
@@ -389,7 +392,36 @@ test_seed_prune_is_exact_and_fail_closed() {
     fm_backend_herdr_workspace_prune_seeded_default_tab demo w1 seed
   ' "$ROOT")
   [ -e "$dir/close" ] || fail "confirmed seed husk was not pruned"
-  pass "Herdr seed pruning uses the exact spawn seed and refuses live panes"
+  out=$(FM_HOME="$dir" FM_HERDR_PRUNE_CLOSE="$dir/close-no-pane" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab list"*) if [ -e "$FM_HERDR_PRUNE_CLOSE" ]; then printf "%s" '\''{"result":{"tabs":[{"tab_id":"task","label":"fm-live"}]}}'\''; else printf "%s" '\''{"result":{"tabs":[{"tab_id":"seed","label":"1"},{"tab_id":"task","label":"fm-live"}]}}'\''; fi ;;
+        *"tab close"*) : > "$FM_HERDR_PRUNE_CLOSE" ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { :; }
+    fm_backend_herdr_workspace_prune_seeded_default_tab demo w1 seed
+  ' "$ROOT")
+  [ -e "$dir/close-no-pane" ] || fail "dead seeded tab without a pane was not pruned"
+  pass "Herdr seed pruning closes and verifies the exact seeded tab"
+}
+
+test_event_capability_uses_named_session() {
+  local lines dir log resp fb
+  read -r dir log resp < <(herdr_case events-capability)
+  printf '%s\n' '{"client":{"protocol":16}}' > "$resp/1.out"
+  printf '%s\n' 'events.subscribe pane.agent_status_changed' > "$resp/2.out"
+  fb=$(make_fake_herdr "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_EVENT_READER="$dir/reader" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable named-session' "$ROOT" \
+    || fail "named-session event capability probe failed"
+  assert_contains "$(cat "$log")" $'HERDR_SESSION=named-session\x1fstatus\x1f--json\x1f--session\x1fnamed-session' \
+    "event capability status probe ignored the named session"
+  assert_contains "$(cat "$log")" $'HERDR_SESSION=named-session\x1fapi\x1fschema\x1f--json\x1f--session\x1fnamed-session' \
+    "event capability schema probe ignored the named session"
+  pass "Herdr event capability probes use the explicit session"
 }
 
 test_eventwait_returns_fresh_blocked_transition() {
@@ -442,5 +474,6 @@ test_submit_retry_verdicts
 test_wait_for_working_classification
 test_husk_duplicate_is_replaced_after_creation
 test_seed_prune_is_exact_and_fail_closed
+test_event_capability_uses_named_session
 test_eventwait_returns_fresh_blocked_transition
 test_dispatch_and_meta_routing

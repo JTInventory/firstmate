@@ -658,6 +658,24 @@ test_inject_msg_herdr_submits_through_backend() {
   pass "inject_msg sends Herdr supervisor escalations through backend primitives"
 }
 
+test_inject_msg_unknown_composer_defers() {
+  local dir state
+  dir=$(make_supercase inject-unknown-composer)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_composer_state() { printf 'unknown'; }
+    fm_backend_send_text_submit() { fail "unknown composer state reached submit"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p2 \
+      inject_msg hello "$state"; then
+      fail "unknown composer state did not defer injection"
+    fi
+  ) || fail "unknown composer guard test failed"
+  pass "inject_msg defers when composer state is unknown"
+}
+
 test_daemon_refuses_unsupported_supervisor_backend() {
   local dir state out
   dir=$(make_supercase unsupported-supervisor-backend)
@@ -956,6 +974,7 @@ test_housekeeping_uses_recorded_herdr_endpoint
 test_housekeeping_uses_recorded_herdr_pause_endpoint
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_submits_through_backend
+test_inject_msg_unknown_composer_defers
 test_daemon_refuses_unsupported_supervisor_backend
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal

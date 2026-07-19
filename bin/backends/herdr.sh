@@ -360,16 +360,24 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace>
     '.result.tabs[]? | select(.tab_id == $tabid) | .label' 2>/dev/null)
   [ "$label" = 1 ] || return 0
   pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$seeded") || return 0
-  [ -n "$pane" ] || return 0
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  if [ -n "$pane" ]; then
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  else
+    state=dead
+  fi
   [ "$state" != live ] || return 0
   [ "$state" = no-agent ] || [ "$state" = dead ] || return 0
-  fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || true
+  fm_backend_herdr_tab_close_exact "$session" "$wsid" "$seeded"
 }
 
 fm_backend_herdr_pane_for_tab() {  # <session> <workspace> <tab>
   local session=$1 wsid=$2 tab_id=$3 panes
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '
+    (.result | type) == "object"
+    and (.result.panes | type) == "array"
+    and all(.result.panes[]; type == "object" and (.pane_id | type) == "string" and (.tab_id | type) == "string")
+  ' >/dev/null 2>&1 || return 1
   printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
     '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
 }
@@ -409,6 +417,13 @@ fm_backend_herdr_tab_absent() {  # <session> <workspace> <tab>
     and all(.result.tabs[]; type == "object" and (.tab_id | type) == "string" and (.label | type) == "string")
     and all(.result.tabs[]; .tab_id != $tabid)
   ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_tab_close_exact() {  # <session> <workspace> <tab>
+  local session=$1 wsid=$2 tab_id=$3
+  [ -n "$tab_id" ] || return 1
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_tab_absent "$session" "$wsid" "$tab_id"
 }
 
 fm_backend_herdr_tab_close_by_label() {  # <session> <workspace> <label>
@@ -497,7 +512,7 @@ EOF
       echo "error: could not parse Herdr tab/pane id from tab create output" >&2
       exit 1
     fi
-    fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded"
+    fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded" || exit 1
     for dup in "${husks[@]:-}"; do
       [ -n "$dup" ] || continue
       fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
@@ -787,10 +802,10 @@ fm_backend_herdr_events_capable() {  # <session>
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
     command -v python3 >/dev/null 2>&1 || return 1
   fi
-  protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
-  schema=$(herdr api schema --json 2>/dev/null) || return 1
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || return 1
   printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
   printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
   return 0
