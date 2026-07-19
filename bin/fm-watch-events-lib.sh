@@ -34,6 +34,6 @@ fm_watch_wait_herdr_transition() {  # <state> <timeout> <session:pane...>
     [ "${w%%:*}" = "$session" ] || return 2
   done
   fm_watch_herdr_events_capable "$session" || return 2
-  local FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1
+  local -x FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1
   fm_backend_wait_transition herdr "$session" "$timeout" "$state" "${windows[@]}"
 }
