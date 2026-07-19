@@ -79,29 +79,27 @@ test_selection_and_metadata() {
   [ "$(fm_backend_of_meta "$meta")" = tmux ] || fail "explicit backend=tmux was not read"
 
   fm_backend_validate tmux || fail "tmux should be known"
-  if fm_backend_validate herdr >/dev/null 2>&1; then
-    fail "unimplemented herdr backend was accepted"
-  fi
-  pass "backend selection precedence, metadata default, and unknown refusal"
+  fm_backend_validate herdr || fail "Herdr should be accepted as the experimental opt-in backend"
+  pass "backend selection precedence, metadata default, and known/unknown validation"
 }
 
 test_spawn_rejects_unknown_selection() {
   local config="$TMP_ROOT/spawn-selection-config" out
   mkdir -p "$config"
 
-  out=$(FM_SPAWN_NO_GUARD=1 FM_BACKEND=herdr "$ROOT/bin/fm-spawn.sh" 2>&1) \
-    && fail "FM_BACKEND=herdr should stop spawn before argument/project validation"
-  assert_contains "$out" "unknown backend 'herdr'" "FM_BACKEND refusal did not name the backend"
+  out=$(FM_SPAWN_NO_GUARD=1 FM_BACKEND=orca "$ROOT/bin/fm-spawn.sh" 2>&1) \
+    && fail "FM_BACKEND=orca should stop spawn before argument/project validation"
+  assert_contains "$out" "unknown backend 'orca'" "FM_BACKEND refusal did not name the backend"
 
-  printf 'herdr\n' > "$config/backend"
+  printf 'orca\n' > "$config/backend"
   out=$(FM_SPAWN_NO_GUARD=1 FM_BACKEND='' FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-spawn.sh" 2>&1) \
-    && fail "config/backend=herdr should stop spawn before argument/project validation"
-  assert_contains "$out" "unknown backend 'herdr'" "config/backend refusal did not name the backend"
+    && fail "config/backend=orca should stop spawn before argument/project validation"
+  assert_contains "$out" "unknown backend 'orca'" "config/backend refusal did not name the backend"
 
-  out=$(FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" --backend herdr 2>&1) \
-    && fail "--backend herdr should stop spawn before argument/project validation"
-  assert_contains "$out" "unknown backend 'herdr'" "--backend refusal did not name the backend"
+  out=$(FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" --backend orca 2>&1) \
+    && fail "--backend orca should stop spawn before argument/project validation"
+  assert_contains "$out" "unknown backend 'orca'" "--backend refusal did not name the backend"
   pass "fm-spawn refuses unknown backends from FM_BACKEND, config/backend, and --backend"
 }
 

@@ -104,7 +104,7 @@ backups/             root-local preservation files; not a canonical tracked surf
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; non-default backends also record backend=, and Herdr records herdr_session=, herdr_workspace_id=, herdr_tab_id=, and herdr_pane_id=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -122,9 +122,10 @@ backups/             root-local preservation files; not a canonical tracked surf
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The tmux window for a task is always named `fm-<id>`.
+The tmux window for a tmux-backed task is named `fm-<id>`.
 `fm-spawn.sh` creates that window by tmux window ID, disables automatic and application-driven renaming, restores the canonical name, and verifies it before sending any pane commands.
-After creation it targets the immutable window ID, never the mutable `session:window-name` label; if setup cannot prove the ID or canonical name, it cleans up a uniquely identified new window and aborts.
+Herdr-backed tasks instead use a `fm-<id>` tab and record an opaque `session:pane` target; the Herdr workspace is scoped to the firstmate home.
+After creation, tmux targets the immutable window ID rather than the mutable `session:window-name` label; Herdr targets the recorded pane ID. If setup cannot prove the backend endpoint, it cleans up the uniquely identified new endpoint and aborts.
 
 ## 3. Bootstrap (run at every session start)
 
@@ -300,9 +301,9 @@ Reconcile reality with your records before doing anything else:
 2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
 3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
    Treat status files as wake-event history; when you need a live current-state read for a recorded direct report, use `bin/fm-crew-state.sh <id>` instead of inferring from the last status line.
-4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those tmux panes.
+4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check each task through its recorded tmux or Herdr endpoint.
    Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans.
-5. If a recorded direct-report window is missing, reconcile it through its meta as described below.
+5. If a recorded direct-report endpoint is missing, reconcile it through its meta as described below.
 6. For meta with no window, reconcile by kind.
    For ordinary crewmates, check `treehouse status` in that project, salvage or report.
    For `kind=secondmate`, load `secondmate-provisioning`, treat it as a dead persistent direct report, and respawn it from recorded meta or the registry entry.
@@ -315,7 +316,7 @@ Reconcile reality with your records before doing anything else:
 10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
 
 A firstmate restart must be a non-event.
-All truth lives in tmux, state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
+All truth lives in the selected session provider (tmux by default or Herdr for marked tasks), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -497,9 +498,9 @@ When `config/crew-dispatch.json` is absent and the active crew harness still mat
 If a manual harness/raw launch is selected, a secondmate profile leaves an axis as `default`, or the active crew harness overrides the routed harness, an omitted axis stays `default` and no launch flag is passed for that axis.
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
-For ship and scout tasks, the script creates the window (in your current tmux session, or a dedicated `firstmate` session when you are outside tmux), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine worktree of the target project (matching physical git common dir and target-repo HEAD, aborting and killing the fresh window otherwise, to prevent wrong-repo launches and the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+For ship and scout tasks, the script creates the selected backend endpoint (in your current tmux session or a dedicated `firstmate` session for tmux, or in the selected Herdr session), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine worktree of the target project (matching physical git common dir and target-repo HEAD, aborting and killing the fresh endpoint otherwise, to prevent wrong-repo launches and the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 For grok, the turn-end hook is one firstmate-owned global hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, activated only when the worktree holds the per-task `.fm-grok-turnend` token pointer that matches `state/<id>.grok-turnend-token`; teardown removes the pointer and token.
-For `kind=secondmate`, the script creates the same kind of window but starts directly in the persistent home.
+For `kind=secondmate`, the script creates the same kind of backend endpoint but starts directly in the persistent home.
 Before launching a secondmate, the script fast-forwards its home worktree to firstmate's own current default-branch commit, so a freshly spawned or recovery-respawned secondmate always starts on firstmate's current version.
 This is a purely local fast-forward of tracked files - never a fetch from origin, and never touching the gitignored operational dirs - so the secondmate's backlog, projects, and any prior in-flight work are untouched; a dirty, diverged, or in-flight home is left as-is and launches unchanged.
 If that pre-launch fast-forward is skipped, `fm-spawn.sh` prints a concise warning to stderr and still launches the secondmate from its unchanged checkout.
@@ -660,7 +661,7 @@ bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch-session.sh start   # durable home-scoped tmux runner; immediate re-arm after wake output
 bin/fm-watch-session.sh --status  # report whether this home's runner window is live
 bin/fm-watch.sh            # the detached watcher itself; exits with: signal|stale|check|heartbeat
-bin/fm-supervise.sh        # read-only checklist/JSON view of current work; never mutates state, tmux, git, treehouse, or GitHub; normalizes HOME-local Axi tool paths for non-interactive shells
+bin/fm-supervise.sh        # read-only checklist/JSON view of current work; never mutates state, tmux/Herdr, git, treehouse, or GitHub; normalizes HOME-local Axi tool paths for non-interactive shells
 bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
 bin/fm-crew-state.sh <id>  # one-line current-state read; reconciles matching run-step, pane, and status log
 ```
@@ -684,7 +685,7 @@ Heartbeats back off exponentially while they are the only wakes firing (600s dou
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
-tmux is the ground truth.
+Tmux is the default session ground truth. A task whose meta records `backend=herdr` uses its recorded Herdr `session:pane` target for endpoint reads and writes; treehouse remains the worktree ground truth. Herdr is experimental and must be enabled explicitly or through its documented `HERDR_ENV=1` auto-detection.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.

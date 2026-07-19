@@ -26,9 +26,10 @@ Homes may also carry a `## Secondmate Backlogs` inventory section with `- <secon
 ## Runtime backend (`config/backend` / `FM_BACKEND`)
 
 The runtime session-provider backend controls where task endpoints are created, captured, sent, watched, and killed.
-Tmux is still the only verified backend. New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, `FM_BACKEND`, the first non-empty line of local gitignored `config/backend`, then default `tmux`.
+Tmux remains the default. Herdr is an experimental opt-in backend for Herdr 0.7.x with protocol 14 or newer. New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, `FM_BACKEND`, the first non-empty line of local gitignored `config/backend`, then runtime auto-detection (`$TMUX` first, `HERDR_ENV=1` second), then default `tmux`.
 Unknown values are rejected. Default tmux task metadata omits `backend=tmux`; readers treat a missing `backend=` as tmux for compatibility.
 The `config/backend` file is local to a firstmate home and is not inherited by secondmate homes.
+When Herdr resolves, bootstrap checks `herdr`, `jq`, and `treehouse`; otherwise Herdr is not a required tool. See [herdr-backend.md](herdr-backend.md) for the guarded `fm-herdr-lab.sh` workflow. Herdr remains a session provider only: treehouse still provides worktrees.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -113,7 +114,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Toolchain
 
-On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh with `gh pr checks --json` support, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+On first launch the first mate detects what its required toolchain is missing or too old (tmux for the default backend, node, gh with `gh pr checks --json` support, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, and lavish-axi), lists it with the exact install commands, and installs only after you say go. When Herdr resolves, bootstrap also requires the Herdr 0.7.x CLI and `jq`.
 Bootstrap, spawn, teardown, and read-only supervision normalize existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories before looking up Axi tools. This covers clean non-interactive SSH shells without overriding an explicit caller PATH.
 Set `FM_TOOL_PATH_HOME` only when those shared lookups must use a home directory other than `HOME`, such as in a specialized shell or test fixture.
 When `config/crew-dispatch.json` or `config/secondmate-profile.json` exists, bootstrap also requires `jq` for JSON validation.
@@ -257,7 +258,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_BACKEND=tmux          # runtime session-provider override for new spawns; tmux only in this phase
+FM_BACKEND=tmux          # runtime session-provider override for new spawns; herdr is experimental and opt-in
 FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3   # additional `treehouse return` retries after a matching transient git index.lock error; invalid values use 3
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1   # whole seconds between those retries; 0 disables waiting and invalid values warn then use 1

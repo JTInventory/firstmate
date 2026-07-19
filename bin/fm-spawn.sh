@@ -10,8 +10,9 @@
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
 #   --backend <name> selects the runtime session-provider for this task. Without
-#   it, selection is FM_BACKEND, then config/backend, then tmux. Only tmux is
-#   verified in this PR. Default tmux tasks omit backend= from metadata.
+#   it, selection is FM_BACKEND, config/backend, runtime detection, then tmux.
+#   Tmux remains the default; Herdr is experimental and opt-in. Default tmux
+#   tasks omit backend= from metadata.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. It also reads fm-route.sh and fills any
 #   omitted --model/--effort axes from the route when the active crew harness still
@@ -60,7 +61,7 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
@@ -687,15 +688,24 @@ if [ "$KIND" = secondmate ]; then
   ROUTE_EFFORT=${EFFORT:-default}
 fi
 
-# Same session when firstmate already runs inside the selected backend;
-# dedicated container otherwise.
-SES=$(fm_backend_container_ensure "$BACKEND" "$PROJ_ABS")
-
 W="fm-$ID"
-T="$SES:$W"
+HERDR_SES=
+HERDR_WORKSPACE_ID=
+HERDR_TAB_ID=
+HERDR_PANE_ID=
+HERDR_SPAWN_TARGET=
 
 cleanup_spawn_window() {
   fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1 || true
+}
+
+cleanup_herdr_spawn() {
+  local rc=$?
+  if [ -n "${HERDR_SPAWN_TARGET:-}" ]; then
+    cleanup_spawn_window "$HERDR_SPAWN_TARGET"
+  fi
+  trap - EXIT
+  exit "$rc"
 }
 
 cleanup_unidentified_spawn_window() {
@@ -799,33 +809,61 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   }
 }
 
-WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
-WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS") || exit 1
-if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
-  cleanup_unidentified_spawn_window
-  echo "error: tmux did not return a window id for $T" >&2
-  exit 1
-fi
-if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
-  cleanup_spawn_window "$WID"
-  echo "error: tmux failed to disable automatic window renaming for $T" >&2
-  exit 1
-fi
-if ! fm_backend_set_task_option "$BACKEND" "$WID" allow-rename off; then
-  cleanup_spawn_window "$WID"
-  echo "error: tmux failed to disable window renaming for $T" >&2
-  exit 1
-fi
-if ! fm_backend_rename_task "$BACKEND" "$WID" "$W"; then
-  cleanup_spawn_window "$WID"
-  echo "error: tmux failed to restore canonical window name $T" >&2
-  exit 1
-fi
-if [ "$(fm_backend_task_name "$BACKEND" "$WID")" != "$W" ]; then
-  cleanup_spawn_window "$WID"
-  echo "error: tmux did not retain canonical window name $T" >&2
-  exit 1
-fi
+case "$BACKEND" in
+  tmux)
+    SES=$(fm_backend_container_ensure "$BACKEND" "$PROJ_ABS")
+    T="$SES:$W"
+    WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
+    WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS") || exit 1
+    if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
+      cleanup_unidentified_spawn_window
+      echo "error: tmux did not return a window id for $T" >&2
+      exit 1
+    fi
+    if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
+      cleanup_spawn_window "$WID"
+      echo "error: tmux failed to disable automatic window renaming for $T" >&2
+      exit 1
+    fi
+    if ! fm_backend_set_task_option "$BACKEND" "$WID" allow-rename off; then
+      cleanup_spawn_window "$WID"
+      echo "error: tmux failed to disable window renaming for $T" >&2
+      exit 1
+    fi
+    if ! fm_backend_rename_task "$BACKEND" "$WID" "$W"; then
+      cleanup_spawn_window "$WID"
+      echo "error: tmux failed to restore canonical window name $T" >&2
+      exit 1
+    fi
+    if [ "$(fm_backend_task_name "$BACKEND" "$WID")" != "$W" ]; then
+      cleanup_spawn_window "$WID"
+      echo "error: tmux did not retain canonical window name $T" >&2
+      exit 1
+    fi
+    ;;
+  herdr)
+    HERDR_LABEL_HOME="$FM_HOME"
+    [ "$KIND" = secondmate ] && HERDR_LABEL_HOME="$PROJ_ABS"
+    CONTAINER=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_container_ensure "$BACKEND" "$PROJ_ABS") || exit 1
+    CONTAINER_MAIN=${CONTAINER%%$'\t'*}
+    HERDR_SEEDED=
+    [ "$CONTAINER_MAIN" = "$CONTAINER" ] || HERDR_SEEDED=${CONTAINER#*$'\t'}
+    HERDR_SES=${CONTAINER_MAIN%%:*}
+    HERDR_WORKSPACE_ID=${CONTAINER_MAIN#*:}
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_create_task "$BACKEND" "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED") || exit 1
+    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+      echo "error: Herdr did not return a tab/pane id for $W" >&2
+      exit 1
+    fi
+    T="$HERDR_SES:$HERDR_PANE_ID"
+    WID="$T"
+    HERDR_SPAWN_TARGET="$T"
+    trap cleanup_herdr_spawn EXIT
+    ;;
+esac
 if [ "$KIND" != secondmate ]; then
   fm_backend_send_text_line "$BACKEND" "$WID" 'treehouse get'
 
@@ -1013,6 +1051,12 @@ mkdir -p "$STATE"
   # Missing backend= is the compatibility spelling for tmux. Record only
   # non-default backends so existing and new tmux metadata stay unchanged.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  if [ "$BACKEND" = herdr ]; then
+    echo "herdr_session=$HERDR_SES"
+    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+    echo "herdr_tab_id=$HERDR_TAB_ID"
+    echo "herdr_pane_id=$HERDR_PANE_ID"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
@@ -1060,5 +1104,8 @@ fi
 fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
 sleep 0.3
 fm_backend_send_key "$BACKEND" "$WID" Enter
+
+HERDR_SPAWN_TARGET=
+trap - EXIT
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

@@ -1458,7 +1458,7 @@ harness=echo
 kind=ship
 mode=no-mistakes
 yolo=off
-backend=herdr
+backend=orca
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/unknown-backend-teardown-fake")
   log="$TMP_ROOT/unknown-backend-teardown-fake/tmux.log"
@@ -1466,10 +1466,10 @@ EOF
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
     fail "force teardown accepted a child with an unknown backend"
   fi
-  [ -d "$subhome" ] || fail "force teardown removed the subhome after unknown-backend refusal"
+  [ -d "$subhome" ] || fail "force teardown removed the subhome after unsupported-backend refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown removed child metadata after unknown-backend refusal"
-  grep -F "REFUSED: child child uses unsupported backend 'herdr'" "$err" >/dev/null \
-    || fail "force teardown did not explain unknown child backend"
+  grep -F "REFUSED: child child uses unsupported backend 'orca'" "$err" >/dev/null \
+    || fail "force teardown did not explain unsupported child backend"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed a window before unknown-backend refusal"
   pass "force teardown refuses unknown child backends before cleanup"
 }

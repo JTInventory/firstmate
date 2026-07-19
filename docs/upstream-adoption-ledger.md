@@ -29,14 +29,14 @@ All changes were first characterized in the clean clone and delivered only to th
 | Fleet/session/Stow expansions | #197, #201, #300, #333, #343, #372 | Defer | Reconsider only after the core adoption train is stable. |
 | Project-less secondmate homes | #409 | Defer | Requires a JT ownership and cleanup contract before enablement. |
 | X/social integration | upstream X-mode work | Reject | Outside Firstmate's JT identity and approval boundary. |
-| Herdr lifecycle and lab work | #402, #404 | Reject | Herdr is not an enabled JT runtime. |
+| Herdr lifecycle and lab work | #402, #404 | Adapt | Experimental Herdr session backend and guarded lab are enabled only by explicit opt-in; tmux remains the default. |
 
 ## Adoption rules
 
 1. Every candidate must be marked Adopt, Adapt, Defer, or Reject here before code is enabled.
 2. A controlled upstream fetch is allowed for comparison only; no upstream delivery or push is allowed.
 3. A merge parser may inspect a qualified JT PR URL, but only a captain-approved path may request a merge.
-4. Runtime proof comes from backlog, state files, tmux, Treehouse, watcher, GitHub, and read-only supervisor output.
+4. Runtime proof comes from backlog, state files, tmux or Herdr, Treehouse, watcher, GitHub, and read-only supervisor output.
 5. Deferred and rejected capabilities must remain unavailable in the supported tmux/Codex runtime.
 
 ## Phase A safety train (U1-U5)
@@ -86,7 +86,7 @@ The no-mistakes receipt is anchored by `.no-mistakes.yaml` and `CONTRIBUTING.md`
 | #505 | Secondmate primary turn-end guard | Adapt | Add a callable script-only guard for the main primary and marked secondmate homes; exempt linked child worktrees by git-dir/common-dir, keep idle homes silent, and do not wire Herdr/Pi-only hooks. | [#67](https://github.com/JTInventory/firstmate/pull/67) |
 | #568 | Spawn target-project containment | Adapt | Require the resolved path to be a real worktree of the target project with matching physical git common dir and target-repo HEAD; kill the fresh window and record no meta on refusal. | [#67](https://github.com/JTInventory/firstmate/pull/67) |
 
-Phase B is one JT PR and must preserve tmux-first operation, JT model policy, and the existing no-mistakes PR-target guard. The owner references were comparison-only; no owner branch or Herdr enablement is included.
+Phase B is one JT PR and must preserve tmux-first operation, JT model policy, and the existing no-mistakes PR-target guard. Owner references remain comparison-only; Herdr enablement is experimental and ships only through `JTInventory/firstmate`.
 
 The clean detached checkout at runtime head `5da9351f3ce17c4fdd318da0021625645e046ef3` passed these focused Phase II suites: `fm-teardown`, `fm-spawn-route`, `fm-tangle-guard`, `fm-send-strict`, `fm-crew-state`, `fm-watch-triage`, `fm-daemon`, and `fm-supervision-model`.
 
@@ -115,7 +115,7 @@ This Phase C train ports only the pause-absorb and AFK-detach halves. Owner `ori
 
 - U5b JT Control Room ingestion of the local wedge marker: deferred because there is no approved JT writer, endpoint, generated-data contract, or demonstrated operator gap.
 - Generic multi-runtime backends, project-less secondmate homes, quota-balanced dispatch, and global hook changes: deferred pending separate JT contracts and approval.
-- New upstream Herdr, Orca, cmux, Zellij, and external Slack/SMS/paging variants: rejected by this train as outside the supported JT identity and approval boundary.
+- New upstream Orca, cmux, Zellij, and external Slack/SMS/paging variants: rejected by this train as outside the supported JT identity and approval boundary. Herdr is the one experimental session-provider exception documented by the runtime-backend train; it does not make the fleet multi-backend production-supported.
   Existing optional Pi harness and opt-in X mode remain available under their existing verified/local contracts; this train neither enables nor broadens them.
 - Grok remains the already-landed optional adapter from JT PR #28 / upstream #143; the open/conflicting Grok-primary proposal (upstream #461) is not adopted.
 
@@ -128,7 +128,7 @@ boundaries after the historical Phase II work above.
 | --- | --- | --- | --- |
 | A | U1-U5 safety micro | [#66](https://github.com/JTInventory/firstmate/pull/66) | Gate agents cannot mutate the fleet; daemon ownership, lock recovery, and Grok effort limits remain JT-scoped. |
 | B | U6-U9 secondmate and spawn containment | [#67](https://github.com/JTInventory/firstmate/pull/67) | Routing markers, turn-end safety, and target worktree containment preserve tmux-first JT operation. |
-| C | U10-U12 pause absorb and AFK detach | [#68](https://github.com/JTInventory/firstmate/pull/68) | Paused gate waits and detached away-mode supervision stay fail-closed without Herdr/cmux/zellij adoption. |
+| C | U10-U12 pause absorb and AFK detach | [#68](https://github.com/JTInventory/firstmate/pull/68) | Paused gate waits and detached away-mode supervision stay fail-closed without Herdr AFK/supervisor injection or cmux/zellij adoption. |
 | D | U13-U16 optional operator comfort | Pending this branch | Local bearings/fleet snapshots, pinned lint parity, and an opt-in primary `cd` guard; remote PR reads are opt-in and soft-failing. |
 
 Phase D covers optional comfort in the JT-sized, Linux-primary subset

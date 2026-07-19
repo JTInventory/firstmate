@@ -8,6 +8,8 @@ FM_SUPERVISION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-numeric-lib.sh
 . "$FM_SUPERVISION_SCRIPT_DIR/fm-numeric-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$FM_SUPERVISION_SCRIPT_DIR/fm-backend.sh"
 
 fm_supervision_usage() {
   cat <<'USAGE'
@@ -282,10 +284,16 @@ fm_supervision_bool() {
 }
 
 fm_supervision_window_live() {
-  local target=$1
+  local target=$1 backend=${2:-tmux}
   [ -n "$target" ] || return 1
-  command -v tmux >/dev/null 2>&1 || return 1
-  tmux display-message -p -t "$target" "#{window_name}" >/dev/null 2>&1
+  case "$backend" in
+    herdr) fm_backend_pane_readable herdr "$target" ;;
+    tmux)
+      command -v tmux >/dev/null 2>&1 || return 1
+      tmux display-message -p -t "$target" "#{window_name}" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_supervision_worktree_dirty_count() {
@@ -765,15 +773,15 @@ fm_supervision_collect() {
   # shellcheck source=bin/fm-backlog-audit-lib.sh
   . "$FM_SUPERVISION_ROOT/bin/fm-backlog-audit-lib.sh"
   local records="" source_records="" checklist_records="" task_records="" worktree_records="" external_records="" backlog_records=""
-  local state_ok=true backlog_ok=true tmux_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
+  local state_ok=true backlog_ok=true tmux_ok=true herdr_ok=true treehouse_ok=true git_ok=true github_ok=true github_detail="gh-axi api GET only"
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
-  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
-  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false
+  local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window backend worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
+  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false tmux_used=false herdr_used=false tmux_detail="tmux not used by active task metadata" herdr_detail="Herdr not used by active task metadata" herdr_session
+  local -A herdr_sessions=()
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
   [ -f "$FM_SUPERVISION_DATA/backlog.md" ] || backlog_ok=false
-  command -v tmux >/dev/null 2>&1 || tmux_ok=false
   command -v treehouse >/dev/null 2>&1 || treehouse_ok=false
   command -v git >/dev/null 2>&1 || git_ok=false
   if ! command -v gh-axi >/dev/null 2>&1; then
@@ -793,12 +801,21 @@ fm_supervision_collect() {
       kind=$(fm_supervision_meta_value "$meta" kind); [ -n "$kind" ] || kind=ship
       mode=$(fm_supervision_meta_value "$meta" mode); [ -n "$mode" ] || mode=no-mistakes
       yolo=$(fm_supervision_meta_value "$meta" yolo); [ -n "$yolo" ] || yolo=off
+      backend=$(fm_supervision_meta_value "$meta" backend); [ -n "$backend" ] || backend=tmux
+      case "$backend" in
+        tmux) tmux_used=true ;;
+        herdr) herdr_used=true ;;
+      esac
       harness=$(fm_supervision_meta_value "$meta" harness); [ -n "$harness" ] || harness=unknown
       route_profile=$(fm_supervision_meta_value "$meta" route_profile); [ -n "$route_profile" ] || route_profile=unknown
       route_harness=$(fm_supervision_meta_value "$meta" route_harness); [ -n "$route_harness" ] || route_harness=unknown
       route_model=$(fm_supervision_meta_value "$meta" route_model); [ -n "$route_model" ] || route_model=unknown
       route_effort=$(fm_supervision_meta_value "$meta" route_effort); [ -n "$route_effort" ] || route_effort=unknown
       window=$(fm_supervision_meta_value "$meta" window)
+      if [ "$backend" = herdr ]; then
+        herdr_session=${window%%:*}
+        [ -n "$herdr_session" ] && herdr_sessions["$herdr_session"]=1
+      fi
       worktree=$(fm_supervision_meta_value "$meta" worktree)
       recorded_branch=$(fm_supervision_meta_value "$meta" branch); [ -n "$recorded_branch" ] || recorded_branch=unknown
       [ -n "$worktree" ] && referenced_worktrees="$referenced_worktrees$worktree|"
@@ -824,7 +841,7 @@ fm_supervision_collect() {
       [ -e "$FM_SUPERVISION_STATE/$id.turn-ended" ] && turn_ended=true
       pr_url=$(fm_supervision_meta_value "$meta" pr)
       [ -n "$pr_url" ] || pr_url=$status_pr
-      if fm_supervision_window_live "$window"; then window_live=true; else window_live=false; fi
+      if fm_supervision_window_live "$window" "$backend"; then window_live=true; else window_live=false; fi
       scout_report_exists=false
       [ "$kind" = scout ] && [ -f "$FM_SUPERVISION_DATA/$id/report.md" ] && scout_report_exists=true
       branch=$(fm_supervision_branch "$worktree" 2>/dev/null) || branch=unknown
@@ -884,6 +901,38 @@ fm_supervision_collect() {
         [ "$severity" = medium ] && medium_count=$((medium_count + 1))
       fi
     done
+  fi
+
+  if [ "$tmux_used" = true ]; then
+    if command -v tmux >/dev/null 2>&1; then
+      tmux_detail="tmux display-message only"
+    else
+      tmux_ok=false
+      tmux_detail="tmux missing for active tmux task metadata"
+    fi
+  fi
+  if [ "$herdr_used" = true ]; then
+    if ! fm_backend_source herdr >/dev/null 2>&1; then
+      herdr_ok=false
+      herdr_detail="Herdr backend could not be loaded"
+    elif [ "${#herdr_sessions[@]}" -eq 0 ]; then
+      herdr_ok=false
+      herdr_detail="Herdr task metadata has no valid session target"
+    else
+      herdr_detail="Herdr status and pane reads only for sessions: ${!herdr_sessions[*]}"
+      for herdr_session in "${!herdr_sessions[@]}"; do
+        if ! fm_backend_herdr_version_check "$herdr_session" >/dev/null 2>&1; then
+          herdr_ok=false
+          herdr_detail="Herdr session '$herdr_session' unavailable or outside the verified 0.7.x protocol 14+ range"
+          break
+        fi
+        if ! fm_backend_herdr_server_available "$herdr_session" >/dev/null 2>&1; then
+          herdr_ok=false
+          herdr_detail="Herdr session '$herdr_session' is unavailable or stopped"
+          break
+        fi
+      done
+    fi
   fi
 
   # A failed away-mode injection is durable local supervision truth. Surface
@@ -1030,10 +1079,11 @@ EOF
   if [ "$high_count" -gt 0 ]; then level=action
   elif [ "$medium_count" -gt 0 ]; then level=watch
   fi
-  source_records=$(printf 'source\tstate\t%s\t%s\nsource\tbacklog\t%s\t%s\nsource\ttmux\t%s\t%s\nsource\ttreehouse\t%s\t%s\nsource\tgit\t%s\t%s\nsource\tgithub\t%s\t%s\nsource\twatcher\t%s\t%s' \
+  source_records=$(printf 'source\tstate\t%s\t%s\nsource\tbacklog\t%s\t%s\nsource\ttmux\t%s\t%s\nsource\therdr\t%s\t%s\nsource\ttreehouse\t%s\t%s\nsource\tgit\t%s\t%s\nsource\tgithub\t%s\t%s\nsource\twatcher\t%s\t%s' \
     "$state_ok" "state/meta/status read only" \
     "$backlog_ok" "data/backlog.md read only" \
-    "$tmux_ok" "tmux display-message only" \
+    "$tmux_ok" "$tmux_detail" \
+    "$herdr_ok" "$herdr_detail" \
     "$treehouse_ok" "treehouse status only" \
     "$git_ok" "git branch/status/worktree reads only" \
     "$github_ok" "$github_detail" \

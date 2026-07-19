@@ -13,7 +13,7 @@ Owner: `AGENTS.md` sections 1, 6, 7, and 9.
 ## 2. Startup, Recovery, And Fleet Truth
 
 At session start, firstmate runs bootstrap, reads local fleet records, and recovers already in-flight work before dispatching anything new.
-The durable inputs are local `data/` records, `state/*.meta`, `state/*.status`, tmux windows, secondmate homes, and project clones.
+The durable inputs are local `data/` records, `state/*.meta`, `state/*.status`, tmux windows or Herdr endpoints, secondmate homes, and project clones.
 Bootstrap uses the shared tool-path helper before dependency checks; spawn, teardown, and the read-only model reuse it so clean non-interactive shells discover HOME-installed Axi tools the same way.
 
 Owner: `AGENTS.md` sections 2, 3, and 5; `bin/fm-bootstrap.sh`; `bin/fm-tool-path-lib.sh`; `bin/fm-fleet-sync.sh`; `bin/fm-crew-state.sh`.
@@ -45,19 +45,19 @@ Owner: `AGENTS.md` sections 6 and 7; `bin/fm-brief.sh`; `bin/fm-spawn.sh`.
 
 ## 6. Spawn
 
-`fm-spawn.sh` selects the runtime session-provider backend, then allocates the canonical `fm-<id>` tmux endpoint in the P1 adapter, validates its immutable window ID and title before issuing pane commands, gets or validates an isolated worktree of the target project, writes the task meta record, launches the selected harness with the resolved model and effort when supported, and installs any harness-specific turn-end hooks. The backend selection and compatibility contract lives in [architecture.md](architecture.md#runtime-session-provider-backend); the detailed target-repository containment contract lives in [architecture.md](architecture.md#worktrees-not-branches-in-your-checkout).
-It uses the window ID for all post-create tmux operations, so a mutable title cannot redirect a task command; an unverified ID or title cleans up a uniquely identified new window and aborts the spawn.
+`fm-spawn.sh` selects the runtime session-provider backend, then allocates the canonical `fm-<id>` tmux window or Herdr tab in the selected adapter, gets or validates an isolated worktree of the target project, writes the task meta record, launches the selected harness with the resolved model and effort when supported, and installs any harness-specific turn-end hooks. The backend selection and compatibility contract lives in [architecture.md](architecture.md#runtime-session-provider-backend); the detailed target-repository containment contract lives in [architecture.md](architecture.md#worktrees-not-branches-in-your-checkout).
+It uses the tmux immutable window ID or recorded Herdr `session:pane` target for post-create operations; an unverified endpoint cleans up the uniquely identified new endpoint and aborts the spawn.
 Secondmate spawn uses the same direct-report machinery but points at an isolated firstmate home.
 
-Owner: `AGENTS.md` sections 4 and 7; `bin/fm-backend.sh`; `bin/backends/tmux.sh`; `bin/fm-spawn.sh`; `bin/fm-harness.sh`; `bin/fm-task-identity-lib.sh`; `bin/fm-home-seed.sh`.
+Owner: `AGENTS.md` sections 4 and 7; `bin/fm-backend.sh`; `bin/backends/tmux.sh`; `bin/backends/herdr.sh`; `bin/fm-spawn.sh`; `bin/fm-harness.sh`; `bin/fm-task-identity-lib.sh`; `bin/fm-home-seed.sh`.
 
-## 7. Tmux, Worktree, And Meta Identity
+## 7. Session, Worktree, And Meta Identity
 
-Each direct report has a `state/<id>.meta` record with fields such as `window=`, `worktree=`, `project=`, `kind=`, `mode=`, `yolo=`, and route metadata.
-The stored `window=` value is the human-facing canonical `session:fm-<id>` label; spawn uses the tmux-assigned immutable window ID internally after creation.
-The tmux window is the live work surface, while the worktree or secondmate home is the filesystem boundary.
+Each direct report has a `state/<id>.meta` record with fields such as `window=`, `worktree=`, `project=`, `kind=`, `mode=`, `yolo=`, and route metadata. Herdr records also include `backend=herdr` and its session, workspace, tab, and pane identifiers.
+For tmux, the stored `window=` value is the human-facing canonical `session:fm-<id>` label and spawn uses the tmux-assigned immutable window ID internally after creation. For Herdr, `window=` records the opaque `session:pane` target.
+The tmux window or Herdr tab/pane is the live work surface, while the worktree or secondmate home is the filesystem boundary. See [herdr-backend.md](herdr-backend.md) for the Herdr-specific workspace and lifecycle contract.
 
-Owner: `AGENTS.md` sections 2, 6, and 7; `bin/fm-backend.sh`; `bin/backends/tmux.sh`; `bin/fm-spawn.sh`; `bin/fm-tangle-lib.sh`.
+Owner: `AGENTS.md` sections 2, 6, and 7; `bin/fm-backend.sh`; `bin/backends/tmux.sh`; `bin/backends/herdr.sh`; `bin/fm-spawn.sh`; `docs/herdr-backend.md`; `bin/fm-tangle-lib.sh`.
 
 ## 8. Status And Current State
 

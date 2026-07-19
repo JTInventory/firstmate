@@ -144,6 +144,23 @@ SH
   chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/fm-crew-state.sh" "$fakebin/gh-axi"
 }
 
+write_fake_herdr() {
+  local fakebin=$1
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' --session custom '*) ;;
+  *) exit 3 ;;
+esac
+case "$1" in
+  status) printf '{"client":{"version":"0.7.4","protocol":14},"server":{"running":%s}}\n' "${FM_FAKE_HERDR_SERVER_RUNNING:-true}" ;;
+  pane) printf '%s\n' '{"result":{"pane":{"pane_id":"p1"}}}' ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+}
+
 write_meta() {
   local home=$1 id=$2 status=${3:-}
   shift 3 || true
@@ -606,6 +623,38 @@ test_github_missing_and_external_reminders_do_not_fail() {
   pass "GitHub failures degrade to unknown and external reminders work"
 }
 
+test_herdr_only_fleet_reports_backend_health() {
+  local home fakebin out
+  home=$(make_home herdr-only)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  rm -f "$fakebin/tmux"
+  write_fake_herdr "$fakebin"
+  write_meta "$home" herdr-live 'working: still running' "project=demo" "window=custom:p1" "backend=herdr" "worktree=$home"
+  out=$(PATH="$fakebin:/usr/bin:/bin" FM_HOME="$home" "$CLI" --json --no-default-reminders) || fail "Herdr-only supervision json failed"
+  FM_TEST_JSON=$out python3 - <<'PY' || fail "Herdr-only fleet reported the wrong source health"
+import json
+import os
+
+sources = json.loads(os.environ["FM_TEST_JSON"])["sources"]
+if sources["tmux"]["ok"] is not True:
+    raise SystemExit("tmux should not be unhealthy when no active task uses it")
+if sources["herdr"]["ok"] is not True:
+    raise SystemExit(f"Herdr source was unhealthy: {sources['herdr']}")
+PY
+  out=$(FM_FAKE_HERDR_SERVER_RUNNING=false PATH="$fakebin:/usr/bin:/bin" FM_HOME="$home" "$CLI" --json --no-default-reminders) \
+    || fail "stopped Herdr supervision json failed"
+  FM_TEST_JSON=$out python3 - <<'PY' || fail "stopped Herdr session was reported healthy"
+import json
+import os
+
+source = json.loads(os.environ["FM_TEST_JSON"])["sources"]["herdr"]
+if source["ok"] is not False:
+    raise SystemExit(f"stopped Herdr session was reported healthy: {source}")
+PY
+  pass "Herdr-only supervision reports backend-aware source health"
+}
+
 test_noninteractive_path_discovers_home_nvm_axi() {
   local home nodebin out
   home=$(make_home noninteractive-nvm)
@@ -662,6 +711,7 @@ test_local_failure_paths_degrade_to_actions_or_unknown
 test_absolute_project_meta_runs_treehouse_status
 test_github_missing_and_external_reminders_do_not_fail
 test_noninteractive_path_discovers_home_nvm_axi
+test_herdr_only_fleet_reports_backend_health
 test_text_output_and_watcher_source
 
 printf 'all fm-supervision-model tests passed\n'
