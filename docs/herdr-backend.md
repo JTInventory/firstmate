@@ -50,12 +50,23 @@ Herdr task metadata records `backend=herdr`, `herdr_session=`,
 continues to omit `backend=tmux`; a missing backend field still means tmux.
 
 The adapter avoids focusing new workspaces or tabs where Herdr supports that
-flag. A duplicate label is safe to replace only when its pane is proven to be a
-husk: the pane is gone (`dead`) or the pane exists without a registered agent
-(`no-agent`). A live or ambiguous pane still refuses the duplicate. Replacement
-is create-first, close-second, so a husk is never removed before its replacement
-exists. `agent_alive` reports `alive`, `dead`, or `unknown` with the same
-fail-closed rule.
+flag.
+
+### ID stability across a server restart
+
+Herdr restores workspace, tab, and pane ids and labels after a session or server
+restart.
+Restored task panes can therefore return as husks with no registered agent.
+A duplicate label is safe to replace only when its pane is proven to be a husk:
+the pane is gone (`dead`) or the pane exists without a registered agent
+(`no-agent`).
+A live or ambiguous pane still refuses the duplicate.
+Replacement is create-first, close-second, so a husk is never removed before
+its replacement exists.
+`agent_alive` reports `alive`, `dead`, or `unknown` with the same fail-closed
+rule.
+
+### Default-tab prune
 
 Herdr seeds a new workspace with a default tab. JT threads the exact tab id
 returned by that same workspace-create call through the spawn path and prunes
@@ -104,12 +115,32 @@ python3 tests/fm-backend-herdr-eventwait.test.py
 bash tests/fm-composer-lib.test.sh
 ```
 
-Real Herdr smoke is opt-in and skips unless Herdr, a live socket, and the
-explicit smoke environment are present. CI therefore remains green without a
-Herdr server. The AFK daemon can inject into a Herdr supervisor when
+The normal behavior suite and CI test loop discover the real-lab scripts below,
+but they skip unless a real-lab opt-in variable is set.
+This keeps the hermetic suite green without a live Herdr server or live e2e.
+
+Set `FM_HERDR_E2E=1` to run the four real lab tests:
+
+```sh
+FM_HERDR_E2E=1 bash tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
+FM_HERDR_E2E=1 bash tests/fm-backend-herdr-respawn-idem-e2e.test.sh
+FM_HERDR_E2E=1 bash tests/fm-backend-herdr-prune-safety-e2e.test.sh
+FM_HERDR_E2E=1 bash tests/fm-send-secondmate-marker-herdr-e2e.test.sh
+```
+
+They cover per-home workspace isolation, restart-idempotent husk replacement,
+adopted-workspace prune safety, and secondmate marker delivery plus unmarked
+direct input.
+Each test creates a private `fm-lab-*` session and never touches the live
+`default` session.
+The marker test also accepts `FM_SEND_MARKER_HERDR_E2E=1` when it is run alone.
+
+Real Herdr smoke remains separately opt-in through `FM_HERDR_SMOKE=1`.
+The AFK daemon can inject into a Herdr supervisor when
 `FM_SUPERVISOR_BACKEND=herdr` and a `<session>:<pane-id>` target are selected;
-unsupported supervisor backends fail closed. The gated coverage lives in
-`tests/fm-afk-inject-herdr-e2e.test.sh` and uses only `fm-lab-*` sessions.
+unsupported supervisor backends fail closed.
+The gated AFK coverage lives in `tests/fm-afk-inject-herdr-e2e.test.sh` and
+uses only `fm-lab-*` sessions.
 
 Changes for this JT fork ship through the `JTInventory/firstmate` PR target;
 the owner repository is comparison-only during the port.

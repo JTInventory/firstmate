@@ -81,10 +81,14 @@ tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tu
 tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands, codex $skill invocations, and marked codex secondmate text
 tests/fm-send-codex-secondmate-submit-retry.test.sh # fm-send delayed final Enter for marked Codex secondmate text after generic retries report pending
 tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
+tests/fm-send-secondmate-marker-herdr-e2e.test.sh # opt-in real Herdr lab e2e for secondmate marker delivery and unmarked direct input
 tests/fm-send-strict.test.sh              # fm-send refuses unresolved bare targets
 tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
 tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for afk injection: partial-input deferral, swallowed-Enter retry, and single clean digest
+tests/fm-backend-herdr-workspace-per-home-e2e.test.sh # opt-in real Herdr lab e2e for per-home workspace isolation and teardown boundaries
+tests/fm-backend-herdr-respawn-idem-e2e.test.sh # opt-in real Herdr lab e2e for restart-idempotent husk replacement and live-duplicate refusal
+tests/fm-backend-herdr-prune-safety-e2e.test.sh # opt-in real Herdr lab e2e for adopted-workspace prune safety and fresh-workspace seed pruning
 tests/fm-afk-launch.test.sh               # JT AFK launch/return detachment, process-group reap survival, and idempotent start
 tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
 tests/fm-gitignore-boundary.test.sh       # local fleet directory ignore boundary for config/, reports/, and backups/
