@@ -91,6 +91,12 @@ test_version_gate() {
     || fail "session-aware protocol 14 should pass the Herdr version gate"
   assert_contains "$(cat "$log")" $'HERDR_SESSION=fmtest\x1fstatus\x1f--json\x1f--session\x1ffmtest' "target version check did not select the target session"
   rm -f "$resp/1.out" "$resp/.count"
+  printf '%s\n' '{"client":{"version":"0.7.4foo","protocol":14}}' > "$resp/1.out"
+  status=0
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "suffixed Herdr version was accepted"
+  rm -f "$resp/1.out" "$resp/.count"
   printf '%s\n' '{"client":{"version":"0.6.0","protocol":13}}' > "$resp/1.out"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1) || status=$?
@@ -259,10 +265,10 @@ test_submit_retry_verdicts() {
   printf '%s\n' '{"server":{"running":true}}' > "$resp/4.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/5.out"
   printf '%s\n' '{"server":{"running":true}}' > "$resp/6.out"
-  printf '%s\n' 'prompt>' > "$resp/7.out"
+  printf '%s\n' '>' > "$resp/7.out"
   fb=$(make_fake_herdr "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 hello 2 0 0' "$ROOT")
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 2 0 0' "$ROOT" '*')
   [ "$out" = empty ] || fail "composer clear should report empty, got '$out'"
   assert_contains "$(cat "$log")" $'\x1fpane\x1fread' "submit acknowledgement did not inspect the composer"
   assert_not_contains "$(cat "$log")" $'\x1fagent\x1fget' "submit acknowledgement used unrelated agent state"
@@ -278,7 +284,7 @@ test_submit_retry_verdicts() {
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 hello 1 0 0' "$ROOT") || status=$?
   [ "$status" -eq 0 ] && [ "$out" = pending ] || fail "wrapped composer text was not retained as pending"
-  assert_contains "$(cat "$log")" $'\x1f--lines\x1f40' "submit acknowledgement did not inspect the full composer region"
+  assert_contains "$(cat "$log")" $'\x1f--lines\x1f1' "submit acknowledgement did not inspect the composer row"
   pass "Herdr text submit confirms the composer cleared"
 }
 

@@ -20,7 +20,6 @@ FM_BACKEND_HERDR_HOME_TOKEN=firstmate_home
 FM_BACKEND_HERDR_VERSION_VERIFIED=0
 FM_BACKEND_HERDR_VERSION_VERIFIED_SESSION=
 FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS=${FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS:-100}
-FM_BACKEND_HERDR_LOCK_STALE_AFTER=${FM_BACKEND_HERDR_LOCK_STALE_AFTER:-2}
 
 fm_backend_herdr_workspace_label() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
@@ -73,9 +72,13 @@ fm_backend_herdr_version_check() {
   }
   protocol=$(printf '%s' "$out" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$out" | jq -r '.client.version // empty' 2>/dev/null)
+  local version_tail
   case "$version" in
-    0.7.[0-9]*|v0.7.[0-9]*) ;;
-    *)
+    0.7.*) version_tail=${version#0.7.} ;;
+    *) version_tail= ;;
+  esac
+  case "$version_tail" in
+    ''|*[!0-9]*)
       echo "error: Herdr client version ${version:-unknown} is outside the verified 0.7.x range" >&2
       return 1
       ;;
@@ -133,27 +136,21 @@ fm_backend_herdr_pid_start() {
   printf '%s\n' "$out"
 }
 
-fm_backend_herdr_lock_age() {
-  local lock=$1 mtime now
-  if [ "$(uname -s)" = Darwin ]; then
-    mtime=$(stat -f %m "$lock" 2>/dev/null) || return 1
-  else
-    mtime=$(stat -c %Y "$lock" 2>/dev/null) || return 1
-  fi
-  now=$(date +%s) || return 1
-  case "$mtime:$now" in
-    *[!0-9:]*|:*) return 1 ;;
-  esac
-  printf '%s\n' "$((now - mtime))"
-}
-
 fm_backend_herdr_lock_owner_status() {
-  local lock=$1 pid start current age
-  pid=$(cat "$lock/pid" 2>/dev/null || true)
+  local lock=$1 pid start current owner
+  if [ -L "$lock" ]; then
+    owner=$(readlink "$lock" 2>/dev/null || true)
+    [ -n "$owner" ] && [ -f "$owner" ] || return 1
+    pid=$(sed -n '1p' "$owner" 2>/dev/null || true)
+    start=$(sed -n '2p' "$owner" 2>/dev/null || true)
+  elif [ -d "$lock" ]; then
+    pid=$(cat "$lock/pid" 2>/dev/null || true)
+    start=$(cat "$lock/pid-start" 2>/dev/null || true)
+  else
+    return 2
+  fi
   case "$pid" in
     ''|*[!0-9]*)
-      age=$(fm_backend_herdr_lock_age "$lock") || return 2
-      [ "$age" -ge "$FM_BACKEND_HERDR_LOCK_STALE_AFTER" ] && return 1
       return 0
       ;;
   esac
@@ -163,54 +160,82 @@ fm_backend_herdr_lock_owner_status() {
   case "$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null)" in
     Z*) return 1 ;;
   esac
-  start=$(cat "$lock/pid-start" 2>/dev/null || true)
   [ -n "$start" ] || return 0
   current=$(fm_backend_herdr_pid_start "$pid") || return 2
   [ "$current" = "$start" ] && return 0
   return 1
 }
 
+fm_backend_herdr_lock_discard() {
+  local lock=$1 owner
+  if [ -L "$lock" ]; then
+    owner=$(readlink "$lock" 2>/dev/null || true)
+    rm -f "$lock"
+    case "$owner" in
+      "$FM_HOME"/.fm-herdr-workspace.owner.*) rm -f "$owner" ;;
+    esac
+  elif [ -d "$lock" ]; then
+    rm -f "$lock/pid" "$lock/pid-start"
+    rmdir "$lock" 2>/dev/null || true
+  else
+    rm -f "$lock"
+  fi
+}
+
 fm_backend_herdr_workspace_lock_acquire() {
-  local lock=$1 attempt=0 stale_status quarantine pid start
+  local lock=$1 attempt=0 stale_status quarantine pid start owner acquired=0
   [ -d "$FM_HOME" ] || return 1
-  while ! mkdir "$lock" 2>/dev/null; do
+  owner=$(mktemp "$FM_HOME/.fm-herdr-workspace.owner.XXXXXX" 2>/dev/null) || return 1
+  pid=${BASHPID:-$$}
+  start=$(fm_backend_herdr_pid_start "$pid") || { rm -f "$owner"; return 1; }
+  printf '%s\n%s\n' "$pid" "$start" > "$owner" || { rm -f "$owner"; return 1; }
+  while [ "$acquired" -eq 0 ]; do
+    if [ ! -e "$lock" ] && [ ! -L "$lock" ] && ln -s "$owner" "$lock" 2>/dev/null; then
+      acquired=1
+      break
+    fi
     fm_backend_herdr_lock_owner_status "$lock"
     stale_status=$?
     if [ "$stale_status" -eq 1 ]; then
       quarantine="$lock.stale.${BASHPID:-$$}.${RANDOM}"
       if [ ! -e "$quarantine" ] && mv "$lock" "$quarantine" 2>/dev/null; then
-        rm -f "$quarantine/pid" "$quarantine/pid-start"
-        rmdir "$quarantine" 2>/dev/null || true
+        fm_backend_herdr_lock_discard "$quarantine"
         continue
       fi
     fi
-    [ "$attempt" -lt "$FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS" ] || return 1
+    if [ "$attempt" -ge "$FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS" ]; then
+      rm -f "$owner"
+      return 1
+    fi
     sleep 0.1
     attempt=$((attempt + 1))
   done
-  pid=${BASHPID:-$$}
-  start=$(fm_backend_herdr_pid_start "$pid") || {
-    rmdir "$lock" 2>/dev/null || true
-    return 1
-  }
-  printf '%s\n' "$pid" > "$lock/pid" && printf '%s\n' "$start" > "$lock/pid-start" || {
-    rm -f "$lock/pid" "$lock/pid-start"
-    rmdir "$lock" 2>/dev/null || true
-    return 1
-  }
 }
 
 fm_backend_herdr_workspace_lock_release() {
-  local lock=$1 owner stored_start current_start
-  owner=$(cat "$lock/pid" 2>/dev/null || true)
+  local lock=$1 owner_path owner stored_start current_start
+  if [ -L "$lock" ]; then
+    owner_path=$(readlink "$lock" 2>/dev/null || true)
+    owner=$(sed -n '1p' "$owner_path" 2>/dev/null || true)
+    stored_start=$(sed -n '2p' "$owner_path" 2>/dev/null || true)
+  elif [ -d "$lock" ]; then
+    owner_path=
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    stored_start=$(cat "$lock/pid-start" 2>/dev/null || true)
+  else
+    return 1
+  fi
   [ "$owner" = "${BASHPID:-$$}" ] || return 1
-  stored_start=$(cat "$lock/pid-start" 2>/dev/null || true)
   if [ -n "$stored_start" ]; then
     current_start=$(fm_backend_herdr_pid_start "$owner") || return 1
     [ "$stored_start" = "$current_start" ] || return 1
   fi
-  rm -f "$lock/pid" "$lock/pid-start"
-  rmdir "$lock" 2>/dev/null
+  if [ -n "$owner_path" ]; then
+    rm -f "$lock" "$owner_path"
+  else
+    rm -f "$lock/pid" "$lock/pid-start"
+    rmdir "$lock" 2>/dev/null
+  fi
 }
 
 fm_backend_herdr_server_ensure() {  # <session>
@@ -463,17 +488,20 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <sleep> <sett
 
 fm_backend_herdr_composer_state() {  # <target> <text> -> empty|pending|unknown
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
-  local text=$2 out normalized_text normalized_out
+  local text=$2 out line stripped
   out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" \
-    --source visible --lines 40 2>/dev/null) || { printf 'unknown'; return 0; }
-  normalized_text=$(printf '%s' "$text" | tr -d '[:space:]')
-  normalized_out=$(printf '%s' "$out" | tr -d '[:space:]')
-  if [ -n "$text" ] && { case "$out" in *"$text"*) true ;; *) false ;; esac; } || \
-    [ -n "$normalized_text" ] && case "$normalized_out" in *"$normalized_text"*) true ;; *) false ;; esac; then
+    --source visible --lines 1 --format text 2>/dev/null) || { printf 'unknown'; return 0; }
+  line=$(printf '%s\n' "$out" | tail -n 1)
+  if [ -n "$text" ] && printf '%s\n' "$line" | grep -F -e "$text" >/dev/null 2>&1; then
     printf 'pending'
-  else
-    printf 'empty'
+    return 0
   fi
+  stripped=${line#"${line%%[![:space:]]*}"}
+  stripped=${stripped%"${stripped##*[![:space:]]}"}
+  case "$stripped" in
+    ''|'>'|'❯'|'$'|'%'|'#') printf 'empty' ;;
+    *) printf 'pending' ;;
+  esac
 }
 
 fm_backend_herdr_agent_status() {  # <target> -> idle|working|blocked|done|unknown

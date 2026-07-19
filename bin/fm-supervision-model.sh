@@ -777,7 +777,8 @@ fm_supervision_collect() {
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
   local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window backend worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
-  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false tmux_used=false herdr_used=false tmux_detail="tmux not used by active task metadata" herdr_detail="Herdr not used by active task metadata"
+  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false tmux_used=false herdr_used=false tmux_detail="tmux not used by active task metadata" herdr_detail="Herdr not used by active task metadata" herdr_session
+  local -A herdr_sessions=()
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
   [ -f "$FM_SUPERVISION_DATA/backlog.md" ] || backlog_ok=false
@@ -811,6 +812,10 @@ fm_supervision_collect() {
       route_model=$(fm_supervision_meta_value "$meta" route_model); [ -n "$route_model" ] || route_model=unknown
       route_effort=$(fm_supervision_meta_value "$meta" route_effort); [ -n "$route_effort" ] || route_effort=unknown
       window=$(fm_supervision_meta_value "$meta" window)
+      if [ "$backend" = herdr ]; then
+        herdr_session=${window%%:*}
+        [ -n "$herdr_session" ] && herdr_sessions["$herdr_session"]=1
+      fi
       worktree=$(fm_supervision_meta_value "$meta" worktree)
       recorded_branch=$(fm_supervision_meta_value "$meta" branch); [ -n "$recorded_branch" ] || recorded_branch=unknown
       [ -n "$worktree" ] && referenced_worktrees="$referenced_worktrees$worktree|"
@@ -907,11 +912,21 @@ fm_supervision_collect() {
     fi
   fi
   if [ "$herdr_used" = true ]; then
-    if fm_backend_source herdr >/dev/null 2>&1 && fm_backend_herdr_version_check >/dev/null 2>&1; then
-      herdr_detail="Herdr status and pane reads only"
-    else
+    if ! fm_backend_source herdr >/dev/null 2>&1; then
       herdr_ok=false
-      herdr_detail="Herdr unavailable or outside the verified 0.7.x protocol 14+ range"
+      herdr_detail="Herdr backend could not be loaded"
+    elif [ "${#herdr_sessions[@]}" -eq 0 ]; then
+      herdr_ok=false
+      herdr_detail="Herdr task metadata has no valid session target"
+    else
+      herdr_detail="Herdr status and pane reads only for sessions: ${!herdr_sessions[*]}"
+      for herdr_session in "${!herdr_sessions[@]}"; do
+        if ! fm_backend_herdr_version_check "$herdr_session" >/dev/null 2>&1; then
+          herdr_ok=false
+          herdr_detail="Herdr session '$herdr_session' unavailable or outside the verified 0.7.x protocol 14+ range"
+          break
+        fi
+      done
     fi
   fi
 

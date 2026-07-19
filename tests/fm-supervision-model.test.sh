@@ -148,6 +148,10 @@ write_fake_herdr() {
   local fakebin=$1
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
+case " $* " in
+  *' --session custom '*) ;;
+  *) exit 3 ;;
+esac
 case "$1" in
   status) printf '%s\n' '{"client":{"version":"0.7.4","protocol":14},"server":{"running":true}}' ;;
   pane) printf '%s\n' '{"result":{"pane":{"pane_id":"p1"}}}' ;;
@@ -626,7 +630,7 @@ test_herdr_only_fleet_reports_backend_health() {
   write_fakebin "$fakebin"
   rm -f "$fakebin/tmux"
   write_fake_herdr "$fakebin"
-  write_meta "$home" herdr-live 'working: still running' "project=demo" "window=default:p1" "backend=herdr" "worktree=$home"
+  write_meta "$home" herdr-live 'working: still running' "project=demo" "window=custom:p1" "backend=herdr" "worktree=$home"
   out=$(PATH="$fakebin:/usr/bin:/bin" FM_HOME="$home" "$CLI" --json --no-default-reminders) || fail "Herdr-only supervision json failed"
   FM_TEST_JSON=$out python3 - <<'PY' || fail "Herdr-only fleet reported the wrong source health"
 import json
