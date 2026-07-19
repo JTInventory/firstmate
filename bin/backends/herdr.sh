@@ -477,12 +477,22 @@ fm_backend_herdr_agent_alive() {  # <target> -> alive|dead|unknown
 }
 
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
-  local container=$1 label=$2 cwd=$3 seeded=${4:-} lock session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs
+  local container=$1 label=$2 cwd=$3 seeded=${4:-} lock session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs created_tab_committed
   lock=$(fm_backend_herdr_workspace_lock_path) || return 1
   (
     local -a husks=()
     fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
-    trap 'fm_backend_herdr_workspace_lock_release "$lock"' EXIT
+    created_tab_committed=0
+    cleanup_created_tab() {
+      local status=$?
+      if [ -n "${tab_id:-}" ] && [ "$created_tab_committed" -ne 1 ]; then
+        fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
+      fi
+      trap - EXIT
+      fm_backend_herdr_workspace_lock_release "$lock"
+      exit "$status"
+    }
+    trap cleanup_created_tab EXIT
     session=${container%%:*}
     wsid=${container#*:}
     if [[ "$wsid" == *$'\t'* ]]; then
@@ -508,7 +518,6 @@ EOF
     tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
     pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
     if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
-      fm_backend_herdr_tab_close_by_label "$session" "$wsid" "$label" >/dev/null 2>&1 || true
       echo "error: could not parse Herdr tab/pane id from tab create output" >&2
       exit 1
     fi
@@ -519,6 +528,11 @@ EOF
     done
     if [ "${#husks[@]}" -gt 0 ]; then
       out=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || exit 1
+      printf '%s' "$out" | jq -e '
+        (.result | type) == "object"
+        and (.result.tabs | type) == "array"
+        and all(.result.tabs[]; type == "object" and (.tab_id | type) == "string" and (.label | type) == "string")
+      ' >/dev/null 2>&1 || exit 1
       remaining_dup_tabs=$(printf '%s' "$out" | jq -r --arg want "$label" --arg replacement "$tab_id" \
         '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
       [ -z "$remaining_dup_tabs" ] || {
@@ -526,6 +540,7 @@ EOF
         exit 1
       }
     fi
+    created_tab_committed=1
     printf '%s %s' "$tab_id" "$pane_id"
   )
 }

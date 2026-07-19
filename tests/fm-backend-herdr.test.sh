@@ -354,6 +354,7 @@ test_husk_duplicate_is_replaced_after_creation() {
     fm_backend_herdr_cli() {
       case "$*" in
         *"tab create"*) printf "%s" '\''{"result":{"tab":{"tab_id":"new-tab"},"root_pane":{"pane_id":"new-pane"}}}'\''; printf "\\n"; ;;
+        *"tab list"*) printf "%s" '\''{"result":{"tabs":[{"tab_id":"new-tab","label":"fm-demo"}]}}'\''; printf "\\n"; ;;
         *"tab close"*) printf "closed\\n" >> "$FM_HERDR_TEST_LOG" ;;
       esac
     }
@@ -361,6 +362,50 @@ test_husk_duplicate_is_replaced_after_creation() {
   ' "$ROOT" 2>/dev/null)
   [ "$out" = 'new-tab new-pane' ] || fail "husk replacement returned '$out'"
   pass "Herdr replaces a confirmed husk only after creating the replacement"
+}
+
+test_create_task_cleans_up_after_postcreate_failure() {
+  local dir log out status=0
+  dir="$TMP_ROOT/postcreate-cleanup"; log="$dir/log"
+  mkdir -p "$dir"
+  out=$(FM_HOME="$dir" FM_HERDR_TEST_LOG="$log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_lock_acquire() { :; }
+    fm_backend_herdr_workspace_lock_release() { :; }
+    fm_backend_herdr_tab_ids_for_label() { :; }
+    fm_backend_herdr_workspace_prune_seeded_default_tab() { return 1; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab create"*) printf "%s" '\''{"result":{"tab":{"tab_id":"new-tab"},"root_pane":{"pane_id":"new-pane"}}}'\'' ;;
+        *"tab close"*) printf "%s\n" "$*" >> "$FM_HERDR_TEST_LOG" ;;
+      esac
+    }
+    fm_backend_herdr_create_task session:w1 fm-demo /tmp
+  ' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "seed-prune failure unexpectedly succeeded"
+  assert_contains "$(cat "$log")" "tab close new-tab" "post-create failure did not close the created tab"
+
+  : > "$log"
+  status=0
+  out=$(FM_HOME="$dir" FM_HERDR_TEST_LOG="$log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_lock_acquire() { :; }
+    fm_backend_herdr_workspace_lock_release() { :; }
+    fm_backend_herdr_tab_ids_for_label() { printf "husk-tab"; }
+    fm_backend_herdr_pane_for_tab() { printf "husk-pane"; }
+    fm_backend_herdr_tab_is_husk() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab create"*) printf "%s" '\''{"result":{"tab":{"tab_id":"new-tab"},"root_pane":{"pane_id":"new-pane"}}}'\'' ;;
+        *"tab close"*) printf "%s\n" "$*" >> "$FM_HERDR_TEST_LOG" ;;
+        *"tab list"*) printf "%s" '\''{}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_create_task session:w1 fm-demo /tmp
+  ' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "malformed husk verification unexpectedly succeeded"
+  assert_contains "$(cat "$log")" "tab close new-tab" "malformed husk response did not close the created tab"
+  pass "Herdr create cleanup closes tabs after post-create failures"
 }
 
 test_seed_prune_is_exact_and_fail_closed() {
@@ -481,6 +526,7 @@ test_capture_send_busy
 test_submit_retry_verdicts
 test_wait_for_working_classification
 test_husk_duplicate_is_replaced_after_creation
+test_create_task_cleans_up_after_postcreate_failure
 test_seed_prune_is_exact_and_fail_closed
 test_event_capability_uses_named_session
 test_eventwait_returns_fresh_blocked_transition
