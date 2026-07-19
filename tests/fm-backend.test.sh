@@ -166,13 +166,25 @@ test_backend_failures_propagate() {
 }
 
 test_teardown_preserves_state_on_kill_failure() {
-  local dir fakebin fake_root log state out
+  local dir fakebin fake_root log project state treehouse_log worktree out
   dir="$TMP_ROOT/teardown-kill-failure"
   fake_root="$dir/root"
+  project="$dir/project"
   state="$fake_root/state"
+  worktree="$dir/worktree"
   mkdir -p "$fake_root/bin/backends" "$state"
   fakebin=$(make_fake_tmux "$dir")
-  log="$dir/tmux.log"; : > "$log"
+  log="$dir/tmux.log"
+  treehouse_log="$dir/treehouse.log"
+  : > "$log"
+  : > "$treehouse_log"
+  fm_git_worktree "$project" "$worktree" kill-fail
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TREEHOUSE_LOG:?}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
 
   ln -s "$ROOT/bin/fm-teardown.sh" "$fake_root/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake_root/bin/fm-backend.sh"
@@ -199,15 +211,16 @@ SH
 
   fm_write_meta "$state/kill-fail.meta" \
     "window=firstmate:fm-demo" \
-    "worktree=$dir/nonexistent-worktree" \
-    "project=$dir/nonexistent-project" \
+    "worktree=$worktree" \
+    "project=$project" \
     "kind=ship" \
     "mode=no-mistakes"
   printf 'working\n' > "$state/kill-fail.status"
 
   if out=$(cd "$fake_root" && PATH="$fakebin:$PATH" FM_HOME="$fake_root" \
     FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" \
-    FM_TMUX_LOG="$log" FM_FAKE_TMUX_KILL_FAIL=1 \
+    FM_TMUX_LOG="$log" FM_TREEHOUSE_LOG="$treehouse_log" \
+    FM_FAKE_TMUX_KILL_FAIL=1 \
     "$fake_root/bin/fm-teardown.sh" kill-fail --force 2>&1); then
     fail "teardown swallowed a backend kill failure"
   fi
@@ -216,6 +229,12 @@ SH
     "teardown did not report the failed backend kill"
   [ -f "$state/kill-fail.meta" ] || fail "teardown deleted metadata after kill failure"
   [ -f "$state/kill-fail.status" ] || fail "teardown deleted status after kill failure"
+  [ -d "$worktree" ] || fail "teardown removed the worktree after kill failure"
+  assert_contains "$(git -C "$project" worktree list --porcelain)" \
+    "worktree $worktree" "teardown unregistered the worktree after kill failure"
+  git -C "$project" show-ref --verify --quiet refs/heads/kill-fail \
+    || fail "teardown deleted the task branch after kill failure"
+  [ ! -s "$treehouse_log" ] || fail "teardown returned the worktree before killing its endpoint"
   pass "teardown preserves task state when backend kill fails"
 }
 
