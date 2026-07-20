@@ -136,6 +136,13 @@ run_one() {
     # that need a home set their own FM_* overrides explicitly.
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
       FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+    if [ "${FM_HERDR_ALLOW_AMBIENT:-0}" != 1 ]; then
+      unset HERDR_ENV HERDR_SESSION HERDR_PANE_ID HERDR_TAB_ID \
+        HERDR_WORKSPACE_ID HERDR_SOCKET_PATH
+      if [ -z "${FM_BACKEND:-}" ]; then
+        export FM_BACKEND=tmux
+      fi
+    fi
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
     bash "$test_path"

@@ -119,6 +119,24 @@ The normal behavior suite and CI test loop discover the real-lab scripts below,
 but they skip unless a real-lab opt-in variable is set.
 This keeps the hermetic suite green without a live Herdr server or live e2e.
 
+### Ambient Herdr isolation for hermetic tests
+
+Running tests from a live Herdr pane exports `HERDR_ENV=1` (and pane ids).
+Without scrubbing those, hermetic spawn and secondmate fixtures auto-select the
+experimental herdr backend and can create real `2ndmate-*` workspaces on the
+captain's `default` session under temp cwd paths such as
+`/tmp/fm-behavior-tests...`.
+`bin/fm-run-behavior-tests.sh` and `tests/lib.sh` therefore unset the six
+ambient runtime `HERDR_*` markers for hermetic runs and pin `FM_BACKEND=tmux`
+when the outer environment did not already set `FM_BACKEND`. The
+`FM_HERDR_E2E` and `FM_HERDR_SMOKE` real-lab selectors do not disable this
+scrub. Real-lab e2e tests instead prepare a private `fm-lab-*` session, export
+`HERDR_SESSION` for that session, and use explicit Herdr selection where a
+spawn needs it; they never rely on the captain pane's ambient markers.
+Set `FM_HERDR_ALLOW_AMBIENT=1` only when deliberately testing ambient
+detection. That opt-in preserves ambient `HERDR_*` markers and the caller's
+`FM_BACKEND` for the full suite.
+
 Set `FM_HERDR_E2E=1` to run the four real lab tests:
 
 ```sh
