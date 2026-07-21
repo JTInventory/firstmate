@@ -8,8 +8,9 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch, else the pane
-# busy-signature) and reconciles the possibly-stale log against it.
+# no-mistakes run-step attributed to this crew's branch and current code
+# identity, else the pane busy-signature) and reconciles the possibly-stale log
+# against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -18,8 +19,15 @@
 #   state: <working|parked|paused|done|blocked|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
-#   1. Resolve worktree + window + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch, active or terminal?
+#   1. Resolve worktree + backend target + kind from state/<id>.meta.
+#   2. Matching no-mistakes run for this crew's branch AND current code identity,
+#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
+#      fallback)? Branch name alone is not enough: a historical run on a reused
+#      branch whose head was rewritten or diverged must not be attributed.
+#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
+#      is an ancestor of the run head (pipeline fix commits advanced the run on
+#      the same line of history). Local work that advanced past the run head, or
+#      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. A valid
@@ -285,18 +293,58 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
-nm_ci_is_monitoring() {
-  [ "${status:-}" = ci ] && return 0
-  [ "${status:-}" = running ] || return 1
-  printf '%s\n' "$RUN_OUT" | grep -qE '^[[:space:]]*ci,[[:space:]]*running,'
-}
-# Most recent run id whose branch matches, from the `no-mistakes axi` run list.
-nm_run_id_for_branch() {  # <branch> <list-output>
-  local branch=$1 list=$2 row id rest br in_runs=0 found=""
+# Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
+# reports the active-or-most-recent run for the CURRENT branch when one
+# exists, else falls back to some other branch's run purely as informational
+# display (verified empirically: querying a worktree with its own active run
+# reliably returns that run, even under concurrent load from several other
+# validating crews on the same underlying repo). A crew whose branch genuinely
+# has no run yet therefore sees another branch's answer here.
+#
+# This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
+# expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
+# matched id via `axi status --run <id>`. Verified against the real installed
+# CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
+# there is no runs-listing subcommand under `axi` at all, so that table never
+# appears and the lookup was silently dead code; whenever the bare `axi
+# status` answer was not this crew's own branch, attribution always failed and
+# the caller fell straight through to the pane/log fallback below. (The
+# PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
+# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
+# file's history - but this cross-branch path was independently confirmed
+# dead code and is worth having actually work.)
+#
+# The real run-listing command is the top-level `no-mistakes runs` (verified:
+# `no-mistakes --help` lists it separately from `axi`). It is plain, human-
+# oriented text - no run id, no JSON/TOON, newest-first, columns
+# "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
+# spaces (verified: no quoting, so splitting on the first two whitespace runs
+# is exact) - but branch + coarse status is exactly what this predicate needs:
+# is a run for THIS branch active right now. Echoes the first (most recent)
+# matching row's status word (running/completed/cancelled/failed), or empty
+# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+nm_runs_status_for_branch() {  # <branch>
+  local branch=$1 out row st rest br sha
+  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+  [ -n "$out" ] || return 0
   while IFS= read -r row; do
-    if [[ $(trim "$row") =~ ^runs\[[0-9]+\]\{.*\}:$ ]]; then
-      in_runs=1
-      continue
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    st=${row%% *}
+    rest=${row#* }
+    rest=$(trim "$rest")
+    br=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    sha=${rest%% *}
+    if [ "$br" = "$branch" ]; then
+      # Same code-identity rule as axi status: skip a same-branch row whose
+      # short-sha does not match this worktree (rewritten or advanced tip).
+      if ! nm_coarse_head_matches_worktree "$sha"; then
+        continue
+      fi
+      printf '%s' "$st"
+      return 0
     fi
     [ "$in_runs" = 1 ] || continue
     case "$row" in
@@ -320,6 +368,43 @@ nm_run_id_for_branch() {  # <branch> <list-output>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
+# 0 if the active axi-status run's head field matches this worktree's code
+# identity. Branch match is a precondition (caller). Rules:
+#   - missing/empty head field: cannot bind; reject the run
+#   - equal commits (short or full SHA): match
+#   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
+#     the same history advanced the run tip)
+#   - run head is a strict ancestor of worktree HEAD: no match (local work
+#     advanced outside the run)
+#   - diverged / run head not in this worktree: no match (rewritten branch tip)
+nm_run_head_matches_worktree() {
+  local run_head local_full run_full
+  run_head=$(strip_quotes "$(nm_field head)")
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
+# sha for this branch row matches the worktree head under the same rules as
+# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+nm_coarse_head_matches_worktree() {  # <short-sha>
+  local run_head=$1 local_full run_full
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  if git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 HAVE_RUN=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
@@ -327,17 +412,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch; find this branch's
-      # own most recent run in the list, then inspect it directly.
-      list_out=$(nm_run axi)
-      rid=$(nm_run_id_for_branch "$CREW_BRANCH" "$list_out")
-      if [ -n "$rid" ]; then
-        RUN_OUT=$(nm_run axi status --run "$rid")
-        run_branch=$(strip_quotes "$(nm_field branch)")
-        [ "$run_branch" = "$CREW_BRANCH" ] && HAVE_RUN=1
+      # The active-or-most-recent run is for another branch, or same branch with
+      # a rewritten/diverged head (the CLI is alive and answered; only the
+      # attribution missed) - try the coarse fallback.
+      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
+      # primary call means the CLI itself did not respond, so retrying it
+      # immediately with a second bounded call would just double the wait
+      # for no better answer.
+      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$COARSE_STATUS" ]; then
+        HAVE_RUN=1
+        RUN_SOURCE=coarse
       fi
     fi
   fi

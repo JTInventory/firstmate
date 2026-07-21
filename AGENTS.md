@@ -541,12 +541,10 @@ Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-deci
 The local behavior-test runner is `bin/fm-run-behavior-tests.sh`; its guard, parallelism, isolation, failure aggregation, and CI boundary are documented in [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml).
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
-Judge a validating crewmate by the run's step status, never by whether its shell is still running.
-Read its current state with `bin/fm-crew-state.sh <id>`: a deterministic, token-tight one-line read that takes the matching no-mistakes run-step as the source of truth and reconciles it against the crewmate's `state/<id>.status` log.
-Because the run-step is authoritative before pane liveness, a crewmate whose window closed after or during validation can still report `done` or `working` from its run; a missing pane becomes `unknown` only when no matching run exists.
-That log is an append-only wake-*event* log, not a current-state field, and it goes stale the moment a resolved gate lets the run resume: after you answer a `needs-decision`/`blocked`, or an external wait represented by valid `paused: <reason>` ends, the crewmate can silently resume (responds to the gate, the pipeline fixes, it re-validates) while the last log line still names the earlier state.
-So never infer current state from a `tail` of that log; `bin/fm-crew-state.sh` reports the live run-step state and explicitly flags the stale log line superseded, where a raw `tail` would mislead you into re-escalating settled work.
-The fields below name the run-step states and outcomes it reads from `no-mistakes axi status`; run that command directly when you want the full gate findings.
+Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
+Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
+A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership; steer it back to the gate response flow.
+The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
 - `running`/`fixing`/`ci` - the pipeline is working (a fix round, a test, or CI monitoring); these run for many minutes and quiet is normal, so leave it alone. The exception is a current CI log marker saying checks are green: `fm-crew-state.sh` then reports the PR ready for captain review while no-mistakes continues to watch for merge or close.
 - `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`.

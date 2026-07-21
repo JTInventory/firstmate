@@ -120,16 +120,22 @@ attach_and_wait() {
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         attached_pid=$HEALTHY_PID
+        cycle_begin "$attached_pid" attached
         report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
     fi
-    # The attached watcher ended or lost its verified identity. Its output is
-    # shared per-home because the watcher is detached and is not waitable by this
-    # process.
-    print_watch_output "$WATCH_OUT"
-    exit 0
+    if wait_for_healthy_successor; then
+      cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
+      attached_pid=$HEALTHY_PID
+      cycle_begin "$attached_pid" attached
+      report_attached
+      continue
+    fi
+    cycle_log_append unknown unknown attached-cycle-ended none
+    fail_unexplained_cycle
+    return 1
   done
 }
 
@@ -262,46 +268,16 @@ if [ "$mode" = restart ]; then
   fi
 fi
 
-# A normal arm owns the one follower slot. If another arm already owns it, a
-# healthy watcher is already being waited on and this invocation must not add a
-# second long-lived process. The startup case uses the same slot so concurrent
-# fresh arms cannot launch a pile of detached watchers before the singleton race
-# settles.
-if [ "$mode" = arm ]; then
-  if healthy_watcher; then
-    if claim_arm_follower; then
-      FOLLOWER_CLAIMED=1
-      report_attached
-      attach_and_wait "$HEALTHY_PID"
-    fi
-    if [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
-      echo "watcher: FAILED - follower ownership is unverified"
-      exit 1
-    fi
-    if healthy_watcher; then
-      if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
-        echo "watcher: follower already waiting pid=$FM_LOCK_HELD_PID"
-        exit 0
-      fi
-      echo "watcher: FAILED - no follower slot available"
-      exit 1
-    fi
-    echo "watcher: FAILED - no live watcher with a fresh beacon"
-    exit 1
-  fi
-  if ! claim_arm_follower; then
-    if [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
-      echo "watcher: FAILED - follower ownership is unverified"
-      exit 1
-    fi
-    if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
-      echo "watcher: follower already waiting pid=$FM_LOCK_HELD_PID"
-      exit 0
-    fi
-    echo "watcher: FAILED - no live watcher with a fresh beacon"
-    exit 1
-  fi
-  FOLLOWER_CLAIMED=1
+# If a genuinely live+fresh watcher already holds the lock, do not start a second
+# one - attach to that cycle and wait until it ends so the harness notify fires
+# then, not as an immediate empty wake. (--restart skips this: it just stopped
+# this home's watcher and wants a fresh one.)
+if [ "$mode" = arm ] && healthy_watcher; then
+  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+  cycle_begin "$HEALTHY_PID" attached
+  report_attached
+  attach_and_wait "$HEALTHY_PID"
+  exit $?
 fi
 
 # Start the watcher detached and confirm it before settling in. The arm follows
