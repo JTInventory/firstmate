@@ -340,10 +340,12 @@ if [ "$detach_status" -ne 0 ]; then
 fi
 child_start=$(fm_pid_start "$child" 2>/dev/null || true)
 
-# Verify the outcome: poll until this detached watcher is the confirmed healthy
-# holder, until another watcher legitimately holds the singleton, or until this
-# detached process gives up.
-deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
+# Verify the outcome: poll until this child is the confirmed healthy watcher, or
+# until some other watcher legitimately holds the singleton (a startup race), or
+# until the child gives up. Only then print the honest line.
+# date(1) exposes whole seconds. Keep the configured confirmation budget from
+# collapsing when startup begins just before the next second boundary.
+deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
