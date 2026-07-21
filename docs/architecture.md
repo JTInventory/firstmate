@@ -38,40 +38,26 @@ It leads with prominent bordered banners for the tangle and no-watcher cases so 
 
 Three watcher-adjacent commands prove different things:
 
-| Command | What it proves | What it does not prove |
-| --- | --- | --- |
-| `bin/fm-watch-arm.sh` | Starts or confirms the inner watcher and fails loudly unless the watcher PID, lock identity, and fresh beacon agree. | It is not a durable tmux runner; it is one verified arm cycle. |
-| `bin/fm-guard.sh` | Conservatively warns when fleet scripts cannot prove a live watcher for this home, including stale beacon or lock mismatch cases. | In restricted shells that cannot see `/proc`, it may warn because it cannot prove PID identity, even when a host-level watcher is alive. |
-| `bin/fm-watch-session.sh status` | Confirms the durable runner tmux window for this home exists. | It does not inspect the runner's last `fm-watch-arm.sh` output and is not proof that the inner watcher is currently healthy. |
-
-When these surfaces disagree, use `bin/fm-watch-arm.sh` as the watcher-health source of truth: it either confirms the live watcher and beacon or exits non-zero. Use `bin/fm-watch-session.sh status` only to check the runner window, and treat `bin/fm-guard.sh` as a conservative pull-based warning that errs loud when process identity cannot be proved.
-
-A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
-The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs and status-scan primitives.
-The always-on watcher also uses that library's provably-working predicate on no-verb signal and non-terminal-stale paths, while the daemon keeps its away-mode stale recheck unchanged.
-A valid `paused: <reason>` is absorbed as an intentional external wait, but it is not an indefinite mute: the watcher stores its first-seen `.paused-*` marker and the away-mode daemon stores the corresponding `.subsuper-paused-*` marker in the existing home state directory. Both use `FM_PAUSE_RESURFACE_SECS` (default 3600 seconds) as the shared cadence, emit at most one bounded local re-surface per interval, and clear their markers when the pause ends, the pane disappears, or an authoritative active run wins.
-The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
-Its injection path uses the selected backend's composer detection and verified submit primitive; tmux shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, while Herdr uses its pane reads and send primitives. Stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
-The read-only supervision model surfaces a non-empty wedge marker as the high-severity `supervision:inject-wedged` checklist item owned by firstmate, including the marker detail, without clearing the marker or attempting recovery.
-`fm-send.sh` selects a pre-Enter popup-settle for slash commands, codex `$...` skill invocations, and marked ordinary text sent to codex secondmates using the target's recorded `harness=` and `kind=` meta.
-If that marked Codex secondmate path still looks pending after the generic Enter retries, `fm-send.sh` waits once more and sends one final Enter before reporting failure.
-After successful text sends, it adds its own `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay either fm-send-only pause.
-
-## Runtime session-provider backend
-
-The runtime backend is the session-provider layer below firstmate's lifecycle scripts.
-`bin/fm-backend.sh` owns selection, metadata helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` and `bin/backends/herdr.sh` own the backend-specific command primitives used by spawn, send, peek, watch, teardown, and crew-state.
-New spawns select a backend from `fm-spawn.sh --backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection (`$TMUX` first, `HERDR_ENV=1` second), then default `tmux`.
-Tmux remains the default and production path. Herdr is an experimental opt-in backend for Herdr 0.7.x/protocol 14+; unknown names fail loudly, and default tmux tasks omit `backend=tmux` from metadata. A missing `backend=` still means tmux.
-When `HERDR_ENV=1` is present without explicit configuration, Herdr is auto-detected; `$TMUX` wins when nested. Herdr tasks use one workspace per firstmate home and one tab per task, while treehouse remains the worktree provider. New Herdr tabs separate their one-time readable display label from the full task id and exact response-derived tab/pane ids; tmux naming remains unchanged. The AFK daemon supports Herdr supervisor target resolution and injection when explicitly selected. On capable Herdr protocol-16 sessions, the watcher can also use the native `pane.agent_status_changed` stream as an optional fast path; capability, socket, subscription, and reader failures fall back to polling. The detailed Herdr lifecycle, label, recovery, and safety contract lives in [herdr-backend.md](herdr-backend.md).
-The existing poll loop remains the fail-closed event-source backstop for Herdr and the normal event source for tmux, so the default wake/stale behavior remains unchanged.
-
-Generated ship and scout briefs carry a shared no-mistakes daemon ownership boundary: workers must not stop, restart, or update the daemon; daemon errors are reported as `blocked:` and only firstmate manages the shared instance. The exact generated rule is owned by `bin/fm-brief.sh`.
-
-For a bounded operator read, `bin/fm-fleet-snapshot.sh --json` is the local
-structured source for backlog, task metadata, status events, and worktree facts.
-`bin/fm-bearings-snapshot.sh` projects that source into a compact view and keeps
-remote PR discovery opt-in and soft-failing.
+The runtime backend is the session-provider layer below firstmate's scripts.
+It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, live-window fallback lookup, agent-process liveness probes where verified, and endpoint teardown.
+`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter ([`docs/tmux-backend.md`](tmux-backend.md)), and `bin/backends/herdr.sh` (P2), `bin/backends/zellij.sh` (P3), `bin/backends/orca.sh` (P4), and `bin/backends/cmux.sh` (P5) are experimental task-spawn adapters.
+New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
+Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, which wins over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; auto-detected herdr or cmux prints a one-time opt-out notice, auto-detected tmux stays silent, and zellij and orca are never auto-detected (only explicit selection).
+Unknown backend names fail loudly.
+For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
+`fm-watch.sh` polls each window's backend for a busy state: tmux, zellij, orca, and cmux have no native primitive and always report unknown, preserving the original pane-tail-regex detection unchanged; herdr's `agent.get` semantic state (working/idle/done/blocked) is consulted first for stale detection, with unknown native states falling back to the same regex.
+That poll loop is the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
+For capable herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [herdr-backend.md](herdr-backend.md#native-paneagent_status_changed-push-escalation-immediate-blocked-wake) owns the mechanism, capability gates, and verification evidence.
+The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and herdr have verified classifiers for secondmate recovery, while zellij, Orca, and cmux currently report `unknown` rather than guess.
+Herdr is experimental and can be selected explicitly or by runtime auto-detection: treehouse remains the worktree provider for it exactly as it is for tmux (herdr is a session provider only), and its full verification - the container shape decision, created-vs-adopted default-tab prune safety, restored-layout husk respawn idempotency, verified CLI facts, ANSI-preserved ghost/placeholder classification through the shared extractor, a verified small-`--lines` capture bug and its workaround, and known gaps - is recorded in `docs/herdr-backend.md`.
+Herdr's durable default container shape is workspace-per-home plus tab-per-task: the primary home uses workspace label `firstmate`, secondmate homes use `2ndmate-<secondmate-id>`, and recovery/list-live scopes to the current `FM_HOME`'s workspace.
+Its optional default-off presentation projection may place one clean new task in a disposable workspace without changing endpoint authority or lifecycle ownership; [`docs/herdr-backend.md`](herdr-backend.md#optional-disposable-single-task-presentation-spaces) owns that conditional design.
+Zellij is experimental and selected only explicitly: treehouse remains its worktree provider too, and its full verification - the resolved "gaps to verify" list from the original design report, the unconditional-exit-0 CLI quirk and its mitigation, the focus-steal-on-new-tab finding, the home-scoped tab-title collision fix, and known gaps - is recorded in `docs/zellij-backend.md`.
+Zellij's container shape is simpler than herdr's: one shared `firstmate` session, one tab per task, with no per-home workspace split; visible tab titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path.
+Orca is experimental and selected only explicitly: Orca owns both worktree and terminal lifecycle, records `orca_worktree_id=` and `terminal=`, and removes worktrees through `orca worktree rm` only after the usual firstmate teardown checks pass. Its current behavior and limitations are recorded in `docs/orca-backend.md`.
+cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: treehouse remains its worktree provider (cmux is a session provider only, like herdr/zellij), and its full verification - the socket access setup requirement with Automation mode recommended, the read-screen-fails-on-a-fresh-surface finding, the close-surface-refuses-on-the-last-surface finding, the source-verified runtime marker and fallback behavior, and known gaps - is recorded in `docs/cmux-backend.md`.
+cmux's container shape is one workspace per task with one surface, no per-home container split; workspace titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path, and `--secondmate` spawns are refused, mirroring Orca.
+Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectable as a runtime backend.
 
 ## Worktrees, not branches in your checkout
 
