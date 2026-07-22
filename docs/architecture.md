@@ -146,8 +146,7 @@ Secondmate agents can run on a different verified harness than crewmates.
 `fm-spawn.sh --secondmate` re-reads that profile on each launch or recovery respawn, while explicit `--model` and `--effort` still win for one spawn.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
-`config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces hand-editing across the fleet.
-`config/secondmate-harness` and `config/secondmate-profile.json` are primary-local and are not inherited into secondmate homes.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.
 
 The `data/secondmates.md` line schema and the secondmate environment variables are documented in [configuration.md](configuration.md).
 

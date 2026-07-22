@@ -6,6 +6,12 @@ data/
 .DS_Store
 /.fm-secondmate-home
 .env
-/config/
-/reports/
-/backups/
+config/crew-harness
+config/crew-dispatch.json
+config/secondmate-harness
+config/backlog-backend
+config/backend
+config/x-mode.env
+config/cmux-socket-password
+config/wedge-alarm
+config/herdr-presentation-spaces
