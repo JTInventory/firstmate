@@ -91,15 +91,12 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bash bin/fm-run-behavior-tests.sh`.
-The guard fails closed if direct push resolution, the no-mistakes gate, or no-mistakes status would target `kunchenguid/firstmate`; this captain-owned lane must target `JTInventory/firstmate`.
-It does not treat an upstream-owner `origin` fetch URL as a PR target by itself when controlled-fork proof shows delivery through `fork/main`, no-mistakes status, the no-mistakes gate, and a safe resolved `origin` push target.
-The runner executes the guard first, requires `tmux` on `PATH`, prints `tmux -V`, and discovers every `tests/*.test.sh` file in sorted order.
-It runs up to four tests in parallel by default, bounded by the host CPU count.
-Set `FM_TEST_JOBS=1` to preserve the legacy serial behavior, or set another positive integer for bounded local parallelism.
-Each test runs with a private `TMPDIR` and `GOTMPDIR`, and the runner removes inherited `FM_HOME`, `FM_ROOT_OVERRIDE`, `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_CONFIG_OVERRIDE`, and `FM_PROJECTS_OVERRIDE` so tests do not share a supervisor home.
-The runner waits for each scheduled test, reports every failure, and exits non-zero after the batch completes if any test failed.
-The CI workflow remains an independent full `tests/*.test.sh` loop in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), so local parallelism does not change CI coverage or its serial execution boundary.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
+That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
+It does not set `commands.test` to a complete `tests/*.test.sh` walk.
+Local no-mistakes Test stays intent-targeted; [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) owns the broad portable and required real-Herdr lane composition.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for local test entry points, `bin/fm-test-run.sh --help` for exact selection mechanics, and [herdr-backend.md](herdr-backend.md) for the real-Herdr lane's verification and isolation rationale.
+The Phase 2 concurrent isolation proof for the portable parallel candidate set is owned by `bin/fm-test-isolation-proof.sh` and archived in [fm-test-isolation-proof.md](fm-test-isolation-proof.md); it does not enable production CI sharding.
 
 ## Captain preferences (data/captain.md)
 
