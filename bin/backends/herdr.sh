@@ -9,8 +9,10 @@
 #
 # One Herdr workspace is kept per firstmate home: `firstmate` for the primary
 # and `2ndmate-<id>` for a seeded secondmate home. Each task is one tab with a
-# single root pane. Targets are `<session>:<pane-id>`; pane ids contain a colon,
-# so parsing always splits on the first colon only.
+# single root pane. Visible task labels are presentation only; full task ids and
+# exact response-derived ids remain machine identity. Targets are
+# `<session>:<pane-id>`; pane ids contain a colon, so parsing always splits on
+# the first colon only.
 
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
@@ -300,6 +302,18 @@ fm_backend_herdr_workspace_find() {  # <session>
       | if ($matches | length) > 1 then error("multiple matching workspaces") else ($matches[0] // empty) end
     end
   ' 2>/dev/null
+}
+
+fm_backend_herdr_workspace_tab_labels() {  # <session>
+  local session=$1 wsid tabs
+  wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
+  [ -n "$wsid" ] || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -r '
+    if (.result.tabs | type) == "array"
+    then .result.tabs[] | select((.label | type) == "string") | .label
+    else error("missing result.tabs")
+    end' 2>/dev/null
 }
 
 fm_backend_herdr_workspace_ids() {  # <session>
@@ -874,6 +888,65 @@ fm_backend_herdr_list_task_ids() {  # <session:workspace>
   local container=$1 session=${1%%:*} wsid=${1#*:} tabs
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -r '.result.tabs[]?.tab_id // empty' 2>/dev/null
+}
+
+fm_backend_herdr_task_id_for_display_label() {  # <label>
+  local want=$1 state record label owner task_id found='' count=0
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}
+  for record in "$state"/*.meta "$state"/*.herdr-label; do
+    [ -f "$record" ] || continue
+    label=$(grep '^display_label=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$label" = "$want" ] || continue
+    owner=$(basename "$record")
+    owner=${owner%.meta}
+    owner=${owner%.herdr-label}
+    if [ "${record##*.}" = herdr-label ]; then
+      task_id=$(grep '^task_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ "$task_id" = "$owner" ] || continue
+    fi
+    if [ -z "$found" ]; then
+      found=$owner
+      count=1
+    elif [ "$found" != "$owner" ]; then
+      count=2
+    fi
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$found"
+}
+
+# Recovery fallback. Exact persisted session/pane ids remain the normal route.
+# New labels are claimed only by an exact metadata or pre-create-journal match;
+# legacy fm-<id> discovery remains supported.
+fm_backend_herdr_list_live() {  # <session>
+  local session=$1 wsid tabs tab_id label pane_id task_id reported
+  wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
+  [ -n "$wsid" ] || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+  while IFS=$'\t' read -r tab_id label; do
+    [ -n "$tab_id" ] || continue
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
+    [ -n "$pane_id" ] || continue
+    reported=$label
+    case "$label" in
+      fm-*) ;;
+      *)
+        if task_id=$(fm_backend_herdr_task_id_for_display_label "$label"); then
+          reported="fm-$task_id"
+        fi
+        ;;
+    esac
+    printf '%s:%s\t%s\n' "$session" "$pane_id" "$reported"
+  done < <(printf '%s' "$tabs" | jq -r '
+    .result.tabs[]?
+    | select(
+        (.label | type) == "string"
+        and (
+          (.label | startswith("fm-"))
+          or (.label | test("^(Crew|Scout|2nd) - [A-Za-z0-9 .+_-]+ · [a-z0-9]{4,10}$"))
+        )
+      )
+    | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 
 # These lifecycle operations are tmux-only in the generic spawn setup. They

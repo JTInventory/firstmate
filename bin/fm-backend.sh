@@ -103,11 +103,26 @@ fm_backend_of_meta() {  # <meta-file>
   printf '%s' "${value:-tmux}"
 }
 
+fm_backend_target_of_meta() {  # <meta-file>
+  local meta=$1 backend session pane window
+  backend=$(fm_backend_of_meta "$meta")
+  if [ "$backend" = herdr ]; then
+    session=$(fm_meta_get "$meta" herdr_session)
+    pane=$(fm_meta_get "$meta" herdr_pane_id)
+    if [ -n "$session" ] && [ -n "$pane" ]; then
+      printf '%s:%s' "$session" "$pane"
+      return 0
+    fi
+  fi
+  window=$(fm_meta_get "$meta" window)
+  [ -n "$window" ] && printf '%s' "$window"
+}
+
 fm_backend_meta_for_window() {  # <target> <state-dir>
   local target=$1 state=$2 meta
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
-    [ "$(fm_meta_get "$meta" window)" = "$target" ] || continue
+    [ "$(fm_backend_target_of_meta "$meta")" = "$target" ] || continue
     printf '%s' "$meta"
     return 0
   done
@@ -156,17 +171,28 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
     *:*)
       printf '%s' "$raw"
       ;;
-    fm-*)
-      meta="$state/${raw#fm-}.meta"
-      if [ ! -f "$meta" ]; then
+    *)
+      if [ -f "$state/$raw.meta" ]; then
+        meta="$state/$raw.meta"
+      elif [[ "$raw" == fm-* ]]; then
+        meta="$state/${raw#fm-}.meta"
+      else
+        meta=
+      fi
+      if [ -n "$meta" ]; then
+        if [ ! -f "$meta" ]; then
+          echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
+          return 1
+        fi
+        window=$(fm_backend_target_of_meta "$meta")
+        [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
+        printf '%s' "$window"
+        return 0
+      fi
+      if [[ "$raw" == fm-* ]]; then
         echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
         return 1
       fi
-      window=$(fm_meta_get "$meta" window)
-      [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
-      printf '%s' "$window"
-      ;;
-    *)
       fm_backend_source tmux || return 1
       fm_backend_tmux_resolve_bare_selector "$raw"
       ;;

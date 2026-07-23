@@ -6,7 +6,7 @@
 #
 # herdr persists its whole session layout (workspaces/tabs/panes) and
 # restores it after a server restart, including a reboot. Before this fix, a
-# restored fm-<id> task tab came back a husk - a dead pane, or a plain
+# restored readable task tab came back a husk - a dead pane, or a plain
 # agent-less shell in the saved cwd - and bin/backends/herdr.sh's
 # fm_backend_herdr_create_task refused to spawn into it unconditionally,
 # because a same-labeled tab already existed. Every fleet respawn after a
@@ -85,7 +85,7 @@ CONTAINER=${RAW%%$'\t'*}
 SEEDED_TAB_ID=${RAW#*$'\t'}
 WSID=${CONTAINER#*:}
 
-CREW_LABEL="fm-respawn-crew1"
+CREW_LABEL="Crew - Respawn crew · rc01"
 CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PROJ_CWD" "$SEEDED_TAB_ID") \
   || fail "initial crewmate-shaped task creation failed"
 read -r CREW_TAB_ID CREW_PANE_ID <<EOF
@@ -95,7 +95,7 @@ if [ -z "$CREW_TAB_ID" ] || [ -z "$CREW_PANE_ID" ]; then
   fail "initial crewmate-shaped task did not return tab/pane ids"
 fi
 
-SM_LABEL="fm-respawn-sm1"
+SM_LABEL="2nd - Respawn secondmate · rs01"
 SM_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$SM_LABEL" "$PROJ_CWD") \
   || fail "initial secondmate-shaped task creation failed"
 read -r SM_TAB_ID SM_PANE_ID <<EOF
@@ -105,7 +105,7 @@ if [ -z "$SM_TAB_ID" ] || [ -z "$SM_PANE_ID" ]; then
   fail "initial secondmate-shaped task did not return tab/pane ids"
 fi
 
-pass "repro setup: two real fm-<id> task tabs exist (crewmate-shaped and secondmate-shaped), neither with a registered agent"
+pass "repro setup: two real readable task tabs exist (crewmate-shaped and secondmate-shaped), neither with a registered agent"
 
 # --- 2. a REAL herdr session restart - the actual root cause -----------------
 # `session stop` + fresh `herdr server` for the SAME named session: verified

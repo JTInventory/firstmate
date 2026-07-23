@@ -6,8 +6,10 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout]
-#        fm-brief.sh <task-id> --secondmate <project>...
+# Usage: fm-brief.sh <task-id> <repo-name> [--display-title <title>] [--scout]
+#        fm-brief.sh <task-id> [--display-title <title>] --secondmate <project>...
+#   --display-title sanitizes and persists a deterministic 1-28 character
+#   presentation phrase at data/<task-id>/display-title for fm-spawn.sh.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -34,24 +36,49 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
+# shellcheck source=bin/fm-task-label-lib.sh
+. "$SCRIPT_DIR/fm-task-label-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
+DISPLAY_TITLE=
+DISPLAY_TITLE_SET=0
 POS=()
+want_value=
 for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$a" in
+      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    esac
+    DISPLAY_TITLE=$a
+    DISPLAY_TITLE_SET=1
+    want_value=
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --display-title) want_value=display-title ;;
+    --display-title=*) DISPLAY_TITLE=${a#--display-title=}; DISPLAY_TITLE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
+[ -z "$want_value" ] || { echo "error: --display-title requires a value" >&2; exit 1; }
 ID=${POS[0]}
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+if [ "$DISPLAY_TITLE_SET" -eq 1 ]; then
+  DISPLAY_TITLE=$(fm_task_label_sanitize_phrase "$DISPLAY_TITLE") || exit 1
+  [ -n "$DISPLAY_TITLE" ] || {
+    echo "error: --display-title has no usable characters" >&2
+    exit 1
+  }
+  printf '%s\n' "$DISPLAY_TITLE" > "$DATA/$ID/display-title"
+fi
 
 shell_quote() {
   printf "'"

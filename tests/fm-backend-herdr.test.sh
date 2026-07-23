@@ -601,14 +601,54 @@ SH
 test_dispatch_and_meta_routing() {
   local state="$TMP_ROOT/dispatch-state" meta
   mkdir -p "$state"
-  fm_write_meta "$state/task.meta" 'window=default:w1:p2' 'backend=herdr'
+  fm_write_meta "$state/task.meta" 'window=stale:w0:p0' 'backend=herdr' \
+    'herdr_session=default' 'herdr_tab_id=w1:t2' 'herdr_pane_id=w1:p2' \
+    'display_label=Crew - Route task · a1b2' 'task_key=a1b2'
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_validate herdr || fail "Herdr should be a known backend"
   [ "$(fm_backend_of_meta "$state/task.meta")" = herdr ] || fail "meta backend was not read"
-  [ "$(fm_backend_resolve_selector fm-task "$state")" = default:w1:p2 ] || fail "selector target changed"
+  [ "$(fm_backend_resolve_selector task "$state")" = default:w1:p2 ] || fail "exact task-id selector did not prefer persisted Herdr ids"
+  [ "$(fm_backend_resolve_selector fm-task "$state")" = default:w1:p2 ] || fail "legacy selector target changed"
   meta=$(fm_backend_meta_for_window default:w1:p2 "$state")
   [ "$meta" = "$state/task.meta" ] || fail "window metadata lookup failed"
-  pass "backend dispatch accepts Herdr and preserves opaque session:pane targets"
+  pass "backend dispatch prefers exact Herdr session/pane ids and retains fm-<id> routing"
+}
+
+test_list_live_correlates_exact_persisted_labels_and_keeps_unknown_orphans() {
+  local home state out
+  home="$TMP_ROOT/list-live-display-home"
+  state="$home/state"
+  mkdir -p "$state"
+  cat > "$state/task-c1db.meta" <<'EOF'
+display_label=Scout - Herdr labels · c1db
+EOF
+  cat > "$state/task-be28.herdr-label" <<'EOF'
+version=1
+task_id=task-be28
+display_label=Crew - UI Design · be28
+task_key=be28
+EOF
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_find() { printf w1; }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"Scout - Herdr labels · c1db\"},{\"tab_id\":\"w1:t2\",\"label\":\"Crew - UI Design · be28\"},{\"tab_id\":\"w1:t3\",\"label\":\"Crew - Unknown orphan · dead\"},{\"tab_id\":\"w1:t4\",\"label\":\"fm-legacy-z9\"}]}}"
+    }
+    fm_backend_herdr_pane_for_tab() {
+      case "$3" in
+        w1:t1) printf w1:p1 ;;
+        w1:t2) printf w1:p2 ;;
+        w1:t3) printf w1:p3 ;;
+        w1:t4) printf w1:p4 ;;
+      esac
+    }
+    fm_backend_herdr_list_live fmtest
+  ' "$ROOT")
+  assert_contains "$out" $'fmtest:w1:p1\tfm-task-c1db' "persisted meta label was not correlated to its full task id"
+  assert_contains "$out" $'fmtest:w1:p2\tfm-task-be28' "pre-create journal label was not correlated to its full task id"
+  assert_contains "$out" $'fmtest:w1:p3\tCrew - Unknown orphan · dead' "unmatched readable label was not surfaced as unknown"
+  assert_contains "$out" $'fmtest:w1:p4\tfm-legacy-z9' "legacy fm-<id> discovery was lost"
+  pass "Herdr list-live claims exact persisted labels only and keeps legacy discovery"
 }
 
 test_selection_and_autodetect
@@ -630,3 +670,4 @@ test_seed_prune_is_exact_and_fail_closed
 test_event_capability_uses_named_session
 test_eventwait_returns_fresh_blocked_transition
 test_dispatch_and_meta_routing
+test_list_live_correlates_exact_persisted_labels_and_keeps_unknown_orphans

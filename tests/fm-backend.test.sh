@@ -110,11 +110,16 @@ test_selector_and_dispatch() {
   log="$dir/tmux.log"; : > "$log"
   state="$dir/state"
   fm_write_meta "$state/demo.meta" "window=firstmate:fm-demo"
+  fm_write_meta "$state/herdr-ids-c1db.meta" "window=stale:w0:p0" "backend=herdr" \
+    "herdr_session=restored" "herdr_tab_id=w9:t4" "herdr_pane_id=w9:p4" \
+    "display_label=Crew - Herdr ids · c1db" "task_key=c1db"
 
   [ "$(fm_backend_resolve_selector sess:win "$state")" = sess:win ] \
     || fail "explicit session:window selector changed"
   [ "$(fm_backend_resolve_selector fm-demo "$state")" = firstmate:fm-demo ] \
     || fail "fm-<id> selector did not use metadata"
+  [ "$(fm_backend_resolve_selector herdr-ids-c1db "$state")" = restored:w9:p4 ] \
+    || fail "exact Herdr task selector did not prefer persisted session/pane ids"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_resolve_selector adhoc "$state")
   [ "$out" = firstmate:adhoc ] || fail "bare selector did not use fake tmux inventory"
 

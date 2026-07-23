@@ -45,12 +45,51 @@ tab with one root pane:
 - secondmate home: workspace label `2ndmate-<secondmate-id>`
 - task target: `<session>:<pane-id>`, for example `default:w1:p2`
 
-Herdr task metadata records `backend=herdr`, `herdr_session=`,
-`herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`. Tmux metadata
-continues to omit `backend=tmux`; a missing backend field still means tmux.
+Herdr task metadata records `backend=herdr`, `display_label=`, `task_key=`,
+`herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and
+`herdr_pane_id=`. Tmux metadata continues to omit `backend=tmux`; a missing
+backend field still means tmux.
 
 The adapter avoids focusing new workspaces or tabs where Herdr supports that
 flag.
+
+### Task display labels: presentation split from identity
+
+`bin/fm-task-label-lib.sh` creates one Herdr-only label at spawn:
+
+```text
+<kind> - <phrase> · <task-key>
+```
+
+Ship maps to `Crew`, scout maps to `Scout`, and the persistent secondmate agent
+maps to `2nd`. The phrase is 1-28 characters from explicit `--display-title`,
+then `data/<id>/display-title`, then the structured backlog title, then a
+semantic task-id fallback. It permits only ASCII letters, digits, spaces, `.`,
+`+`, `_`, and `-`; control, ANSI, newline, tab, and bidi input is refused. The
+whole label is at most 50 characters and is set once, never renamed for a
+phase or status change.
+
+The key reuses a stable 4-6 character alphanumeric id tail when it contains
+both letters and digits. Otherwise it uses the first six lowercase SHA-256
+characters of the full task id. A collision found in metadata, pre-create
+journals, or live workspace labels extends it deterministically to ten
+characters. The key helps people scan tabs but never authorizes routing,
+recovery, or cleanup.
+
+Before tab create, spawn atomically publishes the private
+`state/<id>.herdr-label` journal with the full `task_id=`, exact
+`display_label=`, and `task_key=`. After the create response's exact tab and
+pane ids plus the label are atomically published in `state/<id>.meta`, the
+journal is removed. A crash or lost response therefore leaves an exact
+full-id-to-label correlation, and a retry reuses the same label.
+
+Normal routing prefers `herdr_session=` plus `herdr_pane_id=` and keeps
+`herdr_tab_id=` for exact correlation. Recovery still recognizes legacy
+`fm-<id>` labels. For readable labels it maps only an exact `display_label=`
+match from metadata or the pre-create journal back to the full task id.
+Unmatched readable labels remain unknown orphans; there is no
+pretty-label-only or short-key-only recovery. Workspace identity remains
+`firstmate` or `2ndmate-<id>`, and tmux naming is unchanged.
 
 ### ID stability across a server restart
 
