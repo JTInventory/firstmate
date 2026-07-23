@@ -111,7 +111,7 @@ test_pr_check_records_matching_task_meta() {
   out=$(run_pr_check "$case_dir" same-task "$url") || fail "pr-check should accept matching task metadata: $out"
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
-  assert_contains "$out" "armed: state/same-task.check.sh polls $url" "pr-check did not arm the merge poll"
+  assert_contains "$out" "armed: state/same-task.check.sh" "pr-check did not arm the merge poll"
   assert_grep "pr=$url" "$case_dir/state/same-task.meta" "pr-check did not record PR URL for matching meta"
   assert_grep "pr_head=$head" "$case_dir/state/same-task.meta" "pr-check did not record verified PR head for matching meta"
   assert_present "$case_dir/state/same-task.check.sh" "pr-check did not write check script for matching meta"

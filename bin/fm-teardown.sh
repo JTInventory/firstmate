@@ -25,8 +25,8 @@
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
-# it removes the task's check, trust record, PR sidecar, publication record, and
-# quarantine entries with the rest of the volatile state.
+# it removes the task's check, trust record, PR sidecar, publication record,
+# retirement receipt, and quarantine entries with the rest of the volatile state.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -76,6 +76,12 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
+  echo "error: invalid teardown request" >&2
+  exit 2
+fi
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -215,6 +221,87 @@ remove_grok_turnend_auth() {
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
+}
+
+validate_pr_poll_cleanup() {
+  local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
+  fm_task_id_path_safe "$id" || return 0
+  quarantine="$state_dir/.pr-check-quarantine"
+  if [ "$id" = _noncanonical ] \
+    && { [ -e "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -e "$quarantine/_noncanonical.diagnostic.noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.noncanonical" ]; }; then
+    echo "REFUSED: legacy PR-check quarantine migration is incomplete; preserving task state." >&2
+    return 1
+  fi
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    has_artifact=1
+  fi
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  if [ -e "$state_dir/$id.pr-poll-retirement" ] \
+    || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
+    fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
+      echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
+      return 1
+    }
+  fi
+  [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
+  if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
+    || [ ! -d "$quarantine" ] || [ -L "$quarantine" ]; then
+    echo "REFUSED: unsafe PR-check quarantine path $quarantine; preserving task state." >&2
+    return 1
+  fi
+  if [ "$(fm_pr_file_device "$quarantine")" != "$state_device" ] \
+    || [ "$(fm_pr_file_mode "$quarantine")" != 700 ]; then
+    echo "REFUSED: PR-check quarantine is not on the task state device; preserving task state." >&2
+    return 1
+  fi
+  for artifact in "$quarantine/$id."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if ! fm_pr_private_file_valid "$artifact" 600 "$state_device"; then
+      echo "REFUSED: unsafe task quarantine entry; preserving task state." >&2
+      return 1
+    fi
+  done
+}
+
+remove_pr_poll_artifacts() {
+  local state_dir=$1 id=$2 quarantine artifact
+  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
+  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.check-trust" || return 1
+  if fm_task_id_path_safe "$id"; then
+    quarantine="$state_dir/.pr-check-quarantine"
+    if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
+      for artifact in "$quarantine/$id."*; do
+        [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+        rm -f -- "$artifact" || return 1
+      done
+      rmdir "$quarantine" 2>/dev/null || true
+    fi
+  fi
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -610,6 +697,7 @@ validate_firstmate_home_children_removal() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
@@ -674,7 +762,10 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
+      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.grok-turnend-token"
   done
 }
 
@@ -768,6 +859,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_WORKSPACE=
@@ -855,7 +948,9 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

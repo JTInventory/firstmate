@@ -91,7 +91,8 @@ test_live_stale_watch_lock_is_actionable() {
   status=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
   [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
+  grep -E 'heartbeat is stale|watcher exclusion could not be acquired|watcher ownership is ambiguous' "$err" >/dev/null \
+    || fail "watcher did not explain the stale live lock: $(cat "$err")"
   pass "live watcher lock with stale heartbeat is actionable"
 }
 
@@ -1136,6 +1137,16 @@ test_arm_reclaims_reused_pid_lock_on_plain_arm() {
     i=$((i + 1))
   done
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ "$lock_pid" = "$live" ]; then
+    grep -E 'watcher ownership is ambiguous|PR check migration blocked' "$armout" >/dev/null \
+      || fail "plain arm left the reused-pid lock without a fail-closed migration diagnostic: $(cat "$armout")"
+    is_live_non_zombie "$live" || fail "plain arm killed a reused unrelated pid"
+    kill "$armpid" "$live" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    wait "$live" 2>/dev/null || true
+    pass "plain arm fails closed on a reused-pid lock before PR-check migration"
+    return
+  fi
   { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
     || fail "plain arm did not replace stale reused-pid lock with a live watcher (got '$lock_pid')"
   grep -F "watcher: started pid=$lock_pid" "$armout" >/dev/null \

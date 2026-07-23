@@ -15,7 +15,12 @@
 #                          not provably working (surfaced at once), a provably-
 #                          working stale past the wedge threshold, or an expired
 #                          paused external-wait recheck, unless afk active
-#   check: <script>: <out> per-task check output, always actionable
+#   check: <script>: <out> authenticated check output, always actionable
+#   check: rejected unauthenticated state checks: <paths>
+#                          unsafe state checks were refused without execution
+#   check: rejected unauthenticated PR poll retirement receipts: <paths>
+#                          invalid pending retirements were preserved without
+#                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, re-arm after each printed reason by running
@@ -43,37 +48,16 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-watch-events-lib.sh
 . "$SCRIPT_DIR/fm-watch-events-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-x-lib.sh
+. "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
-if ! fm_lock_try_acquire "$WATCH_LOCK"; then
-  BEAT="$STATE/.last-watcher-beat"
-  if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
-    if [ -e "$BEAT" ]; then
-      beat_age=$(fm_path_age "$BEAT")
-      if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
-        exit 1
-      fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
-      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
-      exit 1
-    fi
-    echo "watcher: already running pid $FM_LOCK_HELD_PID"
-  else
-    echo "watcher: already running"
-  fi
-  exit 0
-fi
-trap 'fm_lock_release "$WATCH_LOCK"' EXIT
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 # Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
 # Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
@@ -362,8 +346,6 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( $(date +%s) - m ))
 }
 
-[ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
-
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
 # compared against a persisted size:mtime signature (.seen-*) rather than
 # mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -385,16 +367,85 @@ scan_signals() {
   return 0
 }
 
-run_check() {
+run_check_process() {
   local c=$1
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
+  shift
+  if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
+    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
+  elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" bash "$c" 2>/dev/null || true
+    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
   fi
+}
+
+run_check() {
+  ( run_check_process "$@" ) 2>/dev/null || true
+}
+
+FM_ACTIVE_CHECK_PID=
+FM_ACTIVE_CHECK_PGID=
+FM_CHECK_OUTPUT=
+FM_CHECK_RESULT=
+FM_CHECK_SIGNAL_PENDING=
+
+fm_check_output_cleanup() {
+  [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
+  FM_CHECK_OUTPUT=
+}
+
+fm_active_check_stop() {
+  local pid=${FM_ACTIVE_CHECK_PID:-} pgid=${FM_ACTIVE_CHECK_PGID:-} i
+  [ -n "$pid" ] || [ -n "$pgid" ] || return 0
+  [ -z "$pgid" ] || kill -TERM -- "-$pgid" 2>/dev/null || true
+  [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -z "$pgid" ] || kill -KILL -- "-$pgid" 2>/dev/null || true
+  [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null || true
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  i=0
+  while [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
+    return 1
+  fi
+  FM_ACTIVE_CHECK_PID=
+  FM_ACTIVE_CHECK_PGID=
+}
+
+run_check_capture() {
+  local pgid
+  fm_check_output_cleanup
+  FM_CHECK_RESULT=
+  FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
+  chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
+  FM_CHECK_SIGNAL_PENDING=
+  trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
+  set -m
+  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
+  FM_ACTIVE_CHECK_PID=$!
+  FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
+  set +m
+  pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  trap 'exit 1' HUP INT TERM
+  if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
+    fm_active_check_stop || true
+    fm_check_output_cleanup
+    return 1
+  fi
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  FM_ACTIVE_CHECK_PID=
+  fm_active_check_stop || return 1
+  FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
+  fm_check_output_cleanup
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the
@@ -448,6 +499,64 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+# Unit tests source this file to exercise the bounded check runner. Runtime
+# migration, lock acquisition, and the supervision loop must remain inert then.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
+# Replace or quarantine checks created by older versions before acquiring the
+# watcher lock or enumerating any runnable check. Migration never executes the
+# legacy check files.
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
+  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
+  exit 1
+}
+
+if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+  BEAT="$STATE/.last-watcher-beat"
+  if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+    if [ -e "$BEAT" ]; then
+      beat_age=$(fm_path_age "$BEAT")
+      if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
+        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
+        exit 1
+      fi
+    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
+      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
+      exit 1
+    fi
+    echo "watcher: already running pid $FM_LOCK_HELD_PID"
+  else
+    echo "watcher: already running"
+  fi
+  exit 0
+fi
+watcher_cleanup() {
+  fm_active_check_stop || return 1
+  fm_check_output_cleanup
+  fm_custom_check_snapshot_cleanup
+  fm_lock_release "$WATCH_LOCK"
+}
+trap watcher_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+WATCHER_PID=${BASHPID:-$$}
+printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
+printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+
+[ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
+
+# A merged poll may have queued its terminal wake and then lost the process
+# between receipt publication and fixed-path removal. Finish only validated,
+# identity-bound retirement receipts before any check can run.
+if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+  reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
+  fm_wake_append check pr-poll-retirement "$reason" || exit 1
+  touch "$STATE/.last-check"
+  wake "$reason"
+fi
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -471,16 +580,63 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      out=$(run_check "$c")
+      is_pr_poll=0
+      if [ "$(basename "$c")" = x-watch.check.sh ]; then
+        if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
+          && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
+          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+          out=$FM_CHECK_RESULT
+        else
+          rejected_checks="$rejected_checks $c"
+          continue
+        fi
+      else
+        id=$(basename "$c" .check.sh)
+        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          is_pr_poll=1
+          provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
+          url=$FM_PR_POLL_SNAPSHOT_URL
+          host=$FM_PR_POLL_SNAPSHOT_HOST
+          path=$FM_PR_POLL_SNAPSHOT_PATH
+          number=$FM_PR_POLL_SNAPSHOT_NUMBER
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+            "$provider" "$url" "$host" "$path" "$number" || exit 1
+          out=$FM_CHECK_RESULT
+        elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+          custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+          run_check_capture "$custom_snapshot" || exit 1
+          out=$FM_CHECK_RESULT
+          fm_custom_check_snapshot_cleanup
+        else
+          fm_custom_check_snapshot_cleanup
+          rejected_checks="$rejected_checks $c"
+          continue
+        fi
+      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
+            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+              || triage_log "merged PR poll retirement remains recoverable for $id"
+          else
+            triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+          fi
+        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi
     done
+    if [ -n "$rejected_checks" ]; then
+      reason="check: rejected unauthenticated state checks:$rejected_checks"
+      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
     touch "$STATE/.last-check"
   fi
 
