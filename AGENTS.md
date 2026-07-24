@@ -122,9 +122,9 @@ backups/             root-local preservation files; not a canonical tracked surf
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The tmux window for a tmux-backed task is named `fm-<id>`.
+The tmux window for a tmux-backed task is named `fm-<id>`; Herdr display labels do not change that naming.
 `fm-spawn.sh` creates that window by tmux window ID, disables automatic and application-driven renaming, restores the canonical name, and verifies it before sending any pane commands.
-Herdr-backed tasks instead use a `fm-<id>` tab and record an opaque `session:pane` target; the Herdr workspace is scoped to the firstmate home.
+Herdr-backed tasks instead use one `<kind> - <phrase> · <task-key>` display tab, with kind shown as `Crew`, `Scout`, or `2nd`, set once at spawn. The full task id plus exact Herdr session, workspace, tab, and pane ids remain machine identity; the Herdr workspace is scoped to the firstmate home, and legacy `fm-<id>` tabs remain discoverable for recovery.
 After creation, tmux targets the immutable window ID rather than the mutable `session:window-name` label; Herdr targets the recorded pane ID. If setup cannot prove the backend endpoint, it cleans up the uniquely identified new endpoint and aborts.
 
 ## 3. Bootstrap (run at every session start)
