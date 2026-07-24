@@ -30,6 +30,7 @@ Tmux remains the default. Herdr is an experimental opt-in backend for Herdr 0.7.
 Unknown values are rejected. Default tmux task metadata omits `backend=tmux`; readers treat a missing `backend=` as tmux for compatibility.
 The `config/backend` file is local to a firstmate home and is not inherited by secondmate homes.
 When Herdr resolves, bootstrap checks `herdr`, `jq`, and `treehouse`; otherwise Herdr is not a required tool. See [herdr-backend.md](herdr-backend.md) for the guarded `fm-herdr-lab.sh` workflow. Herdr remains a session provider only: treehouse still provides worktrees.
+Herdr adds presentation-label and exact-endpoint metadata while retaining `window=` compatibility. The field, routing, and recovery contract lives in [herdr-backend.md](herdr-backend.md#task-display-labels-presentation-split-from-identity); tmux workspace and window naming remain unchanged.
 
 ## Gate defaults (.no-mistakes.yaml)
 

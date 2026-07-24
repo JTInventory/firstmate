@@ -104,7 +104,8 @@ backups/             root-local preservation files; not a canonical tracked surf
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; non-default backends also record backend=, and Herdr records herdr_session=, herdr_workspace_id=, herdr_tab_id=, and herdr_pane_id=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; non-default backends also record backend=, with Herdr-specific label and exact-id fields owned by docs/herdr-backend.md; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.herdr-label   private pre-create recovery journal for a Herdr tab; removed after complete task metadata is published (field and recovery contract: docs/herdr-backend.md)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -122,9 +123,9 @@ backups/             root-local preservation files; not a canonical tracked surf
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
-The tmux window for a tmux-backed task is named `fm-<id>`.
+The tmux window for a tmux-backed task is named `fm-<id>`; Herdr display labels do not change that naming.
 `fm-spawn.sh` creates that window by tmux window ID, disables automatic and application-driven renaming, restores the canonical name, and verifies it before sending any pane commands.
-Herdr-backed tasks instead use a `fm-<id>` tab and record an opaque `session:pane` target; the Herdr workspace is scoped to the firstmate home.
+Herdr-backed tasks instead use one `<kind> - <phrase> · <task-key>` display tab, with kind shown as `Crew`, `Scout`, or `2nd`, set once at spawn. The full task id plus exact Herdr session, workspace, tab, and pane ids remain machine identity; the Herdr workspace is scoped to the firstmate home, and legacy `fm-<id>` tabs remain discoverable for recovery.
 After creation, tmux targets the immutable window ID rather than the mutable `session:window-name` label; Herdr targets the recorded pane ID. If setup cannot prove the backend endpoint, it cleans up the uniquely identified new endpoint and aborts.
 
 ## 3. Bootstrap (run at every session start)

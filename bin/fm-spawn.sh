@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse worktree, or a secondmate in
 # its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--display-title <title>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--display-title <title>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   --display-title supplies the deterministic Herdr-only presentation phrase.
+#   Without it, spawn reads data/<task-id>/display-title, then the structured
+#   backlog title, then a semantic task-id fallback. Tmux naming is unchanged.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -88,6 +91,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-cbm-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-label-lib.sh
+. "$SCRIPT_DIR/fm-task-label-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -96,10 +101,12 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+DISPLAY_TITLE=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+DISPLAY_TITLE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -112,6 +119,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      display-title) DISPLAY_TITLE=$a; DISPLAY_TITLE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -128,6 +136,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --display-title) want_value=display-title ;;
+    --display-title=*) DISPLAY_TITLE=${a#--display-title=}; DISPLAY_TITLE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -136,6 +146,7 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$DISPLAY_TITLE_SET" -eq 0 ] || [ -n "$DISPLAY_TITLE" ] || { echo "error: --display-title requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -171,6 +182,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  if [ "$DISPLAY_TITLE_SET" -eq 1 ]; then
+    echo "error: batch dispatch does not support one shared --display-title; spawn each task explicitly" >&2
+    exit 2
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -192,6 +207,13 @@ ID=${POS[0]:-}
 case "$ID" in
   ''|.*|*[!A-Za-z0-9._-]*) echo "error: unsafe task id: $ID" >&2; exit 2 ;;
 esac
+if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
+  [ -f "$DATA/$ID/display-title" ] || {
+    echo "error: display title record for $ID is not a regular file" >&2
+    exit 1
+  }
+  DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -689,6 +711,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 W="fm-$ID"
+DISPLAY_LABEL=
+TASK_KEY=
+HERDR_LABEL_JOURNAL=
 HERDR_SES=
 HERDR_WORKSPACE_ID=
 HERDR_TAB_ID=
@@ -844,18 +869,23 @@ case "$BACKEND" in
   herdr)
     HERDR_LABEL_HOME="$FM_HOME"
     [ "$KIND" = secondmate ] && HERDR_LABEL_HOME="$PROJ_ABS"
+    HERDR_SES=$(fm_backend_herdr_session)
+    fm_backend_herdr_server_ensure "$HERDR_SES" || exit 1
     CONTAINER=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_container_ensure "$BACKEND" "$PROJ_ABS") || exit 1
     CONTAINER_MAIN=${CONTAINER%%$'\t'*}
     HERDR_SEEDED=
     [ "$CONTAINER_MAIN" = "$CONTAINER" ] || HERDR_SEEDED=${CONTAINER#*$'\t'}
     HERDR_SES=${CONTAINER_MAIN%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER_MAIN#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_create_task "$BACKEND" "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_create_labeled_task \
+      "$BACKEND" "$CONTAINER" "$STATE" "$ID" "$KIND" "$DISPLAY_TITLE" \
+      "$DATA/backlog.md" "$PROJ_ABS" "$HERDR_SEEDED") || exit 1
+    IFS=$'\t' read -r DISPLAY_LABEL TASK_KEY HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    HERDR_LABEL_JOURNAL="$STATE/$ID.herdr-label"
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
-      echo "error: Herdr did not return a tab/pane id for $W" >&2
+      echo "error: Herdr did not return a tab/pane id for $DISPLAY_LABEL" >&2
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
@@ -1030,6 +1060,8 @@ if [ "$KIND" != secondmate ]; then
 fi
 
 mkdir -p "$STATE"
+META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
+chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 {
   echo "window=$T"
   echo "worktree=$WT"
@@ -1052,6 +1084,8 @@ mkdir -p "$STATE"
   # non-default backends so existing and new tmux metadata stay unchanged.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
+    echo "display_label=$DISPLAY_LABEL"
+    echo "task_key=$TASK_KEY"
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
@@ -1061,7 +1095,11 @@ mkdir -p "$STATE"
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
+mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
+if [ "$BACKEND" = herdr ]; then
+  rm -f "$HERDR_LABEL_JOURNAL"
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

@@ -16,17 +16,51 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 usage() {
   cat <<'USAGE'
 Usage: fm-fleet-snapshot.sh [--json|--help]
+       fm-fleet-snapshot.sh --backlog-title <task-id>
 
 The default and --json modes print the read-only fm-fleet-snapshot.v1 JSON
 contract. All sources are local to this Firstmate home.
+--backlog-title prints the title from one canonical structured backlog row and
+exits before task endpoint inspection.
 USAGE
 }
 
+OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
+  --backlog-title)
+    OUTPUT_MODE=backlog-title
+    BACKLOG_TITLE_ID=${2:-}
+    [ -n "$BACKLOG_TITLE_ID" ] || { usage >&2; exit 2; }
+    ;;
   --help|-h) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
+
+if [ "$OUTPUT_MODE" = backlog-title ]; then
+  [ -f "$DATA/backlog.md" ] || exit 0
+  awk -v id="$BACKLOG_TITLE_ID" '
+    {
+      prefix = "- [ ] " id " - "
+      done_prefix = "- [x] " id " - "
+      done_prefix_upper = "- [X] " id " - "
+      bold_prefix = "- **" id "** - "
+      if (index($0, prefix) == 1) title = substr($0, length(prefix) + 1)
+      else if (index($0, done_prefix) == 1) title = substr($0, length(done_prefix) + 1)
+      else if (index($0, done_prefix_upper) == 1) title = substr($0, length(done_prefix_upper) + 1)
+      else if (index($0, bold_prefix) == 1) title = substr($0, length(bold_prefix) + 1)
+      else next
+      sub(/[[:space:]]+\(repo:[^)]*\).*/, "", title)
+      sub(/[[:space:]]+blocked-by:.*/, "", title)
+      sub(/[[:space:]]+-[[:space:]]+https:\/\/github\.com\/[^[:space:]]+\/pull\/[0-9]+[[:space:]]+\(merged[[:space:]][^)]*\)[[:space:]]*$/, "", title)
+      sub(/[[:space:]]+-[[:space:]]+local main[[:space:]]+\(merged[[:space:]][^)]*\)[[:space:]]*$/, "", title)
+      sub(/[[:space:]]+-[[:space:]]+data\/[^[:space:]]+\/report\.md[[:space:]]+\(reported[[:space:]][^)]*\)[[:space:]]*$/, "", title)
+      print title
+      exit
+    }
+  ' "$DATA/backlog.md"
+  exit 0
+fi
 
 command -v jq >/dev/null 2>&1 || {
   printf '%s\n' 'fm-fleet-snapshot.sh: jq is required for the JSON contract' >&2

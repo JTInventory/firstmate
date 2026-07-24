@@ -9,8 +9,10 @@
 #
 # One Herdr workspace is kept per firstmate home: `firstmate` for the primary
 # and `2ndmate-<id>` for a seeded secondmate home. Each task is one tab with a
-# single root pane. Targets are `<session>:<pane-id>`; pane ids contain a colon,
-# so parsing always splits on the first colon only.
+# single root pane. Visible task labels are presentation only; full task ids and
+# exact response-derived ids remain machine identity. Targets are
+# `<session>:<pane-id>`; pane ids contain a colon, so parsing always splits on
+# the first colon only.
 
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
@@ -28,6 +30,8 @@ FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS=${FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS:-100}
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=bin/fm-task-label-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-task-label-lib.sh"
 
 fm_backend_herdr_workspace_label() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
@@ -125,6 +129,10 @@ fm_backend_herdr_workspace_lock_path() {
   printf '%s/.fm-herdr-workspace.lock' "$FM_HOME"
 }
 
+fm_backend_herdr_label_lock_path() {
+  printf '%s/.fm-herdr-label.lock' "$1"
+}
+
 fm_backend_herdr_pid_start() {
   local pid=$1 proc_stat out
   local -a proc_fields
@@ -191,12 +199,15 @@ fm_backend_herdr_lock_owner_status() {
 }
 
 fm_backend_herdr_lock_discard() {
-  local lock=$1 owner
+  local lock=$1 owner owner_dir owner_name
+  owner_dir=$(dirname "$lock")
   if [ -L "$lock" ]; then
     owner=$(readlink "$lock" 2>/dev/null || true)
     rm -f "$lock"
-    case "$owner" in
-      "$FM_HOME"/.fm-herdr-workspace.owner.*) rm -f "$owner" ;;
+    owner_name=$(basename "$owner")
+    case "$owner" in "$owner_dir"/*)
+      case "$owner_name" in .fm-herdr-*.owner.*) rm -f "$owner" ;; esac
+      ;;
     esac
   elif [ -d "$lock" ]; then
     rm -f "$lock/pid" "$lock/pid-start"
@@ -207,9 +218,11 @@ fm_backend_herdr_lock_discard() {
 }
 
 fm_backend_herdr_workspace_lock_acquire() {
-  local lock=$1 attempt=0 stale_status quarantine pid start owner acquired=0
-  [ -d "$FM_HOME" ] || return 1
-  owner=$(mktemp "$FM_HOME/.fm-herdr-workspace.owner.XXXXXX" 2>/dev/null) || return 1
+  local lock=$1 attempt=0 stale_status quarantine pid start owner acquired=0 lock_dir lock_name
+  lock_dir=$(dirname "$lock")
+  lock_name=$(basename "$lock")
+  [ -d "$lock_dir" ] || return 1
+  owner=$(mktemp "$lock_dir/$lock_name.owner.XXXXXX" 2>/dev/null) || return 1
   pid=${BASHPID:-$$}
   start=$(fm_backend_herdr_pid_start "$pid") || { rm -f "$owner"; return 1; }
   printf '%s\n%s\n' "$pid" "$start" > "$owner" || { rm -f "$owner"; return 1; }
@@ -300,6 +313,18 @@ fm_backend_herdr_workspace_find() {  # <session>
       | if ($matches | length) > 1 then error("multiple matching workspaces") else ($matches[0] // empty) end
     end
   ' 2>/dev/null
+}
+
+fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
+  local session=$1 wsid=${2:-} tabs
+  [ -n "$wsid" ] || wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
+  [ -n "$wsid" ] || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -r '
+    if (.result.tabs | type) == "array"
+    then .result.tabs[] | select((.label | type) == "string") | .label
+    else error("missing result.tabs")
+    end' 2>/dev/null
 }
 
 fm_backend_herdr_workspace_ids() {  # <session>
@@ -565,12 +590,10 @@ fm_backend_herdr_agent_alive() {  # <target> -> alive|dead|unknown
   esac
 }
 
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
-  local container=$1 label=$2 cwd=$3 seeded=${4:-} lock session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs created_tab_committed create_attempted
-  lock=$(fm_backend_herdr_workspace_lock_path) || return 1
+fm_backend_herdr_create_task_locked() {  # <container> <label> <cwd> [seeded-default-tab]
+  local container=$1 label=$2 cwd=$3 seeded=${4:-} session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs created_tab_committed create_attempted
   (
     local -a husks=()
-    fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
     created_tab_committed=0
     create_attempted=0
     cleanup_created_tab() {
@@ -582,7 +605,6 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
         fi
       fi
       trap - EXIT
-      fm_backend_herdr_workspace_lock_release "$lock"
       exit "$status"
     }
     trap cleanup_created_tab EXIT
@@ -636,6 +658,47 @@ EOF
     fi
     created_tab_committed=1
     printf '%s %s' "$tab_id" "$pane_id"
+  )
+}
+
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
+  local lock
+  lock=$(fm_backend_herdr_workspace_lock_path) || return 1
+  (
+    fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
+    trap 'status=$?; trap - EXIT; fm_backend_herdr_workspace_lock_release "$lock" || status=1; exit "$status"' EXIT
+    fm_backend_herdr_create_task_locked "$@"
+  )
+}
+
+fm_backend_herdr_create_labeled_task() {  # <container> <state> <id> <kind> <title> <backlog> <cwd> [seeded]
+  local container=$1 state=$2 id=$3 kind=$4 title=$5 backlog=$6 cwd=$7 seeded=${8:-}
+  local label_lock workspace_lock
+  mkdir -p "$state" || return 1
+  label_lock=$(fm_backend_herdr_label_lock_path "$state") || return 1
+  workspace_lock=$(fm_backend_herdr_workspace_lock_path) || return 1
+  (
+    local session wsid live prepared label key ids tab_id pane_id
+    fm_backend_herdr_workspace_lock_acquire "$label_lock" || exit 1
+    fm_backend_herdr_workspace_lock_acquire "$workspace_lock" || {
+      fm_backend_herdr_workspace_lock_release "$label_lock"
+      exit 1
+    }
+    trap 'status=$?; trap - EXIT; fm_backend_herdr_workspace_lock_release "$workspace_lock" || status=1; fm_backend_herdr_workspace_lock_release "$label_lock" || status=1; exit "$status"' EXIT
+    session=${container%%:*}
+    wsid=${container#*:}
+    wsid=${wsid%%$'\t'*}
+    live=$(fm_backend_herdr_workspace_tab_labels "$session" "$wsid") || exit 1
+    prepared=$(fm_task_label_prepare "$state" "$id" "$kind" "$title" "$live" "$backlog" \
+      "$FM_HOME" "$session" "$wsid") || exit 1
+    label=${prepared%%$'\t'*}
+    key=${prepared#*$'\t'}
+    ids=$(fm_backend_herdr_create_task_locked "$container" "$label" "$cwd" "$seeded") || exit 1
+    read -r tab_id pane_id <<EOF
+$ids
+EOF
+    [ -n "$tab_id" ] && [ -n "$pane_id" ] || exit 1
+    printf '%s\t%s\t%s\t%s' "$label" "$key" "$tab_id" "$pane_id"
   )
 }
 
@@ -874,6 +937,106 @@ fm_backend_herdr_list_task_ids() {  # <session:workspace>
   local container=$1 session=${1%%:*} wsid=${1#*:} tabs
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -r '.result.tabs[]?.tab_id // empty' 2>/dev/null
+}
+
+fm_backend_herdr_task_id_for_display_label() {  # <label>
+  local want=$1 state record data label owner found='' count=0
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}
+  for record in "$state"/*.meta "$state"/*.herdr-label; do
+    [ -f "$record" ] || continue
+    owner=$(basename "$record")
+    owner=${owner%.meta}
+    owner=${owner%.herdr-label}
+    data=$(fm_task_label_read_record "$record" "$owner" 2>/dev/null) || continue
+    label=${data%%$'\t'*}
+    [ "$label" = "$want" ] || continue
+    if [ -z "$found" ]; then
+      found=$owner
+      count=1
+    elif [ "$found" != "$owner" ]; then
+      count=2
+    fi
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$found"
+}
+
+fm_backend_herdr_task_id_for_exact_ids() {  # <session> <workspace> <tab> <pane>
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 state record owner found='' count=0
+  local backend record_session record_workspace record_tab record_pane
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}
+  for record in "$state"/*.meta; do
+    [ -f "$record" ] || continue
+    backend=$(grep '^backend=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$backend" = herdr ] || continue
+    record_session=$(grep '^herdr_session=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    record_workspace=$(grep '^herdr_workspace_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    record_tab=$(grep '^herdr_tab_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    record_pane=$(grep '^herdr_pane_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$record_session" = "$session" ] || continue
+    [ "$record_workspace" = "$wsid" ] || continue
+    [ "$record_tab" = "$tab_id" ] || continue
+    [ "$record_pane" = "$pane_id" ] || continue
+    owner=$(basename "$record" .meta)
+    if [ -z "$found" ]; then
+      found=$owner
+      count=1
+    elif [ "$found" != "$owner" ]; then
+      count=2
+    fi
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$found"
+}
+
+# Recovery fallback. Exact persisted session/pane ids remain the normal route.
+# New labels are claimed only by an exact metadata or pre-create-journal match;
+# legacy fm-<id> discovery remains supported.
+fm_backend_herdr_list_live() {  # <session> [workspace]
+  local session=$1 wsid=${2:-} tabs rows row tab_id label pane_id task_id reported
+  [ -n "$wsid" ] || wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
+  [ -n "$wsid" ] || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '
+    (.result | type) == "object"
+    and (.result.tabs | type) == "array"
+    and all(.result.tabs[]; type == "object" and (.tab_id | type) == "string" and (.label | type) == "string")
+  ' >/dev/null 2>&1 || return 1
+  rows=$(printf '%s' "$tabs" | jq -c '
+    def has_unsafe_controls:
+      any(explode[];
+        (. >= 0 and . <= 31)
+        or . == 127
+        or (. >= 8234 and . <= 8238)
+        or (. >= 8294 and . <= 8297));
+    .result.tabs[]
+    | select(.tab_id | has_unsafe_controls | not)
+    | select(.label | has_unsafe_controls | not)
+    | [.tab_id, .label]
+  ') || return 1
+  [ -n "$rows" ] || return 0
+  while IFS= read -r row; do
+    tab_id=$(printf '%s' "$row" | jq -r '.[0]') || return 1
+    label=$(printf '%s' "$row" | jq -r '.[1]') || return 1
+    [ -n "$tab_id" ] || continue
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
+    [ -n "$pane_id" ] || return 1
+    reported=$label
+    if task_id=$(fm_backend_herdr_task_id_for_exact_ids "$session" "$wsid" "$tab_id" "$pane_id"); then
+      reported="fm-$task_id"
+    else
+      case "$label" in
+        fm-*) fm_task_label_task_id_is_valid "${label#fm-}" || continue ;;
+        *)
+          fm_task_label_validate_display_label "$label" >/dev/null 2>&1 || continue
+          if task_id=$(fm_backend_herdr_task_id_for_display_label "$label"); then
+            reported="fm-$task_id"
+          fi
+          ;;
+      esac
+    fi
+    printf '%s:%s\t%s\t%s\n' "$session" "$pane_id" "$reported" "$label"
+  done <<<"$rows"
 }
 
 # These lifecycle operations are tmux-only in the generic spawn setup. They

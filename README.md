@@ -99,7 +99,7 @@ Outside tmux, tmux-backed crewmates land in a detached `firstmate` session you c
     │ backend sends / status files │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows by default; Herdr tabs when selected
+ │ task 1 │   │ task 2 │  ... │ task N │   fm-<id> tmux windows; readable Herdr tabs when selected
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼

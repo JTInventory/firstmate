@@ -103,11 +103,26 @@ fm_backend_of_meta() {  # <meta-file>
   printf '%s' "${value:-tmux}"
 }
 
+fm_backend_target_of_meta() {  # <meta-file>
+  local meta=$1 backend session pane window
+  backend=$(fm_backend_of_meta "$meta")
+  if [ "$backend" = herdr ]; then
+    session=$(fm_meta_get "$meta" herdr_session)
+    pane=$(fm_meta_get "$meta" herdr_pane_id)
+    if [ -n "$session" ] && [ -n "$pane" ]; then
+      printf '%s:%s' "$session" "$pane"
+      return 0
+    fi
+  fi
+  window=$(fm_meta_get "$meta" window)
+  [ -n "$window" ] && printf '%s' "$window"
+}
+
 fm_backend_meta_for_window() {  # <target> <state-dir>
   local target=$1 state=$2 meta
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
-    [ "$(fm_meta_get "$meta" window)" = "$target" ] || continue
+    [ "$(fm_backend_target_of_meta "$meta")" = "$target" ] || continue
     printf '%s' "$meta"
     return 0
   done
@@ -150,27 +165,134 @@ fm_backend_source() {  # <name>
   esac
 }
 
-fm_backend_resolve_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 meta window
+fm_backend_herdr_inventory_target() {  # <state> <alias> [home] [session] [workspace] [display-label] [allow-legacy]
+  local state=$1 alias=$2 home=${3:-$FM_HOME} session=${4:-} wsid=${5:-}
+  local display_label=${6:-} allow_legacy=${7:-0} live target
+  fm_backend_source herdr || return 2
+  if [ -z "$session" ]; then
+    session=$(fm_backend_herdr_session) || return 2
+    [ -n "$session" ] || return 2
+  fi
+  if ! live=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    fm_backend_list_live herdr "$session" "$wsid"); then
+    return 2
+  fi
+  if [ -n "$display_label" ]; then
+    target=$(printf '%s\n' "$live" | awk -F '\t' -v alias="$alias" -v label="$display_label" '
+      $2 == alias && $3 == label { if (++count == 1) found = $1 }
+      END { if (count == 1) print found }
+    ')
+    [ -z "$target" ] || { printf '%s' "$target"; return 0; }
+  fi
+  if [ "$allow_legacy" = 1 ]; then
+    target=$(printf '%s\n' "$live" | awk -F '\t' -v alias="$alias" '
+      $2 == alias && $3 == alias { if (++count == 1) found = $1 }
+      END { if (count == 1) print found }
+    ')
+    [ -z "$target" ] || { printf '%s' "$target"; return 0; }
+  fi
+  return 1
+}
+
+fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes backend<TAB>target
+  local raw=$1 state=$2 meta window id backend session wsid recovery_record recovery_label recovery_home
+  local recovery_display_label
+  local inventory_status
   case "$raw" in
     *:*)
-      printf '%s' "$raw"
+      printf '%s\t%s' "$(fm_backend_of_selector "$raw" "$raw" "$state")" "$raw"
       ;;
-    fm-*)
-      meta="$state/${raw#fm-}.meta"
-      if [ ! -f "$meta" ]; then
+    *)
+      case "$raw" in
+        fm-*) id=${raw#fm-} ;;
+        *) id=$raw ;;
+      esac
+      meta="$state/$id.meta"
+      [ -f "$meta" ] || meta=
+      if [ -n "$meta" ]; then
+        window=$(fm_backend_target_of_meta "$meta")
+        [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
+        backend=$(fm_backend_of_meta "$meta")
+        if [ "$backend" != herdr ]; then
+          printf '%s\t%s' "$backend" "$window"
+          return 0
+        fi
+        if fm_backend_pane_readable herdr "$window"; then
+          printf 'herdr\t%s' "$window"
+          return 0
+        fi
+        recovery_home=$(fm_meta_get "$meta" home)
+        session=$(fm_meta_get "$meta" herdr_session)
+        wsid=$(fm_meta_get "$meta" herdr_workspace_id)
+        recovery_display_label=$(fm_meta_get "$meta" display_label)
+        if window=$(fm_backend_herdr_inventory_target "$state" "fm-$id" \
+          "${recovery_home:-$FM_HOME}" "$session" "$wsid" "$recovery_display_label" 1); then
+          printf 'herdr\t%s' "$window"
+          return 0
+        else
+          inventory_status=$?
+        fi
+        if [ "$inventory_status" -eq 2 ]; then
+          echo "error: could not inspect Herdr recovery inventory for $raw" >&2
+        else
+          echo "error: no live Herdr target found for $raw" >&2
+        fi
+        return 1
+      fi
+      recovery_record="$state/$id.herdr-label"
+      if [ -f "$recovery_record" ]; then
+        recovery_label="fm-$id"
+        fm_backend_source herdr || return 1
+        fm_task_label_read_record "$recovery_record" "$id" >/dev/null 2>&1 || {
+          echo "error: malformed Herdr recovery journal for $raw" >&2
+          return 1
+        }
+        recovery_home=$(fm_meta_get "$recovery_record" herdr_home)
+        session=$(fm_meta_get "$recovery_record" herdr_session)
+        wsid=$(fm_meta_get "$recovery_record" herdr_workspace_id)
+        recovery_display_label=$(fm_meta_get "$recovery_record" display_label)
+        if window=$(fm_backend_herdr_inventory_target "$state" "$recovery_label" \
+          "${recovery_home:-$FM_HOME}" "$session" "$wsid" "$recovery_display_label" 1); then
+          printf 'herdr\t%s' "$window"
+          return 0
+        else
+          inventory_status=$?
+        fi
+        if [ "$inventory_status" -eq 2 ]; then
+          echo "error: could not inspect Herdr recovery inventory for $raw" >&2
+        else
+          echo "error: no live Herdr target found for $raw" >&2
+        fi
+        return 1
+      fi
+      if [[ "$raw" == fm-* ]] && [ "$(fm_backend_name)" = herdr ]; then
+        if window=$(fm_backend_herdr_inventory_target "$state" "fm-$id" \
+          "$FM_HOME" "" "" "" 1); then
+          printf 'herdr\t%s' "$window"
+          return 0
+        else
+          inventory_status=$?
+        fi
+        if [ "$inventory_status" -eq 2 ]; then
+          echo "error: could not inspect Herdr legacy inventory for $raw" >&2
+          return 1
+        fi
+      fi
+      if [[ "$raw" == fm-* ]]; then
         echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
         return 1
       fi
-      window=$(fm_meta_get "$meta" window)
-      [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
-      printf '%s' "$window"
-      ;;
-    *)
       fm_backend_source tmux || return 1
-      fm_backend_tmux_resolve_bare_selector "$raw"
+      window=$(fm_backend_tmux_resolve_bare_selector "$raw") || return 1
+      printf 'tmux\t%s' "$window"
       ;;
   esac
+}
+
+fm_backend_resolve_selector() {  # <raw-target> <state-dir>
+  local resolved
+  resolved=$(fm_backend_resolve_selector_with_backend "$@") || return 1
+  printf '%s' "${resolved#*$'\t'}"
 }
 
 # Generic dispatch wrappers. Backend-specific adapters own command spelling;
@@ -335,6 +457,24 @@ fm_backend_list_task_ids() {  # <backend> <container>
     tmux) fm_backend_tmux_list_task_ids "$@" ;;
     herdr) fm_backend_herdr_list_task_ids "$@" ;;
     *) echo "error: no task-list implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_list_live() {  # <backend> <container-or-session>
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_list_live "$@" ;;
+    *) echo "error: no live-task inventory implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_create_labeled_task() {  # <backend> <container> <state> <id> <kind> <title> <backlog> <cwd> [seeded]
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_create_labeled_task "$@" ;;
+    *) echo "error: no labeled-task create implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 

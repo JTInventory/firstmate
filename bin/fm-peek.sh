@@ -14,7 +14,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 
-T=$(fm_backend_resolve_selector "$1" "$STATE")
+RESOLUTION=$(fm_backend_resolve_selector_with_backend "$1" "$STATE")
+BACKEND=${RESOLUTION%%$'\t'*}
+T=${RESOLUTION#*$'\t'}
 N=${2:-40}
-BACKEND=$(fm_backend_of_selector "$1" "$T" "$STATE")
 fm_backend_capture "$BACKEND" "$T" "$N"

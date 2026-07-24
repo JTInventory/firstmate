@@ -13,7 +13,7 @@
 # create_task path and asserts the live pane (and its live process) survive
 # untouched. Also exercises the normal happy path (a genuinely fresh
 # workspace's seeded default tab gets pruned, leaving exactly one clean
-# fm-<id> task tab), mirroring tests/fm-backend-herdr-smoke.test.sh's broader
+# readable task tab), mirroring tests/fm-backend-herdr-smoke.test.sh's broader
 # coverage but scoped tightly to this one safety property.
 #
 # Safety (tests/herdr-test-safety.sh): cleanup uses ONLY
@@ -115,7 +115,7 @@ fi
 [ -z "$SEEDED_TAB_ID" ] || fail "an ADOPTED workspace must report an EMPTY seeded default tab id (the created-vs-adopted gate), got '$SEEDED_TAB_ID' - this is exactly what would reproduce the 2026-07-02 self-kill"
 pass "fixed: container_ensure adopts the label-colliding startup workspace and reports NO seeded default tab (never a prune candidate)"
 
-TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-prunesafety-e2e "$LIVE_CWD" "$SEEDED_TAB_ID") \
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "Crew - Prune safety · ps01" "$LIVE_CWD" "$SEEDED_TAB_ID") \
   || fail "create_task failed"
 read -r NEW_TAB_ID NEW_PANE_ID <<EOF
 $TASK_IDS
@@ -144,7 +144,7 @@ fm_backend_herdr_kill "$SESSION:$NEW_PANE_ID"
 fm_backend_herdr_kill "$SESSION:$LIVE_PANE_ID"
 
 # --- 4. happy path still works: a genuinely fresh workspace gets its seeded -
-# default tab pruned, leaving exactly one clean fm-<id> task tab -------------
+# default tab pruned, leaving exactly one clean readable task tab ------------
 
 HAPPY_CWD="$SCRATCH/happy-project"
 mkdir -p "$HAPPY_CWD"
@@ -153,7 +153,7 @@ HAPPY_CONTAINER=${HAPPY_RAW%%$'\t'*}
 HAPPY_SEEDED=${HAPPY_RAW#*$'\t'}
 [ -n "$HAPPY_SEEDED" ] || fail "happy path: expected a genuinely fresh workspace with a non-empty seeded default tab id"
 
-HAPPY_TASK_IDS=$(fm_backend_herdr_create_task "$HAPPY_CONTAINER" fm-prunesafety-happy "$HAPPY_CWD" "$HAPPY_SEEDED") \
+HAPPY_TASK_IDS=$(fm_backend_herdr_create_task "$HAPPY_CONTAINER" "Crew - Prune happy · ph01" "$HAPPY_CWD" "$HAPPY_SEEDED") \
   || fail "happy-path create_task failed"
 read -r _HAPPY_TAB HAPPY_PANE <<EOF
 $HAPPY_TASK_IDS
@@ -166,7 +166,7 @@ HAPPY_COUNT=$(printf '%s' "$HAPPY_TABS" | jq -r '.result.tabs? // [] | length')
 [ "$HAPPY_COUNT" = 1 ] || fail "happy path: expected exactly 1 tab (seeded default pruned) after the first real task tab, got $HAPPY_COUNT: $HAPPY_TABS"
 printf '%s' "$HAPPY_TABS" | jq -e --arg t "$HAPPY_SEEDED" '.result.tabs[] | select(.tab_id == $t)' >/dev/null 2>&1 \
   && fail "happy path: the seeded default tab should have been pruned but is still present: $HAPPY_TABS"
-pass "happy path: a genuinely fresh workspace's seeded default tab is still pruned, leaving exactly one clean fm-<id> task tab"
+pass "happy path: a genuinely fresh workspace's seeded default tab is still pruned, leaving exactly one clean readable task tab"
 
 fm_backend_herdr_kill "$SESSION:$HAPPY_PANE"
 

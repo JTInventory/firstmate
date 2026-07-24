@@ -110,11 +110,17 @@ test_selector_and_dispatch() {
   log="$dir/tmux.log"; : > "$log"
   state="$dir/state"
   fm_write_meta "$state/demo.meta" "window=firstmate:fm-demo"
+  fm_write_meta "$state/foo.meta" "window=firstmate:fm-foo"
+  fm_write_meta "$state/fm-foo.meta" "window=firstmate:fm-fm-foo"
 
   [ "$(fm_backend_resolve_selector sess:win "$state")" = sess:win ] \
     || fail "explicit session:window selector changed"
   [ "$(fm_backend_resolve_selector fm-demo "$state")" = firstmate:fm-demo ] \
     || fail "fm-<id> selector did not use metadata"
+  [ "$(fm_backend_resolve_selector fm-foo "$state")" = firstmate:fm-foo ] \
+    || fail "fm-<id> selector did not retain its stripped-id meaning"
+  [ "$(fm_backend_resolve_selector fm-fm-foo "$state")" = firstmate:fm-fm-foo ] \
+    || fail "fm-prefixed task id was not addressable through its canonical selector"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_resolve_selector adhoc "$state")
   [ "$out" = firstmate:adhoc ] || fail "bare selector did not use fake tmux inventory"
 
@@ -130,6 +136,80 @@ test_selector_and_dispatch() {
   assert_contains "$(cat "$log")" $'\x1f''Escape' "send-key did not reach fake tmux"
   assert_contains "$(cat "$log")" $'\x1f''kill-window' "kill did not reach fake tmux"
   pass "selector resolution and capture/key/readability/kill dispatch use tmux adapter"
+}
+
+test_selector_recovers_precreate_herdr_journal() {
+  local state out resolution
+  state="$TMP_ROOT/herdr-recovery/state"
+  mkdir -p "$state"
+  fm_write_meta "$state/exact-c1db.meta" "window=stale:w0:p0" "backend=herdr" \
+    "herdr_session=fmtest" "herdr_workspace_id=w-second" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "display_label=Crew - Exact recovery · c1db" "task_key=c1db" \
+    "home=$TMP_ROOT/secondmate-home"
+  fm_write_meta "$state/stale-d2e3.meta" "window=stale:w0:p0" "backend=herdr" \
+    "herdr_session=fmtest" "herdr_workspace_id=w-second" \
+    "herdr_tab_id=w-old:t1" "herdr_pane_id=w-old:p1" \
+    "display_label=Crew - Stale recovery · d2e3" "task_key=d2e3" \
+    "home=$TMP_ROOT/secondmate-home"
+  fm_write_meta "$state/legacy-e3f4.meta" "window=stale:w0:p0" "backend=herdr" \
+    "herdr_session=fmtest" "herdr_workspace_id=w-second" \
+    "herdr_tab_id=w-gone:t1" "herdr_pane_id=w-gone:p1" \
+    "display_label=Crew - Missing display · e3f4" "task_key=e3f4" \
+    "home=$TMP_ROOT/secondmate-home"
+  printf 'version=1\ntask_id=crash-c1db\ndisplay_label=Crew - Crash recovery · c1db\ntask_key=c1db\nherdr_home=%s\nherdr_session=fmtest\nherdr_workspace_id=w-second\n' \
+    "$TMP_ROOT/secondmate-home" \
+    > "$state/crash-c1db.herdr-label"
+  fm_backend_source herdr || fail "Herdr backend could not be loaded"
+  fm_backend_pane_readable() {
+    [ "$1" = herdr ] && [ "$2" = fmtest:w1:p1 ]
+  }
+  fm_backend_list_live() {
+    [ "$1" = herdr ] || return 1
+    [ "$FM_STATE_OVERRIDE" = "$state" ] || return 1
+    case "${3:-}" in
+      w-second)
+        [ "$2" = fmtest ] || return 1
+        [ "$FM_HOME" = "$TMP_ROOT/secondmate-home" ] || return 1
+        printf 'fmtest:w1:p2\tfm-stale-d2e3\tCrew - Stale recovery · d2e3\n'
+        printf 'fmtest:w1:p5\tfm-stale-d2e3\tfm-stale-d2e3\n'
+        printf 'fmtest:w1:p3\tfm-crash-c1db\tCrew - Crash recovery · c1db\n'
+        printf 'fmtest:w1:p7\tfm-crash-c1db\tfm-crash-c1db\n'
+        printf 'fmtest:w1:p6\tfm-legacy-e3f4\tfm-legacy-e3f4\n'
+        ;;
+      '')
+        printf 'fmtest:w1:p4\tfm-legacy-z9\tfm-legacy-z9\n'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  resolution=$(fm_backend_resolve_selector_with_backend exact-c1db "$state") \
+    || fail "readable exact Herdr ids did not resolve"
+  [ "$resolution" = $'herdr\tfmtest:w1:p1' ] \
+    || fail "readable exact Herdr ids were not preferred: '$resolution'"
+  resolution=$(fm_backend_resolve_selector_with_backend stale-d2e3 "$state") \
+    || fail "stale exact Herdr ids did not fall back through live inventory"
+  [ "$resolution" = $'herdr\tfmtest:w1:p2' ] \
+    || fail "stale exact Herdr ids did not recover by display label: '$resolution'"
+  resolution=$(fm_backend_resolve_selector_with_backend legacy-e3f4 "$state") \
+    || fail "stale Herdr ids did not use final legacy fallback"
+  [ "$resolution" = $'herdr\tfmtest:w1:p6' ] \
+    || fail "final legacy Herdr fallback resolved incorrectly: '$resolution'"
+  out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector crash-c1db "$state") \
+    || fail "bare task id did not recover through the Herdr journal"
+  [ "$out" = fmtest:w1:p3 ] || fail "recovered Herdr target mismatch: '$out'"
+  out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector fm-crash-c1db "$state") \
+    || fail "legacy fm-<id> selector did not recover through the Herdr journal"
+  [ "$out" = fmtest:w1:p3 ] || fail "legacy recovered Herdr target mismatch: '$out'"
+  resolution=$(HERDR_SESSION=fmtest fm_backend_resolve_selector_with_backend fm-crash-c1db "$state") \
+    || fail "journal-only selector did not return backend-aware recovery"
+  [ "$resolution" = $'herdr\tfmtest:w1:p3' ] || fail "journal-only selector lost Herdr backend routing: '$resolution'"
+  resolution=$(FM_BACKEND=herdr HERDR_SESSION=fmtest \
+    fm_backend_resolve_selector_with_backend fm-legacy-z9 "$state") \
+    || fail "legacy-only Herdr tab was not discovered through live inventory"
+  [ "$resolution" = $'herdr\tfmtest:w1:p4' ] \
+    || fail "legacy-only Herdr tab resolved incorrectly: '$resolution'"
+  pass "selector recovery retains Herdr routing and persisted workspace identity"
 }
 
 test_backend_failures_propagate() {
@@ -239,5 +319,6 @@ SH
 test_selection_and_metadata
 test_spawn_rejects_unknown_selection
 test_selector_and_dispatch
+test_selector_recovers_precreate_herdr_journal
 test_backend_failures_propagate
 test_teardown_preserves_state_on_kill_failure
