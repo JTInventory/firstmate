@@ -148,7 +148,7 @@ test_persisted_phrase_must_match_safe_ascii_grammar() {
 }
 
 test_full_label_limit_counts_characters_in_c_and_utf8_locales() {
-  local state locale_name candidate out label key utf8_locale= locales
+  local state locale_name candidate out label key utf8_locale locales
   locales=$(locale -a 2>/dev/null || true)
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
