@@ -44,11 +44,14 @@ if [ "$OUTPUT_MODE" = backlog-title ]; then
       prefix = "- [ ] " id " - "
       done_prefix = "- [x] " id " - "
       done_prefix_upper = "- [X] " id " - "
+      bold_prefix = "- **" id "** - "
       if (index($0, prefix) == 1) title = substr($0, length(prefix) + 1)
       else if (index($0, done_prefix) == 1) title = substr($0, length(done_prefix) + 1)
       else if (index($0, done_prefix_upper) == 1) title = substr($0, length(done_prefix_upper) + 1)
+      else if (index($0, bold_prefix) == 1) title = substr($0, length(bold_prefix) + 1)
       else next
-      sub(/[[:space:]]+\([^)]*\)[[:space:]]*$/, "", title)
+      sub(/[[:space:]]+\(repo:[^)]*\).*/, "", title)
+      sub(/[[:space:]]+blocked-by:.*/, "", title)
       print title
       exit
     }

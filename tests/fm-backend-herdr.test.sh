@@ -607,6 +607,9 @@ test_dispatch_and_meta_routing() {
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_validate herdr || fail "Herdr should be a known backend"
   [ "$(fm_backend_of_meta "$state/task.meta")" = herdr ] || fail "meta backend was not read"
+  fm_backend_pane_readable() {
+    [ "$1" = herdr ] && [ "$2" = default:w1:p2 ]
+  }
   [ "$(fm_backend_resolve_selector task "$state")" = default:w1:p2 ] || fail "exact task-id selector did not prefer persisted Herdr ids"
   [ "$(fm_backend_resolve_selector fm-task "$state")" = default:w1:p2 ] || fail "legacy selector target changed"
   meta=$(fm_backend_meta_for_window default:w1:p2 "$state")

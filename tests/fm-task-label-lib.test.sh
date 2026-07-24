@@ -43,7 +43,7 @@ test_task_keys_and_semantic_fallback() {
   local out expected
   out=$(bash -c '. "$1"; fm_task_label_base_key herdr-tab-labels-c1db' _ "$LIB")
   [ "$out" = c1db ] || fail "random-looking suffix should be reused, got '$out'"
-  expected=$(printf '%s' opaque-task-name | sha256sum | cut -c1-6)
+  expected=3a14b9
   out=$(bash -c '. "$1"; fm_task_label_base_key opaque-task-name' _ "$LIB")
   [ "$out" = "$expected" ] || fail "hash-derived key mismatch: '$out' != '$expected'"
   out=$(bash -c '. "$1"; fm_task_label_semantic_phrase herdr-tab-labels-ship-c1db' _ "$LIB")
@@ -92,6 +92,8 @@ test_backlog_title_precedes_semantic_id_fallback() {
 ## In flight
 - [ ] opaque-work-c9d2 - Operator-friendly Herdr naming (repo: firstmate, kind: ship)
 - [ ] quick-fix-a1b2 - Fix UI (repo: demo, kind: ship)
+- **bold-work-b2c3** - Bold work (repo: demo, since 2026-07-24)
+- [ ] blocked-work-c3d4 - Blocked work (repo: demo) blocked-by: prior-task - waits
 EOF
   out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" ship "" "" "$4"' \
     _ "$LIB" "$state" opaque-work-c9d2 "$home/data/backlog.md")
@@ -101,6 +103,14 @@ EOF
     _ "$LIB" "$state" quick-fix-a1b2 "$home/data/backlog.md")
   [ "$out" = "Crew - Fix UI · a1b2"$'\t'"a1b2" ] \
     || fail "backlog routing metadata leaked into a short display label: '$out'"
+  out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" scout "" "" "$4"' \
+    _ "$LIB" "$state" bold-work-b2c3 "$home/data/backlog.md")
+  [ "$out" = "Scout - Bold work · b2c3"$'\t'"b2c3" ] \
+    || fail "bold in-flight backlog title was not parsed: '$out'"
+  out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" scout "" "" "$4"' \
+    _ "$LIB" "$state" blocked-work-c3d4 "$home/data/backlog.md")
+  [ "$out" = "Scout - Blocked work · c3d4"$'\t'"c3d4" ] \
+    || fail "blocked-by routing metadata leaked into the display label: '$out'"
   pass "task labels: canonical backlog title precedes semantic task-id fallback"
 }
 

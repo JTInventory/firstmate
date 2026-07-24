@@ -165,27 +165,68 @@ fm_backend_source() {  # <name>
   esac
 }
 
+fm_backend_herdr_inventory_target() {  # <state> <alias> [home] [session] [workspace]
+  local state=$1 alias=$2 home=${3:-$FM_HOME} session=${4:-} wsid=${5:-} live target
+  fm_backend_source herdr || return 2
+  if [ -z "$session" ]; then
+    session=$(fm_backend_herdr_session) || return 2
+    [ -n "$session" ] || return 2
+  fi
+  if ! live=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    fm_backend_list_live herdr "$session" "$wsid"); then
+    return 2
+  fi
+  target=$(printf '%s\n' "$live" | awk -F '\t' -v want="$alias" '
+    $2 == want { if (++count == 1) found = $1 }
+    END { if (count == 1) print found }
+  ')
+  [ -n "$target" ] || return 1
+  printf '%s' "$target"
+}
+
 fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes backend<TAB>target
-  local raw=$1 state=$2 meta window id session wsid live recovery_record recovery_label recovery_home
+  local raw=$1 state=$2 meta window id backend session wsid recovery_record recovery_label recovery_home
+  local inventory_status
   case "$raw" in
     *:*)
       printf '%s\t%s' "$(fm_backend_of_selector "$raw" "$raw" "$state")" "$raw"
       ;;
     *)
-      if [ -f "$state/$raw.meta" ]; then
-        meta="$state/$raw.meta"
-      elif [[ "$raw" == fm-* ]] && [ -f "$state/${raw#fm-}.meta" ]; then
-        meta="$state/${raw#fm-}.meta"
-      else
-        meta=
-      fi
+      case "$raw" in
+        fm-*) id=${raw#fm-} ;;
+        *) id=$raw ;;
+      esac
+      meta="$state/$id.meta"
+      [ -f "$meta" ] || meta=
       if [ -n "$meta" ]; then
         window=$(fm_backend_target_of_meta "$meta")
         [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
-        printf '%s\t%s' "$(fm_backend_of_meta "$meta")" "$window"
-        return 0
+        backend=$(fm_backend_of_meta "$meta")
+        if [ "$backend" != herdr ]; then
+          printf '%s\t%s' "$backend" "$window"
+          return 0
+        fi
+        if fm_backend_pane_readable herdr "$window"; then
+          printf 'herdr\t%s' "$window"
+          return 0
+        fi
+        recovery_home=$(fm_meta_get "$meta" home)
+        session=$(fm_meta_get "$meta" herdr_session)
+        wsid=$(fm_meta_get "$meta" herdr_workspace_id)
+        if window=$(fm_backend_herdr_inventory_target "$state" "fm-$id" \
+          "${recovery_home:-$FM_HOME}" "$session" "$wsid"); then
+          printf 'herdr\t%s' "$window"
+          return 0
+        else
+          inventory_status=$?
+        fi
+        if [ "$inventory_status" -eq 2 ]; then
+          echo "error: could not inspect Herdr recovery inventory for $raw" >&2
+        else
+          echo "error: no live Herdr target found for $raw" >&2
+        fi
+        return 1
       fi
-      id=${raw#fm-}
       recovery_record="$state/$id.herdr-label"
       if [ -f "$recovery_record" ]; then
         recovery_label="fm-$id"
@@ -197,14 +238,31 @@ fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes
         recovery_home=$(fm_meta_get "$recovery_record" herdr_home)
         session=$(fm_meta_get "$recovery_record" herdr_session)
         wsid=$(fm_meta_get "$recovery_record" herdr_workspace_id)
-        [ -n "$session" ] || session=$(fm_backend_herdr_session)
-        live=$(FM_HOME="${recovery_home:-$FM_HOME}" FM_STATE_OVERRIDE="$state" \
-          fm_backend_list_live herdr "$session" "$wsid") || {
+        if window=$(fm_backend_herdr_inventory_target "$state" "$recovery_label" \
+          "${recovery_home:-$FM_HOME}" "$session" "$wsid"); then
+          printf 'herdr\t%s' "$window"
+          return 0
+        else
+          inventory_status=$?
+        fi
+        if [ "$inventory_status" -eq 2 ]; then
           echo "error: could not inspect Herdr recovery inventory for $raw" >&2
+        else
+          echo "error: no live Herdr target found for $raw" >&2
+        fi
+        return 1
+      fi
+      if [[ "$raw" == fm-* ]] && [ "$(fm_backend_name)" = herdr ]; then
+        if window=$(fm_backend_herdr_inventory_target "$state" "fm-$id"); then
+          printf 'herdr\t%s' "$window"
+          return 0
+        else
+          inventory_status=$?
+        fi
+        if [ "$inventory_status" -eq 2 ]; then
+          echo "error: could not inspect Herdr legacy inventory for $raw" >&2
           return 1
-        }
-        window=$(printf '%s\n' "$live" | awk -F '\t' -v want="$recovery_label" '$2 == want { if (++count == 1) target=$1 } END { if (count == 1) print target }')
-        [ -n "$window" ] && { printf 'herdr\t%s' "$window"; return 0; }
+        fi
       fi
       if [[ "$raw" == fm-* ]]; then
         echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
