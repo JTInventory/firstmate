@@ -61,8 +61,9 @@ case "$RAW_TARGET" in
     exit 1
     ;;
 esac
-T=$(fm_backend_resolve_selector "$1" "$STATE")
-TARGET_BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
+TARGET_RESOLUTION=$(fm_backend_resolve_selector_with_backend "$1" "$STATE")
+TARGET_BACKEND=${TARGET_RESOLUTION%%$'\t'*}
+T=${TARGET_RESOLUTION#*$'\t'}
 shift
 
 # Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,

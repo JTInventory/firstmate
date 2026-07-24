@@ -78,10 +78,11 @@ recovery, or cleanup.
 
 Before tab create, spawn atomically publishes the private
 `state/<id>.herdr-label` journal with the full `task_id=`, exact
-`display_label=`, and `task_key=`. After the create response's exact tab and
-pane ids plus the label are atomically published in `state/<id>.meta`, the
-journal is removed. A crash or lost response therefore leaves an exact
-full-id-to-label correlation, and a retry reuses the same label.
+`display_label=`, `task_key=`, `herdr_home=`, `herdr_session=`, and
+`herdr_workspace_id=`. After the create response's exact tab and pane ids plus
+the label are atomically published in `state/<id>.meta`, the journal is removed.
+A crash or lost response therefore leaves the backend and workspace identity
+needed to inventory the right home, and a retry reuses the same label.
 
 Normal routing prefers `herdr_session=` plus `herdr_pane_id=` and keeps
 `herdr_tab_id=` for exact correlation. Recovery still recognizes legacy
@@ -90,6 +91,8 @@ match from metadata or the pre-create journal back to the full task id.
 Unmatched readable labels remain unknown orphans; there is no
 pretty-label-only or short-key-only recovery. Workspace identity remains
 `firstmate` or `2ndmate-<id>`, and tmux naming is unchanged.
+Journal-only selector recovery remains routed through Herdr even before final
+metadata exists.
 
 ### ID stability across a server restart
 

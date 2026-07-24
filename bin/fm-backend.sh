@@ -165,11 +165,11 @@ fm_backend_source() {  # <name>
   esac
 }
 
-fm_backend_resolve_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 meta window id session live recovery_record recovery_label
+fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes backend<TAB>target
+  local raw=$1 state=$2 meta window id session wsid live recovery_record recovery_label recovery_home
   case "$raw" in
     *:*)
-      printf '%s' "$raw"
+      printf '%s\t%s' "$(fm_backend_of_selector "$raw" "$raw" "$state")" "$raw"
       ;;
     *)
       if [ -f "$state/$raw.meta" ]; then
@@ -182,7 +182,7 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
       if [ -n "$meta" ]; then
         window=$(fm_backend_target_of_meta "$meta")
         [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
-        printf '%s' "$window"
+        printf '%s\t%s' "$(fm_backend_of_meta "$meta")" "$window"
         return 0
       fi
       id=${raw#fm-}
@@ -190,22 +190,36 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
       if [ -f "$recovery_record" ]; then
         recovery_label="fm-$id"
         fm_backend_source herdr || return 1
-        session=$(fm_backend_herdr_session)
-        live=$(fm_backend_list_live herdr "$session") || {
+        fm_task_label_read_record "$recovery_record" "$id" >/dev/null 2>&1 || {
+          echo "error: malformed Herdr recovery journal for $raw" >&2
+          return 1
+        }
+        recovery_home=$(fm_meta_get "$recovery_record" herdr_home)
+        session=$(fm_meta_get "$recovery_record" herdr_session)
+        wsid=$(fm_meta_get "$recovery_record" herdr_workspace_id)
+        [ -n "$session" ] || session=$(fm_backend_herdr_session)
+        live=$(FM_HOME="${recovery_home:-$FM_HOME}" fm_backend_list_live herdr "$session" "$wsid") || {
           echo "error: could not inspect Herdr recovery inventory for $raw" >&2
           return 1
         }
         window=$(printf '%s\n' "$live" | awk -F '\t' -v want="$recovery_label" '$2 == want { if (++count == 1) target=$1 } END { if (count == 1) print target }')
-        [ -n "$window" ] && { printf '%s' "$window"; return 0; }
+        [ -n "$window" ] && { printf 'herdr\t%s' "$window"; return 0; }
       fi
       if [[ "$raw" == fm-* ]]; then
         echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
         return 1
       fi
       fm_backend_source tmux || return 1
-      fm_backend_tmux_resolve_bare_selector "$raw"
+      window=$(fm_backend_tmux_resolve_bare_selector "$raw") || return 1
+      printf 'tmux\t%s' "$window"
       ;;
   esac
+}
+
+fm_backend_resolve_selector() {  # <raw-target> <state-dir>
+  local resolved
+  resolved=$(fm_backend_resolve_selector_with_backend "$@") || return 1
+  printf '%s' "${resolved#*$'\t'}"
 }
 
 # Generic dispatch wrappers. Backend-specific adapters own command spelling;

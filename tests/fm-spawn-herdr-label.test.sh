@@ -48,7 +48,7 @@ case "$cmd $sub" in
       [ "${args[$i]}" != --label ] || label=${args[$((i+1))]:-}
     done
     if [ -f "${FM_FAKE_LABEL_JOURNAL:?}" ]; then
-      printf 'present\n' > "$state/journal-at-create"
+      cp "$FM_FAKE_LABEL_JOURNAL" "$state/journal-at-create"
     fi
     printf '%s\n' "$label" > "$state/task-label"
     if [ "${FM_FAKE_FAIL_AFTER_CREATE:-0}" = 1 ]; then
@@ -115,7 +115,9 @@ test_spawn_publishes_journal_before_create_then_atomic_meta() {
   assert_grep "task_key=c1db" "$meta" "meta missing task key"
   assert_grep "herdr_tab_id=w1:t1" "$meta" "meta missing response-derived tab id"
   assert_grep "herdr_pane_id=w1:p1" "$meta" "meta missing response-derived pane id"
-  assert_grep "present" "$CASE_DIR/herdr-state/journal-at-create" "label journal was not present before tab create"
+  assert_grep "herdr_home=$HOME_DIR" "$CASE_DIR/herdr-state/journal-at-create" "label journal missed the Herdr home before tab create"
+  assert_grep "herdr_session=fmtest" "$CASE_DIR/herdr-state/journal-at-create" "label journal missed the Herdr session before tab create"
+  assert_grep "herdr_workspace_id=w1" "$CASE_DIR/herdr-state/journal-at-create" "label journal missed the Herdr workspace before tab create"
   assert_absent "$HOME_DIR/state/$id.herdr-label" "label journal should retire only after final metadata publication"
   assert_grep "--label Scout - Herdr labels · c1db --no-focus" "$CASE_DIR/herdr.log" "Herdr tab did not use the display label"
   pass "fm-spawn Herdr: journal precedes create; final metadata persists label, key, and exact ids"
@@ -134,6 +136,8 @@ test_lost_create_response_keeps_recovery_journal() {
   journal="$HOME_DIR/state/$id.herdr-label"
   assert_present "$journal" "pre-create journal was lost after create-response failure"
   assert_grep "display_label=Crew - UI Design · be28" "$journal" "recovery journal lost exact created label"
+  assert_grep "herdr_home=$HOME_DIR" "$journal" "recovery journal lost the Herdr home"
+  assert_grep "herdr_workspace_id=w1" "$journal" "recovery journal lost the Herdr workspace"
   assert_absent "$HOME_DIR/state/$id.meta" "failed spawn must not publish final metadata"
   pass "fm-spawn Herdr: a create/final-meta crash gap remains exactly correlated by the journal"
 }

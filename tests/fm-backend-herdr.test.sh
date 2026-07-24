@@ -633,11 +633,29 @@ task_id=task-be28
 display_label=Crew - UI Design · be28
 task_key=be28
 EOF
+  cat > "$state/task-a1b2c.herdr-label" <<'EOF'
+version=1
+task_id=task-a1b2c
+display_label=Crew - Five key · a1b2c
+task_key=a1b2c
+EOF
+  cat > "$state/task-a1b2c3.herdr-label" <<'EOF'
+version=1
+task_id=task-a1b2c3
+display_label=Scout - Six key · a1b2c3
+task_key=a1b2c3
+EOF
+  cat > "$state/task-a1b2c3d4e5.herdr-label" <<'EOF'
+version=1
+task_id=task-a1b2c3d4e5
+display_label=2nd - Extended key · a1b2c3d4e5
+task_key=a1b2c3d4e5
+EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_workspace_find() { printf w1; }
     fm_backend_herdr_cli() {
-      printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"Scout - Herdr labels · c1db\"},{\"tab_id\":\"w1:t2\",\"label\":\"Crew - UI Design · be28\"},{\"tab_id\":\"w1:t3\",\"label\":\"Crew - Unknown orphan · dead\"},{\"tab_id\":\"w1:t4\",\"label\":\"fm-legacy-z9\"}]}}"
+      printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"Scout - Herdr labels · c1db\"},{\"tab_id\":\"w1:t2\",\"label\":\"Crew - UI Design · be28\"},{\"tab_id\":\"w1:t3\",\"label\":\"Crew - Unknown orphan · dead\"},{\"tab_id\":\"w1:t4\",\"label\":\"fm-legacy-z9\"},{\"tab_id\":\"w1:t5\",\"label\":\"Crew - Five key · a1b2c\"},{\"tab_id\":\"w1:t6\",\"label\":\"Scout - Six key · a1b2c3\"},{\"tab_id\":\"w1:t7\",\"label\":\"2nd - Extended key · a1b2c3d4e5\"}]}}"
     }
     fm_backend_herdr_pane_for_tab() {
       case "$3" in
@@ -645,6 +663,9 @@ EOF
         w1:t2) printf w1:p2 ;;
         w1:t3) printf w1:p3 ;;
         w1:t4) printf w1:p4 ;;
+        w1:t5) printf w1:p5 ;;
+        w1:t6) printf w1:p6 ;;
+        w1:t7) printf w1:p7 ;;
       esac
     }
     fm_backend_herdr_list_live fmtest
@@ -653,6 +674,9 @@ EOF
   assert_contains "$out" $'fmtest:w1:p2\tfm-task-be28' "pre-create journal label was not correlated to its full task id"
   assert_contains "$out" $'fmtest:w1:p3\tCrew - Unknown orphan · dead' "unmatched readable label was not surfaced as unknown"
   assert_contains "$out" $'fmtest:w1:p4\tfm-legacy-z9' "legacy fm-<id> discovery was lost"
+  assert_contains "$out" $'fmtest:w1:p5\tfm-task-a1b2c' "five-character key was not recovered"
+  assert_contains "$out" $'fmtest:w1:p6\tfm-task-a1b2c3' "six-character key was not recovered"
+  assert_contains "$out" $'fmtest:w1:p7\tfm-task-a1b2c3d4e5' "extended collision key was not recovered"
   pass "Herdr list-live prefers exact machine ids, then labels, and keeps legacy discovery"
 }
 
@@ -689,36 +713,47 @@ test_list_live_propagates_inventory_and_pane_failures() {
 }
 
 test_labeled_create_holds_one_lock_across_reservation_and_create() {
-  local home state out_one out_two key_one key_two
-  home="$TMP_ROOT/labeled-create-lock-home"
-  state="$home/state"
-  mkdir -p "$state"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+  local home_one home_two state acquired release out_one out_two key_one key_two
+  home_one="$TMP_ROOT/labeled-create-lock-home-one"
+  home_two="$TMP_ROOT/labeled-create-lock-home-two"
+  state="$TMP_ROOT/labeled-create-shared-state"
+  acquired="$state/first-acquired"
+  release="$state/release-first"
+  mkdir -p "$home_one" "$home_two" "$state"
+  FM_HOME="$home_one" FM_STATE_OVERRIDE="$state" FM_TEST_STATE="$state" FM_TEST_ACQUIRED="$acquired" FM_TEST_RELEASE="$release" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_workspace_tab_labels() { :; }
     fm_backend_herdr_create_task_locked() {
+      [ -L "$FM_TEST_STATE/.fm-herdr-label.lock" ] || exit 1
       [ -L "$FM_HOME/.fm-herdr-workspace.lock" ] || exit 1
-      sleep 0.2
+      : > "$FM_TEST_ACQUIRED"
+      while [ ! -e "$FM_TEST_RELEASE" ]; do sleep 0.01; done
       printf "tab-one pane-one"
     }
     fm_backend_herdr_create_labeled_task fmtest:w1 "$1" alpha-c1db scout "Shared phrase" "" /tmp
-  ' "$ROOT" "$state" > "$home/one.out" &
+  ' "$ROOT" "$state" > "$home_one/one.out" &
   local pid_one=$!
-  sleep 0.05
-  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+  for _ in $(seq 1 100); do
+    [ ! -e "$acquired" ] || break
+    sleep 0.01
+  done
+  [ -e "$acquired" ] || fail "first labeled create never reached the acquisition barrier"
+  FM_HOME="$home_two" FM_STATE_OVERRIDE="$state" FM_TEST_STATE="$state" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_workspace_tab_labels() { :; }
     fm_backend_herdr_create_task_locked() {
+      [ -L "$FM_TEST_STATE/.fm-herdr-label.lock" ] || exit 1
       [ -L "$FM_HOME/.fm-herdr-workspace.lock" ] || exit 1
       printf "tab-two pane-two"
     }
     fm_backend_herdr_create_labeled_task fmtest:w1 "$1" beta-c1db scout "Shared phrase" "" /tmp
-  ' "$ROOT" "$state" > "$home/two.out" &
+  ' "$ROOT" "$state" > "$home_two/two.out" &
   local pid_two=$!
+  : > "$release"
   wait "$pid_one" || fail "first labeled create failed"
   wait "$pid_two" || fail "second labeled create failed"
-  out_one=$(cat "$home/one.out")
-  out_two=$(cat "$home/two.out")
+  out_one=$(cat "$home_one/one.out")
+  out_two=$(cat "$home_two/two.out")
   key_one=$(printf '%s' "$out_one" | cut -f2)
   key_two=$(printf '%s' "$out_two" | cut -f2)
   [ "$key_one" = c1db ] || fail "first reservation did not keep the short key: '$out_one'"

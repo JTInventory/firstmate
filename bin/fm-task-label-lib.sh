@@ -95,6 +95,31 @@ fm_task_label_phrase_is_valid() {  # <phrase>
   [ "$sanitized" = "$phrase" ]
 }
 
+fm_task_label_validate_display_label() {  # <label>; echoes key
+  local label=$1 key phrase
+  fm_task_label_has_unsafe_controls "$label" && return 1
+  [ "$(fm_task_label_character_count "$label")" -le 50 ] || return 1
+  case "$label" in
+    *" · "*) key=${label##*" · "} ;;
+    *) return 1 ;;
+  esac
+  case "$key" in
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) ;;
+    *) return 1 ;;
+  esac
+  case "$label" in
+    Crew\ -\ *\ ·\ "$key") phrase=${label#Crew - }; phrase=${phrase%" · $key"} ;;
+    Scout\ -\ *\ ·\ "$key") phrase=${label#Scout - }; phrase=${phrase%" · $key"} ;;
+    2nd\ -\ *\ ·\ "$key") phrase=${label#2nd - }; phrase=${phrase%" · $key"} ;;
+    *) return 1 ;;
+  esac
+  fm_task_label_phrase_is_valid "$phrase" || return 1
+  printf '%s' "$key"
+}
+
 fm_task_label_semantic_phrase() {  # <task-id>
   local id=$1 tail lower_tail phrase word lower_word count=0 out='' first rest
   id=${id#fm-}
@@ -137,28 +162,14 @@ fm_task_label_backlog_title() {  # <backlog-path> <task-id>
 }
 
 fm_task_label_read_record() {  # <record> <expected-id>; echoes label<TAB>key
-  local record=$1 expected=$2 task_id label key phrase
+  local record=$1 expected=$2 task_id label key label_key
   [ -f "$record" ] || return 1
   task_id=$(grep '^task_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   label=$(grep '^display_label=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   key=$(grep '^task_key=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -z "$task_id" ] || [ "$task_id" = "$expected" ] || return 1
-  case "$key" in
-    [a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
-    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
-    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
-    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) ;;
-    *) return 1 ;;
-  esac
-  fm_task_label_has_unsafe_controls "$label" && return 1
-  [ "$(fm_task_label_character_count "$label")" -le 50 ] || return 1
-  case "$label" in
-    Crew\ -\ *\ ·\ "$key") phrase=${label#Crew - }; phrase=${phrase%" · $key"} ;;
-    Scout\ -\ *\ ·\ "$key") phrase=${label#Scout - }; phrase=${phrase%" · $key"} ;;
-    2nd\ -\ *\ ·\ "$key") phrase=${label#2nd - }; phrase=${phrase%" · $key"} ;;
-    *) return 1 ;;
-  esac
-  fm_task_label_phrase_is_valid "$phrase" || return 1
+  label_key=$(fm_task_label_validate_display_label "$label") || return 1
+  [ "$label_key" = "$key" ] || return 1
   printf '%s\t%s' "$label" "$key"
 }
 
@@ -187,9 +198,11 @@ EOF
   return 1
 }
 
-fm_task_label_prepare() {  # <state> <id> <kind> <explicit-title> <live-labels> [backlog]
+fm_task_label_prepare() {  # <state> <id> <kind> <explicit-title> <live-labels> [backlog] [home] [session] [workspace]
   local state=$1 id=$2 kind=$3 explicit=${4:-} live=${5:-} backlog=${6:-}
+  local herdr_home=${7:-} herdr_session=${8:-} herdr_workspace=${9:-}
   local journal meta existing kind_label key phrase candidate hash tmp
+  local existing_home existing_session existing_workspace
   journal="$state/$id.herdr-label"
   meta="$state/$id.meta"
   case "$id" in
@@ -211,6 +224,30 @@ fm_task_label_prepare() {  # <state> <id> <kind> <explicit-title> <live-labels> 
         echo "error: Herdr label journal and metadata disagree for $id" >&2
         return 1
       }
+    fi
+    existing_home=$(grep '^herdr_home=' "$journal" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    existing_session=$(grep '^herdr_session=' "$journal" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    existing_workspace=$(grep '^herdr_workspace_id=' "$journal" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -z "$existing_home" ] || [ -z "$herdr_home" ] || [ "$existing_home" = "$herdr_home" ] || return 1
+    [ -z "$existing_session" ] || [ -z "$herdr_session" ] || [ "$existing_session" = "$herdr_session" ] || return 1
+    [ -z "$existing_workspace" ] || [ -z "$herdr_workspace" ] || [ "$existing_workspace" = "$herdr_workspace" ] || return 1
+    if { [ -n "$herdr_home" ] && [ -z "$existing_home" ]; } ||
+       { [ -n "$herdr_session" ] && [ -z "$existing_session" ]; } ||
+       { [ -n "$herdr_workspace" ] && [ -z "$existing_workspace" ]; }; then
+      candidate=${existing%%$'\t'*}
+      key=${existing#*$'\t'}
+      tmp=$(mktemp "$state/.$id.herdr-label.XXXXXX") || return 1
+      chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+      {
+        printf 'version=1\n'
+        printf 'task_id=%s\n' "$id"
+        printf 'display_label=%s\n' "$candidate"
+        printf 'task_key=%s\n' "$key"
+        printf 'herdr_home=%s\n' "${existing_home:-$herdr_home}"
+        printf 'herdr_session=%s\n' "${existing_session:-$herdr_session}"
+        printf 'herdr_workspace_id=%s\n' "${existing_workspace:-$herdr_workspace}"
+      } > "$tmp" || { rm -f "$tmp"; return 1; }
+      mv "$tmp" "$journal" || { rm -f "$tmp"; return 1; }
     fi
     printf '%s' "$existing"
     return 0
@@ -259,6 +296,9 @@ fm_task_label_prepare() {  # <state> <id> <kind> <explicit-title> <live-labels> 
     printf 'task_id=%s\n' "$id"
     printf 'display_label=%s\n' "$candidate"
     printf 'task_key=%s\n' "$key"
+    [ -z "$herdr_home" ] || printf 'herdr_home=%s\n' "$herdr_home"
+    [ -z "$herdr_session" ] || printf 'herdr_session=%s\n' "$herdr_session"
+    [ -z "$herdr_workspace" ] || printf 'herdr_workspace_id=%s\n' "$herdr_workspace"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   if ! mv "$tmp" "$journal"; then
     rm -f "$tmp"

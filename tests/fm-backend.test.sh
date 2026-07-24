@@ -138,14 +138,16 @@ test_selector_and_dispatch() {
 }
 
 test_selector_recovers_precreate_herdr_journal() {
-  local state out
+  local state out resolution
   state="$TMP_ROOT/herdr-recovery/state"
   mkdir -p "$state"
-  printf 'version=1\ntask_id=crash-c1db\ndisplay_label=Crew - Crash recovery · c1db\ntask_key=c1db\n' \
+  printf 'version=1\ntask_id=crash-c1db\ndisplay_label=Crew - Crash recovery · c1db\ntask_key=c1db\nherdr_home=%s\nherdr_session=fmtest\nherdr_workspace_id=w-second\n' \
+    "$TMP_ROOT/secondmate-home" \
     > "$state/crash-c1db.herdr-label"
   fm_backend_source herdr || fail "Herdr backend could not be loaded"
   fm_backend_list_live() {
-    [ "$1" = herdr ] && [ "$2" = fmtest ] || return 1
+    [ "$1" = herdr ] && [ "$2" = fmtest ] && [ "$3" = w-second ] || return 1
+    [ "$FM_HOME" = "$TMP_ROOT/secondmate-home" ] || return 1
     printf 'fmtest:w1:p1\tfm-crash-c1db\n'
   }
   out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector crash-c1db "$state") \
@@ -154,7 +156,10 @@ test_selector_recovers_precreate_herdr_journal() {
   out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector fm-crash-c1db "$state") \
     || fail "legacy fm-<id> selector did not recover through the Herdr journal"
   [ "$out" = fmtest:w1:p1 ] || fail "legacy recovered Herdr target mismatch: '$out'"
-  pass "selector recovery uses the generic live inventory for pre-create journals"
+  resolution=$(HERDR_SESSION=fmtest fm_backend_resolve_selector_with_backend fm-crash-c1db "$state") \
+    || fail "journal-only selector did not return backend-aware recovery"
+  [ "$resolution" = $'herdr\tfmtest:w1:p1' ] || fail "journal-only selector lost Herdr backend routing: '$resolution'"
+  pass "selector recovery retains Herdr routing and persisted workspace identity"
 }
 
 test_backend_failures_propagate() {
