@@ -700,7 +700,7 @@ test_list_live_propagates_inventory_and_pane_failures() {
     fm_backend_herdr_workspace_find() { printf w1; }
     fm_backend_herdr_cli() { printf "%s\n" "{\"result\":{\"tabs\":[]}}"; }
     fm_backend_herdr_list_live fmtest
-  ' "$ROOT")
+  ' "$ROOT") || fail "empty tab inventory returned nonzero"
   [ -z "$out" ] || fail "empty tab inventory produced live rows"
   status=0
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
