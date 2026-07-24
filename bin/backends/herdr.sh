@@ -993,7 +993,7 @@ fm_backend_herdr_task_id_for_exact_ids() {  # <session> <workspace> <tab> <pane>
 # New labels are claimed only by an exact metadata or pre-create-journal match;
 # legacy fm-<id> discovery remains supported.
 fm_backend_herdr_list_live() {  # <session> [workspace]
-  local session=$1 wsid=${2:-} tabs rows tab_id label pane_id task_id reported
+  local session=$1 wsid=${2:-} tabs rows row tab_id label pane_id task_id reported
   [ -n "$wsid" ] || wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
   [ -n "$wsid" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -1002,8 +1002,14 @@ fm_backend_herdr_list_live() {  # <session> [workspace]
     and (.result.tabs | type) == "array"
     and all(.result.tabs[]; type == "object" and (.tab_id | type) == "string" and (.label | type) == "string")
   ' >/dev/null 2>&1 || return 1
-  rows=$(printf '%s' "$tabs" | jq -r '.result.tabs[] | "\(.tab_id)\t\(.label)"') || return 1
-  while IFS=$'\t' read -r tab_id label; do
+  rows=$(printf '%s' "$tabs" | jq -c '.result.tabs[] | [.tab_id, .label]') || return 1
+  while IFS= read -r row; do
+    tab_id=$(printf '%s' "$row" | jq -r '.[0] + "\u001f"') || return 1
+    label=$(printf '%s' "$row" | jq -r '.[1] + "\u001f"') || return 1
+    case "$tab_id" in *$'\037') tab_id=${tab_id%$'\037'} ;; *) return 1 ;; esac
+    case "$label" in *$'\037') label=${label%$'\037'} ;; *) return 1 ;; esac
+    fm_task_label_has_unsafe_controls "$tab_id" && continue
+    fm_task_label_has_unsafe_controls "$label" && continue
     [ -n "$tab_id" ] || continue
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
     [ -n "$pane_id" ] || return 1
