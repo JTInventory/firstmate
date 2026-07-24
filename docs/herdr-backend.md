@@ -247,21 +247,35 @@ Version 1 journals, dead panes, duplicate tokens, renamed spaces, detached or fo
 A live or unknown endpoint or token-matched pane refuses the launch entirely.
 Zero token matches, including a label whose token was removed by a human rename, degrade to flat and leave every old workspace untouched.
 
-The user-visible compromises are intentional:
+Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
+It runs only when the current home has at least one ordinary presentation journal and considers only that home; a primary never recursively sweeps a secondmate home.
+Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
+The title must contain exactly one token occurrence across the named-session snapshot and must equal the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+The task's ordinary metadata must be absent, and the candidate must have exactly one tab and exactly one pane.
+Before cleanup, Firstmate acquires the existing task-id spawn lock and then the shared named-session presentation lock.
+Inside both locks it takes one exact snapshot, requires one unambiguous non-target focus and the exact title, token, tab, and pane shape, positively confirms no registered agent, and reads Herdr's process information for the exact named-session pane.
+The process proof requires one recognized idle shell as both the shell process and the sole foreground process-group member, an operating-system process-table row for that shell, no child process, and a sleeping or idle shell state.
+Any foreground command, child process, active shell job, unknown shell, unreadable process table, missing field, or API error preserves the pane.
+Firstmate immediately revalidates the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus before calling the existing exact-pane focus-preserving close helper.
+It closes only that pane, never a workspace.
+The matching journal is retired only after the exact pane is positively confirmed gone; an unconfirmed close retains the journal, while a confirmed close may retire it even when focus restoration reported an error after the close.
+A second run finds no matching title or journal and is a no-op.
+A malformed or missing title or token, duplicate token, zero or multiple journal matches, cross-home version 2 binding, current metadata, registered or unknown agent, extra tab or pane, active target, busy lock, changed revalidation, unreadable check, or any error preserves the candidate and lets session startup continue with at most a concise warning.
 
-- Grouping remains best-effort rather than guaranteed; only an exact same-identity version 2 binding survives a Herdr restart in place.
-- Clean projected creates form one stable contiguous child block immediately after their owning parent (`firstmate` or `2ndmate-<id>`); existing ambiguous or manually interleaved layouts degrade with a warning instead of being rewritten.
-- Existing live or ambiguous projected spaces are never force-renamed, moved, or promoted from tabs into the new topology.
-- A same-identity Herdr restart retains its projected space only when every exact version 2 binding and agent-absence check agrees.
-- Any missing or ambiguous binding degrades to the ordinary flat home workspace without rewriting the old space.
-- Crashes, response loss, failed exact-pane close, or human renames can leave stale empty-looking spaces that Firstmate never auto-deletes.
-- Spaces have no cross-home cleanup, and a secondmate child can reclaim only under its exact bound home and parent.
-- Manual cleanup happens in Herdr's UI after human inspection.
-- Regaining a dedicated space after ambiguous degradation requires stopping or retiring the flat task, manually verifying the stale projection is harmless, clearing its quarantined journal, and starting a genuinely fresh task.
-- The visible 22-character token is only a restart-stable correlator and never substitutes for the exact binding.
+Operational compromises:
 
-The projection, its ordering follow-up, and exact restart replacement make no Herdr provider/API change, no Treehouse lease or return change, no ownership registry, and no cross-home cleanup path.
-It is intentionally separate from any future Treehouse hardening work.
+- Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
+- Existing layouts are not force-renamed or rearranged.
+- Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
+- Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
+- Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
+- Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
+- Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
+- The visible token is only a restart-stable correlator and never substitutes for the exact binding.
+
+`tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
+`tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
+`tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab; [`verification/runtime-backends.md`](verification/runtime-backends.md#per-home-and-presentation-topology) owns the active versioned evidence.
 
 ### Isolated E2E evidence (2026-07-24)
 
@@ -271,8 +285,17 @@ The default-session fleet-state tripwire was identical before and after teardown
 Exact command:
 
 ```sh
-HERDR_LAB_HELPER='/Users/kunchen/.treehouse/firstmate-b8697d/3/firstmate/bin/fm-herdr-lab.sh' \
-  bash tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-backend-herdr.test.sh
+tests/fm-backend-herdr-smoke.test.sh
+tests/fm-backend-herdr-prune-safety-e2e.test.sh
+tests/fm-backend-herdr-respawn-idem-e2e.test.sh
+tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
+tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-backend-herdr-eventwait-smoke.test.sh
+tests/fm-herdr-session-cleanup.test.sh
+tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-afk-inject-herdr-e2e.test.sh
+tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
 Exact result was exit 0.
