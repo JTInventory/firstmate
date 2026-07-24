@@ -99,6 +99,47 @@ EOF
   pass "task labels: canonical backlog title precedes semantic task-id fallback"
 }
 
+test_persisted_phrase_must_match_safe_ascii_grammar() {
+  local state phrase record
+  state="$TMP_ROOT/persisted-grammar/state"
+  mkdir -p "$state"
+  for phrase in "" "Bad/Path" "Bad:Value" 'Bad"Quote' "Café" " Leading"; do
+    record="$state/record-${RANDOM}.meta"
+    printf 'display_label=Crew - %s · c1db\ntask_key=c1db\n' "$phrase" > "$record"
+    if bash -c '. "$1"; fm_task_label_read_record "$2" task' _ "$LIB" "$record" >/dev/null 2>&1; then
+      fail "unsafe persisted phrase was accepted: '$phrase'"
+    fi
+  done
+  printf 'display_label=Crew - Safe phrase_1 + polish · c1db\ntask_key=c1db\n' > "$state/safe.meta"
+  bash -c '. "$1"; fm_task_label_read_record "$2" task' _ "$LIB" "$state/safe.meta" >/dev/null \
+    || fail "safe persisted phrase was rejected"
+  pass "task labels: persisted phrases enforce the generated ASCII grammar"
+}
+
+test_full_label_limit_counts_characters_in_c_and_utf8_locales() {
+  local state locale_name candidate out label key utf8_locale=
+  for candidate in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do
+    if [ "$(LC_ALL="$candidate" locale charmap 2>/dev/null || true)" = UTF-8 ]; then
+      utf8_locale=$candidate
+      break
+    fi
+  done
+  [ -n "$utf8_locale" ] || fail "no UTF-8 locale is available for character-count coverage"
+  for locale_name in C "$utf8_locale"; do
+    state="$TMP_ROOT/locale-${locale_name//./-}/state"
+    mkdir -p "$state"
+    printf 'display_label=Crew - Other · c1db\ntask_key=c1db\n' > "$state/other.meta"
+    out=$(LC_ALL="$locale_name" bash -c '. "$1"; fm_task_label_prepare "$2" "$3" scout "1234567890123456789012345678" ""' \
+      _ "$LIB" "$state" locale-task-c1db) || fail "$locale_name rejected a 49-character display label"
+    label=${out%%$'\t'*}
+    key=${out#*$'\t'}
+    [ "${#key}" -eq 10 ] || fail "$locale_name did not exercise the extended key"
+    [ "$(bash -c '. "$1"; fm_task_label_character_count "$2"' _ "$LIB" "$label")" -eq 49 ] \
+      || fail "$locale_name counted the display label incorrectly"
+  done
+  pass "task labels: the 50-character cap is stable in C and UTF-8 locales"
+}
+
 test_kind_mapping
 test_phrase_sanitization_and_truncation
 test_control_and_bidi_input_refused
@@ -106,5 +147,7 @@ test_task_keys_and_semantic_fallback
 test_collision_extends_key_and_journal_reuses_label
 test_empty_title_falls_back_and_label_is_bounded
 test_backlog_title_precedes_semantic_id_fallback
+test_persisted_phrase_must_match_safe_ascii_grammar
+test_full_label_limit_counts_characters_in_c_and_utf8_locales
 
 echo "# all fm-task-label-lib tests passed"

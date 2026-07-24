@@ -166,7 +166,7 @@ fm_backend_source() {  # <name>
 }
 
 fm_backend_resolve_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 meta window
+  local raw=$1 state=$2 meta window id session live recovery_record recovery_label
   case "$raw" in
     *:*)
       printf '%s' "$raw"
@@ -174,20 +174,29 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
     *)
       if [ -f "$state/$raw.meta" ]; then
         meta="$state/$raw.meta"
-      elif [[ "$raw" == fm-* ]]; then
+      elif [[ "$raw" == fm-* ]] && [ -f "$state/${raw#fm-}.meta" ]; then
         meta="$state/${raw#fm-}.meta"
       else
         meta=
       fi
       if [ -n "$meta" ]; then
-        if [ ! -f "$meta" ]; then
-          echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
-          return 1
-        fi
         window=$(fm_backend_target_of_meta "$meta")
         [ -n "$window" ] || { echo "error: no window recorded in $meta" >&2; return 1; }
         printf '%s' "$window"
         return 0
+      fi
+      id=${raw#fm-}
+      recovery_record="$state/$id.herdr-label"
+      if [ -f "$recovery_record" ]; then
+        recovery_label="fm-$id"
+        fm_backend_source herdr || return 1
+        session=$(fm_backend_herdr_session)
+        live=$(fm_backend_list_live herdr "$session") || {
+          echo "error: could not inspect Herdr recovery inventory for $raw" >&2
+          return 1
+        }
+        window=$(printf '%s\n' "$live" | awk -F '\t' -v want="$recovery_label" '$2 == want { if (++count == 1) target=$1 } END { if (count == 1) print target }')
+        [ -n "$window" ] && { printf '%s' "$window"; return 0; }
       fi
       if [[ "$raw" == fm-* ]]; then
         echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
@@ -361,6 +370,24 @@ fm_backend_list_task_ids() {  # <backend> <container>
     tmux) fm_backend_tmux_list_task_ids "$@" ;;
     herdr) fm_backend_herdr_list_task_ids "$@" ;;
     *) echo "error: no task-list implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_list_live() {  # <backend> <container-or-session>
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_list_live "$@" ;;
+    *) echo "error: no live-task inventory implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_create_labeled_task() {  # <backend> <container> <state> <id> <kind> <title> <backlog> <cwd> [seeded]
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_create_labeled_task "$@" ;;
+    *) echo "error: no labeled-task create implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 

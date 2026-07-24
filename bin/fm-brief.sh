@@ -77,8 +77,12 @@ if [ "$DISPLAY_TITLE_SET" -eq 1 ]; then
     echo "error: --display-title has no usable characters" >&2
     exit 1
   }
-  printf '%s\n' "$DISPLAY_TITLE" > "$DATA/$ID/display-title"
 fi
+
+publish_display_title() {
+  [ "$DISPLAY_TITLE_SET" -eq 1 ] || return 0
+  printf '%s\n' "$DISPLAY_TITLE" > "$DATA/$ID/display-title"
+}
 
 shell_quote() {
   printf "'"
@@ -115,6 +119,7 @@ while [ "$idx" -lt "${#POS[@]}" ]; do
   idx=$((idx + 1))
 done
 [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project" >&2; exit 1; }
+publish_display_title
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 PROJECT_LIST=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
@@ -177,6 +182,7 @@ fi
 REPO=${POS[1]}
 
 if [ "$KIND" = scout ]; then
+publish_display_title
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -223,6 +229,7 @@ fi
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+publish_display_title
 
 case "$MODE" in
   direct-PR)

@@ -620,7 +620,12 @@ test_list_live_correlates_exact_persisted_labels_and_keeps_unknown_orphans() {
   state="$home/state"
   mkdir -p "$state"
   cat > "$state/task-c1db.meta" <<'EOF'
-display_label=Scout - Herdr labels · c1db
+backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t1
+herdr_pane_id=w1:p1
+display_label=Scout - Old label · c1db
 EOF
   cat > "$state/task-be28.herdr-label" <<'EOF'
 version=1
@@ -648,7 +653,78 @@ EOF
   assert_contains "$out" $'fmtest:w1:p2\tfm-task-be28' "pre-create journal label was not correlated to its full task id"
   assert_contains "$out" $'fmtest:w1:p3\tCrew - Unknown orphan · dead' "unmatched readable label was not surfaced as unknown"
   assert_contains "$out" $'fmtest:w1:p4\tfm-legacy-z9' "legacy fm-<id> discovery was lost"
-  pass "Herdr list-live claims exact persisted labels only and keeps legacy discovery"
+  pass "Herdr list-live prefers exact machine ids, then labels, and keeps legacy discovery"
+}
+
+test_list_live_propagates_inventory_and_pane_failures() {
+  local home state status
+  home="$TMP_ROOT/list-live-failures-home"
+  state="$home/state"
+  mkdir -p "$state"
+  status=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_find() { return 1; }
+    fm_backend_herdr_list_live fmtest
+  ' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "workspace inventory failure became an empty live inventory"
+  status=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_find() { printf w1; }
+    fm_backend_herdr_cli() { printf "%s\n" "{\"result\":{\"tabs\":\"invalid\"}}"; }
+    fm_backend_herdr_list_live fmtest
+  ' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "malformed tab JSON became an empty live inventory"
+  status=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_find() { printf w1; }
+    fm_backend_herdr_cli() { printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"fm-task\"}]}}"; }
+    fm_backend_herdr_pane_for_tab() { return 1; }
+    fm_backend_herdr_list_live fmtest
+  ' "$ROOT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "pane lookup failure skipped a live tab"
+  pass "Herdr list-live propagates workspace, JSON, and pane lookup failures"
+}
+
+test_labeled_create_holds_one_lock_across_reservation_and_create() {
+  local home state out_one out_two key_one key_two
+  home="$TMP_ROOT/labeled-create-lock-home"
+  state="$home/state"
+  mkdir -p "$state"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_tab_labels() { :; }
+    fm_backend_herdr_create_task_locked() {
+      [ -L "$FM_HOME/.fm-herdr-workspace.lock" ] || exit 1
+      sleep 0.2
+      printf "tab-one pane-one"
+    }
+    fm_backend_herdr_create_labeled_task fmtest:w1 "$1" alpha-c1db scout "Shared phrase" "" /tmp
+  ' "$ROOT" "$state" > "$home/one.out" &
+  local pid_one=$!
+  sleep 0.05
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_tab_labels() { :; }
+    fm_backend_herdr_create_task_locked() {
+      [ -L "$FM_HOME/.fm-herdr-workspace.lock" ] || exit 1
+      printf "tab-two pane-two"
+    }
+    fm_backend_herdr_create_labeled_task fmtest:w1 "$1" beta-c1db scout "Shared phrase" "" /tmp
+  ' "$ROOT" "$state" > "$home/two.out" &
+  local pid_two=$!
+  wait "$pid_one" || fail "first labeled create failed"
+  wait "$pid_two" || fail "second labeled create failed"
+  out_one=$(cat "$home/one.out")
+  out_two=$(cat "$home/two.out")
+  key_one=$(printf '%s' "$out_one" | cut -f2)
+  key_two=$(printf '%s' "$out_two" | cut -f2)
+  [ "$key_one" = c1db ] || fail "first reservation did not keep the short key: '$out_one'"
+  [ "${#key_two}" -eq 10 ] || fail "second reservation did not extend under collision: '$out_two'"
+  [ "$key_one" != "$key_two" ] || fail "concurrent creates reserved the same task key"
+  pass "Herdr labeled create serializes collision scan, journal reservation, and creation"
 }
 
 test_selection_and_autodetect
@@ -671,3 +747,5 @@ test_event_capability_uses_named_session
 test_eventwait_returns_fresh_blocked_transition
 test_dispatch_and_meta_routing
 test_list_live_correlates_exact_persisted_labels_and_keeps_unknown_orphans
+test_list_live_propagates_inventory_and_pane_failures
+test_labeled_create_holds_one_lock_across_reservation_and_create

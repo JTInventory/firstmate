@@ -871,25 +871,19 @@ case "$BACKEND" in
     [ "$KIND" = secondmate ] && HERDR_LABEL_HOME="$PROJ_ABS"
     HERDR_SES=$(fm_backend_herdr_session)
     fm_backend_herdr_server_ensure "$HERDR_SES" || exit 1
-    HERDR_LIVE_LABELS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_tab_labels "$HERDR_SES") || {
-      echo "error: could not inspect existing Herdr labels before spawning $ID" >&2
-      exit 1
-    }
-    HERDR_LABEL_RESULT=$(fm_task_label_prepare \
-      "$STATE" "$ID" "$KIND" "$DISPLAY_TITLE" "$HERDR_LIVE_LABELS" "$DATA/backlog.md") || exit 1
-    DISPLAY_LABEL=${HERDR_LABEL_RESULT%%$'\t'*}
-    TASK_KEY=${HERDR_LABEL_RESULT#*$'\t'}
-    HERDR_LABEL_JOURNAL="$STATE/$ID.herdr-label"
     CONTAINER=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_container_ensure "$BACKEND" "$PROJ_ABS") || exit 1
     CONTAINER_MAIN=${CONTAINER%%$'\t'*}
     HERDR_SEEDED=
     [ "$CONTAINER_MAIN" = "$CONTAINER" ] || HERDR_SEEDED=${CONTAINER#*$'\t'}
     HERDR_SES=${CONTAINER_MAIN%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER_MAIN#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_create_task "$BACKEND" "$CONTAINER" "$DISPLAY_LABEL" "$PROJ_ABS" "$HERDR_SEEDED") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_create_labeled_task \
+      "$BACKEND" "$CONTAINER" "$STATE" "$ID" "$KIND" "$DISPLAY_TITLE" \
+      "$DATA/backlog.md" "$PROJ_ABS" "$HERDR_SEEDED") || exit 1
+    IFS=$'\t' read -r DISPLAY_LABEL TASK_KEY HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    HERDR_LABEL_JOURNAL="$STATE/$ID.herdr-label"
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: Herdr did not return a tab/pane id for $DISPLAY_LABEL" >&2
       exit 1

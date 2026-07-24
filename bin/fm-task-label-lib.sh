@@ -80,6 +80,21 @@ fm_task_label_sanitize_phrase() {  # <raw phrase>
   printf '%s' "$phrase"
 }
 
+fm_task_label_character_count() {  # <safe display label>
+  local ascii=${1//$'·'/x}
+  printf '%s' "${#ascii}"
+}
+
+fm_task_label_phrase_is_valid() {  # <phrase>
+  local phrase=$1 sanitized
+  case "$phrase" in
+    ''|*[!A-Za-z0-9\ .+_-]*) return 1 ;;
+  esac
+  [ "${#phrase}" -le 28 ] || return 1
+  sanitized=$(fm_task_label_sanitize_phrase "$phrase") || return 1
+  [ "$sanitized" = "$phrase" ]
+}
+
 fm_task_label_semantic_phrase() {  # <task-id>
   local id=$1 tail lower_tail phrase word lower_word count=0 out='' first rest
   id=${id#fm-}
@@ -122,7 +137,7 @@ fm_task_label_backlog_title() {  # <backlog-path> <task-id>
 }
 
 fm_task_label_read_record() {  # <record> <expected-id>; echoes label<TAB>key
-  local record=$1 expected=$2 task_id label key
+  local record=$1 expected=$2 task_id label key phrase
   [ -f "$record" ] || return 1
   task_id=$(grep '^task_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   label=$(grep '^display_label=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -136,11 +151,14 @@ fm_task_label_read_record() {  # <record> <expected-id>; echoes label<TAB>key
     *) return 1 ;;
   esac
   fm_task_label_has_unsafe_controls "$label" && return 1
-  [ "${#label}" -le 50 ] || return 1
+  [ "$(fm_task_label_character_count "$label")" -le 50 ] || return 1
   case "$label" in
-    Crew\ -\ *\ ·\ "$key"|Scout\ -\ *\ ·\ "$key"|2nd\ -\ *\ ·\ "$key") ;;
+    Crew\ -\ *\ ·\ "$key") phrase=${label#Crew - }; phrase=${phrase%" · $key"} ;;
+    Scout\ -\ *\ ·\ "$key") phrase=${label#Scout - }; phrase=${phrase%" · $key"} ;;
+    2nd\ -\ *\ ·\ "$key") phrase=${label#2nd - }; phrase=${phrase%" · $key"} ;;
     *) return 1 ;;
   esac
+  fm_task_label_phrase_is_valid "$phrase" || return 1
   printf '%s\t%s' "$label" "$key"
 }
 
@@ -229,7 +247,7 @@ fm_task_label_prepare() {  # <state> <id> <kind> <explicit-title> <live-labels> 
       }
     fi
   fi
-  [ "${#candidate}" -le 50 ] || {
+  [ "$(fm_task_label_character_count "$candidate")" -le 50 ] || {
     echo "error: Herdr display label exceeds 50 characters" >&2
     return 1
   }

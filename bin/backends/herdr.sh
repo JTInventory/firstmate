@@ -30,6 +30,8 @@ FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS=${FM_BACKEND_HERDR_LOCK_WAIT_ATTEMPTS:-100}
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=bin/fm-task-label-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-task-label-lib.sh"
 
 fm_backend_herdr_workspace_label() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
@@ -579,12 +581,10 @@ fm_backend_herdr_agent_alive() {  # <target> -> alive|dead|unknown
   esac
 }
 
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
-  local container=$1 label=$2 cwd=$3 seeded=${4:-} lock session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs created_tab_committed create_attempted
-  lock=$(fm_backend_herdr_workspace_lock_path) || return 1
+fm_backend_herdr_create_task_locked() {  # <container> <label> <cwd> [seeded-default-tab]
+  local container=$1 label=$2 cwd=$3 seeded=${4:-} session wsid dup dup_pane out tab_id pane_id dup_tabs remaining_dup_tabs created_tab_committed create_attempted
   (
     local -a husks=()
-    fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
     created_tab_committed=0
     create_attempted=0
     cleanup_created_tab() {
@@ -596,7 +596,6 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
         fi
       fi
       trap - EXIT
-      fm_backend_herdr_workspace_lock_release "$lock"
       exit "$status"
     }
     trap cleanup_created_tab EXIT
@@ -650,6 +649,37 @@ EOF
     fi
     created_tab_committed=1
     printf '%s %s' "$tab_id" "$pane_id"
+  )
+}
+
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
+  local lock
+  lock=$(fm_backend_herdr_workspace_lock_path) || return 1
+  (
+    fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
+    trap 'status=$?; trap - EXIT; fm_backend_herdr_workspace_lock_release "$lock" || status=1; exit "$status"' EXIT
+    fm_backend_herdr_create_task_locked "$@"
+  )
+}
+
+fm_backend_herdr_create_labeled_task() {  # <container> <state> <id> <kind> <title> <backlog> <cwd> [seeded]
+  local container=$1 state=$2 id=$3 kind=$4 title=$5 backlog=$6 cwd=$7 seeded=${8:-} lock
+  lock=$(fm_backend_herdr_workspace_lock_path) || return 1
+  (
+    local session live prepared label key ids tab_id pane_id
+    fm_backend_herdr_workspace_lock_acquire "$lock" || exit 1
+    trap 'status=$?; trap - EXIT; fm_backend_herdr_workspace_lock_release "$lock" || status=1; exit "$status"' EXIT
+    session=${container%%:*}
+    live=$(fm_backend_herdr_workspace_tab_labels "$session") || exit 1
+    prepared=$(fm_task_label_prepare "$state" "$id" "$kind" "$title" "$live" "$backlog") || exit 1
+    label=${prepared%%$'\t'*}
+    key=${prepared#*$'\t'}
+    ids=$(fm_backend_herdr_create_task_locked "$container" "$label" "$cwd" "$seeded") || exit 1
+    read -r tab_id pane_id <<EOF
+$ids
+EOF
+    [ -n "$tab_id" ] && [ -n "$pane_id" ] || exit 1
+    printf '%s\t%s\t%s\t%s' "$label" "$key" "$tab_id" "$pane_id"
   )
 }
 
@@ -891,19 +921,44 @@ fm_backend_herdr_list_task_ids() {  # <session:workspace>
 }
 
 fm_backend_herdr_task_id_for_display_label() {  # <label>
-  local want=$1 state record label owner task_id found='' count=0
+  local want=$1 state record data label owner found='' count=0
   state=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}
   for record in "$state"/*.meta "$state"/*.herdr-label; do
     [ -f "$record" ] || continue
-    label=$(grep '^display_label=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ "$label" = "$want" ] || continue
     owner=$(basename "$record")
     owner=${owner%.meta}
     owner=${owner%.herdr-label}
-    if [ "${record##*.}" = herdr-label ]; then
-      task_id=$(grep '^task_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      [ "$task_id" = "$owner" ] || continue
+    data=$(fm_task_label_read_record "$record" "$owner" 2>/dev/null) || continue
+    label=${data%%$'\t'*}
+    [ "$label" = "$want" ] || continue
+    if [ -z "$found" ]; then
+      found=$owner
+      count=1
+    elif [ "$found" != "$owner" ]; then
+      count=2
     fi
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$found"
+}
+
+fm_backend_herdr_task_id_for_exact_ids() {  # <session> <workspace> <tab> <pane>
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 state record owner found='' count=0
+  local backend record_session record_workspace record_tab record_pane
+  state=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}
+  for record in "$state"/*.meta; do
+    [ -f "$record" ] || continue
+    backend=$(grep '^backend=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$backend" = herdr ] || continue
+    record_session=$(grep '^herdr_session=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    record_workspace=$(grep '^herdr_workspace_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    record_tab=$(grep '^herdr_tab_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    record_pane=$(grep '^herdr_pane_id=' "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$record_session" = "$session" ] || continue
+    [ "$record_workspace" = "$wsid" ] || continue
+    [ "$record_tab" = "$tab_id" ] || continue
+    [ "$record_pane" = "$pane_id" ] || continue
+    owner=$(basename "$record" .meta)
     if [ -z "$found" ]; then
       found=$owner
       count=1
@@ -919,34 +974,38 @@ fm_backend_herdr_task_id_for_display_label() {  # <label>
 # New labels are claimed only by an exact metadata or pre-create-journal match;
 # legacy fm-<id> discovery remains supported.
 fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid tabs tab_id label pane_id task_id reported
-  wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
+  local session=$1 wsid tabs rows tab_id label pane_id task_id reported
+  wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
   [ -n "$wsid" ] || return 0
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '
+    (.result | type) == "object"
+    and (.result.tabs | type) == "array"
+    and all(.result.tabs[]; type == "object" and (.tab_id | type) == "string" and (.label | type) == "string")
+  ' >/dev/null 2>&1 || return 1
+  rows=$(printf '%s' "$tabs" | jq -r '.result.tabs[] | "\(.tab_id)\t\(.label)"') || return 1
   while IFS=$'\t' read -r tab_id label; do
     [ -n "$tab_id" ] || continue
-    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
-    [ -n "$pane_id" ] || continue
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
+    [ -n "$pane_id" ] || return 1
     reported=$label
-    case "$label" in
-      fm-*) ;;
-      *)
-        if task_id=$(fm_backend_herdr_task_id_for_display_label "$label"); then
-          reported="fm-$task_id"
-        fi
-        ;;
-    esac
+    if task_id=$(fm_backend_herdr_task_id_for_exact_ids "$session" "$wsid" "$tab_id" "$pane_id"); then
+      reported="fm-$task_id"
+    else
+      case "$label" in
+        fm-*) ;;
+        Crew\ -\ *\ ·\ [a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+        Scout\ -\ *\ ·\ [a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+        2nd\ -\ *\ ·\ [a-z0-9][a-z0-9][a-z0-9][a-z0-9])
+          if task_id=$(fm_backend_herdr_task_id_for_display_label "$label"); then
+            reported="fm-$task_id"
+          fi
+          ;;
+        *) continue ;;
+      esac
+    fi
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$reported"
-  done < <(printf '%s' "$tabs" | jq -r '
-    .result.tabs[]?
-    | select(
-        (.label | type) == "string"
-        and (
-          (.label | startswith("fm-"))
-          or (.label | test("^(Crew|Scout|2nd) - [A-Za-z0-9 .+_-]+ · [a-z0-9]{4,10}$"))
-        )
-      )
-    | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done <<<"$rows"
 }
 
 # These lifecycle operations are tmux-only in the generic spawn setup. They

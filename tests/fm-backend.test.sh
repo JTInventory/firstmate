@@ -137,6 +137,26 @@ test_selector_and_dispatch() {
   pass "selector resolution and capture/key/readability/kill dispatch use tmux adapter"
 }
 
+test_selector_recovers_precreate_herdr_journal() {
+  local state out
+  state="$TMP_ROOT/herdr-recovery/state"
+  mkdir -p "$state"
+  printf 'version=1\ntask_id=crash-c1db\ndisplay_label=Crew - Crash recovery · c1db\ntask_key=c1db\n' \
+    > "$state/crash-c1db.herdr-label"
+  fm_backend_source herdr || fail "Herdr backend could not be loaded"
+  fm_backend_list_live() {
+    [ "$1" = herdr ] && [ "$2" = fmtest ] || return 1
+    printf 'fmtest:w1:p1\tfm-crash-c1db\n'
+  }
+  out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector crash-c1db "$state") \
+    || fail "bare task id did not recover through the Herdr journal"
+  [ "$out" = fmtest:w1:p1 ] || fail "recovered Herdr target mismatch: '$out'"
+  out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector fm-crash-c1db "$state") \
+    || fail "legacy fm-<id> selector did not recover through the Herdr journal"
+  [ "$out" = fmtest:w1:p1 ] || fail "legacy recovered Herdr target mismatch: '$out'"
+  pass "selector recovery uses the generic live inventory for pre-create journals"
+}
+
 test_backend_failures_propagate() {
   local dir fakebin log out
   dir="$TMP_ROOT/failures"; mkdir -p "$dir"
@@ -244,5 +264,6 @@ SH
 test_selection_and_metadata
 test_spawn_rejects_unknown_selection
 test_selector_and_dispatch
+test_selector_recovers_precreate_herdr_journal
 test_backend_failures_propagate
 test_teardown_preserves_state_on_kill_failure
