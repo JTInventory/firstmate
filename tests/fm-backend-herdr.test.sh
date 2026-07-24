@@ -658,7 +658,7 @@ EOF
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_workspace_find() { printf w1; }
     fm_backend_herdr_cli() {
-      printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"Scout - Herdr labels · c1db\"},{\"tab_id\":\"w1:t2\",\"label\":\"Crew - UI Design · be28\"},{\"tab_id\":\"w1:t3\",\"label\":\"Crew - Unknown orphan · dead\"},{\"tab_id\":\"w1:t4\",\"label\":\"fm-legacy-z9\"},{\"tab_id\":\"w1:t5\",\"label\":\"Crew - Five key · a1b2c\"},{\"tab_id\":\"w1:t6\",\"label\":\"Scout - Six key · a1b2c3\"},{\"tab_id\":\"w1:t7\",\"label\":\"2nd - Extended key · a1b2c3d4e5\"},{\"tab_id\":\"w1:t8\",\"label\":\"fm-victim\\tfm-victim\"},{\"tab_id\":\"w1:t9\",\"label\":\"junk\\nw1:t10\\tfm-victim\"}]}}"
+      printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"Scout - Herdr labels · c1db\"},{\"tab_id\":\"w1:t2\",\"label\":\"Crew - UI Design · be28\"},{\"tab_id\":\"w1:t3\",\"label\":\"Crew - Unknown orphan · dead\"},{\"tab_id\":\"w1:t4\",\"label\":\"fm-legacy-z9\"},{\"tab_id\":\"w1:t5\",\"label\":\"Crew - Five key · a1b2c\"},{\"tab_id\":\"w1:t6\",\"label\":\"Scout - Six key · a1b2c3\"},{\"tab_id\":\"w1:t7\",\"label\":\"2nd - Extended key · a1b2c3d4e5\"},{\"tab_id\":\"w1:t8\",\"label\":\"fm-victim\\tfm-victim\"},{\"tab_id\":\"w1:t9\",\"label\":\"junk\\nw1:t10\\tfm-victim\"},{\"tab_id\":\"w1:t11\",\"label\":\"fm-vic\\u0000tim\"}]}}"
     }
     fm_backend_herdr_pane_for_tab() {
       case "$3" in
@@ -672,6 +672,7 @@ EOF
         w1:t8) printf w1:p8 ;;
         w1:t9) printf w1:p9 ;;
         w1:t10) printf w1:p10 ;;
+        w1:t11) printf w1:p11 ;;
       esac
     }
     fm_backend_herdr_list_live fmtest
@@ -685,14 +686,22 @@ EOF
   assert_contains "$out" $'fmtest:w1:p7\tfm-task-a1b2c3d4e5' "extended collision key was not recovered"
   assert_not_contains "$out" $'fmtest:w1:p8\t' "tab-bearing legacy label entered recovery inventory"
   assert_not_contains "$out" $'fmtest:w1:p10\tfm-victim\tfm-victim' "newline-bearing label forged a recovery inventory row"
+  assert_not_contains "$out" $'fmtest:w1:p11\t' "NUL-bearing legacy label entered recovery inventory"
   pass "Herdr list-live prefers exact machine ids, then labels, and keeps legacy discovery"
 }
 
 test_list_live_propagates_inventory_and_pane_failures() {
-  local home state status
+  local home state status out
   home="$TMP_ROOT/list-live-failures-home"
   state="$home/state"
   mkdir -p "$state"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_workspace_find() { printf w1; }
+    fm_backend_herdr_cli() { printf "%s\n" "{\"result\":{\"tabs\":[]}}"; }
+    fm_backend_herdr_list_live fmtest
+  ' "$ROOT")
+  [ -z "$out" ] || fail "empty tab inventory produced live rows"
   status=0
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
     . "$0/bin/backends/herdr.sh"
@@ -717,7 +726,7 @@ test_list_live_propagates_inventory_and_pane_failures() {
     fm_backend_herdr_list_live fmtest
   ' "$ROOT" >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "pane lookup failure skipped a live tab"
-  pass "Herdr list-live propagates workspace, JSON, and pane lookup failures"
+  pass "Herdr list-live handles empty inventories and propagates lookup failures"
 }
 
 test_labeled_create_holds_one_lock_across_reservation_and_create() {

@@ -1002,14 +1002,22 @@ fm_backend_herdr_list_live() {  # <session> [workspace]
     and (.result.tabs | type) == "array"
     and all(.result.tabs[]; type == "object" and (.tab_id | type) == "string" and (.label | type) == "string")
   ' >/dev/null 2>&1 || return 1
-  rows=$(printf '%s' "$tabs" | jq -c '.result.tabs[] | [.tab_id, .label]') || return 1
+  rows=$(printf '%s' "$tabs" | jq -c '
+    def has_unsafe_controls:
+      any(explode[];
+        (. >= 0 and . <= 31)
+        or . == 127
+        or (. >= 8234 and . <= 8238)
+        or (. >= 8294 and . <= 8297));
+    .result.tabs[]
+    | select(.tab_id | has_unsafe_controls | not)
+    | select(.label | has_unsafe_controls | not)
+    | [.tab_id, .label]
+  ') || return 1
+  [ -n "$rows" ] || return 0
   while IFS= read -r row; do
-    tab_id=$(printf '%s' "$row" | jq -r '.[0] + "\u001f"') || return 1
-    label=$(printf '%s' "$row" | jq -r '.[1] + "\u001f"') || return 1
-    case "$tab_id" in *$'\037') tab_id=${tab_id%$'\037'} ;; *) return 1 ;; esac
-    case "$label" in *$'\037') label=${label%$'\037'} ;; *) return 1 ;; esac
-    fm_task_label_has_unsafe_controls "$tab_id" && continue
-    fm_task_label_has_unsafe_controls "$label" && continue
+    tab_id=$(printf '%s' "$row" | jq -r '.[0]') || return 1
+    label=$(printf '%s' "$row" | jq -r '.[1]') || return 1
     [ -n "$tab_id" ] || continue
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
     [ -n "$pane_id" ] || return 1
