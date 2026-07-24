@@ -152,6 +152,11 @@ test_selector_recovers_precreate_herdr_journal() {
     "herdr_tab_id=w-old:t1" "herdr_pane_id=w-old:p1" \
     "display_label=Crew - Stale recovery · d2e3" "task_key=d2e3" \
     "home=$TMP_ROOT/secondmate-home"
+  fm_write_meta "$state/legacy-e3f4.meta" "window=stale:w0:p0" "backend=herdr" \
+    "herdr_session=fmtest" "herdr_workspace_id=w-second" \
+    "herdr_tab_id=w-gone:t1" "herdr_pane_id=w-gone:p1" \
+    "display_label=Crew - Missing display · e3f4" "task_key=e3f4" \
+    "home=$TMP_ROOT/secondmate-home"
   printf 'version=1\ntask_id=crash-c1db\ndisplay_label=Crew - Crash recovery · c1db\ntask_key=c1db\nherdr_home=%s\nherdr_session=fmtest\nherdr_workspace_id=w-second\n' \
     "$TMP_ROOT/secondmate-home" \
     > "$state/crash-c1db.herdr-label"
@@ -166,11 +171,14 @@ test_selector_recovers_precreate_herdr_journal() {
       w-second)
         [ "$2" = fmtest ] || return 1
         [ "$FM_HOME" = "$TMP_ROOT/secondmate-home" ] || return 1
-        printf 'fmtest:w1:p2\tfm-stale-d2e3\n'
-        printf 'fmtest:w1:p3\tfm-crash-c1db\n'
+        printf 'fmtest:w1:p2\tfm-stale-d2e3\tCrew - Stale recovery · d2e3\n'
+        printf 'fmtest:w1:p5\tfm-stale-d2e3\tfm-stale-d2e3\n'
+        printf 'fmtest:w1:p3\tfm-crash-c1db\tCrew - Crash recovery · c1db\n'
+        printf 'fmtest:w1:p7\tfm-crash-c1db\tfm-crash-c1db\n'
+        printf 'fmtest:w1:p6\tfm-legacy-e3f4\tfm-legacy-e3f4\n'
         ;;
       '')
-        printf 'fmtest:w1:p4\tfm-legacy-z9\n'
+        printf 'fmtest:w1:p4\tfm-legacy-z9\tfm-legacy-z9\n'
         ;;
       *) return 1 ;;
     esac
@@ -183,6 +191,10 @@ test_selector_recovers_precreate_herdr_journal() {
     || fail "stale exact Herdr ids did not fall back through live inventory"
   [ "$resolution" = $'herdr\tfmtest:w1:p2' ] \
     || fail "stale exact Herdr ids did not recover by display label: '$resolution'"
+  resolution=$(fm_backend_resolve_selector_with_backend legacy-e3f4 "$state") \
+    || fail "stale Herdr ids did not use final legacy fallback"
+  [ "$resolution" = $'herdr\tfmtest:w1:p6' ] \
+    || fail "final legacy Herdr fallback resolved incorrectly: '$resolution'"
   out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector crash-c1db "$state") \
     || fail "bare task id did not recover through the Herdr journal"
   [ "$out" = fmtest:w1:p3 ] || fail "recovered Herdr target mismatch: '$out'"

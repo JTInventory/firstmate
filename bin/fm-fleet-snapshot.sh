@@ -52,6 +52,9 @@ if [ "$OUTPUT_MODE" = backlog-title ]; then
       else next
       sub(/[[:space:]]+\(repo:[^)]*\).*/, "", title)
       sub(/[[:space:]]+blocked-by:.*/, "", title)
+      sub(/[[:space:]]+-[[:space:]]+https:\/\/github\.com\/[^[:space:]]+\/pull\/[0-9]+[[:space:]]+\(merged[[:space:]][^)]*\)[[:space:]]*$/, "", title)
+      sub(/[[:space:]]+-[[:space:]]+local main[[:space:]]+\(merged[[:space:]][^)]*\)[[:space:]]*$/, "", title)
+      sub(/[[:space:]]+-[[:space:]]+data\/[^[:space:]]+\/report\.md[[:space:]]+\(reported[[:space:]][^)]*\)[[:space:]]*$/, "", title)
       print title
       exit
     }

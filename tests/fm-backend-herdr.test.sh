@@ -673,10 +673,10 @@ EOF
     }
     fm_backend_herdr_list_live fmtest
   ' "$ROOT")
-  assert_contains "$out" $'fmtest:w1:p1\tfm-task-c1db' "persisted meta label was not correlated to its full task id"
-  assert_contains "$out" $'fmtest:w1:p2\tfm-task-be28' "pre-create journal label was not correlated to its full task id"
-  assert_contains "$out" $'fmtest:w1:p3\tCrew - Unknown orphan · dead' "unmatched readable label was not surfaced as unknown"
-  assert_contains "$out" $'fmtest:w1:p4\tfm-legacy-z9' "legacy fm-<id> discovery was lost"
+  assert_contains "$out" $'fmtest:w1:p1\tfm-task-c1db\tScout - Herdr labels · c1db' "persisted meta label was not correlated to its full task id"
+  assert_contains "$out" $'fmtest:w1:p2\tfm-task-be28\tCrew - UI Design · be28' "pre-create journal label was not correlated to its full task id"
+  assert_contains "$out" $'fmtest:w1:p3\tCrew - Unknown orphan · dead\tCrew - Unknown orphan · dead' "unmatched readable label was not surfaced as unknown"
+  assert_contains "$out" $'fmtest:w1:p4\tfm-legacy-z9\tfm-legacy-z9' "legacy fm-<id> discovery was lost"
   assert_contains "$out" $'fmtest:w1:p5\tfm-task-a1b2c' "five-character key was not recovered"
   assert_contains "$out" $'fmtest:w1:p6\tfm-task-a1b2c3' "six-character key was not recovered"
   assert_contains "$out" $'fmtest:w1:p7\tfm-task-a1b2c3d4e5' "extended collision key was not recovered"

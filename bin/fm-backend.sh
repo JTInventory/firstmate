@@ -165,8 +165,9 @@ fm_backend_source() {  # <name>
   esac
 }
 
-fm_backend_herdr_inventory_target() {  # <state> <alias> [home] [session] [workspace]
-  local state=$1 alias=$2 home=${3:-$FM_HOME} session=${4:-} wsid=${5:-} live target
+fm_backend_herdr_inventory_target() {  # <state> <alias> [home] [session] [workspace] [display-label] [allow-legacy]
+  local state=$1 alias=$2 home=${3:-$FM_HOME} session=${4:-} wsid=${5:-}
+  local display_label=${6:-} allow_legacy=${7:-0} live target
   fm_backend_source herdr || return 2
   if [ -z "$session" ]; then
     session=$(fm_backend_herdr_session) || return 2
@@ -176,16 +177,26 @@ fm_backend_herdr_inventory_target() {  # <state> <alias> [home] [session] [works
     fm_backend_list_live herdr "$session" "$wsid"); then
     return 2
   fi
-  target=$(printf '%s\n' "$live" | awk -F '\t' -v want="$alias" '
-    $2 == want { if (++count == 1) found = $1 }
-    END { if (count == 1) print found }
-  ')
-  [ -n "$target" ] || return 1
-  printf '%s' "$target"
+  if [ -n "$display_label" ]; then
+    target=$(printf '%s\n' "$live" | awk -F '\t' -v alias="$alias" -v label="$display_label" '
+      $2 == alias && $3 == label { if (++count == 1) found = $1 }
+      END { if (count == 1) print found }
+    ')
+    [ -z "$target" ] || { printf '%s' "$target"; return 0; }
+  fi
+  if [ "$allow_legacy" = 1 ]; then
+    target=$(printf '%s\n' "$live" | awk -F '\t' -v alias="$alias" '
+      $2 == alias && $3 == alias { if (++count == 1) found = $1 }
+      END { if (count == 1) print found }
+    ')
+    [ -z "$target" ] || { printf '%s' "$target"; return 0; }
+  fi
+  return 1
 }
 
 fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes backend<TAB>target
   local raw=$1 state=$2 meta window id backend session wsid recovery_record recovery_label recovery_home
+  local recovery_display_label
   local inventory_status
   case "$raw" in
     *:*)
@@ -213,8 +224,9 @@ fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes
         recovery_home=$(fm_meta_get "$meta" home)
         session=$(fm_meta_get "$meta" herdr_session)
         wsid=$(fm_meta_get "$meta" herdr_workspace_id)
+        recovery_display_label=$(fm_meta_get "$meta" display_label)
         if window=$(fm_backend_herdr_inventory_target "$state" "fm-$id" \
-          "${recovery_home:-$FM_HOME}" "$session" "$wsid"); then
+          "${recovery_home:-$FM_HOME}" "$session" "$wsid" "$recovery_display_label" 1); then
           printf 'herdr\t%s' "$window"
           return 0
         else
@@ -238,8 +250,9 @@ fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes
         recovery_home=$(fm_meta_get "$recovery_record" herdr_home)
         session=$(fm_meta_get "$recovery_record" herdr_session)
         wsid=$(fm_meta_get "$recovery_record" herdr_workspace_id)
+        recovery_display_label=$(fm_meta_get "$recovery_record" display_label)
         if window=$(fm_backend_herdr_inventory_target "$state" "$recovery_label" \
-          "${recovery_home:-$FM_HOME}" "$session" "$wsid"); then
+          "${recovery_home:-$FM_HOME}" "$session" "$wsid" "$recovery_display_label" 1); then
           printf 'herdr\t%s' "$window"
           return 0
         else
@@ -253,7 +266,8 @@ fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes
         return 1
       fi
       if [[ "$raw" == fm-* ]] && [ "$(fm_backend_name)" = herdr ]; then
-        if window=$(fm_backend_herdr_inventory_target "$state" "fm-$id"); then
+        if window=$(fm_backend_herdr_inventory_target "$state" "fm-$id" \
+          "$FM_HOME" "" "" "" 1); then
           printf 'herdr\t%s' "$window"
           return 0
         else

@@ -1021,7 +1021,7 @@ fm_backend_herdr_list_live() {  # <session> [workspace]
           ;;
       esac
     fi
-    printf '%s:%s\t%s\n' "$session" "$pane_id" "$reported"
+    printf '%s:%s\t%s\t%s\n' "$session" "$pane_id" "$reported" "$label"
   done <<<"$rows"
 }
 

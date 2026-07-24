@@ -94,6 +94,10 @@ test_backlog_title_precedes_semantic_id_fallback() {
 - [ ] quick-fix-a1b2 - Fix UI (repo: demo, kind: ship)
 - **bold-work-b2c3** - Bold work (repo: demo, since 2026-07-24)
 - [ ] blocked-work-c3d4 - Blocked work (repo: demo) blocked-by: prior-task - waits
+## Done
+- [x] done-pr-d4e5 - Fix PR - https://github.com/example/repo/pull/12 (merged 2026-07-24)
+- [X] done-local-e5f6 - Fix local - local main (merged 2026-07-24)
+- [x] done-report-f6a7 - Fix report - data/done-report-f6a7/report.md (reported 2026-07-24)
 EOF
   out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" ship "" "" "$4"' \
     _ "$LIB" "$state" opaque-work-c9d2 "$home/data/backlog.md")
@@ -111,6 +115,18 @@ EOF
     _ "$LIB" "$state" blocked-work-c3d4 "$home/data/backlog.md")
   [ "$out" = "Scout - Blocked work · c3d4"$'\t'"c3d4" ] \
     || fail "blocked-by routing metadata leaked into the display label: '$out'"
+  out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" ship "" "" "$4"' \
+    _ "$LIB" "$state" done-pr-d4e5 "$home/data/backlog.md")
+  [ "$out" = "Crew - Fix PR · d4e5"$'\t'"d4e5" ] \
+    || fail "PR completion metadata leaked into the display label: '$out'"
+  out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" ship "" "" "$4"' \
+    _ "$LIB" "$state" done-local-e5f6 "$home/data/backlog.md")
+  [ "$out" = "Crew - Fix local · e5f6"$'\t'"e5f6" ] \
+    || fail "local-main completion metadata leaked into the display label: '$out'"
+  out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" scout "" "" "$4"' \
+    _ "$LIB" "$state" done-report-f6a7 "$home/data/backlog.md")
+  [ "$out" = "Scout - Fix report · f6a7"$'\t'"f6a7" ] \
+    || fail "report completion metadata leaked into the display label: '$out'"
   pass "task labels: canonical backlog title precedes semantic task-id fallback"
 }
 
