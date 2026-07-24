@@ -91,11 +91,16 @@ test_backlog_title_precedes_semantic_id_fallback() {
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] opaque-work-c9d2 - Operator-friendly Herdr naming (repo: firstmate, kind: ship)
+- [ ] quick-fix-a1b2 - Fix UI (repo: demo, kind: ship)
 EOF
   out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" ship "" "" "$4"' \
     _ "$LIB" "$state" opaque-work-c9d2 "$home/data/backlog.md")
   [ "$out" = "Crew - Operator-friendly Herdr · c9d2"$'\t'"c9d2" ] \
     || fail "canonical backlog title was not preferred and bounded: '$out'"
+  out=$(bash -c '. "$1"; fm_task_label_prepare "$2" "$3" ship "" "" "$4"' \
+    _ "$LIB" "$state" quick-fix-a1b2 "$home/data/backlog.md")
+  [ "$out" = "Crew - Fix UI · a1b2"$'\t'"a1b2" ] \
+    || fail "backlog routing metadata leaked into a short display label: '$out'"
   pass "task labels: canonical backlog title precedes semantic task-id fallback"
 }
 

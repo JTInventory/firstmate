@@ -148,6 +148,7 @@ test_selector_recovers_precreate_herdr_journal() {
   fm_backend_list_live() {
     [ "$1" = herdr ] && [ "$2" = fmtest ] && [ "$3" = w-second ] || return 1
     [ "$FM_HOME" = "$TMP_ROOT/secondmate-home" ] || return 1
+    [ "$FM_STATE_OVERRIDE" = "$state" ] || return 1
     printf 'fmtest:w1:p1\tfm-crash-c1db\n'
   }
   out=$(HERDR_SESSION=fmtest fm_backend_resolve_selector crash-c1db "$state") \

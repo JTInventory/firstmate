@@ -48,7 +48,7 @@ if [ "$OUTPUT_MODE" = backlog-title ]; then
       else if (index($0, done_prefix) == 1) title = substr($0, length(done_prefix) + 1)
       else if (index($0, done_prefix_upper) == 1) title = substr($0, length(done_prefix_upper) + 1)
       else next
-      sub(/[[:space:]]+\([^)]*$/, "", title)
+      sub(/[[:space:]]+\([^)]*\)[[:space:]]*$/, "", title)
       print title
       exit
     }

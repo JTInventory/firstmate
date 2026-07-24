@@ -198,7 +198,8 @@ fm_backend_resolve_selector_with_backend() {  # <raw-target> <state-dir>; echoes
         session=$(fm_meta_get "$recovery_record" herdr_session)
         wsid=$(fm_meta_get "$recovery_record" herdr_workspace_id)
         [ -n "$session" ] || session=$(fm_backend_herdr_session)
-        live=$(FM_HOME="${recovery_home:-$FM_HOME}" fm_backend_list_live herdr "$session" "$wsid") || {
+        live=$(FM_HOME="${recovery_home:-$FM_HOME}" FM_STATE_OVERRIDE="$state" \
+          fm_backend_list_live herdr "$session" "$wsid") || {
           echo "error: could not inspect Herdr recovery inventory for $raw" >&2
           return 1
         }
