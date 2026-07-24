@@ -7,7 +7,7 @@ Each file also starts with a short header comment.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `fm-bootstrap.sh`        | Detect required toolchain and version problems, dispatch profile JSON errors or active-rule blocks, secondmate profile JSON errors, default backlog-backend status, primary-checkout `TANGLE:` problems, and actionable clone refresh outcomes; refresh project clones best-effort; locally sync live secondmate homes and propagate declared inheritable config; set up opt-in X mode; install tools only after consent |
 | `fm-fleet-sync.sh`       | Fetch clones, fast-forward safe default-branch states, self-heal clean detached ancestor drift, recover orphaned `packed-refs.lock` only when provably stale, report unsafe drift as `STUCK:`, safely prune branches whose remote is gone, and accept a project name or `projects/<name>` for a deterministic single-clone sync |
-| `fm-fleet-snapshot.sh`   | Print the read-only local `fm-fleet-snapshot.v1` JSON contract for backlog, task metadata, status events, and worktree facts |
+| `fm-fleet-snapshot.sh`   | Print the read-only local `fm-fleet-snapshot.v1` JSON contract for backlog, task metadata, status events, and worktree facts, or return one canonical structured backlog title with `--backlog-title <task-id>` |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot into a compact TOON/JSON operator view; local-only by default, with soft-failing live PR discovery only under `--include-prs` |
 | `fm-lint.sh`              | Run the pinned ShellCheck definition shared by CI and the no-mistakes gate |
 | `fm-install-shellcheck.sh` | Install and checksum CI's pinned Linux ShellCheck build |
