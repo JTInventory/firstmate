@@ -658,7 +658,7 @@ EOF
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_workspace_find() { printf w1; }
     fm_backend_herdr_cli() {
-      printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"Scout - Herdr labels · c1db\"},{\"tab_id\":\"w1:t2\",\"label\":\"Crew - UI Design · be28\"},{\"tab_id\":\"w1:t3\",\"label\":\"Crew - Unknown orphan · dead\"},{\"tab_id\":\"w1:t4\",\"label\":\"fm-legacy-z9\"},{\"tab_id\":\"w1:t5\",\"label\":\"Crew - Five key · a1b2c\"},{\"tab_id\":\"w1:t6\",\"label\":\"Scout - Six key · a1b2c3\"},{\"tab_id\":\"w1:t7\",\"label\":\"2nd - Extended key · a1b2c3d4e5\"}]}}"
+      printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"Scout - Herdr labels · c1db\"},{\"tab_id\":\"w1:t2\",\"label\":\"Crew - UI Design · be28\"},{\"tab_id\":\"w1:t3\",\"label\":\"Crew - Unknown orphan · dead\"},{\"tab_id\":\"w1:t4\",\"label\":\"fm-legacy-z9\"},{\"tab_id\":\"w1:t5\",\"label\":\"Crew - Five key · a1b2c\"},{\"tab_id\":\"w1:t6\",\"label\":\"Scout - Six key · a1b2c3\"},{\"tab_id\":\"w1:t7\",\"label\":\"2nd - Extended key · a1b2c3d4e5\"},{\"tab_id\":\"w1:t8\",\"label\":\"fm-victim\\tfm-victim\"}]}}"
     }
     fm_backend_herdr_pane_for_tab() {
       case "$3" in
@@ -669,6 +669,7 @@ EOF
         w1:t5) printf w1:p5 ;;
         w1:t6) printf w1:p6 ;;
         w1:t7) printf w1:p7 ;;
+        w1:t8) printf w1:p8 ;;
       esac
     }
     fm_backend_herdr_list_live fmtest
@@ -680,6 +681,7 @@ EOF
   assert_contains "$out" $'fmtest:w1:p5\tfm-task-a1b2c' "five-character key was not recovered"
   assert_contains "$out" $'fmtest:w1:p6\tfm-task-a1b2c3' "six-character key was not recovered"
   assert_contains "$out" $'fmtest:w1:p7\tfm-task-a1b2c3d4e5' "extended collision key was not recovered"
+  assert_not_contains "$out" $'fmtest:w1:p8\t' "tab-bearing legacy label entered recovery inventory"
   pass "Herdr list-live prefers exact machine ids, then labels, and keeps legacy discovery"
 }
 

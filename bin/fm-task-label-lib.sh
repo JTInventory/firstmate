@@ -95,6 +95,12 @@ fm_task_label_phrase_is_valid() {  # <phrase>
   [ "$sanitized" = "$phrase" ]
 }
 
+fm_task_label_task_id_is_valid() {  # <task-id>
+  case "$1" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 fm_task_label_validate_display_label() {  # <label>; echoes key
   local label=$1 key phrase
   fm_task_label_has_unsafe_controls "$label" && return 1
@@ -205,12 +211,10 @@ fm_task_label_prepare() {  # <state> <id> <kind> <explicit-title> <live-labels> 
   local existing_home existing_session existing_workspace
   journal="$state/$id.herdr-label"
   meta="$state/$id.meta"
-  case "$id" in
-    ''|.*|*[!A-Za-z0-9._-]*)
-      echo "error: invalid task id for Herdr display label" >&2
-      return 1
-      ;;
-  esac
+  if ! fm_task_label_task_id_is_valid "$id"; then
+    echo "error: invalid task id for Herdr display label" >&2
+    return 1
+  fi
   mkdir -p "$state" || return 1
 
   if [ -e "$journal" ] || [ -L "$journal" ]; then

@@ -1012,7 +1012,7 @@ fm_backend_herdr_list_live() {  # <session> [workspace]
       reported="fm-$task_id"
     else
       case "$label" in
-        fm-*) ;;
+        fm-*) fm_task_label_task_id_is_valid "${label#fm-}" || continue ;;
         *)
           fm_task_label_validate_display_label "$label" >/dev/null 2>&1 || continue
           if task_id=$(fm_backend_herdr_task_id_for_display_label "$label"); then
