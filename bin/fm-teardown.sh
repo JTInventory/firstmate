@@ -770,8 +770,6 @@ fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
 HERDR_PRESENTATION_WORKSPACE=
 if [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || {
@@ -782,8 +780,6 @@ if [ "$BACKEND" = herdr ]; then
     echo "REFUSED: invalid Herdr target $T for $ID; preserving task state and worktree" >&2
     exit 1
   }
-  HERDR_PRESENTATION_SESSION=$FM_BACKEND_HERDR_SESSION
-  HERDR_PRESENTATION_PANE=$FM_BACKEND_HERDR_PANE
 fi
 if [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then

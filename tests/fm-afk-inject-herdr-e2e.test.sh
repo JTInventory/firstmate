@@ -78,11 +78,8 @@ done
 # e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
 # only watches state/*.status mtimes, no window/pane dependency), but kept for
 # parity so this test's shape matches the tmux e2e's.
-FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp) \
+fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp >/dev/null \
   || fail "could not create the fake crewmate scratch tab"
-read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
-$FAKE_CREW_IDS
-EOF
 
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
