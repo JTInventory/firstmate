@@ -2291,15 +2291,17 @@ fm_backend_herdr_submit_enter() {  # <target> <retries> <enter-sleep> [expected-
   [ -n "$expected_text" ] || { printf 'unknown'; return 0; }
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
-    baseline=$(fm_backend_herdr_classify_submit_agent_status \
-      "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
     preflight=$(fm_backend_herdr_composer_state "$target" "$expected_text")
     case "$preflight" in
       empty)
+        baseline=$(fm_backend_herdr_classify_submit_agent_status \
+          "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
         [ "$baseline" = busy ] && printf 'empty' || printf 'unknown'
         return 0
         ;;
       pending)
+        baseline=$(fm_backend_herdr_classify_submit_agent_status \
+          "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
         [ "$baseline" = idle ] || { printf 'unknown'; return 0; }
         ;;
       *) printf 'unknown'; return 0 ;;

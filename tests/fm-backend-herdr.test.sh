@@ -2782,15 +2782,19 @@ test_send_text_submit_pending_unknown_does_not_retry() {
 }
 
 test_submit_enter_dispatch_confirms_idle_pending_text() {
-  local dir log resp fb out enter_count
+  local dir log resp fb out enter_count ownership_line idle_line
   dir="$TMP_ROOT/submit-enter-dispatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '  ❯ hello captain\n' > "$resp/2.out"
+  printf '  ❯ hello captain\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_submit_enter herdr default:w1:p2 1 0.01 "hello captain"' "$ROOT" )
   [ "$out" = empty ] || fail "Herdr submit-enter dispatch should confirm pending idle text once the final Enter starts work, got '$out'"
+  ownership_line=$(grep -n $'\x1f''pane'$'\x1f''read' "$log" | head -n 1 | cut -d: -f1)
+  idle_line=$(grep -n $'\x1f''agent'$'\x1f''get' "$log" | head -n 1 | cut -d: -f1)
+  [ -n "$ownership_line" ] && [ -n "$idle_line" ] && [ "$ownership_line" -lt "$idle_line" ] \
+    || fail "Herdr submit-enter should capture composer ownership before sampling native state"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "Herdr submit-enter dispatch should send exactly one final Enter, sent $enter_count"
   pass "fm_backend_submit_enter: Herdr final Enter submits idle pending text and returns a confirmed verdict"
@@ -2799,8 +2803,8 @@ test_submit_enter_dispatch_confirms_idle_pending_text() {
 test_submit_enter_idle_swallow_stays_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-enter-idle-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '  ❯ hello captain\n' > "$resp/2.out"
+  printf '  ❯ hello captain\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
