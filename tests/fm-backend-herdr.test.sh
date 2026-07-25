@@ -2848,7 +2848,7 @@ test_submit_enter_preflight_refuses_unowned_composer() {
   pass "fm_backend_herdr_submit_enter: mismatched and unreadable composer content is never submitted"
 }
 
-test_submit_enter_preflight_accepts_already_empty_composer() {
+test_submit_enter_preflight_empty_without_activity_is_unknown() {
   local out enter_log
   enter_log="$TMP_ROOT/submit-enter-empty-enter.log"
   : > "$enter_log"
@@ -2863,9 +2863,51 @@ test_submit_enter_preflight_accepts_already_empty_composer() {
     fm_backend_herdr_send_key() { printf "enter\n" >> "$ENTER_LOG"; }
     fm_backend_herdr_submit_enter default:w1:p2 1 0 "hello captain"
   ' "$ROOT")
-  [ "$out" = empty ] || fail "Herdr final Enter should preserve an already-empty submitted verdict, got '$out'"
+  [ "$out" = unknown ] || fail "Herdr final Enter must not treat an idle empty composer as delivery proof, got '$out'"
   [ ! -s "$enter_log" ] || fail "Herdr final Enter sent Enter into an already-empty composer"
-  pass "fm_backend_herdr_submit_enter: an already-empty composer is not submitted again"
+  pass "fm_backend_herdr_submit_enter: an idle empty composer is unconfirmed and never submitted"
+}
+
+test_submit_enter_preflight_empty_with_activity_is_confirmed() {
+  local out enter_log
+  enter_log="$TMP_ROOT/submit-enter-active-empty-enter.log"
+  : > "$enter_log"
+  out=$(ENTER_LOG="$enter_log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=default
+      FM_BACKEND_HERDR_PANE=w1:p2
+    }
+    fm_backend_herdr_agent_status_raw() { printf working; }
+    fm_backend_herdr_composer_state() { printf empty; }
+    fm_backend_herdr_send_key() { printf "enter\n" >> "$ENTER_LOG"; }
+    fm_backend_herdr_submit_enter default:w1:p2 1 0 "hello captain"
+  ' "$ROOT")
+  [ "$out" = empty ] || fail "Herdr final Enter should accept empty composer plus submit-active proof, got '$out'"
+  [ ! -s "$enter_log" ] || fail "Herdr final Enter sent Enter after delivery was already submit-active"
+  pass "fm_backend_herdr_submit_enter: empty composer needs submit-active proof"
+}
+
+test_submit_enter_pending_requires_current_idle() {
+  local state out enter_log
+  enter_log="$TMP_ROOT/submit-enter-nonidle-enter.log"
+  for state in working unreadable; do
+    : > "$enter_log"
+    out=$(NATIVE_STATE="$state" ENTER_LOG="$enter_log" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_parse_target() {
+        FM_BACKEND_HERDR_SESSION=default
+        FM_BACKEND_HERDR_PANE=w1:p2
+      }
+      fm_backend_herdr_agent_status_raw() { printf "%s" "$NATIVE_STATE"; }
+      fm_backend_herdr_composer_state() { printf pending; }
+      fm_backend_herdr_send_key() { printf "enter\n" >> "$ENTER_LOG"; }
+      fm_backend_herdr_submit_enter default:w1:p2 1 0 "hello captain"
+    ' "$ROOT")
+    [ "$out" = unknown ] || fail "Herdr final Enter must refuse pending text with $state native state, got '$out'"
+    [ ! -s "$enter_log" ] || fail "Herdr final Enter sent into pending text with $state native state"
+  done
+  pass "fm_backend_herdr_submit_enter: pending text requires current idle proof"
 }
 
 test_submit_enter_unknown_confirmation_stays_unknown() {
@@ -3621,7 +3663,9 @@ test_submit_enter_dispatch_confirms_idle_pending_text
 test_submit_enter_idle_swallow_stays_pending
 test_submit_enter_transport_failure
 test_submit_enter_preflight_refuses_unowned_composer
-test_submit_enter_preflight_accepts_already_empty_composer
+test_submit_enter_preflight_empty_without_activity_is_unknown
+test_submit_enter_preflight_empty_with_activity_is_confirmed
+test_submit_enter_pending_requires_current_idle
 test_submit_enter_unknown_confirmation_stays_unknown
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
