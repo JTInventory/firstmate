@@ -338,6 +338,30 @@ SH
   pass "fail-on-gate-skip converts herdr-not-found into a hard failure"
 }
 
+test_fail_on_any_gate_skip() {
+  local tmp skip_f out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-any-skip.XXXXXX")
+  skip_f="$tmp/skip.test.sh"
+  out="$tmp/out.txt"
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: optional condition"
+exit 0
+SH
+  chmod +x "$skip_f"
+  set +e
+  "$RUNNER" --fail-on-any-gate-skip "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fail-on-any-gate-skip must reject every gate skip"
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$out" \
+    || fail "summary must report failed=1 under fail-on-any-gate-skip"
+  grep -q 'required gate reported a skip' "$tmp/err.txt" \
+    || fail "runner must log the any-skip failure"
+  rm -rf "$tmp"
+  pass "fail-on-any-gate-skip converts every gate skip into failure"
+}
+
 test_exclude_family() {
   local listed
   listed=$("$RUNNER" --list --all --exclude-family real-herdr-gated)
@@ -367,7 +391,7 @@ test_ci_and_docs_call_the_owner() {
     || fail "Herdr CI job must opt into the real E2E scripts"
   grep -Fq 'FM_HERDR_SMOKE: "1"' "$CI" \
     || fail "Herdr CI job must opt into the real smoke scripts"
-  grep -Fq -- "--fail-on-gate-skip 'skip:'" "$CI" \
+  grep -Fq -- "--fail-on-any-gate-skip" "$CI" \
     || fail "Herdr CI job must fail on every skipped real-Herdr script"
   grep -Fq 'bin/fm-install-herdr.sh' "$CI" \
     || fail "Herdr CI job must install via bin/fm-install-herdr.sh"
@@ -410,5 +434,6 @@ test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
+test_fail_on_any_gate_skip
 test_exclude_family
 test_ci_and_docs_call_the_owner

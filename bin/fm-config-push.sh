@@ -5,8 +5,8 @@
 # Config-only convergence for mid-session changes such as config/crew-dispatch.json
 # edits. This discovers live secondmate homes from state/*.meta, backfills
 # home= from data/secondmates.md for older meta records, and reuses the same
-# propagate_inheritable_config machinery as bootstrap, but deliberately does not
-# fast-forward tracked files and does not nudge running secondmates.
+# propagate_inheritable_config machinery as bootstrap, but does not fast-forward
+# tracked files. Changed config is delivered through the shared reread path.
 # Warnings-only skips exit 0; real propagation errors exit non-zero.
 set -u
 
@@ -19,7 +19,7 @@ live secondmate home's config/ directory.
 
 This is config-only:
   - does not fast-forward tracked files
-  - does not nudge secondmates
+  - sends a CONFIG_REREAD pointer when inherited config changes
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
   - exits non-zero only for real propagation errors
@@ -61,6 +61,8 @@ SECONDMATES_MD="$DATA/secondmates.md"
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
@@ -123,9 +125,34 @@ while IFS='|' read -r id home _window meta; do
     echo "  home: dirty working tree - config-only push continuing"
   fi
 
+  mkdir -p "$home_real/state" || {
+    echo "  home: error - could not create state directory"
+    errors=1
+    continue
+  }
+  home_lock=$(fm_config_inherit_lock_path "$home_real") || {
+    echo "  home: error - could not resolve per-home lock"
+    errors=1
+    continue
+  }
+  if ! fm_lock_acquire_wait "$home_lock"; then
+    echo "  home: error - could not acquire per-home lock"
+    errors=1
+    continue
+  fi
+  if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+    fm_config_reread_retry_pending "$id" "$home_real" || true
+    if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+      echo "  home: error - config reread retry queue is full"
+      errors=1
+      fm_lock_release "$home_lock" || true
+      continue
+    fi
+  fi
   report=$(mktemp "${TMPDIR:-/tmp}/fm-config-push-report.XXXXXX" 2>/dev/null) || {
     echo "  home: error - could not create report file"
     errors=1
+    fm_lock_release "$home_lock" || true
     continue
   }
   reports="$reports $report"
@@ -135,6 +162,19 @@ while IFS='|' read -r id home _window meta; do
     errors=1
     print_item_report "$report"
   fi
+  if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$STATE" \
+    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+    errors=1
+    if [ -n "$reread_out" ]; then
+      printf '%s\n' "$reread_out"
+    else
+      printf 'CONFIG_REREAD: secondmate %s: send failed: unknown error\n' "$id"
+    fi
+  elif [ -n "$reread_out" ]; then
+    printf '%s\n' "$reread_out"
+  fi
+  fm_lock_release "$home_lock" || true
 done < "$records"
 
 [ "$errors" -eq 0 ] || exit 1

@@ -131,10 +131,10 @@ Enter was accepted and queued (reported as `empty` so the caller does not
 re-send), while an idle pane keeps `pending` as a genuine swallow. The
 strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
 and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
-verification - this exception is a busy-queue is treated as a delivered
-Enter, not a swallowed one. The herdr adapter observes the same opencode
-behavior but needs a separate fix; the gap is recorded in
-`docs/herdr-backend.md` rather than papered over here.
+verification - this exception is a busy queue treated as a delivered Enter,
+not a swallowed one. Herdr applies the same exception only after successful
+Enter transport when the pending composer still contains the exact submitted
+text; autocomplete-expanded content retries.
 
 ## Classification policy
 

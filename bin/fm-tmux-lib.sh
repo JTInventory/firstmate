@@ -37,9 +37,8 @@
 # the Enter-retry budget is spent: a busy pane means the harness accepted and
 # queued the Enter (report `empty` so the caller does not re-send), while an
 # idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
-# observes the same opencode behavior but needs a separate fix; it is recorded
-# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
-# tmux adapter does not paper over a herdr-specific shape.
+# handles the same opencode behavior in its own submit path, so the tmux
+# adapter does not paper over a herdr-specific shape.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy

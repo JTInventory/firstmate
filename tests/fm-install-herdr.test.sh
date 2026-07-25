@@ -78,8 +78,8 @@ test_ci_wires_installers_and_required_lane() {
   assert_grep 'fm-install-treehouse.sh' "$CI" "CI must call the Treehouse installer"
   assert_grep 'fm-herdr-ci-cleanup.sh snapshot' "$CI" "CI must snapshot sessions before the suite"
   assert_grep 'fm-herdr-ci-cleanup.sh teardown' "$CI" "CI must teardown job-owned sessions after"
-  assert_grep "fail-on-gate-skip 'herdr not found'" "$CI" \
-    "CI Herdr lane must fail on herdr-not-found"
+  assert_grep 'fail-on-any-gate-skip' "$CI" \
+    "CI Herdr lane must fail on every skipped test"
   assert_grep 'family real-herdr-gated' "$CI" \
     "CI Herdr lane must run only the real-herdr-gated family"
   assert_grep 'exclude-family real-herdr-gated' "$CI" \

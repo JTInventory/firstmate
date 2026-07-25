@@ -1467,6 +1467,15 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
 }
 
+fm_backend_herdr_projection_reclaim_rollback_identity() {
+  local session=$1 workspace=$2 tab=$3 pane=$4
+  if [ -z "$pane" ] && [ -n "$tab" ]; then
+    pane=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$tab") || return 1
+  fi
+  [ -n "$pane" ] || return 1
+  fm_backend_herdr_projection_reclaim_rollback "$session" "$pane"
+}
+
 # fm_backend_herdr_projection_reclaim_task: replace one exact agent-free
 # restored projection husk inside its original workspace.
 # The caller holds the session presentation lock and has already established
@@ -1536,7 +1545,11 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$new_tab" ] || [ -z "$new_pane" ]; then
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create" || return 1
+    if ! fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create"; then
+      fm_backend_herdr_projection_reclaim_rollback_identity \
+        "$session" "$meta_workspace" "$new_tab" "$new_pane" || true
+      return 1
+    fi
     if [ -n "$new_pane" ]; then
       fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
       echo "warning: herdr presentation reclaim for $id returned partial replacement ids and rolled back the exact pane; spawning flat" >&2
@@ -1552,7 +1565,10 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "error: herdr presentation reclaim for $id mutated Herdr without returning any replacement identity; refusing launch" >&2
     return 1
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create" || return 1
+  if ! fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create"; then
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || true
+    return 1
+  fi
   info=$(fm_backend_herdr_cli "$session" tab get "$new_tab" 2>/dev/null) || info=
   if ! printf '%s' "$info" | jq -e --arg tab "$new_tab" --arg workspace "$meta_workspace" '
     .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace
@@ -1965,9 +1981,9 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  local identity agent agent_status row=0 generic_line=0
+fm_backend_herdr_composer_state() {  # <target> [expected-text] -> empty|pending|autocomplete|unknown
+  local target=$1 expected_text=${2-} session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local identity agent agent_status row=0 generic_line=0 verdict content
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
@@ -2064,7 +2080,21 @@ EOF
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
+  if [ "$verdict" = pending ] && [ -n "$expected_text" ]; then
+    content=$stripped
+    case "$content" in
+      '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
+      '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    esac
+    content="${content#"${content%%[![:space:]]*}"}"
+    content="${content%"${content##*[![:space:]]}"}"
+    if [ "$content" != "$expected_text" ]; then
+      printf 'autocomplete'
+      return 0
+    fi
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -2137,13 +2167,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
-    fm_backend_herdr_send_key "$target" Enter || true
+    fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_composer_state "$target" "$text")
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
@@ -2154,6 +2184,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
           return 0
         fi
         ;;
+      autocomplete) ;;
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
@@ -2165,7 +2196,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # Verified: closing a tab's only pane closes the tab too, so a separate tab
 # close is unnecessary.
 fm_backend_herdr_kill() {  # <target>
+  local state
   fm_backend_herdr_target_ready "$1" || return 1
+  state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "$state" in
+    dead) return 0 ;;
+    no-agent|live) ;;
+    unknown) return 1 ;;
+  esac
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane close "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = dead ]
 }

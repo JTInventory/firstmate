@@ -164,7 +164,7 @@ jobs:
           # Serial only. Every mapped real-Herdr script is required in this lane.
           # Live harness credential tests stay outside this family.
           bin/fm-test-run.sh --family real-herdr-gated \
-            --fail-on-gate-skip 'skip:' \
+            --fail-on-any-gate-skip \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
         if: always()

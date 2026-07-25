@@ -27,8 +27,8 @@
 #   --fail-on-gate-skip <token>
 #                   after each script, fail the run if any output line contains
 #                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
-#                   The required Herdr CI lane uses this so a missing pin cannot
-#                   silently pass as a gate skip.
+#   --fail-on-any-gate-skip
+#                   fail the run if any selected script reports a gate skip.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -41,8 +41,8 @@
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
 # Exit status is non-zero if any selected script exits non-zero or a configured
-# --fail-on-gate-skip token appears. Other gate skips (first meaningful line
-# matching ^skip:) remain successful and are counted as skipped_gate.
+# configured gate-skip failure condition matches. Other gate skips remain
+# successful and are counted as skipped_gate.
 #
 # Family labels and the changed-file map live in this script only (one owner).
 # --changed is conservative: it over-selects related families rather than
@@ -61,6 +61,7 @@ JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
+FAIL_ON_ANY_GATE_SKIP=0
 
 usage() {
   awk '
@@ -633,6 +634,10 @@ while [ "$#" -gt 0 ]; do
       FAIL_ON_GATE_SKIP=${1#--fail-on-gate-skip=}
       shift
       ;;
+    --fail-on-any-gate-skip)
+      FAIL_ON_ANY_GATE_SKIP=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -697,6 +702,9 @@ if [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ]; then
 fi
 if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
+fi
+if [ "$FAIL_ON_ANY_GATE_SKIP" -eq 1 ]; then
+  SELECTION_DESC="${SELECTION_DESC};fail-on-any-gate-skip"
 fi
 
 if [ "$LIST_ONLY" -eq 1 ]; then
@@ -802,7 +810,10 @@ for script in "${SCRIPTS[@]}"; do
   # Required-lane hard fail: a configured skip token anywhere in the output is
   # a failure even when the script itself exited 0 (classic "skip: herdr not
   # found" gate). Retries are not used as a green strategy.
-  if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
+  if [ "$FAIL_ON_ANY_GATE_SKIP" -eq 1 ] && detect_gate_skip "$out"; then
+    log "required gate reported a skip in $script"
+    rc=1
+  elif [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
     log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
     rc=1
   fi

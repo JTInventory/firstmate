@@ -1562,8 +1562,8 @@ test_projection_reclaim_partial_create_rolls_back_or_fails_closed() {
     fm_backend_herdr_projection_live_binding_matches() { return 0; }
     fm_backend_herdr_pane_agent_state() { printf no-agent; }
     fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
-    fm_backend_herdr_projection_focus_restore() { return 0; }
-    fm_backend_herdr_projection_reclaim_rollback() { printf "%s" "$2" > "$ROLLBACK"; }
+    fm_backend_herdr_projection_focus_restore() { [ "${RESTORE_OK:-1}" = 1 ]; }
+    fm_backend_herdr_projection_reclaim_rollback() { printf "%s\n" "$2" >> "$ROLLBACK"; }
     fm_backend_herdr_cli() { printf "%s" "$CREATE_OUT"; }
     CREATE_OUT="{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p3\"}}}"
     export CREATE_OUT
@@ -1574,11 +1574,17 @@ test_projection_reclaim_partial_create_rolls_back_or_fails_closed() {
     export CREATE_OUT
     fm_backend_herdr_projection_reclaim_task \
       fmtest journal task /home w2 w2:t2 w2:p2 firstmate fm-task /tmp >/dev/null 2>&1
+    printf "%s:" "$?"
+    CREATE_OUT="{\"result\":{\"tab\":{\"tab_id\":\"w2:t4\"},\"root_pane\":{\"pane_id\":\"w2:p4\"}}}"
+    RESTORE_OK=0
+    export CREATE_OUT RESTORE_OK
+    fm_backend_herdr_projection_reclaim_task \
+      fmtest journal task /home w2 w2:t2 w2:p2 firstmate fm-task /tmp >/dev/null 2>&1
     printf "%s" "$?"
   ')
-  [ "$out" = "2:1" ] || fail "partial reclaim must roll back known identity and fail closed without identity: $out"
-  [ "$(cat "$rollback")" = w2:p3 ] || fail "partial reclaim did not roll back the exact returned pane"
-  pass "herdr presentation reclaim: partial create rolls back known identity and fails closed without identity"
+  [ "$out" = "2:1:1" ] || fail "partial reclaim must roll back known identity and fail closed without identity: $out"
+  [ "$(cat "$rollback")" = $'w2:p3\nw2:p4' ] || fail "reclaim did not roll back exact panes after partial identity and focus failure"
+  pass "herdr presentation reclaim: partial identity and focus failure roll back exact created panes"
 }
 
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
@@ -1744,7 +1750,9 @@ test_send_key_normalizes_and_targets_pane() {
 }
 
 test_kill_requires_close_and_confirmed_absence() {
-  local out
+  local dir out
+  dir="$TMP_ROOT/kill-state"
+  mkdir -p "$dir"
   out=$(bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_target_ready() {
@@ -1753,18 +1761,27 @@ test_kill_requires_close_and_confirmed_absence() {
       [ "${READY:-1}" = 1 ]
     }
     fm_backend_herdr_cli() { [ "${CLOSE:-1}" = 1 ]; }
-    fm_backend_herdr_pane_agent_state() { printf "%s" "${STATE:-dead}"; }
-    for fixture in "0:1:dead" "1:0:dead" "1:1:live" "1:1:dead"; do
-      IFS=: read -r READY CLOSE STATE <<EOF
+    fm_backend_herdr_pane_agent_state() {
+      if [ -e "$STATE_MARKER" ]; then
+        printf "%s" "$AFTER"
+      else
+        : > "$STATE_MARKER"
+        printf "%s" "$INITIAL"
+      fi
+    }
+    for fixture in "0:1:live:dead" "1:1:unknown:dead" "1:1:dead:dead" "1:0:live:dead" "1:1:live:live" "1:1:live:dead"; do
+      IFS=: read -r READY CLOSE INITIAL AFTER <<EOF
 $fixture
 EOF
-      export READY CLOSE STATE
+      STATE_MARKER="$1/state-marker"
+      rm -f "$STATE_MARKER"
+      export READY CLOSE INITIAL AFTER STATE_MARKER
       fm_backend_herdr_kill default:w1:p2 >/dev/null 2>&1
       printf "%s\n" "$?"
     done
-  ' "$ROOT")
-  [ "$out" = $'1\n1\n1\n0' ] || fail "kill must fail preparation, close, and surviving-pane cases: $out"
-  pass "fm_backend_herdr_kill: succeeds only after close succeeds and exact pane absence is confirmed"
+  ' "$ROOT" "$dir")
+  [ "$out" = $'1\n1\n0\n1\n1\n0' ] || fail "kill must be idempotent only for dead panes and fail closed otherwise: $out"
+  pass "fm_backend_herdr_kill: dead is idempotent; unknown, close failure, and surviving panes fail closed"
 }
 
 test_current_path_reads_cwd() {
@@ -2345,6 +2362,39 @@ test_send_text_submit_preexisting_working_accepts_busy_queue() {
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
   [ "$read_count" -eq 1 ] || fail "accepted busy queue should need one composer read, made $read_count read(s)"
   pass "fm_backend_herdr_send_text_submit: preexisting busy plus pending composer confirms accepted queue delivery"
+}
+
+test_send_text_submit_busy_autocomplete_retries() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-busy-autocomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
+  printf '  ❯ /compact compaction instructions\n' > "$resp/4.out"
+  printf '  ❯ /compact\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "busy autocomplete should retry until exact queued text is visible, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "busy autocomplete should require a second Enter, sent $enter_count"
+  pass "fm_backend_herdr_send_text_submit: busy autocomplete retries before accepting exact queued text"
+}
+
+test_send_text_submit_enter_transport_failure() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=default
+      FM_BACKEND_HERDR_PANE=w1:p2
+    }
+    fm_backend_herdr_send_literal() { return 0; }
+    fm_backend_herdr_agent_status_raw() { printf working; }
+    fm_backend_herdr_send_key() { return 1; }
+    fm_backend_herdr_send_text_submit default:w1:p2 hello 3 0 0
+  ' "$ROOT")
+  [ "$out" = send-failed ] || fail "failed Enter transport must report send-failed, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: failed Enter transport is never accepted as queued"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -3158,6 +3208,8 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_accepts_busy_queue
+test_send_text_submit_busy_autocomplete_retries
+test_send_text_submit_enter_transport_failure
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change

@@ -531,8 +531,9 @@ run_bootstrap() {
 }
 
 run_config_push() {
-  local w=$1
-  PATH="$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_CONFIG_PUSH_NO_GUARD=1 \
+  local w=$1 fakebin
+  fakebin=$(make_fake_toolchain "$w")
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_CONFIG_PUSH_NO_GUARD=1 \
     "$ROOT/bin/fm-config-push.sh"
 }
 
@@ -674,8 +675,8 @@ test_bootstrap_sweep_surfaces_config_propagation_failure() {
   pass "B11 bootstrap sweep surfaces config propagation failures"
 }
 
-test_config_push_propagates_reports_without_ff_or_nudge() {
-  local w c1 sm_real old_head out err status out2 tmp
+test_config_push_propagates_reports_without_ff_and_sends_reread() {
+  local w c1 sm_real old_head out err status out2 tmp instruction generation_count
   w=$(new_world config-push-basic)
   c1=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$c1"
@@ -707,8 +708,11 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "config push did not report crew-harness as pushed"
   assert_contains "$out" "backlog-backend: pushed" \
     "config push did not report backlog-backend as pushed"
-  assert_not_contains "$out" "NUDGE_SECONDMATES" \
-    "config push must not nudge secondmates"
+  instruction=$(find "$w/sm/state" -maxdepth 1 -type f -name '.fm-inherited-config-reread.*' ! -name '*.pending' | head -1)
+  [ -n "$instruction" ] || fail "config push did not publish a CONFIG_REREAD instruction"
+  assert_contains "$(cat "$instruction")" "BEGIN config/crew-harness" \
+    "config reread instruction omitted changed crew-harness bytes"
+  generation_count=$(find "$w/sm/state" -maxdepth 1 -type f -name '.fm-inherited-config-reread.*' ! -name '*.pending' | wc -l | tr -d ' ')
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$old_head" ] \
     || fail "config push fast-forwarded tracked files"
   [ ! -s "$err" ] || fail "clean config push wrote unexpected stderr: $(cat "$err")"
@@ -721,7 +725,9 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report crew-harness as unchanged"
   assert_contains "$out2" "backlog-backend: unchanged" \
     "idempotent config push did not report backlog-backend as unchanged"
-  pass "B12 config-push propagates via shared live discovery, reports items, and does not fast-forward or nudge"
+  [ "$(find "$w/sm/state" -maxdepth 1 -type f -name '.fm-inherited-config-reread.*' ! -name '*.pending' | wc -l | tr -d ' ')" = "$generation_count" ] \
+    || fail "idempotent config push published a redundant reread generation"
+  pass "B12 config-push propagates under lock, sends exact reread content, and does not fast-forward"
 }
 
 test_config_push_reports_skips_dirty_and_invalid_home() {
@@ -807,7 +813,7 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_no_inheritance_is_noop
 test_bootstrap_sweep_surfaces_config_propagation_failure
-test_config_push_propagates_reports_without_ff_or_nudge
+test_config_push_propagates_reports_without_ff_and_sends_reread
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
 
