@@ -651,6 +651,28 @@ test_create_task_exposes_idless_mutation_uncertainty() {
   pass "fm_backend_herdr_create_task: idless mutation exposes durable cleanup scope"
 }
 
+test_create_task_nonzero_create_preserves_uncertainty() {
+  local out status
+  if out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list") printf "%s" "{\"result\":{\"tabs\":[]}}" ;;
+        "tab create") return 1 ;;
+      esac
+    }
+    fm_backend_herdr_create_task default:w1 fm-transport-uncertain /tmp
+  ' "$ROOT" 2>/dev/null); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "nonzero tab create must remain a failed creation"
+  [ "$out" = $'cleanup-uncertain\tdefault:w1\tfm-transport-uncertain' ] \
+    || fail "nonzero tab create lost its possible mutation scope: $out"
+  pass "fm_backend_herdr_create_task: nonzero create preserves workspace and label uncertainty"
+}
+
 test_close_active_husk_focuses_replacement() {
   local dir
   dir="$TMP_ROOT/active-husk-focus"
@@ -2571,10 +2593,10 @@ test_send_text_submit_busy_retry_requires_current_busy_state() {
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "a retry after the original busy turn became idle must not inherit stale queue acceptance, got '$out'"
+  [ "$out" = unknown ] || fail "pending text after the original busy turn became idle must report unknown, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 2 ] || fail "current-state retry should use exactly two Enter attempts, sent $enter_count"
-  pass "fm_backend_herdr_send_text_submit: every retry requires contemporaneous busy-state proof"
+  pass "fm_backend_herdr_send_text_submit: pending text requires contemporaneous busy-state proof"
 }
 
 test_send_text_submit_enter_transport_failure() {
@@ -2718,6 +2740,27 @@ test_send_text_submit_unknown_baseline_verifies_and_retries_autocomplete() {
   [ "$(cat "$dir/enter")" = $'Enter\nEnter' ] || fail "unknown-baseline autocomplete did not receive a safe second Enter"
   [ "$(wc -l < "$dir/composer")" -eq 2 ] || fail "unknown-baseline submission did not inspect the composer after every Enter"
   pass "fm_backend_herdr_send_text_submit: unknown baseline verifies composer and retries autocomplete safely"
+}
+
+test_send_text_submit_pending_unknown_does_not_retry() {
+  local dir out
+  dir="$TMP_ROOT/submit-pending-unknown"
+  mkdir -p "$dir"
+  out=$(ENTER_LOG="$dir/enter" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=default
+      FM_BACKEND_HERDR_PANE=w1:p2
+    }
+    fm_backend_herdr_send_literal() { return 0; }
+    fm_backend_herdr_agent_status_raw() { printf unreadable; }
+    fm_backend_herdr_send_key() { printf "%s\n" "$2" >> "$ENTER_LOG"; }
+    fm_backend_herdr_composer_state() { printf pending; }
+    fm_backend_herdr_send_text_submit default:w1:p2 hello 3 0 0
+  ' "$ROOT")
+  [ "$out" = unknown ] || fail "pending text without current busy proof must return unknown, got '$out'"
+  [ "$(cat "$dir/enter")" = Enter ] || fail "pending text with unknown state sent a duplicate Enter"
+  pass "fm_backend_herdr_send_text_submit: pending unknown state never retries Enter"
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -3358,6 +3401,7 @@ test_create_task_creates_and_parses_ids
 test_create_task_rolls_back_partial_and_focus_unsafe_mutations
 test_create_task_exposes_identity_when_rollback_fails
 test_create_task_exposes_idless_mutation_uncertainty
+test_create_task_nonzero_create_preserves_uncertainty
 test_close_active_husk_focuses_replacement
 test_create_task_creates_with_no_focus_flag
 test_projection_journal_is_atomic_and_uses_128_bit_token
@@ -3449,6 +3493,7 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_baseline_verifies_and_retries_autocomplete
+test_send_text_submit_pending_unknown_does_not_retry
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

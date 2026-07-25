@@ -659,16 +659,18 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home"
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
+        cleanup_firstmate_home_children "$child_home" || return 1
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
+          || safe_rm_rf_child_worktree "$child_wt" "$child_proj" \
+          || return 1
       else
-        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return 1
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
@@ -818,7 +820,10 @@ elif [ "$BACKEND" != orca ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
+  if ! cleanup_firstmate_home_children "$HOME_PATH"; then
+    echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent state and home" >&2
+    exit 1
+  fi
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
