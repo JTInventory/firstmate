@@ -134,12 +134,14 @@ The tmux window for a tmux-backed task is named `fm-<id>`; Herdr display labels 
 Herdr-backed tasks instead use one `<kind> - <phrase> · <task-key>` display tab, with kind shown as `Crew`, `Scout`, or `2nd`, set once at spawn. The full task id plus exact Herdr session, workspace, tab, and pane ids remain machine identity; the Herdr workspace is scoped to the firstmate home, and legacy `fm-<id>` tabs remain discoverable for recovery.
 After creation, tmux targets the immutable window ID rather than the mutable `session:window-name` label; Herdr targets the recorded pane ID. If setup cannot prove the backend endpoint, it cleans up the uniquely identified new endpoint and aborts.
 
-## 3. Bootstrap (run at every session start)
+## 3. Session start and bootstrap
 
 Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 
-Run `bin/fm-bootstrap.sh`.
+Run `bin/fm-session-start.sh` once at every session start.
+It acquires the session lock, performs locked stale Herdr projection cleanup, runs `bin/fm-bootstrap.sh`, drains the wake queue, and prints the recovery digest in that order.
+Do not run `bin/fm-lock.sh` and `bin/fm-bootstrap.sh` separately as the normal startup path.
 Before checking the toolchain, bootstrap adds existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories to `PATH` without moving them ahead of an explicit caller path.
 The same shared normalization runs before tool lookup in spawn, teardown, and the read-only supervision model, so clean non-interactive shells can find HOME-installed Axi tools consistently.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
@@ -289,14 +291,14 @@ If `config/crew-harness` or `config/secondmate-harness` names an unverified one,
 If the captain asks for a new harness, load `harness-adapters`, verify it empirically with a trivial supervised task, then commit the script and knowledge changes.
 Load `harness-adapters` before any spawn, recovery, trust-dialog handling, harness-specific skill invocation, interrupt, exit, resume, or adapter verification.
 
-## 5. Recovery (run at every session start, after bootstrap)
+## 5. Recovery (included in `bin/fm-session-start.sh`)
 
 You may have been restarted mid-flight.
 Reconcile reality with your records before doing anything else:
 
-1. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
+1. Use the lock result printed by `bin/fm-session-start.sh`; it records the harness process PID, which is session-stable.
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
-2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
+2. Keep the wake records drained and printed by `bin/fm-session-start.sh` as the first work queue for this recovery turn.
 3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
    Treat status files as wake-event history; when you need a live current-state read for a recorded direct report, use `bin/fm-crew-state.sh <id>` instead of inferring from the last status line.
 4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check each task through its recorded tmux or Herdr endpoint.

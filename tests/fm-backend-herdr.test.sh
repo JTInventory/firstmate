@@ -133,6 +133,14 @@ case "$cmd $sub" in
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
     ;;
+  "pane get")
+    pane=${3:-}
+    if jq_state -e --arg p "$pane" '.tabs[] | select(.pane_id == $p)' >/dev/null 2>&1; then
+      jq_state --arg p "$pane" '{result:{pane:(.tabs[] | select(.pane_id == $p) | {pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id})}}'
+    else
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane"
+    fi
+    ;;
   "pane close")
     pane=${3:-}
     jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
@@ -1378,6 +1386,26 @@ test_projected_abort_cleanup_holds_presentation_lock() {
   pass "fm-spawn: projected abort cleanup remains serialized by the presentation lock"
 }
 
+test_flat_abort_cleanup_closes_exact_created_pane() {
+  local dir kill_log function_source
+  dir="$TMP_ROOT/flat-abort-cleanup"; mkdir -p "$dir"
+  kill_log="$dir/kill"
+  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  ROOT="$ROOT" KILL_LOG="$kill_log" FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_backend_herdr_kill() { printf "%s" "$1" > "$KILL_LOG"; }
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    HERDR_FLAT_ABORT_CLEANUP=1
+    HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    ORCA_ABORT_CLEANUP=0
+    SPAWN_TASK_LOCK_HELD=0
+    spawn_abort_cleanup
+  '
+  [ "$(cat "$kill_log")" = fmtest:w9:p4 ] || fail "flat abort cleanup did not close the exact created pane"
+  pass "fm-spawn: flat Herdr abort cleanup closes the exact response-derived pane"
+}
+
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
   local dir state home other_home home_real journal legacy token label out mutation_log
   dir="$TMP_ROOT/projection-reclaim-refusals"; state="$dir/state"; home="$dir/home"; other_home="$dir/other-home"
@@ -1509,6 +1537,48 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   assert_not_contains "$calls" $'workspace\x1frename' "reclaim renamed the projected workspace"
   assert_not_contains "$calls" $'tab\x1ffocus' "focus-preserving reclaim changed an already-stable focus snapshot"
   pass "herdr presentation reclaim: exact agent-free husk is replaced in place and journal/focus identities advance"
+}
+
+test_projection_reclaim_partial_create_rolls_back_or_fails_closed() {
+  local dir rollback out
+  dir="$TMP_ROOT/projection-reclaim-partial"; mkdir -p "$dir"
+  rollback="$dir/rollback"
+  out=$(ROOT="$ROOT" ROLLBACK="$rollback" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_snapshot() {
+      FM_BACKEND_HERDR_JOURNAL_VERSION=2
+      FM_BACKEND_HERDR_JOURNAL_HOME=/home
+      FM_BACKEND_HERDR_JOURNAL_SESSION=fmtest
+      FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=w2
+      FM_BACKEND_HERDR_JOURNAL_TAB_ID=w2:t2
+      FM_BACKEND_HERDR_JOURNAL_PANE_ID=w2:p2
+      FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=firstmate
+      FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=fm-task
+      FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=token
+      FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=w1
+      FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=projection
+    }
+    fm_backend_herdr_projection_home_identity() { printf /home; }
+    fm_backend_herdr_projection_live_binding_matches() { return 0; }
+    fm_backend_herdr_pane_agent_state() { printf no-agent; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_projection_focus_restore() { return 0; }
+    fm_backend_herdr_projection_reclaim_rollback() { printf "%s" "$2" > "$ROLLBACK"; }
+    fm_backend_herdr_cli() { printf "%s" "$CREATE_OUT"; }
+    CREATE_OUT="{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p3\"}}}"
+    export CREATE_OUT
+    fm_backend_herdr_projection_reclaim_task \
+      fmtest journal task /home w2 w2:t2 w2:p2 firstmate fm-task /tmp >/dev/null 2>&1
+    printf "%s:" "$?"
+    CREATE_OUT="{\"result\":{}}"
+    export CREATE_OUT
+    fm_backend_herdr_projection_reclaim_task \
+      fmtest journal task /home w2 w2:t2 w2:p2 firstmate fm-task /tmp >/dev/null 2>&1
+    printf "%s" "$?"
+  ')
+  [ "$out" = "2:1" ] || fail "partial reclaim must roll back known identity and fail closed without identity: $out"
+  [ "$(cat "$rollback")" = w2:p3 ] || fail "partial reclaim did not roll back the exact returned pane"
+  pass "herdr presentation reclaim: partial create rolls back known identity and fails closed without identity"
 }
 
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
@@ -1673,16 +1743,28 @@ test_send_key_normalizes_and_targets_pane() {
   pass "fm_backend_herdr_send_key: normalizes the key and targets the right pane"
 }
 
-test_kill_is_best_effort() {
-  local dir log resp fb
-  dir="$TMP_ROOT/kill"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/1.exit"
-  fb=$(make_herdr_fakebin "$dir")
-  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill default:w1:p2' "$ROOT"
-  expect_code 0 $? "kill must be best-effort (never fail even when the pane close call itself fails)"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p2' "kill did not call pane close on the right pane"
-  pass "fm_backend_herdr_kill: calls pane close and stays best-effort on failure"
+test_kill_requires_close_and_confirmed_absence() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_target_ready() {
+      FM_BACKEND_HERDR_SESSION=default
+      FM_BACKEND_HERDR_PANE=w1:p2
+      [ "${READY:-1}" = 1 ]
+    }
+    fm_backend_herdr_cli() { [ "${CLOSE:-1}" = 1 ]; }
+    fm_backend_herdr_pane_agent_state() { printf "%s" "${STATE:-dead}"; }
+    for fixture in "0:1:dead" "1:0:dead" "1:1:live" "1:1:dead"; do
+      IFS=: read -r READY CLOSE STATE <<EOF
+$fixture
+EOF
+      export READY CLOSE STATE
+      fm_backend_herdr_kill default:w1:p2 >/dev/null 2>&1
+      printf "%s\n" "$?"
+    done
+  ' "$ROOT")
+  [ "$out" = $'1\n1\n1\n0' ] || fail "kill must fail preparation, close, and surviving-pane cases: $out"
+  pass "fm_backend_herdr_kill: succeeds only after close succeeds and exact pane absence is confirmed"
 }
 
 test_current_path_reads_cwd() {
@@ -2247,7 +2329,7 @@ test_send_text_submit_confirms_blocked_after_enter() {
   pass "fm_backend_herdr_send_text_submit: a post-Enter blocked state confirms delivery without retrying into the prompt"
 }
 
-test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter() {
+test_send_text_submit_preexisting_working_accepts_busy_queue() {
   local dir log resp fb out enter_count read_count
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
@@ -2257,12 +2339,12 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
+  [ "$out" = empty ] || fail "send_text_submit must accept a pending composer when native state was already busy, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 2 ] || fail "preexisting-working swallowed Enter should retry Enter up to the configured count, sent $enter_count Enter(s)"
+  [ "$enter_count" -eq 1 ] || fail "accepted busy queue should stop after one Enter, sent $enter_count Enter(s)"
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should fall back to composer reads, made $read_count read(s)"
-  pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
+  [ "$read_count" -eq 1 ] || fail "accepted busy queue should need one composer read, made $read_count read(s)"
+  pass "fm_backend_herdr_send_text_submit: preexisting busy plus pending composer confirms accepted queue delivery"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -3026,8 +3108,10 @@ test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projected_abort_cleanup_holds_presentation_lock
+test_flat_abort_cleanup_closes_exact_created_pane
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
+test_projection_reclaim_partial_create_rolls_back_or_fails_closed
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
@@ -3037,7 +3121,7 @@ test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
-test_kill_is_best_effort
+test_kill_requires_close_and_confirmed_absence
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
@@ -3073,7 +3157,7 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
-test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_preexisting_working_accepts_busy_queue
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change

@@ -155,13 +155,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
       - name: Run real-Herdr family (serial, required)
+        env:
+          FM_HERDR_E2E: "1"
+          FM_HERDR_SMOKE: "1"
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # Serial only. Fail if any script reports herdr not found. Live
-          # harness credential tests stay outside this family (opt-in env only).
+          # Serial only. Every mapped real-Herdr script is required in this lane.
+          # Live harness credential tests stay outside this family.
           bin/fm-test-run.sh --family real-herdr-gated \
-            --fail-on-gate-skip 'herdr not found' \
+            --fail-on-gate-skip 'skip:' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
         if: always()

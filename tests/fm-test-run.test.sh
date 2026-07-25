@@ -363,8 +363,12 @@ test_ci_and_docs_call_the_owner() {
     || fail "CI must define the required tests-herdr job"
   grep -Fq 'bin/fm-test-run.sh --family real-herdr-gated' "$CI" \
     || fail "Herdr CI job must run the real-herdr-gated family via fm-test-run"
-  grep -Fq -- "--fail-on-gate-skip 'herdr not found'" "$CI" \
-    || fail "Herdr CI job must fail on herdr-not-found skips"
+  grep -Fq 'FM_HERDR_E2E: "1"' "$CI" \
+    || fail "Herdr CI job must opt into the real E2E scripts"
+  grep -Fq 'FM_HERDR_SMOKE: "1"' "$CI" \
+    || fail "Herdr CI job must opt into the real smoke scripts"
+  grep -Fq -- "--fail-on-gate-skip 'skip:'" "$CI" \
+    || fail "Herdr CI job must fail on every skipped real-Herdr script"
   grep -Fq 'bin/fm-install-herdr.sh' "$CI" \
     || fail "Herdr CI job must install via bin/fm-install-herdr.sh"
   grep -Fq 'bin/fm-install-treehouse.sh' "$CI" \

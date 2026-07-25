@@ -1537,8 +1537,20 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$new_tab" ] || [ -z "$new_pane" ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create" || return 1
-    echo "warning: herdr presentation reclaim for $id returned ambiguous replacement ids; spawning flat" >&2
-    return 2
+    if [ -n "$new_pane" ]; then
+      fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+      echo "warning: herdr presentation reclaim for $id returned partial replacement ids and rolled back the exact pane; spawning flat" >&2
+      return 2
+    fi
+    if [ -n "$new_tab" ]; then
+      new_pane=$(fm_backend_herdr_pane_for_tab "$session" "$meta_workspace" "$new_tab") || return 1
+      [ -n "$new_pane" ] || return 1
+      fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+      echo "warning: herdr presentation reclaim for $id returned partial replacement ids and rolled back the exact tab pane; spawning flat" >&2
+      return 2
+    fi
+    echo "error: herdr presentation reclaim for $id mutated Herdr without returning any replacement identity; refusing launch" >&2
+    return 1
   fi
   fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create" || return 1
   info=$(fm_backend_herdr_cli "$session" tab get "$new_tab" 2>/dev/null) || info=
@@ -2136,6 +2148,12 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
       empty) printf 'empty'; return 0 ;;
+      pending)
+        if [ "$baseline" = busy ]; then
+          printf 'empty'
+          return 0
+        fi
+        ;;
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
@@ -2143,12 +2161,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
-# fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
-# tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
-# closes the tab too, so a separate tab close is unnecessary.
+# fm_backend_herdr_kill: remove the task's exact pane and prove it disappeared.
+# Verified: closing a tab's only pane closes the tab too, so a separate tab
+# close is unnecessary.
 fm_backend_herdr_kill() {  # <target>
-  fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane close "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || true
+  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane close "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = dead ]
 }
 
 # fm_backend_herdr_classify_agent_status: map a raw `agent get` agent_status

@@ -30,6 +30,26 @@ cleanup_all() {
 }
 trap cleanup_all EXIT
 
+fm_herdr_lab_provision "$SESSION" >/dev/null || fail "could not provision the isolated Herdr lab"
+
+export HERDR_SESSION="$SESSION"
+export FM_HOME="$STATE_DIR" FM_STATE_OVERRIDE="$STATE_DIR"
+
+# shellcheck source=bin/fm-supervise-daemon.sh
+. "$DAEMON"
+fm_backend_source herdr || fail "could not load the Herdr backend"
+
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "could not ensure the lab workspace"
+CONTAINER=${CONTAINER_RAW%%$'\t'*}
+SEEDED_TAB=${CONTAINER_RAW#*$'\t'}
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-afk-supervisor /tmp "$SEEDED_TAB") \
+  || fail "could not create the lab supervisor pane"
+read -r _TAB_ID PANE_ID <<EOF
+$TASK_IDS
+EOF
+[ -n "$PANE_ID" ] || fail "lab supervisor task did not return a pane id"
+TARGET="$SESSION:$PANE_ID"
+
 # Herdr can return the created pane before its interactive shell is ready to
 # receive Enter. Require a stable shell-owned foreground before launching the
 # fixture, or the command can remain typed but unsubmitted in the shell buffer.
