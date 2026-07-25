@@ -187,6 +187,13 @@ fm_backend_herdr_version_check() {
   return 0
 }
 
+fm_backend_herdr_server_available() {  # <session>
+  local session=$1 out running
+  out=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
+  running=$(printf '%s' "$out" | jq -r '.server.running // false' 2>/dev/null)
+  [ "$running" = true ]
+}
+
 # fm_backend_herdr_session: resolve which named herdr session this normal
 # spawn/op uses. HERDR_SESSION mirrors tmux's $TMUX ambient-selection for
 # adapter workspace/tab/pane operations: an operator (or firstmate's own
@@ -269,7 +276,7 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines expected_label task_key exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -324,9 +331,24 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
   expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-  expected_task_label="fm-$id"
-  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
+  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] || return 1
+  [ "${#FM_BACKEND_HERDR_JOURNAL_TASK_LABEL}" -le 50 ] || return 1
+  case "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" in
+    "fm-$id") return 0 ;;
+    *" · "*) task_key=${FM_BACKEND_HERDR_JOURNAL_TASK_LABEL##*" · "} ;;
+    *) return 1 ;;
+  esac
+  case "$task_key" in
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]|\
+    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) ;;
+    *) return 1 ;;
+  esac
+  case "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" in
+    Crew\ -\ ?*\ ·\ "$task_key"|Scout\ -\ ?*\ ·\ "$task_key") return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_backend_herdr_projection_journal_token: validate and read either journal

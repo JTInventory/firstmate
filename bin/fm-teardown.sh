@@ -730,9 +730,12 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
-  echo "REFUSED: could not kill task $ID window $T; refusing to delete task state" >&2
-  exit 1
+if [ "$BACKEND" != herdr ] \
+   || { [ ! -e "$STATE/$ID.herdr-presentation" ] && [ ! -L "$STATE/$ID.herdr-presentation" ]; }; then
+  if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
+    echo "REFUSED: could not kill task $ID window $T; refusing to delete task state" >&2
+    exit 1
+  fi
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
@@ -764,6 +767,7 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_CLOSE_CANDIDATE=0
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
@@ -776,15 +780,17 @@ if [ "$BACKEND" = herdr ] \
   if [ -n "$HERDR_PRESENTATION_SESSION" ] \
      && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
      && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ]; then
+    HERDR_PRESENTATION_CLOSE_CANDIDATE=1
+    if fm_backend_herdr_projection_endpoint_matches_journal \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+      "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+      HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+    fi
   fi
 fi
 
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+if [ "$HERDR_PRESENTATION_CLOSE_CANDIDATE" = 1 ]; then
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   HERDR_PRESENTATION_FOCUS_LOCK=

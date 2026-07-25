@@ -72,6 +72,14 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+status_line_verb() {  # <status-line>
+  local verb=${1%%:*}
+  verb=${verb%%\[key=*}
+  verb=${verb#"${verb%%[![:space:]]*}"}
+  verb=${verb%"${verb##*[![:space:]]}"}
+  printf '%s' "$verb"
+}
+
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
 # (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
@@ -93,14 +101,14 @@ status_is_terminal_verb() {
 status_is_captain_relevant() {
   local line=$1
   [ -n "$line" ] || return 1
-  status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
-  case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
-      return 1
-      ;;
-  esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
+    status_is_paused "$line" && return 1
+    case "$verb" in
+      working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+        return 1
+        ;;
+    esac
     case "$verb" in
       done|needs-decision|blocked|failed) return 0 ;;
     esac

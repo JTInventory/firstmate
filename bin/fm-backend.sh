@@ -175,6 +175,24 @@ fm_backend_source() {  # <name>
   esac
 }
 
+fm_backend_agent_state() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unverified'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_agent_state "$target" ;;
+    herdr) fm_backend_herdr_agent_state "$target" ;;
+    *) printf 'unverified' ;;
+  esac
+}
+
+fm_backend_agent_alive() {  # <backend> <target>
+  case "$(fm_backend_agent_state "$1" "$2")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_backend_herdr_inventory_target() {  # <state> <alias> [home] [session] [workspace] [display-label] [allow-legacy]
   local state=$1 alias=$2 home=${3:-$FM_HOME} session=${4:-} wsid=${5:-}
   local display_label=${6:-} allow_legacy=${7:-0} live target
@@ -368,11 +386,9 @@ fm_backend_busy_state() {  # <backend> <target> -> busy|idle|unknown
 }
 
 fm_backend_agent_alive() {  # <backend> <target> -> alive|dead|unknown
-  local backend=$1
-  shift
-  fm_backend_source "$backend" || { printf unknown; return 0; }
-  case "$backend" in
-    herdr) fm_backend_herdr_agent_alive "$@" ;;
+  case "$(fm_backend_agent_state "$1" "$2")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
     *) printf unknown ;;
   esac
 }
@@ -382,14 +398,31 @@ fm_backend_pane_readable() {  # <backend> <target>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_pane_readable "$@" ;;
-    herdr) fm_backend_herdr_pane_readable "$@" ;;
+    herdr) fm_backend_herdr_target_ready "$@" ;;
     *) echo "error: no pane-readability implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 
-# Supervisor callers use this name for the same backend-neutral existence probe.
+# Cheap passive existence probe. In particular, the Herdr path must not call
+# target_ready because that helper may start a server during a read-only fleet
+# digest.
 fm_backend_target_exists() {  # <backend> <target>
-  fm_backend_pane_readable "$@"
+  local backend=$1 target=$2 session pane
+  case "$backend" in
+    tmux)
+      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
+      ;;
+    *)
+      fm_backend_pane_readable "$@"
+      ;;
+  esac
 }
 
 fm_backend_composer_state() {  # <backend> <target> [text] -> empty|pending|unknown

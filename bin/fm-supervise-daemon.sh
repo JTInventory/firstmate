@@ -420,6 +420,12 @@ pause_marker_record() {  # <window> <state>
   fi
 }
 
+pause_marker_remove() {  # <window> <state>
+  local win=$1 state=$2 key
+  key=$(_stale_key "$(task_for_endpoint "$win" "$state")")
+  rm -f "$state/.subsuper-paused-$key"
+}
+
 pause_marker_record_status() {  # <status-file> <state>
   local f=$1 state=$2 task win
   task=$(basename "$f"); task=${task%.status}
@@ -870,7 +876,7 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
+  [ "$kind" = signal ] && pause_marker_record_signal "$arg" "$state"
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"

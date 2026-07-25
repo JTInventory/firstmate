@@ -965,23 +965,12 @@ HERDR_SES=
 HERDR_WORKSPACE_ID=
 HERDR_TAB_ID=
 HERDR_PANE_ID=
-HERDR_SPAWN_TARGET=
 
 cleanup_spawn_window() {
+  if [ "$BACKEND" = herdr ] && [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ]; then
+    return 0
+  fi
   fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1 || true
-}
-
-cleanup_herdr_spawn() {
-  local rc=$?
-  if [ -n "${HERDR_SPAWN_TARGET:-}" ]; then
-    cleanup_spawn_window "$HERDR_SPAWN_TARGET"
-  fi
-  if [ "${HERDR_LABEL_LOCK_HELD:-0}" = 1 ]; then
-    HERDR_LABEL_LOCK_HELD=0
-    fm_lock_release "$HERDR_LABEL_LOCK" || true
-  fi
-  trap - EXIT
-  exit "$rc"
 }
 
 cleanup_unidentified_spawn_window() {
@@ -994,7 +983,7 @@ cleanup_unidentified_spawn_window() {
       candidate_count=$((candidate_count + 1))
     fi
   done <<<"$window_ids_after"
-  [ "$candidate_count" -eq 1 ] && cleanup_spawn_window "$candidate"
+  [ "$candidate_count" -eq 1 ] && fm_backend_kill "$BACKEND" "$candidate" >/dev/null 2>&1 || true
 }
 
 # Spawn-time isolation guard: the resolved pane path must be the root of a real
@@ -1135,8 +1124,8 @@ case "$BACKEND" in
     fi
     HERDR_SES=$(fm_backend_herdr_session)
     HERDR_LABEL_LOCK="$STATE/.herdr-label.lock"
-    if ! fm_lock_try_acquire "$HERDR_LABEL_LOCK"; then
-      echo "error: another Herdr spawn is reserving a display label" >&2
+    if ! fm_lock_acquire_wait "$HERDR_LABEL_LOCK"; then
+      echo "error: timed out waiting for another Herdr spawn to finish reserving its display label" >&2
       exit 1
     fi
     HERDR_LABEL_LOCK_HELD=1
@@ -1283,8 +1272,6 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     WID="$T"
-    HERDR_SPAWN_TARGET="$T"
-    trap cleanup_herdr_spawn EXIT
     ;;
 esac
 if [ "$KIND" != secondmate ]; then
@@ -1544,7 +1531,6 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 fm_backend_send_key "$BACKEND" "$WID" Enter
 
-HERDR_SPAWN_TARGET=
 trap - EXIT
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

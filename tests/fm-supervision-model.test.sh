@@ -149,6 +149,7 @@ write_fake_herdr() {
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
+  " status --json ") ;;
   *' --session custom '*) ;;
   *) exit 3 ;;
 esac

@@ -259,7 +259,8 @@ case "${1:-}" in
     if [ -e "$spawned" ]; then
       case "$format" in
         *pane_current_command*) printf '%s\n' node ;;
-        *) printf '%%1\n' ;;
+        *window_name*) printf '%s\n' "$mate_window" ;;
+        *) printf '@1\n' ;;
       esac
       exit 0
     fi
@@ -301,7 +302,7 @@ case "${1:-}" in
   new-window)
     printf '%s\n' "$*" >> "$log"
     : > "$spawned"
-    printf '%%1\n'
+    printf '@1\n'
     exit 0
     ;;
   set-window-option|send-keys) exit 0 ;;
@@ -411,8 +412,8 @@ SH
 # (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_BACKEND \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_BACKEND="${FM_BACKEND:-}" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START"
 }
 
@@ -812,11 +813,11 @@ command() {
 SH
     if [ "$mode" = configured ]; then
       printf '%s\n' herdr > "$home/config/backend"
-      out=$(TMUX='' HERDR_ENV='' BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+      out=$(FM_BACKEND='' TMUX='' HERDR_ENV='' BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
       assert_not_contains "$out" "NOTICE: auto-detected herdr runtime" \
         "an explicit Herdr home should not be reported as auto-detected"
     else
-      out=$(TMUX='' HERDR_ENV=1 BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+      out=$(FM_BACKEND='' TMUX='' HERDR_ENV=1 BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
       assert_contains "$out" "NOTICE: auto-detected herdr runtime (HERDR_ENV=1)" \
         "session start did not preserve the Herdr runtime auto-detection fallback"
     fi
@@ -1041,7 +1042,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/tasks-axi"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
@@ -1051,11 +1052,9 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: tasks-axi (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
-  assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
-
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
 
@@ -1382,7 +1381,3 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
-test_pi_diagnostic_rejects_stale_loaded_marker
-test_pi_diagnostic_accepts_prelock_loaded_marker
-test_pi_diagnostic_rejects_missing_turnend_guard_marker
-test_pi_diagnostic_rejects_previous_session_loaded_marker

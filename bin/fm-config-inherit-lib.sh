@@ -168,6 +168,17 @@ propagate_inheritable_config() {
   return "$rc"
 }
 
+# Compatibility entry point used by newer startup and spawn paths. This fork
+# does not yet carry the shared-captain inheritance surface, so the combined
+# operation currently delegates to its existing config-only contract.
+propagate_secondmate_inheritance() {
+  local src_home=$1 dest_home=$2 src_config=${3:-}
+  [ -n "$src_home" ] || return 1
+  [ -n "$dest_home" ] || return 1
+  [ -n "$src_config" ] || src_config="$src_home/config"
+  propagate_inheritable_config "$src_config" "$dest_home/config"
+}
+
 # Relative prefix of per-home instruction files written after a successful
 # config push so the live secondmate can re-read exact post-write bytes.
 # Kept under state/ (gitignored operational dir) so it never dirties the home.

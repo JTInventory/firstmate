@@ -164,12 +164,17 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
   case "$label" in
-    fm-active-seeded)
+    fm-active-seeded|Crew\ -\ Active\ seeded\ ·\ *)
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
       printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
       ;;
-    fm-abort-a|fm-abort-b)
-      task=${label#fm-}
+    fm-abort-a|Crew\ -\ Abort\ a\ ·\ *)
+      task=abort-a
+      mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
+      ;;
+    fm-abort-b|Crew\ -\ Abort\ b\ ·\ *)
+      task=abort-b
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
       ;;
@@ -536,6 +541,7 @@ TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
 PROJECTED_WSID=$(grep '^herdr_workspace_id=' "$ON_META" | cut -d= -f2-)
 PROJECTED_TAB=$(grep '^herdr_tab_id=' "$ON_META" | cut -d= -f2-)
 PROJECTED_PANE=$(grep '^herdr_pane_id=' "$ON_META" | cut -d= -f2-)
+PROJECTED_TASK_LABEL=$(grep '^display_label=' "$ON_META" | cut -d= -f2-)
 PROJECTED_INFO=$(lab workspace get "$PROJECTED_WSID") || fail "could not inspect the projected workspace"
 PROJECTED_LABEL=$(printf '%s' "$PROJECTED_INFO" | jq -r '.result.workspace.label // empty')
 [ "$PROJECTED_LABEL" = "└ shape · p:$TOKEN" ] \
@@ -546,9 +552,9 @@ PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
   || fail "projected workspace retained a seeded or placeholder tab"
 [ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
   || fail "projected workspace did not contain exactly one task pane"
-printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" \
-  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "fm-shape"' >/dev/null 2>&1 \
-  || fail "projected workspace's only tab was not the normal fm-shape task tab"
+printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" --arg label "$PROJECTED_TASK_LABEL" \
+  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == $label' >/dev/null 2>&1 \
+  || fail "projected workspace's only tab did not retain the recorded readable task label"
 printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
   '.result.panes[0].pane_id == $pane' >/dev/null 2>&1 \
   || fail "projected workspace's only pane was not the exact recorded task pane"

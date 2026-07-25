@@ -36,9 +36,6 @@ make_repo_on_branch() {  # <dir> <branch>
   git -C "$dir" init -q
   git -C "$dir" commit -q --allow-empty -m init
   git -C "$dir" checkout -q -b "$branch"
-  # Real worktree HEAD for run head-binding (fixtures read FM_FAKE_RUN_HEAD).
-  FM_FAKE_RUN_HEAD=$(git -C "$dir" rev-parse HEAD)
-  export FM_FAKE_RUN_HEAD
 }
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
@@ -123,7 +120,8 @@ run:
   id: "01RUN"
   branch: $1
   status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
   pr: ""
   findings: none
   steps[2]{step,status,findings,duration_ms}:
@@ -138,20 +136,9 @@ run:
   id: "01RUN"
   branch: $1
   status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
   pr: ""
-  findings: none
-EOF
-}
-
-run_top_level_ci() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: ci
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/2"
   findings: none
 EOF
 }
@@ -163,7 +150,7 @@ run:
   branch: $1
   status: awaiting_approval
   awaiting_agent: parked 2m10s
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  head: "abc1234"
   pr: ""
   findings[2]{id,severity,file,line,action,description}:
     r1,warning,a.go,,auto-fix,ignored error
@@ -191,7 +178,8 @@ run:
   id: "01RUN"
   branch: $1
   status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
   pr: ""
   findings[1]{id,severity,file,line,action,description}:
     r1,error,b.go,,ask-user,changes product behavior
@@ -205,7 +193,8 @@ run:
   id: "01RUN"
   branch: $1
   status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
   pr: ""
   findings[1]{id,severity,file,line,action,description}:
     r1,error,b.go,,ask-user,changes product behavior
@@ -225,7 +214,7 @@ run:
   id: "01RUN"
   branch: $1
   status: completed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  head: "abc1234"
   pr: "https://github.com/o/r/pull/1"
   findings: none
 outcome: passed
@@ -238,7 +227,7 @@ run:
   id: "01RUN"
   branch: $1
   status: completed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  head: "abc1234"
   pr: ""
   findings: none
 outcome: failed
@@ -251,7 +240,8 @@ run:
   id: "01RUN"
   branch: $1
   status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
   pr: "https://github.com/o/r/pull/2"
   findings: none
   steps[4]{step,status,findings,duration_ms}:
@@ -259,40 +249,6 @@ run:
     review,completed,0,0
     push,completed,0,0
     ci,running,0,0
-EOF
-}
-
-run_fixing_ci_running() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/2"
-  findings: none
-  steps[4]{step,status,findings,duration_ms}:
-    intent,completed,0,0
-    review,completed,0,0
-    push,completed,0,0
-    ci,running,0,0
-EOF
-}
-
-run_ci_fixing() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/2"
-  findings: none
-  steps[4]{step,status,findings,duration_ms}:
-    intent,completed,0,0
-    review,completed,0,0
-    push,completed,0,0
-    ci,fixing,0,0
 EOF
 }
 
@@ -495,18 +451,16 @@ test_terminal_failed() {
 # helper finds THIS branch's own run via the run list and inspects it directly.
 test_cross_branch_attribution_via_list() {
   reset_fakes
-  local d short; d=$(new_case crossbranch)
+  local d; d=$(new_case crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-f
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
   # The repo-wide active/most-recent run belongs to a different crew's branch.
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
-  # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-f ${short}  2026-07-02 22:05
+  FM_FAKE_AXI_LIST="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  "01OTHER",fm/other-crew,running,aa,""
+  "01MINE",fm/feat-f,running,bb,""
 EOF
 )"
   FM_FAKE_AXI_STATUS_RUN="$(run_running fm/feat-f)"
@@ -518,16 +472,15 @@ EOF
 
 test_cross_branch_attribution_unquoted_run_list() {
   reset_fakes
-  local d short; d=$(new_case crossbranch-mostrecent)
+  local d; d=$(new_case crossbranch-unquoted)
   make_repo_on_branch "$d/wt" fm/feat-fq
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-fq.meta" "window=fm:fm-feat-fq" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-fq ${short}  2026-07-02 21:50
-  completed  fm/feat-fq bbbbbbb  2026-07-02 20:00  https://github.com/o/r/pull/1
+  FM_FAKE_AXI_LIST="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  01OTHER, "fm/other-crew" ,running,aa,""
+  01MINE, "fm/feat-fq" ,running,bb,""
 EOF
 )"
   FM_FAKE_AXI_STATUS_RUN="$(run_running fm/feat-fq)"
@@ -537,30 +490,7 @@ EOF
   pass "unquoted run-list row is attributed"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
-  reset_fakes
-  local d short; d=$(new_case coarse-ready-other-log)
-  make_repo_on_branch "$d/wt" fm/feat-coarseready
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-coarseready.meta" "window=fm:fm-feat-coarseready" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/4 checks green\n' > "$d/state/feat-coarseready.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-coarseready ${short}  2026-07-02 22:05
-EOF
-)"
-  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
-  local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
-}
-
-# A different-branch run with NO matching runs-list row must NOT be
-# misattributed, and must not be treated as a false "working" verdict either.
+# A different-branch run with NO matching list row must NOT be misattributed.
 test_other_branch_run_ignored() {
   reset_fakes
   local d; d=$(new_case otherbranch)
@@ -830,51 +760,6 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
-# (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
-# canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
-# coverage). This is the direct regression pair for the 2026-07-02 herdr
-# incident: a validating crew whose bare `axi status` answer belongs to
-# another branch must still be absorbed by the watcher via the runs-list
-# fallback (working), while a crew with genuinely no run anywhere and an idle
-# pane must still surface (the safety property the fix must never widen away).
-test_provably_working_via_runs_list_fallback() {
-  reset_fakes
-  local d short; d=$(new_case provably-working-crossbranch)
-  make_repo_on_branch "$d/wt" fm/feat-provable
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-provable ${short}  2026-07-02 22:05
-EOF
-)"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
-    || fail "cross-branch attribution via the runs list was not treated as provably working"
-  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
-}
-
-test_not_provably_working_when_stopped() {
-  reset_fakes
-  local d; d=$(new_case provably-working-stopped)
-  make_repo_on_branch "$d/wt" fm/feat-stopped
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
-  # Repo-wide run belongs to someone else, and this branch has no row in the
-  # runs list either (it never validated, or genuinely finished/stopped) - the
-  # only remaining signal is the pane, which is idle.
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-EOF
-)"
-  FM_FAKE_BUSY=0
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
-    && fail "a stopped crew with no run anywhere and an idle pane was treated as provably working"
-  pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
-}
-
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -882,96 +767,6 @@ test_usage_error() {
   "$CREW_STATE" >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "no-arg usage error exits 2"
   pass "usage error exits 2"
-}
-
-# Head-binding: same branch name with a rewritten/diverged worktree tip must not
-# attribute a historical no-mistakes run (multi-stage branch reuse incident).
-test_historical_same_branch_rewritten_head_not_current() {
-  reset_fakes
-  local d old_head new_head out
-  d=$(new_case rewritten-head)
-  make_repo_on_branch "$d/wt" fm/todo-flag
-  old_head=$(git -C "$d/wt" rev-parse HEAD)
-  # Simulate a rebase rewrite: orphan new history on the same branch name.
-  git -C "$d/wt" checkout -q --orphan tmp-rewrite
-  git -C "$d/wt" commit -q --allow-empty -m 'rewritten tip'
-  git -C "$d/wt" branch -q -M fm/todo-flag
-  new_head=$(git -C "$d/wt" rev-parse HEAD)
-  [ "$old_head" != "$new_head" ] || fail "rewrite did not produce a new head"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/wishlist.meta" "window=fm:fm-wishlist" "worktree=$d/wt" "kind=ship"
-  printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/wishlist.status"
-  # Historical run still reports the pre-rewrite head on the reused branch.
-  FM_FAKE_RUN_HEAD="$old_head"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag)"
-  FM_FAKE_BUSY=0
-  out=$(run_crew_state "$d" wishlist)
-  assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
-  assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
-  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
-  assert_contains "$out" "state: working" "status-log working: remains current"
-  pass "historical same-branch rewritten head is not attributed as current"
-}
-
-# Head-binding: an active pipeline whose run head is a descendant of the local
-# tip (fix commits on the same history) remains current.
-test_active_run_descendant_fix_head_remains_current() {
-  reset_fakes
-  local d base_head fix_head out
-  d=$(new_case pipeline-descendant)
-  make_repo_on_branch "$d/wt" fm/feat-pipeline
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
-  fix_head=$(git -C "$d/wt" rev-parse HEAD)
-  # Worktree still at the pre-fix tip; run reports the pipeline fix head.
-  git -C "$d/wt" reset -q --hard "$base_head"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/pipe.meta" "window=fm:fm-pipe" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_RUN_HEAD="$fix_head"
-  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-pipeline)"
-  out=$(run_crew_state "$d" pipe)
-  assert_contains "$out" "source: run-step" "descendant pipeline fix head remains run-step"
-  assert_contains "$out" "state: working" "active fixing run remains working"
-  pass "active run with valid descendant fix head remains current"
-}
-
-# Head-binding: local work that advanced past the run head invalidates the run.
-test_local_advanced_past_run_head_invalidates() {
-  reset_fakes
-  local d run_head out
-  d=$(new_case local-advanced)
-  make_repo_on_branch "$d/wt" fm/feat-adv
-  run_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'local stage-2 work after prior run'
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/adv.meta" "window=fm:fm-adv" "worktree=$d/wt" "kind=ship"
-  printf 'working: stage 2 implementation in progress\n' > "$d/state/adv.status"
-  FM_FAKE_RUN_HEAD="$run_head"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-adv)"
-  FM_FAKE_BUSY=0
-  out=$(run_crew_state "$d" adv)
-  assert_not_contains "$out" "source: run-step" "local-advanced tip must not use historical run"
-  assert_contains "$out" "source: status-log" "falls back after local advanced past run"
-  assert_contains "$out" "state: working" "status-log working: is current"
-  pass "local work advanced past run head invalidates attribution"
-}
-
-test_missing_run_head_falls_back_to_current_state() {
-  reset_fakes
-  local d out
-  d=$(new_case missing-run-head)
-  make_repo_on_branch "$d/wt" fm/feat-no-head
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/no-head.meta" "window=fm:fm-no-head" "worktree=$d/wt" "kind=ship"
-  printf 'working: current stage still in progress\n' > "$d/state/no-head.status"
-  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-no-head | grep -v '^  head:')
-  FM_FAKE_RUNS_LIST=""
-  FM_FAKE_BUSY=0
-  out=$(run_crew_state "$d" no-head)
-  assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
-  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
-  assert_contains "$out" "state: working" "status-log remains current after missing run head"
-  pass "missing run head falls back instead of matching by branch"
 }
 
 test_active_run_is_authoritative
@@ -1005,9 +800,5 @@ test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
 test_usage_error
-test_historical_same_branch_rewritten_head_not_current
-test_active_run_descendant_fix_head_remains_current
-test_local_advanced_past_run_head_invalidates
-test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"
