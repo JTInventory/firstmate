@@ -2781,6 +2781,48 @@ test_send_text_submit_pending_unknown_does_not_retry() {
   pass "fm_backend_herdr_send_text_submit: pending unknown state never retries Enter"
 }
 
+test_submit_enter_dispatch_confirms_idle_pending_text() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-enter-dispatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_submit_enter herdr default:w1:p2 1 0.01 "hello captain"' "$ROOT" )
+  [ "$out" = empty ] || fail "Herdr submit-enter dispatch should confirm pending idle text once the final Enter starts work, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "Herdr submit-enter dispatch should send exactly one final Enter, sent $enter_count"
+  pass "fm_backend_submit_enter: Herdr final Enter submits idle pending text and returns a confirmed verdict"
+}
+
+test_submit_enter_idle_swallow_stays_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-enter-idle-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_submit_enter default:w1:p2 1 0.01 "hello captain"' "$ROOT" )
+  [ "$out" = pending ] || fail "Herdr final Enter must keep an idle swallowed message pending, got '$out'"
+  pass "fm_backend_herdr_submit_enter: idle swallowed text is never falsely acknowledged"
+}
+
+test_submit_enter_transport_failure() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=default
+      FM_BACKEND_HERDR_PANE=w1:p2
+    }
+    fm_backend_herdr_agent_status_raw() { printf idle; }
+    fm_backend_herdr_send_key() { return 1; }
+    fm_backend_herdr_submit_enter default:w1:p2 1 0 "hello captain"
+  ' "$ROOT")
+  [ "$out" = send-failed ] || fail "Herdr final Enter transport failure must report send-failed, got '$out'"
+  pass "fm_backend_herdr_submit_enter: failed final Enter is never acknowledged"
+}
+
 # --- fm-backend.sh dispatch wiring -------------------------------------------
 
 test_dispatch_routes_herdr_backend() {
@@ -3512,6 +3554,9 @@ test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_baseline_verifies_and_retries_autocomplete
 test_send_text_submit_pending_unknown_does_not_retry
+test_submit_enter_dispatch_confirms_idle_pending_text
+test_submit_enter_idle_swallow_stays_pending
+test_submit_enter_transport_failure
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

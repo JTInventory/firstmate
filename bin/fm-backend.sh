@@ -355,7 +355,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-fm_backend_submit_enter() {  # <backend> <target> <retries> <enter-sleep>
+fm_backend_submit_enter() {  # <backend> <target> <retries> <enter-sleep> [expected-text]
   local backend=$1; shift
   fm_backend_source "$backend" || return 1
   case "$backend" in

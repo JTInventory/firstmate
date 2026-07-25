@@ -136,7 +136,7 @@ else
     # normal retry loop left the marked request in the composer. Do exactly that
     # once, and only on the marked Codex secondmate path.
     sleep "$settle"
-    verdict=$(fm_backend_submit_enter "$TARGET_BACKEND" "$T" 1 "$sleep_s")
+    verdict=$(fm_backend_submit_enter "$TARGET_BACKEND" "$T" 1 "$sleep_s" "$MESSAGE")
   fi
   case "$verdict" in
     pending)

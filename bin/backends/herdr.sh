@@ -2285,6 +2285,42 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
+fm_backend_herdr_submit_enter() {  # <target> <retries> <enter-sleep> [expected-text]
+  local target=$1 retries=$2 sleep_s=$3 expected_text=${4-} i=0 baseline verdict current confirm_sleep
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  baseline=$(fm_backend_herdr_classify_submit_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
+  while :; do
+    fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
+    if [ "$baseline" = idle ]; then
+      verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+    else
+      sleep "$sleep_s"
+      verdict=$(fm_backend_herdr_composer_state "$target" "$expected_text")
+    fi
+    case "$verdict" in
+      busy|empty) printf 'empty'; return 0 ;;
+      pending)
+        if [ "$baseline" != idle ]; then
+          current=$(fm_backend_herdr_classify_submit_agent_status \
+            "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+          case "$current" in
+            busy) printf 'empty'; return 0 ;;
+            idle) printf 'pending'; return 0 ;;
+            unknown) printf 'unknown'; return 0 ;;
+          esac
+        fi
+        ;;
+      autocomplete) ;;
+      unknown) printf 'unknown'; return 0 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+  done
+}
+
 # fm_backend_herdr_kill: remove the task's exact pane and prove it disappeared.
 # Verified: closing a tab's only pane closes the tab too, so a separate tab
 # close is unnecessary.
