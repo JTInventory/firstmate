@@ -90,7 +90,9 @@ old_stty=$(stty -g 2>/dev/null || true)
 cleanup() { [ -z "$old_stty" ] || stty "$old_stty" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 buf=
-redraw() { printf '\r\033[K> %s' "$buf"; }
+# Use an agent-composer glyph so the fixture exercises Herdr's composer
+# confirmation path. A bare shell prompt is deliberately classified unknown.
+redraw() { printf '\r\033[K› %s' "$buf"; }
 submit() {
   local hex
   hex=$(printf '%s' "$buf" | od -An -tx1 | tr -d ' \n')

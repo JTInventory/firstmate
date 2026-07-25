@@ -130,6 +130,8 @@ assert_contains_local "$(cat "$CM1_META")" "backend=herdr" "cm1 meta missing bac
 WT1=$(grep '^worktree=' "$CM1_META" | cut -d= -f2-)
 CM1_PANE=$(grep '^herdr_pane_id=' "$CM1_META" | cut -d= -f2-)
 [ -n "$CM1_PANE" ] || fail "cm1 meta missing herdr_pane_id"
+CM1_DISPLAY_LABEL=$(grep '^display_label=' "$CM1_META" | cut -d= -f2-)
+[ -n "$CM1_DISPLAY_LABEL" ] || fail "cm1 meta missing display_label"
 pass "real herdr E2E: a primary-shaped home spawns a crewmate on the herdr backend"
 
 sleep 1
@@ -160,6 +162,10 @@ assert_contains_local "$(cat "$SM_META")" "backend=herdr" "e2esm1 meta missing b
 assert_contains_local "$(cat "$SM_META")" "home=$SM_HOME" "e2esm1 meta does not record its own home"
 SM_PANE=$(grep '^herdr_pane_id=' "$SM_META" | cut -d= -f2-)
 [ -n "$SM_PANE" ] || fail "e2esm1 meta missing herdr_pane_id"
+SM_TAB=$(grep '^herdr_tab_id=' "$SM_META" | cut -d= -f2-)
+[ -n "$SM_TAB" ] || fail "e2esm1 meta missing herdr_tab_id"
+SM_DISPLAY_LABEL=$(grep '^display_label=' "$SM_META" | cut -d= -f2-)
+[ -n "$SM_DISPLAY_LABEL" ] || fail "e2esm1 meta missing display_label"
 pass "real herdr E2E: the primary spawns a --secondmate task on the herdr backend"
 
 SM_WSID=$(herdr pane get "$SM_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
@@ -185,6 +191,8 @@ assert_contains_local "$(cat "$CM2_META")" "backend=herdr" "cm2 meta missing bac
 WT2=$(grep '^worktree=' "$CM2_META" | cut -d= -f2-)
 CM2_PANE=$(grep '^herdr_pane_id=' "$CM2_META" | cut -d= -f2-)
 [ -n "$CM2_PANE" ] || fail "cm2 meta missing herdr_pane_id"
+CM2_DISPLAY_LABEL=$(grep '^display_label=' "$CM2_META" | cut -d= -f2-)
+[ -n "$CM2_DISPLAY_LABEL" ] || fail "cm2 meta missing display_label"
 pass "real herdr E2E: a crewmate spawns successfully FROM a secondmate-shaped home's own fm-spawn.sh process"
 
 sleep 1
@@ -203,12 +211,13 @@ pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands i
 
 PRIMARY_TABS=$(herdr tab list --workspace "${CM1_WSID}" --session "$SESSION" 2>&1)
 PRIMARY_LABELS=$(printf '%s' "$PRIMARY_TABS" | jq -r '.result.tabs[]?.label // empty' | sort)
-[ "$PRIMARY_LABELS" = "fm-cm1" ] || fail "the primary workspace must contain exactly its own task label, got: $PRIMARY_LABELS"
+[ "$PRIMARY_LABELS" = "$CM1_DISPLAY_LABEL" ] || fail "the primary workspace must contain exactly its persisted readable task label, got: $PRIMARY_LABELS"
 pass "real herdr E2E: the primary workspace inventory contains only the primary home's task"
 
 SM_TABS=$(herdr tab list --workspace "${SM_WSID}" --session "$SESSION" 2>&1)
 SM_LABELS=$(printf '%s' "$SM_TABS" | jq -r '.result.tabs[]?.label // empty' | sort)
-[ "$SM_LABELS" = $'fm-cm2\nfm-e2esm1' ] || fail "the secondmate workspace must contain exactly its two task labels, got: $SM_LABELS"
+EXPECTED_SM_LABELS=$(printf '%s\n%s\n' "$CM2_DISPLAY_LABEL" "$SM_DISPLAY_LABEL" | sort)
+[ "$SM_LABELS" = "$EXPECTED_SM_LABELS" ] || fail "the secondmate workspace must contain exactly its two persisted readable task labels, got: $SM_LABELS"
 pass "real herdr E2E: the secondmate workspace inventory contains its own task and its spawned crewmate only"
 
 # --- 5. teardown closes the RIGHT tab, and no other ------------------------
@@ -219,6 +228,12 @@ pass "real herdr E2E: the secondmate workspace inventory contains its own task a
 # fm-teardown exercise without weakening the production identity check.
 printf 'workspace-per-home Herdr lab scratch report\n' > "$PRIMARY_HOME/data/cm1/report.md"
 printf 'workspace-per-home Herdr lab secondmate scratch report\n' > "$SM_HOME/data/cm2/report.md"
+
+# The adopted teardown refuses to close the active tab because restoring that
+# exact focus would be impossible. Focus the surviving secondmate tab so both
+# task teardowns can prove they preserve it.
+fm_backend_herdr_cli "$SESSION" tab focus "$SM_TAB" >/dev/null \
+  || fail "could not focus the surviving secondmate tab before teardown"
 
 TD1_OUT="$TMP_ROOT/td1.out"
 FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \

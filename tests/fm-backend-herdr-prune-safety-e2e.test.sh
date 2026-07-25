@@ -80,12 +80,9 @@ fi
 
 LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace label should be 'firstmate', got '$LIVE_LABEL' - repro setup is wrong"
-# JT binds workspace ownership with a home-identity token before adoption. Bind
-# this deliberately pre-existing workspace to the test's primary-shaped home;
-# the safety property remains the same: its seeded tab labeled "1" already has
-# a live process and must never become a prune candidate.
-fm_backend_herdr_workspace_bind_home "$SESSION" "$LIVE_WSID" \
-  || fail "could not bind the pre-existing startup workspace to the test home identity"
+# The adopted adapter resolves flat home workspaces by their per-home label.
+# This deliberately pre-existing workspace therefore exercises the real
+# label-collision adoption path directly.
 pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with the primary home's own label"
 
 # Simulate a live long-running agent in that pane: a heartbeat loop that
