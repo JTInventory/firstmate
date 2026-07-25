@@ -2971,10 +2971,13 @@ test_dispatch_composer_state_routes_by_backend() {
 }
 
 test_scripts_route_explicit_target_through_meta_backend() {
-  local dir state log resp fb neutral out
+  local dir state log resp fb neutral script_root out
   dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   neutral="$dir/neutral-root"; mkdir -p "$neutral"
+  script_root="$dir/repo"
+  mkdir -p "$script_root"
+  cp -a "$ROOT/bin" "$script_root/bin"
   fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
   touch "$state/.last-watcher-beat"
   printf 'captured herdr pane\n' > "$resp/1.out"
@@ -2995,9 +2998,15 @@ SH
     "fm-peek did not route the explicit stale target through herdr capture"
 
   : > "$log"
-  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
-    FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    "$ROOT/bin/fm-send.sh" default:w1:p2 --key Escape >/dev/null 2>&1
+  # fm-send deliberately refuses every fleet mutation from a no-mistakes gate
+  # worktree. Run this positive routing fixture from a normal temporary source
+  # copy so the gate-path safety contract cannot mask the selector assertion.
+  (
+    cd "$neutral" || exit 1
+    env -u NO_MISTAKES_GATE PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" \
+      FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      "$script_root/bin/fm-send.sh" default:w1:p2 --key Escape >/dev/null 2>&1
+  )
   expect_code 0 $? "fm-send --key should route an explicit metadata-matched target through herdr"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''escape' \
     "fm-send did not route the explicit stale target through herdr send-key"
