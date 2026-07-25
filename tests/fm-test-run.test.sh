@@ -343,8 +343,9 @@ test_fail_on_any_gate_skip() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-any-skip.XXXXXX")
   skip_f="$tmp/skip.test.sh"
   out="$tmp/out.txt"
-  cat >"$skip_f" <<'SH'
+cat >"$skip_f" <<'SH'
 #!/usr/bin/env bash
+echo "diagnostic: preparing optional condition"
 echo "skip: optional condition"
 exit 0
 SH
@@ -359,7 +360,7 @@ SH
   grep -q 'required gate reported a skip' "$tmp/err.txt" \
     || fail "runner must log the any-skip failure"
   rm -rf "$tmp"
-  pass "fail-on-any-gate-skip converts every gate skip into failure"
+  pass "fail-on-any-gate-skip scans every output line and converts every gate skip into failure"
 }
 
 test_exclude_family() {

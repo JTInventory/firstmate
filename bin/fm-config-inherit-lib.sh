@@ -192,8 +192,9 @@ captain_shared_quarantine() {
 }
 
 propagate_captain_shared() {
-  local src_home=$1 dest_home=$2 src=$1/data/captain-shared.md dest=$2/data/captain-shared.md
+  local src_home=$1 dest_home=$2 src_data=${3:-$1/data} src dest=$2/data/captain-shared.md
   local reason links quarantine
+  src="$src_data/captain-shared.md"
   if [ -e "$src" ] || [ -L "$src" ]; then
     if [ ! -f "$src" ] || [ -L "$src" ]; then
       reason="source is not an ordinary file"
@@ -263,12 +264,13 @@ propagate_captain_shared() {
 }
 
 propagate_secondmate_inheritance() {
-  local src_home=$1 dest_home=$2 src_config=${3:-} config_rc=0 shared_rc=0
+  local src_home=$1 dest_home=$2 src_config=${3:-} src_data=${4:-} config_rc=0 shared_rc=0
   [ -n "$src_home" ] || return 1
   [ -n "$dest_home" ] || return 1
   [ -n "$src_config" ] || src_config="$src_home/config"
+  [ -n "$src_data" ] || src_data="$src_home/data"
   propagate_inheritable_config "$src_config" "$dest_home/config" || config_rc=$?
-  propagate_captain_shared "$src_home" "$dest_home" || shared_rc=$?
+  propagate_captain_shared "$src_home" "$dest_home" "$src_data" || shared_rc=$?
   [ "$config_rc" -eq 0 ] && [ "$shared_rc" -eq 0 ]
 }
 

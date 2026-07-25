@@ -825,17 +825,11 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
-  # Inheritable-config propagation: push the primary's declared LOCAL config into
-  # this secondmate home's config/, so the secondmate's OWN crewmates, dispatch
-  # profiles, and backlog backend inherit the primary's settings. config/ is
-  # gitignored, so this is a
-  # separate copy from the local-HEAD fast-forward above;
-  # primary-authoritative and re-pushed on every convergence. config/secondmate-harness
-  # and config/secondmate-profile.json are primary launch knobs and are deliberately
-  # NOT in the inheritable set
-  # (fm-config-inherit-lib.sh). A primary with no inheritable config set is a no-op.
-  propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
-    || echo "warning: secondmate $ID config inheritance failed for $PROJ_ABS/config" >&2
+  # Inheritance propagation is separate from the tracked local-HEAD fast-forward:
+  # declared local config converges into config/, while captain-shared.md converges
+  # read-only into data/. Primary launch knobs remain local to the primary home.
+  propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
+    || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
@@ -1265,7 +1259,15 @@ EOF
         echo "error: herdr focus lock unavailable; refusing a focus-unsafe flat tab create" >&2
         exit 1
       }
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$DISPLAY_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      if ! HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$DISPLAY_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID"); then
+        case "$HERDR_TASK_IDS" in
+          cleanup-required$'\t'*)
+            HERDR_FLAT_ABORT_CLEANUP=1
+            HERDR_FLAT_ABORT_TARGET=${HERDR_TASK_IDS#*$'\t'}
+            ;;
+        esac
+        exit 1
+      fi
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF

@@ -616,6 +616,48 @@ test_create_task_rolls_back_partial_and_focus_unsafe_mutations() {
   pass "fm_backend_herdr_create_task: every identifiable post-create failure rolls back the exact new pane"
 }
 
+test_create_task_exposes_identity_when_rollback_fails() {
+  local out status
+  if out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_create_task_rollback() { return 1; }
+    fm_backend_herdr_pane_for_tab() { printf w1:p9; }
+    fm_backend_herdr_create_task_abort_created default w1 w1:t9 ""
+  ' "$ROOT"); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "failed rollback must remain observable"
+  [ "$out" = $'cleanup-required\tdefault:w1:p9' ] \
+    || fail "failed rollback did not expose the exact endpoint for spawn cleanup: $out"
+  pass "fm_backend_herdr_create_task: failed rollback exposes exact endpoint identity"
+}
+
+test_close_active_husk_focuses_replacement() {
+  local dir
+  dir="$TMP_ROOT/active-husk-focus"
+  mkdir -p "$dir"
+  FOCUS_LOG="$dir/focus" CLOSE_LOG="$dir/close" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t2"; }
+    fm_backend_herdr_projection_focus_restore() { printf "%s\n" "$2" >> "$FOCUS_LOG"; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab get")
+          printf "{\"result\":{\"tab\":{\"workspace_id\":\"w1\",\"tab_id\":\"%s\"}}}" "$4"
+          ;;
+        "tab close") printf "%s\n" "$4" >> "$CLOSE_LOG" ;;
+      esac
+    }
+    fm_backend_herdr_close_tab_focus_preserving default w1 w1:t2 w1:t3
+  ' "$ROOT"
+  [ "$(cat "$dir/close")" = w1:t2 ] || fail "active husk close did not target the restored husk"
+  [ "$(cat "$dir/focus")" = $'w1\tw1:t3\nw1\tw1:t3' ] \
+    || fail "active husk replacement did not preserve focus on the exact replacement tab"
+  pass "fm_backend_herdr_close_tab_focus_preserving: active husk transfers focus to its replacement"
+}
+
 # --- container_ensure / create_task: --no-focus and per-home label ----------
 
 test_container_ensure_creates_with_no_focus_flag() {
@@ -1840,7 +1882,7 @@ test_projection_teardown_requires_confirmed_absence() {
         printf "%s" "$BEFORE"
       fi
     }
-    for fixture in "dead:dead:0" "no-agent:live:1" "no-agent:dead:1"; do
+    for fixture in "dead:dead:0" "no-agent:live:1" "no-agent:dead:1" "no-agent:dead:0"; do
       IFS=: read -r BEFORE AFTER CLOSE_OK <<EOF
 $fixture
 EOF
@@ -1851,9 +1893,9 @@ EOF
       printf "%s\n" "$?"
     done
   ' "$ROOT" "$dir")
-  [ "$out" = $'0\n1\n0' ] \
-    || fail "projected teardown must succeed only when exact absence is confirmed: $out"
-  pass "projected teardown: already-dead is idempotent and surviving panes fail closed"
+  [ "$out" = $'0\n1\n0\n1' ] \
+    || fail "projected teardown must require both successful focus restoration and exact absence: $out"
+  pass "projected teardown: already-dead is idempotent; close, focus, and absence failures stay closed"
 }
 
 test_current_path_reads_cwd() {
@@ -2581,6 +2623,26 @@ test_send_text_submit_unknown_on_capture_failure() {
   pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter agent-get read fails (never retries past an unreadable target)"
 }
 
+test_send_text_submit_unknown_baseline_still_attempts_enter() {
+  local dir out
+  dir="$TMP_ROOT/submit-unknown-baseline"
+  mkdir -p "$dir"
+  out=$(ENTER_LOG="$dir/enter" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=default
+      FM_BACKEND_HERDR_PANE=w1:p2
+    }
+    fm_backend_herdr_send_literal() { return 0; }
+    fm_backend_herdr_agent_status_raw() { printf unreadable; }
+    fm_backend_herdr_send_key() { printf "%s\n" "$2" >> "$ENTER_LOG"; }
+    fm_backend_herdr_send_text_submit default:w1:p2 hello 3 0 0
+  ' "$ROOT")
+  [ "$out" = unknown ] || fail "unreadable native baseline must retain a truthful unknown verdict"
+  [ "$(cat "$dir/enter")" = Enter ] || fail "unreadable native baseline skipped the Enter submission attempt"
+  pass "fm_backend_herdr_send_text_submit: unreadable baseline still attempts Enter and reports unknown"
+}
+
 # --- fm-backend.sh dispatch wiring -------------------------------------------
 
 test_dispatch_routes_herdr_backend() {
@@ -3217,6 +3279,8 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_rolls_back_partial_and_focus_unsafe_mutations
+test_create_task_exposes_identity_when_rollback_fails
+test_close_active_husk_focuses_replacement
 test_create_task_creates_with_no_focus_flag
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
@@ -3306,6 +3370,7 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
+test_send_text_submit_unknown_baseline_still_attempts_enter
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

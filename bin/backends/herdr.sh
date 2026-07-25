@@ -650,9 +650,14 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 }
 
 fm_backend_herdr_projection_teardown_close() {
-  local session=$1 pane_id=$2
+  local session=$1 pane_id=$2 close_status
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ] && return 0
-  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" 2>/dev/null || true
+  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" 2>/dev/null; then
+    close_status=0
+  else
+    close_status=$?
+  fi
+  [ "$close_status" -eq 0 ] || return "$close_status"
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
 }
 
@@ -1118,22 +1123,46 @@ fm_backend_herdr_create_task_rollback() {
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
 }
 
+fm_backend_herdr_create_task_abort_created() {
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4
+  fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" && return 0
+  if [ -z "$pane_id" ] && [ -n "$tab_id" ]; then
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || pane_id=
+  fi
+  [ -n "$pane_id" ] && printf 'cleanup-required\t%s:%s\n' "$session" "$pane_id"
+  return 1
+}
+
 fm_backend_herdr_close_tab_focus_preserving() {
-  local session=$1 wsid=$2 tab_id=$3 before active_tab info close_status
+  local session=$1 wsid=$2 tab_id=$3 replacement_tab=${4:-} before active_tab info close_status desired
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
   active_tab=${before#*$'\t'}
-  [ "$active_tab" != "$tab_id" ] || return 1
   info=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || return 1
   printf '%s' "$info" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" '
     .result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab
   ' >/dev/null 2>&1 || return 1
+  if [ "$active_tab" = "$tab_id" ]; then
+    [ -n "$replacement_tab" ] || return 1
+    info=$(fm_backend_herdr_cli "$session" tab get "$replacement_tab" 2>/dev/null) || return 1
+    printf '%s' "$info" | jq -e --arg workspace "$wsid" --arg tab "$replacement_tab" '
+      .result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab
+    ' >/dev/null 2>&1 || return 1
+    desired="${wsid}"$'\t'"${replacement_tab}"
+    fm_backend_herdr_projection_focus_restore "$session" "$desired" "active husk replacement" || return 1
+  else
+    desired=$before
+  fi
   if fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1; then
     close_status=0
   else
     close_status=$?
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$before" "husk tab close" || return 1
-  [ "$close_status" -eq 0 ]
+  if [ "$close_status" -ne 0 ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "failed husk tab close" || return 1
+    return "$close_status"
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$desired" "husk tab close" || return 1
+  return 0
 }
 
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
@@ -1246,7 +1275,7 @@ EOF
       candidate_count=$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l | tr -d ' ')
       [ "$candidate_count" = 1 ] && tab_id=$candidates
     fi
-    fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
+    fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
@@ -1254,20 +1283,20 @@ EOF
   if [ -n "$dup_tab_ids" ]; then
     while IFS=$'\t' read -r dup dup_pane; do
       [ -n "$dup" ] || continue
-      if ! fm_backend_herdr_close_tab_focus_preserving "$session" "$wsid" "$dup"; then
-        fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
+      if ! fm_backend_herdr_close_tab_focus_preserving "$session" "$wsid" "$dup" "$tab_id"; then
+        fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
         return 1
       fi
     done <<EOF
 $dup_records
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-      fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
+      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
-      fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
+      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
@@ -1275,7 +1304,7 @@ EOF
       '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
-      fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
+      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     fi
@@ -2221,10 +2250,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   sleep "$settle"
   baseline=$(fm_backend_herdr_classify_submit_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
-  [ "$baseline" != unknown ] || { printf 'unknown'; return 0; }
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
+    [ "$baseline" != unknown ] || { printf 'unknown'; return 0; }
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")

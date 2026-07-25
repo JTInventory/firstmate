@@ -461,13 +461,8 @@ select_changed() {
 }
 
 detect_gate_skip() {
-  # True when the first non-empty output line is a skip: gate message.
-  local file=$1 first
-  first=$(awk 'NF { print; exit }' "$file" 2>/dev/null || true)
-  case "$first" in
-    skip:*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local file=$1
+  grep -E -q '^skip:' "$file" 2>/dev/null
 }
 
 # True when any output line contains "skip: <token>" (token may contain spaces).

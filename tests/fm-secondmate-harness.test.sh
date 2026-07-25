@@ -278,6 +278,8 @@ test_spawn_split_and_inherit() {
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
+  mkdir -p "$w/home/data"
+  printf 'shared spawn preference\n' > "$w/home/data/captain-shared.md"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -294,7 +296,9 @@ test_spawn_split_and_inherit() {
     || fail "split: home backlog-backend not inherited as manual"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
-  pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
+  [ "$(cat "$sm/data/captain-shared.md" 2>/dev/null)" = "shared spawn preference" ] \
+    || fail "split: captain-shared did not converge during secondmate spawn"
+  pass "B2 spawn: secondmate runs the secondmate harness; its home inherits config and captain-shared"
 }
 
 # Backward-compat: secondmate-harness absent -> the secondmate launches on the
@@ -586,7 +590,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
 }
 
 test_shared_captain_preferences_converge_read_only() {
-  local w head report quarantine_count
+  local w head report quarantine_count override
   w=$(new_world captain-shared)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -602,6 +606,15 @@ test_shared_captain_preferences_converge_read_only() {
   assert_contains "$(cat "$report")" $'data/captain-shared.md\tpushed' \
     "captain-shared push was not reported"
 
+  override="$w/override-data"
+  mkdir -p "$override"
+  printf 'override-authoritative\n' > "$override/captain-shared.md"
+  printf 'stale-home-data\n' > "$w/home/data/captain-shared.md"
+  FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_secondmate_inheritance "$w/home" "$w/sm" "$w/home/config" "$override"
+  [ "$(cat "$w/sm/data/captain-shared.md")" = override-authoritative ] \
+    || fail "captain-shared propagation ignored the active data override"
+
   chmod u+w "$w/sm/data/captain-shared.md"
   printf 'secondmate-local divergence\n' > "$w/sm/data/captain-shared.md"
   printf '# Main-authoritative shared preferences\nbeta\n' > "$w/home/data/captain-shared.md"
@@ -611,7 +624,7 @@ test_shared_captain_preferences_converge_read_only() {
   assert_contains "$(cat "$w/sm/data/captain-shared.md")" "beta" \
     "divergent captain-shared destination did not reconverge"
   quarantine_count=$(find "$w/sm/data" -maxdepth 1 -type f -name '.captain-shared.quarantine.*' | wc -l | tr -d ' ')
-  [ "$quarantine_count" = 1 ] || fail "divergent captain-shared bytes were not quarantined exactly once"
+  [ "$quarantine_count" = 2 ] || fail "each divergent captain-shared value was not quarantined exactly once"
   assert_contains "$(cat "$w/shared.err")" "SECONDMATE_SYNC: quarantined divergent data/captain-shared.md" \
     "captain-shared quarantine did not emit its durable diagnostic"
 
@@ -621,7 +634,7 @@ test_shared_captain_preferences_converge_read_only() {
   [ ! -e "$w/sm/data/captain-shared.md" ] \
     || fail "primary captain-shared absence did not remove the downstream copy"
   quarantine_count=$(find "$w/sm/data" -maxdepth 1 -type f -name '.captain-shared.quarantine.*' | wc -l | tr -d ' ')
-  [ "$quarantine_count" = 2 ] || fail "captain-shared absence did not quarantine the prior downstream bytes"
+  [ "$quarantine_count" = 3 ] || fail "captain-shared absence did not quarantine the prior downstream bytes"
   pass "captain-shared preferences converge read-only with guarded quarantine and absence mirroring"
 }
 
