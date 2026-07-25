@@ -649,6 +649,13 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   [ "$close_status" -eq 0 ]
 }
 
+fm_backend_herdr_projection_teardown_close() {
+  local session=$1 pane_id=$2
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ] && return 0
+  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" 2>/dev/null || true
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
+}
+
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.
@@ -1101,6 +1108,34 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+fm_backend_herdr_create_task_rollback() {
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4
+  if [ -z "$pane_id" ] && [ -n "$tab_id" ]; then
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
+  fi
+  [ -n "$pane_id" ] || return 1
+  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" || return 1
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
+}
+
+fm_backend_herdr_close_tab_focus_preserving() {
+  local session=$1 wsid=$2 tab_id=$3 before active_tab info close_status
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  active_tab=${before#*$'\t'}
+  [ "$active_tab" != "$tab_id" ] || return 1
+  info=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" '
+    .result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab
+  ' >/dev/null 2>&1 || return 1
+  if fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1; then
+    close_status=0
+  else
+    close_status=$?
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$before" "husk tab close" || return 1
+  [ "$close_status" -eq 0 ]
+}
+
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
@@ -1171,7 +1206,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids dup_records out tab_id pane_id remaining_dup_tabs candidates candidate_count
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -1180,6 +1215,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     return 1
   }
   dup_tab_ids=""
+  dup_records=""
   if [ -n "$dup_tabs" ]; then
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
@@ -1189,6 +1225,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
         return 1
       fi
       dup_tab_ids="${dup_tab_ids}${dup}"$'\n'
+      dup_records="${dup_records}${dup}"$'\t'"${dup_pane}"$'\n'
     done <<EOF
 $dup_tabs
 EOF
@@ -1197,22 +1234,40 @@ EOF
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    if [ -z "$tab_id" ]; then
+      list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || list=
+      candidates=$(printf '%s' "$list" | jq -r --arg want "$label" --arg prior "$dup_tab_ids" '
+        .result.tabs[]?
+        | select(.label == $want)
+        | .tab_id as $tab
+        | select(($prior | split("\n") | index($tab)) == null)
+        | .tab_id
+      ' 2>/dev/null)
+      candidate_count=$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l | tr -d ' ')
+      [ "$candidate_count" = 1 ] && tab_id=$candidates
+    fi
+    fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
-    while IFS= read -r dup; do
+    while IFS=$'\t' read -r dup dup_pane; do
       [ -n "$dup" ] || continue
-      fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
+      if ! fm_backend_herdr_close_tab_focus_preserving "$session" "$wsid" "$dup"; then
+        fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
+        return 1
+      fi
     done <<EOF
-$dup_tab_ids
+$dup_records
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+      fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+      fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
@@ -1220,6 +1275,7 @@ EOF
       '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
+      fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" || true
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     fi
@@ -2159,12 +2215,13 @@ EOF
 # backend; how each backend confirms it is an internal decision - herdr's is
 # no longer literally "the composer read empty").
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep current
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   baseline=$(fm_backend_herdr_classify_submit_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  [ "$baseline" != unknown ] || { printf 'unknown'; return 0; }
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
@@ -2180,8 +2237,12 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       empty) printf 'empty'; return 0 ;;
       pending)
         if [ "$baseline" = busy ]; then
-          printf 'empty'
-          return 0
+          current=$(fm_backend_herdr_classify_submit_agent_status \
+            "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+          case "$current" in
+            busy) printf 'empty'; return 0 ;;
+            unknown) printf 'unknown'; return 0 ;;
+          esac
         fi
         ;;
       autocomplete) ;;

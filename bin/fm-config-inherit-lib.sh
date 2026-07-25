@@ -168,15 +168,108 @@ propagate_inheritable_config() {
   return "$rc"
 }
 
-# Compatibility entry point used by newer startup and spawn paths. This fork
-# does not yet carry the shared-captain inheritance surface, so the combined
-# operation currently delegates to its existing config-only contract.
+captain_shared_link_count() {
+  stat -c '%h' "$1" 2>/dev/null || stat -f '%l' "$1" 2>/dev/null
+}
+
+captain_shared_quarantine() {
+  local dest_home=$1 dest=$2 stamp quarantine
+  stamp=$(date -u +%Y%m%dT%H%M%S 2>/dev/null) || return 1
+  quarantine=$(umask 077; mktemp "$dest_home/data/.captain-shared.quarantine.$stamp.XXXXXX" 2>/dev/null) || return 1
+  rm -f "$quarantine" || return 1
+  chmod u+w "$dest" 2>/dev/null || {
+    rm -f "$quarantine"
+    return 1
+  }
+  mv "$dest" "$quarantine" 2>/dev/null || {
+    chmod 0444 "$dest" 2>/dev/null || true
+    rm -f "$quarantine"
+    return 1
+  }
+  chmod 0400 "$quarantine" 2>/dev/null || true
+  printf 'SECONDMATE_SYNC: quarantined divergent data/captain-shared.md for %s at %s\n' "$dest_home" "$quarantine" >&2
+  printf '%s' "$quarantine"
+}
+
+propagate_captain_shared() {
+  local src_home=$1 dest_home=$2 src=$1/data/captain-shared.md dest=$2/data/captain-shared.md
+  local reason links quarantine
+  if [ -e "$src" ] || [ -L "$src" ]; then
+    if [ ! -f "$src" ] || [ -L "$src" ]; then
+      reason="source is not an ordinary file"
+      warn_inheritable_config_error "data/captain-shared.md" "$src" "$reason"
+      record_inheritable_config_result "data/captain-shared.md" error "$reason"
+      return 1
+    fi
+  fi
+  if ! destination_allows_inherited_item "$dest_home/data" "captain-shared.md"; then
+    reason=$(inheritable_config_skip_reason)
+    warn_inheritable_config_skip "data/captain-shared.md" "$dest_home/data" "$reason"
+    record_inheritable_config_result "data/captain-shared.md" skipped "$reason"
+    return 0
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ ! -f "$dest" ] || [ -L "$dest" ]; then
+      reason="destination is not an ordinary file"
+      warn_inheritable_config_error "data/captain-shared.md" "$dest" "$reason"
+      record_inheritable_config_result "data/captain-shared.md" error "$reason"
+      return 1
+    fi
+    links=$(captain_shared_link_count "$dest") || links=
+    if [ "$links" != 1 ]; then
+      reason="destination hardlink count is not one"
+      warn_inheritable_config_error "data/captain-shared.md" "$dest" "$reason"
+      record_inheritable_config_result "data/captain-shared.md" error "$reason"
+      return 1
+    fi
+  fi
+  if [ ! -f "$src" ]; then
+    if [ -f "$dest" ]; then
+      quarantine=$(captain_shared_quarantine "$dest_home" "$dest") || {
+        record_inheritable_config_result "data/captain-shared.md" error "failed to quarantine removed primary value"
+        return 1
+      }
+      record_inheritable_config_result "data/captain-shared.md" pushed "mirrored primary absence; quarantined at $quarantine"
+    else
+      record_inheritable_config_result "data/captain-shared.md" unchanged ""
+    fi
+    return 0
+  fi
+  if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+    chmod 0444 "$dest" 2>/dev/null || {
+      record_inheritable_config_result "data/captain-shared.md" error "failed to restore read-only mode"
+      return 1
+    }
+    record_inheritable_config_result "data/captain-shared.md" unchanged ""
+    return 0
+  fi
+  quarantine=
+  if [ -f "$dest" ]; then
+    quarantine=$(captain_shared_quarantine "$dest_home" "$dest") || {
+      record_inheritable_config_result "data/captain-shared.md" error "failed to quarantine divergent destination"
+      return 1
+    }
+  fi
+  if copy_inheritable_file "$src" "$dest" && chmod 0444 "$dest" 2>/dev/null; then
+    record_inheritable_config_result "data/captain-shared.md" pushed "${quarantine:+quarantined prior value at $quarantine}"
+    return 0
+  fi
+  rm -f "$dest" 2>/dev/null || true
+  if [ -n "$quarantine" ]; then
+    cp "$quarantine" "$dest" 2>/dev/null && chmod 0444 "$dest" 2>/dev/null || true
+  fi
+  record_inheritable_config_result "data/captain-shared.md" error "failed to copy read-only shared preferences"
+  return 1
+}
+
 propagate_secondmate_inheritance() {
-  local src_home=$1 dest_home=$2 src_config=${3:-}
+  local src_home=$1 dest_home=$2 src_config=${3:-} config_rc=0 shared_rc=0
   [ -n "$src_home" ] || return 1
   [ -n "$dest_home" ] || return 1
   [ -n "$src_config" ] || src_config="$src_home/config"
-  propagate_inheritable_config "$src_config" "$dest_home/config"
+  propagate_inheritable_config "$src_config" "$dest_home/config" || config_rc=$?
+  propagate_captain_shared "$src_home" "$dest_home" || shared_rc=$?
+  [ "$config_rc" -eq 0 ] && [ "$shared_rc" -eq 0 ]
 }
 
 # Relative prefix of per-home instruction files written after a successful

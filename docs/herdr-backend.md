@@ -263,7 +263,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.
 - Mid-session secondmate liveness is not implemented.
 - OpenCode 1.18.4 can accept Enter while busy without clearing the composer.
-  The Herdr adapter accepts that queue only when native agent state was already busy, Enter transport succeeds, and the pending composer still contains the exact submitted text. Autocomplete-expanded content retries Enter, and idle submission checks remain strict.
+  The Herdr adapter accepts that queue only when Enter transport succeeds, contemporaneous native agent state remains busy, and the pending composer still contains the exact submitted text. Autocomplete-expanded content retries Enter, and idle submission checks remain strict.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

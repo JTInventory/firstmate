@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Push declared inheritable local config to live secondmate homes.
+# Push declared inheritable local material to live secondmate homes.
 # Usage: fm-config-push.sh [--help]
 #
 # Config-only convergence for mid-session changes such as config/crew-dispatch.json
@@ -7,22 +7,22 @@
 # home= from data/secondmates.md for older meta records, and reuses the same
 # propagate_inheritable_config machinery as bootstrap, but does not fast-forward
 # tracked files. Changed config is delivered through the shared reread path.
-# Warnings-only skips exit 0; real propagation errors exit non-zero.
+# Warnings-only skips exit 0; propagation or reread delivery errors exit non-zero.
 set -u
 
 usage() {
   cat <<'EOF'
 Usage: fm-config-push.sh [--help]
 
-Push the primary firstmate home's declared inheritable local config into each
-live secondmate home's config/ directory.
+Push the primary firstmate home's declared inheritable local material into each
+live secondmate home.
 
-This is config-only:
+This is inheritance-only:
   - does not fast-forward tracked files
   - sends a CONFIG_REREAD pointer when inherited config changes
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
-  - exits non-zero only for real propagation errors
+  - exits non-zero for propagation, CONFIG_REREAD publication, or delivery errors
 
 Live homes come from state/*.meta records with kind=secondmate.
 data/secondmates.md is only a fallback for missing home= fields in older or
@@ -122,7 +122,7 @@ while IFS='|' read -r id home _window meta; do
   printf 'secondmate %s (%s):\n' "$id" "$home_real"
   dirty=$(dirty_status "$home_real" yes || true)
   if [ -n "$dirty" ]; then
-    echo "  home: dirty working tree - config-only push continuing"
+    echo "  home: dirty working tree - inheritance-only push continuing"
   fi
 
   mkdir -p "$home_real/state" || {
@@ -156,7 +156,8 @@ while IFS='|' read -r id home _window meta; do
     continue
   }
   reports="$reports $report"
-  if FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$CONFIG" "$home_real/config"; then
+  if FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
     print_item_report "$report"
   else
     errors=1

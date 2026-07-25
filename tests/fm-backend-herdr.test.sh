@@ -413,7 +413,7 @@ test_create_task_closes_and_replaces_dead_pane_husk() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace a dead-pane husk instead of refusing"
   read -r tab pane <<EOF
 $out
@@ -441,7 +441,7 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace a no-agent husk (restored plain shell) instead of refusing"
   read -r tab pane <<EOF
 $out
@@ -469,7 +469,7 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/11.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace all same-labeled husks after creating a replacement"
   read -r tab pane <<EOF
 $out
@@ -501,7 +501,7 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1 || true; }; fm_backend_herdr_create_task_rollback() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task must fail when a preexisting same-labeled husk remains after close-and-replace"
   assert_contains "$out" "failed to remove preexisting herdr tab" "create_task did not report the stale preexisting husk tab"
@@ -549,7 +549,7 @@ test_create_task_husk_replacement_creates_before_closing() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_close_tab_focus_preserving() { fm_backend_herdr_cli "$1" tab close "$3" >/dev/null 2>&1; }; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
     || fail "create_task should close-and-replace the dead-pane husk"
   create_line=$(grep -n $'\x1f''tab'$'\x1f''create' "$log" | head -1 | cut -d: -f1)
   close_line=$(grep -n $'\x1f''tab'$'\x1f''close' "$log" | head -1 | cut -d: -f1)
@@ -573,6 +573,47 @@ test_create_task_creates_and_parses_ids() {
   assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' \
     "create_task must never prune when called with no seeded default tab id (the 4th arg defaults to empty)"
   pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
+}
+
+test_create_task_rolls_back_partial_and_focus_unsafe_mutations() {
+  local dir out
+  dir="$TMP_ROOT/create-task-rollback"
+  mkdir -p "$dir"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list")
+          if [ -e "$1/seen-list" ]; then
+            printf "%s" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t9\",\"label\":\"fm-partial\"}]}}"
+          else
+            : > "$1/seen-list"
+            printf "%s" "{\"result\":{\"tabs\":[]}}"
+          fi
+          ;;
+        "tab create") printf "%s" "{\"result\":{\"root_pane\":{\"pane_id\":\"w1:p9\"}}}" ;;
+      esac
+    }
+    fm_backend_herdr_create_task_rollback() { printf "%s|%s|%s|%s\n" "$@" >> "$1/rollback"; }
+    fm_backend_herdr_create_task "$1:w1" fm-partial /tmp >/dev/null 2>&1
+    printf "%s:" "$?"
+    printf "%s" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t2\",\"label\":\"fm-husk\"}]}}" > "$1/list"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list") cat "$1/list" ;;
+        "tab create") printf "%s" "{\"result\":{\"tab\":{\"tab_id\":\"w1:t3\"},\"root_pane\":{\"pane_id\":\"w1:p3\"}}}" ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { printf w1:p2; }
+    fm_backend_herdr_tab_is_husk() { return 0; }
+    fm_backend_herdr_close_tab_focus_preserving() { return 1; }
+    fm_backend_herdr_create_task "$1:w1" fm-husk /tmp >/dev/null 2>&1
+    printf "%s\n" "$?"
+    cat "$1/rollback"
+  ' "$ROOT" "$dir")
+  [ "$out" = $'1:1\n'"$dir"$'|w1|w1:t9|w1:p9\n'"$dir"$'|w1|w1:t3|w1:p3' ] \
+    || fail "flat create did not roll back partial identity and focus-unsafe replacement: $out"
+  pass "fm_backend_herdr_create_task: every identifiable post-create failure rolls back the exact new pane"
 }
 
 # --- container_ensure / create_task: --no-focus and per-home label ----------
@@ -1784,6 +1825,37 @@ EOF
   pass "fm_backend_herdr_kill: dead is idempotent; unknown, close failure, and surviving panes fail closed"
 }
 
+test_projection_teardown_requires_confirmed_absence() {
+  local dir out
+  dir="$TMP_ROOT/projection-teardown"
+  mkdir -p "$dir"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { [ "$CLOSE_OK" = 1 ]; }
+    fm_backend_herdr_pane_agent_state() {
+      if [ -e "$STATE_FILE" ]; then
+        printf "%s" "$AFTER"
+      else
+        : > "$STATE_FILE"
+        printf "%s" "$BEFORE"
+      fi
+    }
+    for fixture in "dead:dead:0" "no-agent:live:1" "no-agent:dead:1"; do
+      IFS=: read -r BEFORE AFTER CLOSE_OK <<EOF
+$fixture
+EOF
+      STATE_FILE="$1/state"
+      rm -f "$STATE_FILE"
+      export BEFORE AFTER CLOSE_OK STATE_FILE
+      fm_backend_herdr_projection_teardown_close fmtest w1:p2
+      printf "%s\n" "$?"
+    done
+  ' "$ROOT" "$dir")
+  [ "$out" = $'0\n1\n0' ] \
+    || fail "projected teardown must succeed only when exact absence is confirmed: $out"
+  pass "projected teardown: already-dead is idempotent and surviving panes fail closed"
+}
+
 test_current_path_reads_cwd() {
   local dir log resp fb out
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2350,9 +2422,8 @@ test_send_text_submit_preexisting_working_accepts_busy_queue() {
   local dir log resp fb out enter_count read_count
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
@@ -2368,9 +2439,9 @@ test_send_text_submit_busy_autocomplete_retries() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-busy-autocomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
   printf '  ❯ /compact compaction instructions\n' > "$resp/4.out"
   printf '  ❯ /compact\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 0.01' "$ROOT" )
@@ -2378,6 +2449,22 @@ test_send_text_submit_busy_autocomplete_retries() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 2 ] || fail "busy autocomplete should require a second Enter, sent $enter_count"
   pass "fm_backend_herdr_send_text_submit: busy autocomplete retries before accepting exact queued text"
+}
+
+test_send_text_submit_busy_retry_requires_current_busy_state() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-busy-retry-current"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '  ❯ /compact compaction instructions\n' > "$resp/4.out"
+  printf '  ❯ /compact\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a retry after the original busy turn became idle must not inherit stale queue acceptance, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "current-state retry should use exactly two Enter attempts, sent $enter_count"
+  pass "fm_backend_herdr_send_text_submit: every retry requires contemporaneous busy-state proof"
 }
 
 test_send_text_submit_enter_transport_failure() {
@@ -3129,6 +3216,7 @@ test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
+test_create_task_rolls_back_partial_and_focus_unsafe_mutations
 test_create_task_creates_with_no_focus_flag
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
@@ -3172,6 +3260,7 @@ test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_requires_close_and_confirmed_absence
+test_projection_teardown_requires_confirmed_absence
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
@@ -3209,6 +3298,7 @@ test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_accepts_busy_queue
 test_send_text_submit_busy_autocomplete_retries
+test_send_text_submit_busy_retry_requires_current_busy_state
 test_send_text_submit_enter_transport_failure
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint

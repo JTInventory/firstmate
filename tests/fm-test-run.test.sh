@@ -373,6 +373,11 @@ test_exclude_family() {
   listed=$("$RUNNER" --list --family real-herdr-gated)
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "family real-herdr-gated must list smoke test"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-send-secondmate-marker-herdr-e2e.test.sh' \
+    || fail "family real-herdr-gated must include credential-free marker/send coverage"
+  listed=$("$RUNNER" --list --all --exclude-family live-harness-optin)
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-send-secondmate-marker-herdr-e2e.test.sh' \
+    || fail "credential-free marker/send coverage must not remain live-harness opt-in"
   pass "exclude-family drops the named primary family after selection"
 }
 

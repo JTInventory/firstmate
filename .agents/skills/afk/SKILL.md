@@ -133,8 +133,9 @@ strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
 and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
 verification - this exception is a busy queue treated as a delivered Enter,
 not a swallowed one. Herdr applies the same exception only after successful
-Enter transport when the pending composer still contains the exact submitted
-text; autocomplete-expanded content retries.
+Enter transport when contemporaneous native state remains busy and the pending
+composer still contains the exact submitted text; autocomplete-expanded content
+retries.
 
 ## Classification policy
 

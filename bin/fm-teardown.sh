@@ -791,12 +791,20 @@ if [ "$BACKEND" = herdr ] \
 fi
 
 if [ "$HERDR_PRESENTATION_CLOSE_CANDIDATE" = 1 ]; then
+  HERDR_PRESENTATION_STATE=$(fm_backend_herdr_pane_agent_state \
+    "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")
+  if [ "$HERDR_PRESENTATION_STATE" = dead ]; then
+    HERDR_PRESENTATION_CLOSE_CONFIRMED=1
+  else
+    HERDR_PRESENTATION_CLOSE_CONFIRMED=0
+  fi
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   HERDR_PRESENTATION_FOCUS_LOCK=
   HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
   HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
-  if HERDR_PRESENTATION_FOCUS_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
+  if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" = 0 ] \
+     && HERDR_PRESENTATION_FOCUS_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
     while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
       if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
         HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
@@ -806,23 +814,28 @@ if [ "$HERDR_PRESENTATION_CLOSE_CANDIDATE" = 1 ]; then
       HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=$((HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT + 1))
     done
   fi
-  if [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+  if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" = 1 ]; then
+    :
+  elif [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
+    HERDR_PRESENTATION_CLOSE_CONFIRMED=0
+    fm_backend_herdr_projection_teardown_close \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" \
+      && HERDR_PRESENTATION_CLOSE_CONFIRMED=1
     HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
+    if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" != 1 ]; then
+      echo "REFUSED: exact herdr task-pane close could not be confirmed for $ID; preserving task state" >&2
+      exit 1
+    fi
   else
-    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+    echo "REFUSED: herdr presentation focus lock unavailable; preserving task state" >&2
+    exit 1
   fi
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
-    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
-  fi
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
 elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2

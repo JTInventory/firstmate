@@ -148,8 +148,9 @@ The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) now falls back
 to `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means
 the Enter was accepted and queued (reported as `empty` so the caller does not
 re-send), while an idle pane keeps `pending` as a genuine swallow. Herdr accepts
-the busy queue only after Enter transport succeeds and the pending composer
-still contains the exact submitted text; autocomplete-expanded content retries.
+the busy queue only after Enter transport succeeds, contemporaneous native state
+remains busy, and the pending composer still contains the exact submitted text;
+autocomplete-expanded content retries.
 Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
 scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
 cleared -> `empty`, idle + cleared -> `empty`), and
