@@ -1301,10 +1301,6 @@ EOF
         echo "error: Herdr display-label binding changed before tab creation" >&2
         exit 1
       }
-      spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-        echo "error: herdr focus lock unavailable; refusing a focus-unsafe flat tab create" >&2
-        exit 1
-      }
       if ! HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$DISPLAY_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID"); then
         case "$HERDR_TASK_IDS" in
           cleanup-required$'\t'*)
@@ -1327,7 +1323,6 @@ EOF
         HERDR_FLAT_ABORT_CLEANUP=1
         HERDR_FLAT_ABORT_TARGET="$HERDR_SES:$HERDR_PANE_ID"
       fi
-      spawn_herdr_presentation_order_lock_release
     fi
     HERDR_BOUND_LABEL_DATA=$(fm_task_label_prepare "$STATE" "$ID" "$KIND" "$DISPLAY_TITLE" "" \
       "$DATA/backlog.md" "$HERDR_LABEL_HOME" "$HERDR_SES" "$HERDR_WORKSPACE_ID") || exit 1
