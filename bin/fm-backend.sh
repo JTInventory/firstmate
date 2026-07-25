@@ -16,12 +16,15 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 FM_BACKEND_KNOWN="tmux herdr"
 
-fm_backend_is_known() {  # <name>
-  local name=$1 known
-  for known in $FM_BACKEND_KNOWN; do
-    [ "$name" = "$known" ] && return 0
-  done
+fm_backend_list_contains() {  # <space-delimited-list> <name>
+  local list=$1 name=$2
+  case "$name" in *[[:space:]]*) return 1 ;; esac
+  case " $list " in *" $name "*) return 0 ;; esac
   return 1
+}
+
+fm_backend_is_known() {  # <name>
+  fm_backend_list_contains "$FM_BACKEND_KNOWN" "$1"
 }
 
 # Detect the innermost session provider. A tmux pane nested inside Herdr has
@@ -81,6 +84,13 @@ fm_backend_required_tools() {  # <backend>
     herdr) printf '%s' 'herdr jq treehouse' ;;
     *) return 1 ;;
   esac
+}
+
+fm_backend_required_tool_available() {  # <backend> <tool>
+  local backend=$1 tool=$2 required
+  required=$(fm_backend_required_tools "$backend") || return 1
+  fm_backend_list_contains "$required" "$tool" || return 1
+  command -v "$tool" >/dev/null 2>&1
 }
 
 fm_backend_validate() {  # <name>

@@ -135,6 +135,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-task-label-lib.sh
 . "$SCRIPT_DIR/fm-task-label-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -368,6 +370,13 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
+  [ -f "$DATA/$ID/display-title" ] || {
+    echo "error: display title record for $ID is not a regular file" >&2
+    exit 1
+  }
+  DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
+fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -950,6 +959,8 @@ W="fm-$ID"
 DISPLAY_LABEL=
 TASK_KEY=
 HERDR_LABEL_JOURNAL=
+HERDR_LABEL_LOCK=
+HERDR_LABEL_LOCK_HELD=0
 HERDR_SES=
 HERDR_WORKSPACE_ID=
 HERDR_TAB_ID=
@@ -964,6 +975,10 @@ cleanup_herdr_spawn() {
   local rc=$?
   if [ -n "${HERDR_SPAWN_TARGET:-}" ]; then
     cleanup_spawn_window "$HERDR_SPAWN_TARGET"
+  fi
+  if [ "${HERDR_LABEL_LOCK_HELD:-0}" = 1 ]; then
+    HERDR_LABEL_LOCK_HELD=0
+    fm_lock_release "$HERDR_LABEL_LOCK" || true
   fi
   trap - EXIT
   exit "$rc"
@@ -1118,10 +1133,22 @@ case "$BACKEND" in
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
     fi
+    HERDR_SES=$(fm_backend_herdr_session)
+    HERDR_LABEL_LOCK="$STATE/.herdr-label.lock"
+    if ! fm_lock_try_acquire "$HERDR_LABEL_LOCK"; then
+      echo "error: another Herdr spawn is reserving a display label" >&2
+      exit 1
+    fi
+    HERDR_LABEL_LOCK_HELD=1
+    HERDR_LABEL_DATA=$(fm_task_label_prepare "$STATE" "$ID" "$KIND" "$DISPLAY_TITLE" "" \
+      "$DATA/backlog.md" "$HERDR_LABEL_HOME" "$HERDR_SES" "") || exit 1
+    IFS=$'\t' read -r DISPLAY_LABEL TASK_KEY <<EOF
+$HERDR_LABEL_DATA
+EOF
+    HERDR_LABEL_JOURNAL="$STATE/$ID.herdr-label"
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
-      HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
@@ -1142,7 +1169,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$DISPLAY_LABEL" "$PROJ_ABS"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -1180,7 +1207,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$DISPLAY_LABEL"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -1206,11 +1233,11 @@ case "$BACKEND" in
                && fm_backend_herdr_projection_live_binding_matches \
                  "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
                  "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
+                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$DISPLAY_LABEL" \
                && fm_backend_herdr_projection_journal_bind \
                  "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
                  "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
+                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$DISPLAY_LABEL"; then
               :
             else
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
@@ -1233,11 +1260,23 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_FLAT_LABEL_DATA=$(fm_task_label_prepare "$STATE" "$ID" "$KIND" "$DISPLAY_TITLE" "" \
+        "$DATA/backlog.md" "$HERDR_LABEL_HOME" "$HERDR_SES" "$HERDR_WORKSPACE_ID") || exit 1
+      [ "$HERDR_FLAT_LABEL_DATA" = "$HERDR_LABEL_DATA" ] || {
+        echo "error: Herdr display-label binding changed before tab creation" >&2
+        exit 1
+      }
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$DISPLAY_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
     fi
+    HERDR_BOUND_LABEL_DATA=$(fm_task_label_prepare "$STATE" "$ID" "$KIND" "$DISPLAY_TITLE" "" \
+      "$DATA/backlog.md" "$HERDR_LABEL_HOME" "$HERDR_SES" "$HERDR_WORKSPACE_ID") || exit 1
+    [ "$HERDR_BOUND_LABEL_DATA" = "$HERDR_LABEL_DATA" ] || {
+      echo "error: Herdr display-label binding changed during spawn" >&2
+      exit 1
+    }
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: Herdr did not return a tab/pane id for $DISPLAY_LABEL" >&2
       exit 1
@@ -1453,6 +1492,10 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
+  if [ "$HERDR_LABEL_LOCK_HELD" = 1 ]; then
+    HERDR_LABEL_LOCK_HELD=0
+    fm_lock_release "$HERDR_LABEL_LOCK" || exit 1
+  fi
 fi
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -1499,7 +1542,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+fm_backend_send_key "$BACKEND" "$WID" Enter
 
 HERDR_SPAWN_TARGET=
 trap - EXIT

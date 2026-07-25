@@ -411,7 +411,7 @@ SH
 # (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_BACKEND \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START"
 }
@@ -647,6 +647,10 @@ EOF
 
 test_lock_write_failure_read_only_path() {
   local rec root home fakebin out status
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "session-lock publication failure test skipped as root (root bypasses directory write bits)"
+    return 0
+  fi
   rec=$(new_world lock-write-failure)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -755,7 +759,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/tasks-axi"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
@@ -778,7 +782,7 @@ EOF
   [ "$context_line" -lt "$fleet_line" ] || fail "CONTEXT did not precede FLEET STATE"
   [ "$fleet_line" -lt "$next_line" ] || fail "FLEET STATE did not precede NEXT STEP"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
+  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: tasks-axi' | head -1 | cut -d: -f1)
   [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 

@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Unit coverage for the experimental Herdr session backend.
-# Every Herdr call is made through a deterministic fake; no live server is
-# required for this suite.
+# tests/fm-backend-herdr.test.sh - fake-herdr-CLI unit tests for the herdr
+# session-provider adapter (bin/backends/herdr.sh), P2 of
+# data/fm-backend-design-d7 (herdr-addendum.md). Mirrors tests/fm-backend.test.sh's
+# fakebin/command-log convention, but herdr has no pre-refactor baseline to
+# diff against (it is new in this task), so these are direct behavior
+# assertions against a small, LOG-based, canned-response fake `herdr` + real
+# `jq` (jq itself is a real required tool for this backend, not faked).
+# The real-binary smoke test lives in tests/fm-backend-herdr-smoke.test.sh,
+# gated on the herdr binary actually being installed.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1294,12 +1300,12 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
   wake_source=". \"\$SCRIPT_DIR/fm-wake-lib.sh\""
   acquire_pattern="fm_lock_try_acquire \"\$SPAWN_TASK_LOCK\""
   backend_pattern="^case \"\$BACKEND\" in"
-  meta_pattern="} > \"\$STATE/\$ID.meta\""
+  meta_pattern="mv \"\$META_TMP\" \"\$STATE/\$ID.meta\""
   assert_contains "$source" "$wake_source" \
     "fm-spawn does not load the shared lock implementation"
   acquire_line=$(grep -n "$acquire_pattern" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
   backend_line=$(grep -n "$backend_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  meta_line=$(grep -n "$meta_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  meta_line=$(grep -nF "$meta_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   [ -n "$acquire_line" ] && [ -n "$backend_line" ] && [ -n "$meta_line" ] \
     || fail "could not locate the spawn lock, backend creation, and metadata publication"
   [ "$acquire_line" -lt "$backend_line" ] && [ "$backend_line" -lt "$meta_line" ] \
@@ -1311,12 +1317,12 @@ test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
   local literal_pattern disarm_pattern release_pattern enter_pattern literal_line disarm_line release_line enter_line
   # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
   # shellcheck disable=SC2016
-  literal_pattern='spawn_send_literal "$T" "$LAUNCH"'
+  literal_pattern='fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"'
   # shellcheck disable=SC2016
   disarm_pattern='HERDR_PROJECTION_ABORT_CLEANUP=0'
   release_pattern='spawn_herdr_presentation_order_lock_release'
   # shellcheck disable=SC2016
-  enter_pattern='spawn_send_key "$T" Enter'
+  enter_pattern='fm_backend_send_key "$BACKEND" "$WID" Enter'
   literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
@@ -1576,7 +1582,7 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
-  [ "$out" = $'fmtest:w2:p1\tfm-secondmatetask' ] || fail "list_live should report only this home's own tab, got '$out'"
+  [ "$out" = $'fmtest:w2:p1\tfm-secondmatetask\tfm-secondmatetask' ] || fail "list_live should report only this home's own tab, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w2' \
     "list_live did not scope the tab list call to this home's own workspace (w2)"
   assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
@@ -2384,18 +2390,13 @@ test_dispatch_composer_state_routes_by_backend() {
     . "$ROOT/bin/fm-backend.sh"
     _FM_BACKEND_TMUX_SOURCED=1
     _FM_BACKEND_HERDR_SOURCED=1
-    _FM_BACKEND_ORCA_SOURCED=1
-    _FM_BACKEND_ZELLIJ_SOURCED=1
-    fm_tmux_composer_state() { [ "$1" = "sess:win" ] || fail "tmux composer_state got wrong target: $1"; printf 'pending'; }
+    fm_backend_tmux_composer_state() { [ "$1" = "sess:win" ] || fail "tmux composer_state got wrong target: $1"; printf 'pending'; }
     fm_backend_herdr_composer_state() { [ "$1" = "default:w1:p2" ] || fail "herdr composer_state got wrong target: $1"; printf 'empty'; }
-    fm_backend_orca_composer_state() { [ "$1" = "term-1" ] || fail "orca composer_state got wrong target: $1"; printf 'empty'; }
     [ "$(fm_backend_composer_state tmux sess:win)" = pending ] || fail "composer_state did not dispatch to the tmux classifier"
     [ "$(fm_backend_composer_state herdr default:w1:p2)" = empty ] || fail "composer_state did not dispatch to the herdr classifier"
-    [ "$(fm_backend_composer_state orca term-1)" = empty ] || fail "composer_state did not dispatch to the orca classifier"
-    [ "$(fm_backend_composer_state zellij sess:win)" = unknown ] || fail "composer_state should report unknown for zellij (no named classifier yet)"
     [ "$(fm_backend_composer_state bogus x)" = unknown ] || fail "composer_state should report unknown for an unrecognized backend"
   ) || fail "composer_state dispatch subshell failed"
-  pass "fm_backend_composer_state dispatches tmux/herdr/orca to their named classifiers, unknown for zellij/unrecognized backends"
+  pass "fm_backend_composer_state dispatches tmux/herdr to their named classifiers and reports unknown for unrecognized backends"
 }
 
 test_scripts_route_explicit_target_through_meta_backend() {
