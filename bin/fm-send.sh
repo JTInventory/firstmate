@@ -128,6 +128,7 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  final_after_pending=0
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
   verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle")
@@ -136,6 +137,7 @@ else
     # normal retry loop left the marked request in the composer. Do exactly that
     # once, and only on the marked Codex secondmate path.
     sleep "$settle"
+    final_after_pending=1
     verdict=$(fm_backend_submit_enter "$TARGET_BACKEND" "$T" 1 "$sleep_s" "$MESSAGE")
   fi
   case "$verdict" in
@@ -146,6 +148,12 @@ else
     send-failed)
       echo "error: text not sent to $T (tmux send-keys failed)" >&2
       exit 1
+      ;;
+    unknown)
+      if [ "$final_after_pending" = 1 ]; then
+        echo "error: final Enter submission to $T could not be confirmed" >&2
+        exit 1
+      fi
       ;;
   esac
   # Submit landed (verdict was not pending/send-failed). The cleared composer only
