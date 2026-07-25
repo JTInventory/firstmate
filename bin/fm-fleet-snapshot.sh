@@ -99,7 +99,7 @@ shopt -s nullglob
 meta_files=("$STATE"/*.meta)
 # Shell pathname expansion is already sorted. Avoid Bash 4's mapfile so this
 # read-only snapshot remains runnable with stock macOS Bash 3.2.
-for meta in "${meta_files[@]}"; do
+for meta in "${meta_files[@]+"${meta_files[@]}"}"; do
   id=$(basename "$meta" .meta)
   worktree=$(meta_value "$meta" worktree)
   project=$(meta_value "$meta" project)
