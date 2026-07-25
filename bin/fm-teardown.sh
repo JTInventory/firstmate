@@ -173,6 +173,42 @@ meta_value() {
   grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
+teardown_herdr_endpoint_focus_safe() {
+  local target=$1 session pane state lock attempt=0 held=0 close_status=1
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  [ "$state" = dead ] && return 0
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  lock=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock"; then
+      held=1
+      break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$held" = 1 ] || return 1
+  if fm_backend_herdr_projection_teardown_close "$session" "$pane"; then
+    close_status=0
+  else
+    close_status=$?
+  fi
+  fm_lock_release "$lock" || true
+  return "$close_status"
+}
+
+teardown_backend_endpoint() {
+  local backend=$1 target=$2
+  case "$backend" in
+    herdr) teardown_herdr_endpoint_focus_safe "$target" ;;
+    *) fm_backend_kill "$backend" "$target" ;;
+  esac
+}
+
 remove_grok_turnend_auth() {
   local state_dir=$1 id=$2 token hooks_dir
   token=$(cat "$state_dir/$id.grok-turnend-token" 2>/dev/null || true)
@@ -614,7 +650,7 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ -n "$child_t" ]; then
-      if ! fm_backend_kill "$child_backend" "$child_t" 2>/dev/null; then
+      if ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
         echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
         return 1
       fi
@@ -731,71 +767,51 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_CLOSE_CANDIDATE=0
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
+HERDR_PRESENTATION_WORKSPACE=
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_source herdr || {
+    echo "REFUSED: could not load Herdr teardown support for $ID; preserving task state and worktree" >&2
+    exit 1
+  }
+  fm_backend_herdr_parse_target "$T" || {
+    echo "REFUSED: invalid Herdr target $T for $ID; preserving task state and worktree" >&2
+    exit 1
+  }
+  HERDR_PRESENTATION_SESSION=$FM_BACKEND_HERDR_SESSION
+  HERDR_PRESENTATION_PANE=$FM_BACKEND_HERDR_PANE
+fi
 if [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_META_SESSION=$(meta_value "$META" herdr_session)
   HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+  HERDR_META_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_META_SESSION" ] \
      && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ]; then
-    HERDR_PRESENTATION_CLOSE_CANDIDATE=1
+     && [ -n "$HERDR_META_PANE" ] \
+     && [ "$T" = "$HERDR_META_SESSION:$HERDR_META_PANE" ]; then
     if fm_backend_herdr_projection_endpoint_matches_journal \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+      "$HERDR_META_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
       HERDR_PRESENTATION_RETIRE_CANDIDATE=1
     fi
   fi
 fi
 
-if [ "$HERDR_PRESENTATION_CLOSE_CANDIDATE" = 1 ]; then
-  HERDR_PRESENTATION_STATE=$(fm_backend_herdr_pane_agent_state \
-    "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")
-  if [ "$HERDR_PRESENTATION_STATE" = dead ]; then
-    HERDR_PRESENTATION_CLOSE_CONFIRMED=1
-  else
-    HERDR_PRESENTATION_CLOSE_CONFIRMED=0
-  fi
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
-  HERDR_PRESENTATION_FOCUS_LOCK=
-  HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
-  HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
-  if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" = 0 ] \
-     && HERDR_PRESENTATION_FOCUS_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
-    while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
-      if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
-        HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
-        break
-      fi
-      sleep 0.1
-      HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=$((HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT + 1))
-    done
-  fi
-  if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" = 1 ]; then
-    :
-  elif [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
-    HERDR_PRESENTATION_CLOSE_CONFIRMED=0
-    fm_backend_herdr_projection_teardown_close \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" \
-      && HERDR_PRESENTATION_CLOSE_CONFIRMED=1
-    HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
-    fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
-    if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" != 1 ]; then
-      echo "REFUSED: exact herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
-      exit 1
-    fi
-  else
-    echo "REFUSED: herdr presentation focus lock unavailable; preserving task state and worktree" >&2
+if [ "$BACKEND" = herdr ]; then
+  if ! teardown_herdr_endpoint_focus_safe "$T"; then
+    echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
     exit 1
   fi
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+    echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+  fi
 elif [ "$BACKEND" != orca ]; then
-  if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
+  if ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
     echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
     exit 1
   fi
@@ -829,12 +845,6 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  rm -f "$HERDR_PRESENTATION_JOURNAL"
-elif [ "$BACKEND" = herdr ] \
-     && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
-fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"

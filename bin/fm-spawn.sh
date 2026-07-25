@@ -226,6 +226,10 @@ HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_FLAT_ABORT_CLEANUP=0
 HERDR_FLAT_ABORT_TARGET=
+HERDR_FLAT_ABORT_UNCERTAIN=0
+HERDR_FLAT_ABORT_SCOPE=
+HERDR_FLAT_ABORT_LABEL=
+HERDR_FLAT_ABORT_UNCERTAINTY_FILE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -248,8 +252,25 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_herdr_flat_uncertainty_record() {
+  local reason=$1 target=${2:-} scope=${3:-} label=${4:-} file tmp
+  file=${HERDR_FLAT_ABORT_UNCERTAINTY_FILE:-"$STATE/$ID.herdr-cleanup-uncertain"}
+  mkdir -p "$STATE" 2>/dev/null || return 1
+  tmp=$(mktemp "$STATE/.$ID.herdr-cleanup-uncertain.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$ID"
+    printf 'reason=%s\n' "$reason"
+    printf 'target=%s\n' "$target"
+    printf 'scope=%s\n' "$scope"
+    printf 'label=%s\n' "$label"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$file"
+}
+
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? cleanup_session
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -265,8 +286,28 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
   fi
   if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
+    cleanup_session=${HERDR_FLAT_ABORT_TARGET%%:*}
+    if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ] \
+       && ! spawn_herdr_presentation_order_lock_acquire "$cleanup_session"; then
+      spawn_herdr_flat_uncertainty_record \
+        "presentation lock unavailable during abort cleanup" "$HERDR_FLAT_ABORT_TARGET" "" "" \
+        || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
+    elif fm_backend_herdr_parse_target "$HERDR_FLAT_ABORT_TARGET" \
+         && fm_backend_herdr_projection_teardown_close \
+           "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+      rm -f "${HERDR_FLAT_ABORT_UNCERTAINTY_FILE:-"$STATE/$ID.herdr-cleanup-uncertain"}"
+    else
+      spawn_herdr_flat_uncertainty_record \
+        "exact focus-safe abort cleanup unconfirmed" "$HERDR_FLAT_ABORT_TARGET" "" "" \
+        || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
+    fi
     HERDR_FLAT_ABORT_CLEANUP=0
-    fm_backend_herdr_kill "$HERDR_FLAT_ABORT_TARGET" >/dev/null 2>&1 || true
+  fi
+  if [ "$HERDR_FLAT_ABORT_UNCERTAIN" = 1 ]; then
+    spawn_herdr_flat_uncertainty_record \
+      "tab create mutation identity unavailable" "" "$HERDR_FLAT_ABORT_SCOPE" "$HERDR_FLAT_ABORT_LABEL" \
+      || echo "error: could not persist Herdr create uncertainty for $ID" >&2
+    HERDR_FLAT_ABORT_UNCERTAIN=0
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -389,6 +430,11 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/$ID.herdr-cleanup-uncertain"
+if [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; then
+  echo "error: unresolved Herdr cleanup uncertainty for $ID at $HERDR_FLAT_ABORT_UNCERTAINTY_FILE; refusing another spawn" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1264,6 +1310,12 @@ EOF
           cleanup-required$'\t'*)
             HERDR_FLAT_ABORT_CLEANUP=1
             HERDR_FLAT_ABORT_TARGET=${HERDR_TASK_IDS#*$'\t'}
+            ;;
+          cleanup-uncertain$'\t'*)
+            IFS=$'\t' read -r _ HERDR_FLAT_ABORT_SCOPE HERDR_FLAT_ABORT_LABEL <<EOF
+$HERDR_TASK_IDS
+EOF
+            HERDR_FLAT_ABORT_UNCERTAIN=1
             ;;
         esac
         exit 1

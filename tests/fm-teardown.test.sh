@@ -733,6 +733,45 @@ SH
   pass "forced secondmate teardown retries a transient child worktree index lock"
 }
 
+test_herdr_teardown_helper_locks_and_closes_focus_safe() {
+  local dir function_source close_log
+  dir="$TMP_ROOT/herdr-focus-safe-helper"
+  mkdir -p "$dir/state"
+  close_log="$dir/close"
+  function_source=$(sed -n '/^teardown_herdr_endpoint_focus_safe()/,/^}/p' "$TEARDOWN")
+  FUNCTION_SOURCE="$function_source" SCRIPT_DIR="$ROOT/bin" STATE="$dir/state" CLOSE_LOG="$close_log" \
+    bash -c '
+      eval "$FUNCTION_SOURCE"
+      fm_backend_source() { return 0; }
+      fm_backend_herdr_parse_target() {
+        FM_BACKEND_HERDR_SESSION=${1%%:*}
+        FM_BACKEND_HERDR_PANE=${1#*:}
+      }
+      fm_backend_herdr_pane_agent_state() { printf live; }
+      fm_backend_herdr_presentation_session_lock_path() { printf "%s/presentation.lock" "$STATE"; }
+      fm_backend_herdr_projection_teardown_close() {
+        printf "%s:%s\n" "$1" "$2" > "$CLOSE_LOG"
+      }
+      teardown_herdr_endpoint_focus_safe fmtest:w9:p4
+    ' || fail "focus-safe Herdr teardown helper refused a verifiable exact close"
+  [ "$(cat "$close_log")" = fmtest:w9:p4 ] \
+    || fail "focus-safe Herdr teardown helper did not close the exact response-derived pane"
+  [ ! -e "$dir/state/presentation.lock" ] \
+    || fail "focus-safe Herdr teardown helper did not release its session lock"
+  pass "Herdr teardown serializes every exact endpoint close through focus-safe verification"
+}
+
+test_projection_journal_retires_before_worktree_return() {
+  local retire_line return_line
+  retire_line=$(grep -n '^    rm -f "$HERDR_PRESENTATION_JOURNAL"$' "$TEARDOWN" | cut -d: -f1)
+  return_line=$(grep -n '^  teardown_treehouse_return "$WT"' "$TEARDOWN" | cut -d: -f1)
+  [ -n "$retire_line" ] && [ -n "$return_line" ] && [ "$retire_line" -lt "$return_line" ] \
+    || fail "confirmed projection journal retirement must precede the fallible worktree return"
+  grep -Fq 'teardown_backend_endpoint "$child_backend" "$child_t"' "$TEARDOWN" \
+    || fail "forced child Herdr teardown bypasses the shared focus-safe endpoint closer"
+  pass "confirmed projection journals retire before return failure and child teardown shares safe closure"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -754,3 +793,5 @@ test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_teardown_retries_transient_index_lock
 test_forced_secondmate_teardown_retries_child_index_lock
+test_herdr_teardown_helper_locks_and_closes_focus_safe
+test_projection_journal_retires_before_worktree_return

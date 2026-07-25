@@ -1124,12 +1124,16 @@ fm_backend_herdr_create_task_rollback() {
 }
 
 fm_backend_herdr_create_task_abort_created() {
-  local session=$1 wsid=$2 tab_id=$3 pane_id=$4
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 label=${5:-}
   fm_backend_herdr_create_task_rollback "$session" "$wsid" "$tab_id" "$pane_id" && return 0
   if [ -z "$pane_id" ] && [ -n "$tab_id" ]; then
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || pane_id=
   fi
-  [ -n "$pane_id" ] && printf 'cleanup-required\t%s:%s\n' "$session" "$pane_id"
+  if [ -n "$pane_id" ]; then
+    printf 'cleanup-required\t%s:%s\n' "$session" "$pane_id"
+  else
+    printf 'cleanup-uncertain\t%s:%s\t%s\n' "$session" "$wsid" "$label"
+  fi
   return 1
 }
 
@@ -1275,7 +1279,7 @@ EOF
       candidate_count=$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l | tr -d ' ')
       [ "$candidate_count" = 1 ] && tab_id=$candidates
     fi
-    fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
+    fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
@@ -1284,19 +1288,19 @@ EOF
     while IFS=$'\t' read -r dup dup_pane; do
       [ -n "$dup" ] || continue
       if ! fm_backend_herdr_close_tab_focus_preserving "$session" "$wsid" "$dup" "$tab_id"; then
-        fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
+        fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
         return 1
       fi
     done <<EOF
 $dup_records
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
+      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
-      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
+      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
@@ -1304,7 +1308,7 @@ EOF
       '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
-      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" || true
+      fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     fi
@@ -2253,7 +2257,6 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
-    [ "$baseline" != unknown ] || { printf 'unknown'; return 0; }
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
@@ -2265,12 +2268,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       busy) printf 'empty'; return 0 ;;
       empty) printf 'empty'; return 0 ;;
       pending)
-        if [ "$baseline" = busy ]; then
+        if [ "$baseline" != idle ]; then
           current=$(fm_backend_herdr_classify_submit_agent_status \
             "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
           case "$current" in
             busy) printf 'empty'; return 0 ;;
-            unknown) printf 'unknown'; return 0 ;;
           esac
         fi
         ;;

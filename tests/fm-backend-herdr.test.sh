@@ -634,6 +634,23 @@ test_create_task_exposes_identity_when_rollback_fails() {
   pass "fm_backend_herdr_create_task: failed rollback exposes exact endpoint identity"
 }
 
+test_create_task_exposes_idless_mutation_uncertainty() {
+  local out status
+  if out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_create_task_rollback() { return 1; }
+    fm_backend_herdr_create_task_abort_created default w1 "" "" fm-idless
+  ' "$ROOT"); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "idless mutation uncertainty must remain observable"
+  [ "$out" = $'cleanup-uncertain\tdefault:w1\tfm-idless' ] \
+    || fail "idless mutation did not expose its exact session/workspace/label scope: $out"
+  pass "fm_backend_herdr_create_task: idless mutation exposes durable cleanup scope"
+}
+
 test_close_active_husk_focuses_replacement() {
   local dir
   dir="$TMP_ROOT/active-husk-focus"
@@ -1469,24 +1486,75 @@ test_projected_abort_cleanup_holds_presentation_lock() {
   pass "fm-spawn: projected abort cleanup remains serialized by the presentation lock"
 }
 
-test_flat_abort_cleanup_closes_exact_created_pane() {
-  local dir kill_log function_source
+test_flat_abort_cleanup_is_locked_focus_safe_and_durable() {
+  local dir close_log lock_log function_source marker
   dir="$TMP_ROOT/flat-abort-cleanup"; mkdir -p "$dir"
-  kill_log="$dir/kill"
-  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  ROOT="$ROOT" KILL_LOG="$kill_log" FUNCTION_SOURCE="$function_source" bash -c '
+  close_log="$dir/close"
+  lock_log="$dir/lock"
+  marker="$dir/state/task-a.herdr-cleanup-uncertain"
+  function_source=$(sed -n '/^spawn_herdr_flat_uncertainty_record()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  ROOT="$ROOT" CLOSE_LOG="$close_log" LOCK_LOG="$lock_log" FUNCTION_SOURCE="$function_source" \
+    STATE="$dir/state" ID=task-a bash -c '
     eval "$FUNCTION_SOURCE"
-    fm_backend_herdr_kill() { printf "%s" "$1" > "$KILL_LOG"; }
+    spawn_herdr_presentation_order_lock_acquire() {
+      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+      HERDR_PRESENTATION_ORDER_LOCK="$STATE/presentation.lock"
+      printf "acquire:%s\n" "$1" >> "$LOCK_LOG"
+    }
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=${1%%:*}
+      FM_BACKEND_HERDR_PANE=${1#*:}
+    }
+    fm_backend_herdr_projection_teardown_close() {
+      printf "%s:%s\n" "$1" "$2" >> "$CLOSE_LOG"
+    }
+    fm_lock_release() { printf "release:%s\n" "$1" >> "$LOCK_LOG"; }
     HERDR_PROJECTION_ABORT_CLEANUP=0
     HERDR_FLAT_ABORT_CLEANUP=1
     HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/task-a.herdr-cleanup-uncertain"
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     ORCA_ABORT_CLEANUP=0
     SPAWN_TASK_LOCK_HELD=0
     spawn_abort_cleanup
   '
-  [ "$(cat "$kill_log")" = fmtest:w9:p4 ] || fail "flat abort cleanup did not close the exact created pane"
-  pass "fm-spawn: flat Herdr abort cleanup closes the exact response-derived pane"
+  [ "$(cat "$close_log")" = fmtest:w9:p4 ] || fail "flat abort cleanup did not use exact focus-safe closure"
+  [ "$(cat "$lock_log")" = $'acquire:fmtest\nrelease:'"$dir"$'/state/presentation.lock' ] \
+    || fail "flat abort cleanup was not serialized by the session presentation lock"
+  [ ! -e "$marker" ] || fail "confirmed flat abort cleanup left a false uncertainty marker"
+
+  CLOSE_LOG="$close_log" LOCK_LOG="$lock_log" FUNCTION_SOURCE="$function_source" \
+    STATE="$dir/state" ID=task-a bash -c '
+    eval "$FUNCTION_SOURCE"
+    spawn_herdr_presentation_order_lock_acquire() {
+      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+      HERDR_PRESENTATION_ORDER_LOCK="$STATE/presentation.lock"
+    }
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=${1%%:*}
+      FM_BACKEND_HERDR_PANE=${1#*:}
+    }
+    fm_backend_herdr_projection_teardown_close() { return 1; }
+    fm_lock_release() { return 0; }
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    HERDR_FLAT_ABORT_CLEANUP=1
+    HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/task-a.herdr-cleanup-uncertain"
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    ORCA_ABORT_CLEANUP=0
+    SPAWN_TASK_LOCK_HELD=0
+    spawn_abort_cleanup
+  '
+  [ -f "$marker" ] || fail "unconfirmed flat abort cleanup did not persist durable endpoint identity"
+  assert_contains "$(cat "$marker")" "target=fmtest:w9:p4" \
+    "flat abort uncertainty marker lost the exact endpoint"
+  grep -Fq 'unresolved Herdr cleanup uncertainty' "$ROOT/bin/fm-spawn.sh" \
+    || fail "future spawn does not refuse a durable Herdr cleanup uncertainty marker"
+  grep -Fq "cleanup-uncertain" "$ROOT/bin/fm-spawn.sh" \
+    || fail "spawn does not persist the backend's ID-less mutation uncertainty"
+  pass "fm-spawn: flat abort cleanup is locked, focus-safe, verified, and durable on uncertainty"
 }
 
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
@@ -2623,11 +2691,11 @@ test_send_text_submit_unknown_on_capture_failure() {
   pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter agent-get read fails (never retries past an unreadable target)"
 }
 
-test_send_text_submit_unknown_baseline_still_attempts_enter() {
+test_send_text_submit_unknown_baseline_verifies_and_retries_autocomplete() {
   local dir out
   dir="$TMP_ROOT/submit-unknown-baseline"
   mkdir -p "$dir"
-  out=$(ENTER_LOG="$dir/enter" bash -c '
+  out=$(ENTER_LOG="$dir/enter" COMPOSER_LOG="$dir/composer" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_parse_target() {
       FM_BACKEND_HERDR_SESSION=default
@@ -2636,11 +2704,20 @@ test_send_text_submit_unknown_baseline_still_attempts_enter() {
     fm_backend_herdr_send_literal() { return 0; }
     fm_backend_herdr_agent_status_raw() { printf unreadable; }
     fm_backend_herdr_send_key() { printf "%s\n" "$2" >> "$ENTER_LOG"; }
+    fm_backend_herdr_composer_state() {
+      printf "read\n" >> "$COMPOSER_LOG"
+      if [ "$(wc -l < "$COMPOSER_LOG")" -eq 1 ]; then
+        printf autocomplete
+      else
+        printf empty
+      fi
+    }
     fm_backend_herdr_send_text_submit default:w1:p2 hello 3 0 0
   ' "$ROOT")
-  [ "$out" = unknown ] || fail "unreadable native baseline must retain a truthful unknown verdict"
-  [ "$(cat "$dir/enter")" = Enter ] || fail "unreadable native baseline skipped the Enter submission attempt"
-  pass "fm_backend_herdr_send_text_submit: unreadable baseline still attempts Enter and reports unknown"
+  [ "$out" = empty ] || fail "unreadable native baseline did not confirm the later empty composer truthfully"
+  [ "$(cat "$dir/enter")" = $'Enter\nEnter' ] || fail "unknown-baseline autocomplete did not receive a safe second Enter"
+  [ "$(wc -l < "$dir/composer")" -eq 2 ] || fail "unknown-baseline submission did not inspect the composer after every Enter"
+  pass "fm_backend_herdr_send_text_submit: unknown baseline verifies composer and retries autocomplete safely"
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -3280,6 +3357,7 @@ test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_rolls_back_partial_and_focus_unsafe_mutations
 test_create_task_exposes_identity_when_rollback_fails
+test_create_task_exposes_idless_mutation_uncertainty
 test_close_active_husk_focuses_replacement
 test_create_task_creates_with_no_focus_flag
 test_projection_journal_is_atomic_and_uses_128_bit_token
@@ -3310,7 +3388,7 @@ test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projected_abort_cleanup_holds_presentation_lock
-test_flat_abort_cleanup_closes_exact_created_pane
+test_flat_abort_cleanup_is_locked_focus_safe_and_durable
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_reclaim_partial_create_rolls_back_or_fails_closed
@@ -3370,7 +3448,7 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
-test_send_text_submit_unknown_baseline_still_attempts_enter
+test_send_text_submit_unknown_baseline_verifies_and_retries_autocomplete
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
