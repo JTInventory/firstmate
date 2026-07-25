@@ -84,12 +84,12 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 `bin/fm-test-run.sh` is the single owner of serial behavior-suite selection, per-script timing markers, family totals, and the optional JSON timing artifact.
 Its header and `--help` own the flags, family labels, and changed-file map; this section only documents the entry points.
 `bin/fm-test-isolation-proof.sh` is the single owner of the Phase 2 concurrent isolation proof for a bounded, audited portable candidate set.
-It does not enable production CI sharding or general local `--jobs` on the serial runner; see `docs/fm-test-isolation-proof.md` for the archived candidate set, concurrency, and results.
+It does not enable production CI sharding or general local `--jobs` on the serial runner; its `--help` output and focused tests own the candidate set and execution contract.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 CI owns the broad portable and required real-Herdr lane composition in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 Use `bin/fm-test-run.sh --help` for the exact family exclusion and required gate-skip flags when reproducing either lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
-Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
+Tests that need real Herdr or another explicit opt-in (such as the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md) owns the lane's safety and isolation rationale, including why live harness credential tests remain opt-in.
 
 ## Questions

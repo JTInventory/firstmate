@@ -222,17 +222,17 @@ the marker lets firstmate distinguish it from a real captain message.
   `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
   `firstmate:0` fallback with a warning. Both resolution sources are logged at
   startup so a wrong-but-resolving fallback is detectable. Other runtime
-  backends, including zellij, orca, and cmux, are not yet supported as
+  backends other than tmux and Herdr are not supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
-  (docs/herdr-backend.md "Away-mode daemon: herdr supervisor-pane support").
+  (docs/herdr-backend.md "Away-mode supervisor support").
 
 ## Stale-artifact lifecycle
 
 Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
-`docs/herdr-backend.md` "Stale-artifact lifecycle fix" owns the mechanism and verification evidence.
+This section owns the stale-artifact lifecycle contract.
 
 ## Reliability properties
 

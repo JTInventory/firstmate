@@ -66,7 +66,7 @@ Firstmate atomically publishes a three-field version 1 journal containing a rand
 After the new workspace converges to one exact task endpoint beneath one exact parent, the journal advances to a version 2 binding that records the physical home, named session, endpoint, parent, and immutable expected labels.
 The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
 
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
+The task's immutable `<kind> - <phrase> · <task-key>` display tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
@@ -193,11 +193,9 @@ A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
 
-The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `.
-The separate routed-request carrier uses `[fm-from-firstmate]` plus U+2063.
-U+2063 survives Herdr terminal input as text, unlike the legacy ASCII control separator that could erase the visible routing label.
-`bin/fm-operational-input.sh` owns current operational construction and parsing, and the AFK skill owns legacy away-input compatibility.
-No Herdr-specific copy of that protocol exists.
+Away-mode escalation digests use the `FM_INJECT_MARK` ASCII 0x1f sentinel owned by `bin/fm-supervise-daemon.sh` and the AFK skill.
+The separate routed-request carrier uses `[fm-from-firstmate]` plus U+2063 and is owned by `bin/fm-marker-lib.sh`.
+Herdr uses those shared protocols without a backend-specific copy.
 
 ## Restart and liveness behavior
 
@@ -224,14 +222,14 @@ The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
 There is still one watcher process; the event reader is a bounded child of that watcher.
 
-`tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
+`tests/fm-backend-herdr.test.sh` and `tests/fm-transition-lib.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 
 ## Away-mode supervisor support
 
 The away daemon supports tmux and Herdr supervisor panes only.
-It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
+It refuses every supervisor backend other than tmux and Herdr rather than applying the wrong transport.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
-The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
+The pane-independent max-defer alert is configured in [`configuration.md`](configuration.md#away-mode-wedge-alarm-channels-configwedge-alarm).
 
 Harnesses with native tracked background execution can run the daemon in their terminal.
 Pi has no such mechanism.
@@ -275,11 +273,9 @@ tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
-tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
-tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

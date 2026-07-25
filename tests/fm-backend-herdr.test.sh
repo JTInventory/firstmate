@@ -24,7 +24,7 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # reads 1.out, call 2 reads 2.out, ...) so a test can script a short sequence
 # of calls precisely. A missing response file means "succeed with empty
 # stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
-# on success in the real CLI - verified in herdr-verification-p2.md).
+# on success in the real CLI - see docs/verification/runtime-backends.md).
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -1898,7 +1898,8 @@ test_capture_calls_pane_read() {
 
 test_capture_works_around_small_lines_bug() {
   local dir log resp fb out
-  # Verified herdr v0.7.1 bug (herdr-verification-p2.md): `pane read --lines N`
+  # Verified Herdr bug (docs/herdr-backend.md "Current transport behavior"):
+  # `pane read --lines N`
   # for a small N (below the pane's viewport height) returns EMPTY, not the
   # last N lines. The adapter must never ask herdr for a small --lines bound -
   # it always fetches >= 200 and trims locally with tail.
@@ -2009,7 +2010,7 @@ EOF
 test_current_path_reads_cwd() {
   local dir log resp fb out
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Verified pitfall (herdr-verification-p2.md): .result.pane.cwd is frozen at
+  # Verified pitfall (docs/verification/runtime-backends.md): .result.pane.cwd is frozen at
   # pane-creation time and never updates; .foreground_cwd tracks the live
   # running process (e.g. a treehouse get subshell) and is what must be read.
   printf '{"result":{"pane":{"cwd":"/tmp/pane-creation-dir","foreground_cwd":"/tmp/fake-worktree"}}}\n' > "$resp/1.out"
@@ -2218,7 +2219,7 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
 
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
-# (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
+# (docs/herdr-backend.md "Composer and injection safety"): real Claude and Codex
 # composer rows carry NO border glyph at all - the fixtures below are captured
 # verbatim (character-for-character) from a real herdr session running real
 # `claude`/`codex` (see the dated evidence entry). Before the fix these all
@@ -2374,7 +2375,7 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
-# (docs/herdr-backend.md "Native agent-state submit confirmation").
+# (docs/herdr-backend.md "Current transport behavior").
 
 test_wait_for_working_returns_busy_on_first_poll() {
   local dir log resp fb out calls
@@ -3234,9 +3235,7 @@ test_no_jq_reserved_keyword_arg_names() {
 # These exercise the herdr subscriber (fm_backend_herdr_wait_transition and its
 # helpers) with a FAKE socket reader and fake herdr CLI, so the policy routing,
 # per-pane dedupe marker, reconnect level-reconcile, and fail-closed return
-# codes are asserted without a real herdr server. The isolated real-herdr smoke
-# that drives a live idle->blocked transition lives in
-# tests/fm-backend-herdr-eventwait-smoke.test.sh.
+# codes are asserted without a real herdr server.
 
 # make_herdr_eventfake: a herdr stub answering exactly the calls the event path
 # makes - `session list --json` (echoes one session, name FM_FAKE_SESSION_NAME,
