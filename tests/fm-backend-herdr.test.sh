@@ -611,9 +611,9 @@ test_create_task_rolls_back_partial_and_focus_unsafe_mutations() {
     printf "%s\n" "$?"
     cat "$1/rollback"
   ' "$ROOT" "$dir")
-  [ "$out" = $'1:1\n'"$dir"$'|w1|w1:t9|w1:p9\n'"$dir"$'|w1|w1:t3|w1:p3' ] \
+  [ "$out" = $'1:1\n'"$dir"$'|w1||w1:p9\n'"$dir"$'|w1|w1:t3|w1:p3' ] \
     || fail "flat create did not roll back partial identity and focus-unsafe replacement: $out"
-  pass "fm_backend_herdr_create_task: every identifiable post-create failure rolls back the exact new pane"
+  pass "fm_backend_herdr_create_task: partial create rollback uses response-derived identity only"
 }
 
 test_create_task_exposes_identity_when_rollback_fails() {
@@ -652,25 +652,43 @@ test_create_task_exposes_idless_mutation_uncertainty() {
 }
 
 test_create_task_nonzero_create_preserves_uncertainty() {
-  local out status
-  if out=$(bash -c '
+  local dir out status
+  dir="$TMP_ROOT/nonzero-create-uncertainty"
+  mkdir -p "$dir"
+  if out=$(ROLLBACK_LOG="$dir/rollback" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_cli() {
       case "$2 $3" in
-        "tab list") printf "%s" "{\"result\":{\"tabs\":[]}}" ;;
+        "tab list")
+          if [ -e "$1/listed" ]; then
+            : > "$1/listed-after-create"
+            printf "%s" "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:foreign\",\"label\":\"fm-transport-uncertain\"}]}}"
+          else
+            : > "$1/listed"
+            printf "%s" "{\"result\":{\"tabs\":[]}}"
+          fi
+          ;;
         "tab create") return 1 ;;
       esac
     }
-    fm_backend_herdr_create_task default:w1 fm-transport-uncertain /tmp
-  ' "$ROOT" 2>/dev/null); then
+    fm_backend_herdr_create_task_rollback() {
+      printf "%s|%s|%s|%s\n" "$@" > "$ROLLBACK_LOG"
+      return 1
+    }
+    fm_backend_herdr_create_task "$1:w1" fm-transport-uncertain /tmp
+  ' "$ROOT" "$dir" 2>/dev/null); then
     status=0
   else
     status=$?
   fi
   [ "$status" -ne 0 ] || fail "nonzero tab create must remain a failed creation"
-  [ "$out" = $'cleanup-uncertain\tdefault:w1\tfm-transport-uncertain' ] \
+  [ "$out" = $'cleanup-uncertain\t'"$dir"$':w1\tfm-transport-uncertain' ] \
     || fail "nonzero tab create lost its possible mutation scope: $out"
-  pass "fm_backend_herdr_create_task: nonzero create preserves workspace and label uncertainty"
+  [ "$(cat "$dir/rollback")" = "$dir|w1||" ] \
+    || fail "failed create promoted a label-only tab into rollback authority"
+  [ ! -e "$dir/listed-after-create" ] \
+    || fail "failed create performed label-only post-create discovery"
+  pass "fm_backend_herdr_create_task: failed create never promotes label-only rollback authority"
 }
 
 test_close_active_husk_focuses_replacement() {
@@ -2593,10 +2611,10 @@ test_send_text_submit_busy_retry_requires_current_busy_state() {
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = unknown ] || fail "pending text after the original busy turn became idle must report unknown, got '$out'"
+  [ "$out" = pending ] || fail "pending text after the original busy turn became idle must remain pending, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 2 ] || fail "current-state retry should use exactly two Enter attempts, sent $enter_count"
-  pass "fm_backend_herdr_send_text_submit: pending text requires contemporaneous busy-state proof"
+  pass "fm_backend_herdr_send_text_submit: idle pending text is never acknowledged as sent"
 }
 
 test_send_text_submit_enter_transport_failure() {

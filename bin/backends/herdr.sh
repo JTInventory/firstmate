@@ -1239,7 +1239,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids dup_records out tab_id pane_id remaining_dup_tabs candidates candidate_count create_status response_identity_complete
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids dup_records out tab_id pane_id remaining_dup_tabs create_status response_identity_complete
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -1272,18 +1272,6 @@ EOF
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   response_identity_complete=0
   [ -n "$tab_id" ] && [ -n "$pane_id" ] && response_identity_complete=1
-  if [ -z "$tab_id" ]; then
-    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || list=
-    candidates=$(printf '%s' "$list" | jq -r --arg want "$label" --arg prior "$dup_tab_ids" '
-      .result.tabs[]?
-      | select(.label == $want)
-      | .tab_id as $tab
-      | select(($prior | split("\n") | index($tab)) == null)
-      | .tab_id
-    ' 2>/dev/null)
-    candidate_count=$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l | tr -d ' ')
-    [ "$candidate_count" = 1 ] && tab_id=$candidates
-  fi
   if [ "$create_status" -ne 0 ]; then
     fm_backend_herdr_create_task_abort_created "$session" "$wsid" "$tab_id" "$pane_id" "$label" || true
     echo "error: herdr tab create failed after endpoint identity became uncertain" >&2
@@ -2284,7 +2272,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
             "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
           case "$current" in
             busy) printf 'empty'; return 0 ;;
-            *) printf 'unknown'; return 0 ;;
+            idle) printf 'pending'; return 0 ;;
+            unknown) printf 'unknown'; return 0 ;;
           esac
         fi
         ;;
