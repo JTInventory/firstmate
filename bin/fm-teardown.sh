@@ -126,6 +126,22 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 TASK_TMP_CLEANUP=$(validated_task_tmp_cleanup_path "$TASK_TMP") || exit 1
 
+validate_direct_pr_state_cleanup() {
+  local artifact mode
+  for artifact in "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ -L "$artifact" ] || [ ! -f "$artifact" ] || [ ! -O "$artifact" ]; then
+      echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
+      return 1
+    fi
+    mode=$(stat -c '%a' "$artifact" 2>/dev/null) || return 1
+    if [ "$mode" != 600 ]; then
+      echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+}
+
 TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
 TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-1}
 case "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS" in
@@ -905,6 +921,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+validate_direct_pr_state_cleanup || exit 1
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
@@ -1001,7 +1018,8 @@ remove_grok_turnend_auth "$STATE" "$ID"
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
