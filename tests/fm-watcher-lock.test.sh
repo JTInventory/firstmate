@@ -19,7 +19,7 @@ trap fm_test_watch_cleanup_exit EXIT
 
 
 test_singleton_start() {
-  local dir state fakebin out1 out2 pid1 pid2 live i
+  local dir state fakebin out1 out2 pid1 pid2 i
   dir=$(make_case singleton)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -27,23 +27,29 @@ test_singleton_start() {
   out2="$dir/watch-two.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
   pid1=$!
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
-  pid2=$!
   i=0
   while [ "$i" -lt 50 ]; do
-    live=0
-    is_live_non_zombie "$pid1" && live=$((live + 1))
-    is_live_non_zombie "$pid2" && live=$((live + 1))
-    [ "$live" -eq 1 ] && break
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid1" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && is_live_non_zombie "$pid1" \
+      && break
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
-  grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid1" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    && is_live_non_zombie "$pid1" \
+    || fail "first watcher did not establish a live singleton"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
+  pid2=$!
+  wait "$pid2" || fail "second watcher failed while checking the live singleton"
+  grep -qF "watcher: already running pid $pid1" "$out2" || fail "second watcher did not report existing singleton"
+  is_live_non_zombie "$pid1" || fail "first watcher exited while the second checked its singleton"
   kill "$pid1" "$pid2" 2>/dev/null || true
   wait "$pid1" 2>/dev/null || true
   wait "$pid2" 2>/dev/null || true
-  pass "simultaneous watcher starts leave exactly one live process"
+  pass "second watcher preserves an established live singleton"
 }
 
 test_stale_watch_lock_reclaimed() {
