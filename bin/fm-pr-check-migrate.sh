@@ -516,6 +516,7 @@ metadata_pr_is_canonical() {
 legacy_custom_check_register() {
   local id=$1 check trust meta data registration line state_device
   fm_pr_task_id_valid "$id" || return 1
+  [ "$id" != x-watch ] || return 1
   check="$STATE/$id.check.sh"
   trust="$STATE/$id.check-trust"
   meta="$STATE/$id.meta"

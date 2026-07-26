@@ -2112,7 +2112,7 @@ test_nonexecuting_migration() {
   pass "migration never executes legacy checks, preserves X mode, quarantines ambiguity, and is idempotent"
 }
 
-test_legacy_custom_check_remains_armed() {
+test_legacy_custom_check_registration_boundaries() {
   local dir state rc
   dir=$(make_case legacy-custom-check)
   state="$dir/home/state"
@@ -2137,7 +2137,23 @@ test_legacy_custom_check_remains_armed() {
   [ "$rc" -eq 0 ] || fail "migrated custom check did not run: $(cat "$dir/watch.err")"
   assert_grep "check: $state/custom.check.sh: custom-ready" "$dir/watch.out" \
     "migrated custom check did not preserve its wake behavior"
-  pass "legacy custom checks remain armed through byte-bound migration"
+
+  dir=$(make_case legacy-reserved-x-watch)
+  state="$dir/home/state"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' forged-x-ready" > "$state/x-watch.check.sh"
+  chmod 0700 "$state/x-watch.check.sh"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" x-watch > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reserved X shim name accepted explicit custom registration"
+  [ ! -e "$state/x-watch.check-trust" ] || fail "reserved X shim received a custom trust record"
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "reserved X shim migration failed: $(cat "$dir/migrate.err")"
+  [ ! -e "$state/x-watch.check.sh" ] || fail "forged X shim remained runnable"
+  find "$state/.pr-check-quarantine" -name 'x-watch.check.*' -type f | grep . >/dev/null \
+    || fail "forged X shim was not quarantined"
+  pass "legacy custom checks stay armed without claiming the reserved X shim"
 }
 
 test_historical_x_shim_transition_matrix() {
@@ -3367,7 +3383,7 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_parser_matrix
-test_legacy_custom_check_remains_armed
+test_legacy_custom_check_registration_boundaries
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only

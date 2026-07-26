@@ -37,6 +37,7 @@ fm_custom_check_trust_read() {
 
 fm_custom_check_registered() {
   local state=$1 id=$2 check hash state_device
+  [ "$id" != x-watch ] || return 1
   check="$state/$id.check.sh"
   fm_custom_check_trust_read "$state" "$id" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -48,6 +49,7 @@ fm_custom_check_registered() {
 fm_custom_check_register() {
   local state=$1 id=$2 check trust hash state_device tmp
   fm_pr_task_id_valid "$id" || return 1
+  [ "$id" != x-watch ] || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   check="$state/$id.check.sh"
   trust="$state/$id.check-trust"
