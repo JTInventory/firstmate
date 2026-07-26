@@ -267,7 +267,7 @@ fi
 stopped_watcher=0
 pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
 if fm_pid_alive "$pid"; then
-  if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME"; then
+  if ! fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
     echo "PR_CHECK_MIGRATION: watcher ownership is ambiguous; review state/.watch.lock before rearming polls" >&2
     exit 1
   fi
@@ -511,6 +511,33 @@ metadata_pr_is_canonical() {
   MIGRATION_HOST=$FM_PR_META_HOST
   MIGRATION_PATH=$FM_PR_META_PATH
   MIGRATION_NUMBER=$FM_PR_META_NUMBER
+}
+
+legacy_custom_check_register() {
+  local id=$1 check trust meta data registration line state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ "$id" != x-watch ] || return 1
+  check="$STATE/$id.check.sh"
+  trust="$STATE/$id.check-trust"
+  meta="$STATE/$id.meta"
+  data="$STATE/$id.pr-poll"
+  registration="$STATE/$id.pr-poll-registration"
+  [ ! -e "$trust" ] && [ ! -L "$trust" ] || return 1
+  [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
+  [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  [ -f "$check" ] && [ ! -L "$check" ] || return 1
+  [ "$(fm_pr_file_device "$check")" = "$state_device" ] || return 1
+  [ "$(fm_pr_file_link_count "$check")" = 1 ] || return 1
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+    [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in pr=*) return 1 ;; esac
+    done < "$meta"
+  fi
+  chmod 0700 "$check" || return 1
+  fm_custom_check_register "$STATE" "$id"
 }
 
 quarantine_artifact() {
@@ -1030,6 +1057,7 @@ if migration_needed; then
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
+    legacy_custom_check_register "$id" && continue
 
     if fm_pr_task_id_valid "$id"; then
       prefix=$id

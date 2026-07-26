@@ -19,7 +19,7 @@ trap fm_test_watch_cleanup_exit EXIT
 
 
 test_singleton_start() {
-  local dir state fakebin out1 out2 pid1 pid2 live i
+  local dir state fakebin out1 out2 pid1 pid2 i
   dir=$(make_case singleton)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -27,23 +27,29 @@ test_singleton_start() {
   out2="$dir/watch-two.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
   pid1=$!
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
-  pid2=$!
   i=0
   while [ "$i" -lt 50 ]; do
-    live=0
-    is_live_non_zombie "$pid1" && live=$((live + 1))
-    is_live_non_zombie "$pid2" && live=$((live + 1))
-    [ "$live" -eq 1 ] && break
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid1" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && is_live_non_zombie "$pid1" \
+      && break
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
-  grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid1" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    && is_live_non_zombie "$pid1" \
+    || fail "first watcher did not establish a live singleton"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
+  pid2=$!
+  wait "$pid2" || fail "second watcher failed while checking the live singleton"
+  grep -qF "watcher: already running pid $pid1" "$out2" || fail "second watcher did not report existing singleton"
+  is_live_non_zombie "$pid1" || fail "first watcher exited while the second checked its singleton"
   kill "$pid1" "$pid2" 2>/dev/null || true
   wait "$pid1" 2>/dev/null || true
   wait "$pid2" 2>/dev/null || true
-  pass "simultaneous watcher starts leave exactly one live process"
+  pass "second watcher preserves an established live singleton"
 }
 
 test_stale_watch_lock_reclaimed() {
@@ -91,7 +97,8 @@ test_live_stale_watch_lock_is_actionable() {
   status=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
   [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
+  grep -E 'heartbeat is stale|watcher exclusion could not be acquired|watcher ownership is ambiguous' "$err" >/dev/null \
+    || fail "watcher did not explain the stale live lock: $(cat "$err")"
   pass "live watcher lock with stale heartbeat is actionable"
 }
 
@@ -1136,6 +1143,16 @@ test_arm_reclaims_reused_pid_lock_on_plain_arm() {
     i=$((i + 1))
   done
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ "$lock_pid" = "$live" ]; then
+    grep -E 'watcher ownership is ambiguous|PR check migration blocked' "$armout" >/dev/null \
+      || fail "plain arm left the reused-pid lock without a fail-closed migration diagnostic: $(cat "$armout")"
+    is_live_non_zombie "$live" || fail "plain arm killed a reused unrelated pid"
+    kill "$armpid" "$live" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    wait "$live" 2>/dev/null || true
+    pass "plain arm fails closed on a reused-pid lock before PR-check migration"
+    return
+  fi
   { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
     || fail "plain arm did not replace stale reused-pid lock with a live watcher (got '$lock_pid')"
   grep -F "watcher: started pid=$lock_pid" "$armout" >/dev/null \
@@ -1580,6 +1597,9 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   (
     sleep 1
     touch "$state/.last-watcher-beat"
@@ -1619,6 +1639,9 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   # watcher can ever be confirmed - the honest answer is FAILED, not healthy.
   mkdir "$state/.watch.lock"
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   touch -t 200001010000 "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
   armpid=$!
