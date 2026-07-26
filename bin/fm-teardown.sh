@@ -734,7 +734,7 @@ validate_child_backend() {
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
-  local child_retire_staged child_retire_source
+  local child_retire_staged child_retire_source child_resolved_handoff
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -748,6 +748,7 @@ cleanup_firstmate_home_children() {
     [ -n "$child_kind" ] || child_kind=ship
     child_retire_staged=0
     child_retire_source=
+    child_resolved_handoff=0
     if [ "$child_kind" = secondmate ]; then
       child_retire_source=$(fm_pending_reply_source_identity "$sub_state") || return 1
       if fm_pending_reply_task_has_open "$sub_state" "$child_id"; then
@@ -758,10 +759,11 @@ cleanup_firstmate_home_children() {
         child_retire_staged=1
       fi
       if ! fm_pending_reply_handoff_resolved_task_history \
-        "$sub_state" "$child_id" "$STATE" "$child_retire_source"; then
+        "$sub_state" "$child_id" "$STATE" "$child_retire_source" child_resolved_handoff; then
         echo "REFUSED: could not hand off resolved reply history for child secondmate $child_id." >&2
         return 1
       fi
+      [ "$child_resolved_handoff" = 0 ] || child_retire_staged=1
     fi
     if [ -n "$child_t" ]; then
       if ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then

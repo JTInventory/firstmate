@@ -378,6 +378,43 @@ test_incomplete_transaction_lock_is_reclaimed() {
   pass "incomplete transaction locks are reclaimed"
 }
 
+test_stale_generation_reclaim_preserves_new_owner() {
+  local home state corr lock log max_active
+  home=$(setup_parent stale-generation-lock)
+  state="$home/state"
+  corr=4123456789abcdef
+  lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
+  mkdir -p "$lock"
+  fm_pending_reply_txn_owner_write \
+    "$lock/owner-stale-token" 99999999 dead-owner stale-token owned \
+    || fail "stale-generation-lock: stale fixture setup failed"
+  log="$home/critical.log"
+  : > "$log"
+  for _ in 1 2 3 4 5 6 7 8; do
+    (
+      local token
+      fm_pending_reply_txn_lock_acquire "$state" "$corr" token \
+        || exit 1
+      printf '%s acquire\n' "$BASHPID" >> "$log"
+      sleep 0.02
+      printf '%s release\n' "$BASHPID" >> "$log"
+      fm_pending_reply_txn_lock_release "$state" "$corr" "$token"
+    ) &
+  done
+  wait || fail "stale-generation-lock: contender failed"
+  max_active=$(awk '
+    $2 == "acquire" { active++ }
+    $2 == "release" { active-- }
+    active > max { max=active }
+    END { print max + 0 }
+  ' "$log")
+  [ "$max_active" = 1 ] \
+    || fail "stale-generation-lock: concurrent owners entered ($max_active)"
+  [ ! -e "$lock/owner-stale-token" ] \
+    || fail "stale-generation-lock: stale generation remained"
+  pass "stale generation reclaim preserves the live owner"
+}
+
 test_escalation_publication_failure_retries() {
   local home state corr rec target escalations
   home=$(setup_parent escalation-retry)
@@ -1166,6 +1203,36 @@ test_finalizer_recovers_cleared_history_marker_with_active_record() {
   pass "finalization recovers cleared history markers"
 }
 
+test_finalizer_preserves_report_on_resolution_archive_failure() {
+  (
+    local home state retained corr rec source receipt
+    home=$(setup_parent finalizer-resolution-failure)
+    state="$home/state"
+    retained="$TMP_ROOT/finalizer-resolution-failure-retained/state"
+    mkdir -p "$retained"
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "preserve failed resolution")
+    fm_pending_reply_mark_delivered "$state" "$corr" \
+      || fail "finalizer-resolution-failure: delivery setup failed"
+    rec=$(fm_pending_reply_active_path "$state" "$corr")
+    fm_pending_reply_set "$rec" phase escalated \
+      || fail "finalizer-resolution-failure: phase setup failed"
+    source=$(fm_pending_reply_source_identity "$state")
+    fm_pending_reply_stage_force_retire_task "$state" hibit "$retained" \
+      || fail "finalizer-resolution-failure: staging failed"
+    receipt=$(fm_pending_reply_handoff_path "$retained" "$source" "$corr")
+    printf 'done [corr=%s]: preserve me\n' "$corr" > "$state/hibit.status"
+    fm_pending_reply_archive_resolved() { return 1; }
+    if fm_pending_reply_finalize_force_retire_task "$state" hibit "$retained" "$source"; then
+      fail "finalizer-resolution-failure: archive failure was suppressed"
+    fi
+    [ -f "$rec" ] || fail "finalizer-resolution-failure: active evidence was deleted"
+    [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] \
+      || fail "finalizer-resolution-failure: report evidence was not persisted"
+    [ -f "$receipt" ] || fail "finalizer-resolution-failure: retirement receipt was consumed"
+  ) || fail "finalizer resolution failure regression failed"
+  pass "finalization preserves reports when resolution archival fails"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1176,6 +1243,7 @@ test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_concurrent_escalation_publishes_once
 test_incomplete_transaction_lock_is_reclaimed
+test_stale_generation_reclaim_preserves_new_owner
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
@@ -1200,5 +1268,6 @@ test_staging_reconciles_already_archived_nested_resolution
 test_wrong_home_scan_preserves_staged_transaction
 test_finalizer_rechecks_late_resolution_under_lock
 test_finalizer_recovers_cleared_history_marker_with_active_record
+test_finalizer_preserves_report_on_resolution_archive_failure
 
 printf 'ok - all pending-reply tests passed\n'

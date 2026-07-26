@@ -1067,6 +1067,9 @@ test_nested_secondmate_teardown_handoffs_archived_resolution() {
     "nested-archived-resolved-reply: archived history must migrate before home deletion"
   [ "$(sed -n 's/^phase=//p' "$history")" = resolved ] \
     || fail "nested-archived-resolved-reply: resolved phase was not retained"
+  if compgen -G "$case_dir/state/pending-reply-history/.handoff-*" >/dev/null; then
+    fail "nested-archived-resolved-reply: resolved handoff receipt remained"
+  fi
   [ ! -e "$case_dir/home" ] && [ ! -e "$case_dir/nested-home" ] \
     || fail "nested-archived-resolved-reply: retired homes were not removed"
   pass "recursive teardown migrates already archived nested history"

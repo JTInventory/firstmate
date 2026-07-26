@@ -153,87 +153,147 @@ fm_pending_reply_txn_lock_value() {  # <lock-path> <key>
   fi
 }
 
-fm_pending_reply_txn_lock_cleanup() {  # <lock-path>
-  local path=$1
-  if [ -f "$path" ] && [ ! -d "$path" ]; then
-    rm -f "$path"
-    return $?
+fm_pending_reply_txn_owner_write() {  # <owner-path> <pid> <identity> <token> <waiting|owned>
+  local owner=$1 pid=$2 identity=$3 token=$4 phase=$5 tmp
+  tmp="$(dirname "$(dirname "$owner")")/.owner-${token}.$$.$RANDOM"
+  if ! printf '%s\n' \
+    "pid=$pid" \
+    "identity=$identity" \
+    "token=$token" \
+    "phase=$phase" > "$tmp"; then
+    rm -f "$tmp" || true
+    return 1
   fi
-  [ -d "$path" ] || return 0
-  rm -f "$path/pid" "$path/identity" "$path/token" || return 1
-  rmdir "$path"
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$owner" 2>/dev/null; then
+    rm -f "$tmp" || true
+    return 1
+  fi
 }
 
 fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
-  local state=$1 corr=$2 result_var=$3 lock owner pid identity lock_token
-  local existing_pid existing_identity existing_token actual quarantine attempt=0
-  local incomplete_signature='' incomplete_seen=0 current_signature
+  local state=$1 corr=$2 result_var=$3 lock owner pid identity lock_token phase
+  local existing_pid existing_identity existing_token actual attempt=0 generation
+  local incomplete_signature='' incomplete_seen=0 current_signature winner live_owner
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
   mkdir -p "$(dirname "$lock")" || return 1
   pid=${BASHPID:-$$}
   identity=$(fm_pending_reply_pid_identity "$pid") || return 1
   lock_token="$pid-$RANDOM-$(fm_pending_reply_now)"
+  owner="$lock/owner-$lock_token"
   while [ "$attempt" -lt 200 ]; do
-    owner="${lock}.owner.${lock_token}.$RANDOM"
-    if ! printf '%s\n' \
-      "pid=$pid" \
-      "identity=$identity" \
-      "token=$lock_token" > "$owner"; then
-      rm -f "$owner" || true
-      return 1
-    fi
-    chmod 600 "$owner" 2>/dev/null || true
-    if [ ! -d "$lock" ] && ln "$owner" "$lock" 2>/dev/null; then
-      rm -f "$owner" || true
-      printf -v "$result_var" '%s' "$lock_token"
-      return 0
-    fi
-    rm -f "$owner" || return 1
-    existing_pid=$(fm_pending_reply_txn_lock_value "$lock" pid)
-    existing_identity=$(fm_pending_reply_txn_lock_value "$lock" identity)
-    existing_token=$(fm_pending_reply_txn_lock_value "$lock" token)
-    if [ -n "$existing_pid" ] && [ -n "$existing_identity" ] && [ -n "$existing_token" ]; then
-      incomplete_signature=
-      incomplete_seen=0
+    if [ -f "$lock" ] && [ ! -d "$lock" ]; then
+      existing_pid=$(fm_pending_reply_txn_lock_value "$lock" pid)
+      existing_identity=$(fm_pending_reply_txn_lock_value "$lock" identity)
+      existing_token=$(fm_pending_reply_txn_lock_value "$lock" token)
       actual=$(fm_pending_reply_pid_identity "$existing_pid" 2>/dev/null || true)
-      if [ "$actual" != "$existing_identity" ] \
+      if [ -n "$existing_pid" ] && [ -n "$existing_identity" ] && [ -n "$existing_token" ] \
+         && [ "$actual" != "$existing_identity" ] \
          && [ "$(fm_pending_reply_txn_lock_value "$lock" token)" = "$existing_token" ]; then
-        quarantine="${lock}.stale.$$.$RANDOM"
-        if mv "$lock" "$quarantine" 2>/dev/null; then
-          fm_pending_reply_txn_lock_cleanup "$quarantine" || return 1
+        rm -f "$lock" 2>/dev/null || true
+        continue
+      fi
+      sleep 0.05
+      attempt=$((attempt + 1))
+      continue
+    fi
+    mkdir "$lock" 2>/dev/null || [ -d "$lock" ] || return 1
+    existing_pid=$(cat "$lock/pid" 2>/dev/null || true)
+    existing_identity=$(cat "$lock/identity" 2>/dev/null || true)
+    existing_token=$(cat "$lock/token" 2>/dev/null || true)
+    if [ -n "$existing_pid" ] || [ -n "$existing_identity" ] || [ -n "$existing_token" ]; then
+      if [ -n "$existing_pid" ] && [ -n "$existing_identity" ] && [ -n "$existing_token" ]; then
+        actual=$(fm_pending_reply_pid_identity "$existing_pid" 2>/dev/null || true)
+        if [ "$actual" != "$existing_identity" ] \
+           && [ "$(cat "$lock/token" 2>/dev/null || true)" = "$existing_token" ]; then
+          rm -f "$lock/pid" "$lock/identity" "$lock/token" || return 1
+          incomplete_signature=
+          incomplete_seen=0
           continue
         fi
-      fi
-    elif [ -d "$lock" ] && [ ! -L "$lock" ]; then
-      current_signature=$(fm_pending_reply_file_signature "$lock")
-      if [ "$current_signature" = "$incomplete_signature" ]; then
-        incomplete_seen=$((incomplete_seen + 1))
       else
-        incomplete_signature=$current_signature
-        incomplete_seen=0
-      fi
-      if [ "$incomplete_seen" -ge 20 ] \
-         && { [ ! -s "$lock/pid" ] || [ ! -s "$lock/identity" ] || [ ! -s "$lock/token" ]; }; then
-        quarantine="${lock}.incomplete.$$.$RANDOM"
-        if mv "$lock" "$quarantine" 2>/dev/null; then
-          fm_pending_reply_txn_lock_cleanup "$quarantine" || return 1
+        current_signature=$(fm_pending_reply_file_signature "$lock")
+        if [ "$current_signature" = "$incomplete_signature" ]; then
+          incomplete_seen=$((incomplete_seen + 1))
+        else
+          incomplete_signature=$current_signature
+          incomplete_seen=0
+        fi
+        if [ "$incomplete_seen" -ge 20 ]; then
+          rm -f "$lock/pid" "$lock/identity" "$lock/token" || return 1
           incomplete_signature=
           incomplete_seen=0
           continue
         fi
       fi
+      sleep 0.05
+      attempt=$((attempt + 1))
+      continue
+    fi
+    incomplete_signature=
+    incomplete_seen=0
+    if [ ! -f "$owner" ]; then
+      if ! fm_pending_reply_txn_owner_write \
+        "$owner" "$pid" "$identity" "$lock_token" waiting; then
+        sleep 0.05
+        attempt=$((attempt + 1))
+        continue
+      fi
+    fi
+    winner=
+    live_owner=0
+    for generation in "$lock"/owner-*; do
+      [ -f "$generation" ] || continue
+      existing_pid=$(fm_pending_reply_get "$generation" pid)
+      existing_identity=$(fm_pending_reply_get "$generation" identity)
+      existing_token=$(fm_pending_reply_get "$generation" token)
+      phase=$(fm_pending_reply_get "$generation" phase)
+      actual=$(fm_pending_reply_pid_identity "$existing_pid" 2>/dev/null || true)
+      if [ -z "$existing_pid" ] || [ -z "$existing_identity" ] || [ -z "$existing_token" ] \
+         || [ "$actual" != "$existing_identity" ]; then
+        [ "$(fm_pending_reply_get "$generation" token)" = "$existing_token" ] \
+          && rm -f "$generation" 2>/dev/null
+        continue
+      fi
+      case "$phase" in
+        owned)
+          if [ "$existing_token" = "$lock_token" ]; then
+            printf -v "$result_var" '%s' "$lock_token"
+            return 0
+          fi
+          live_owner=1
+          ;;
+        waiting)
+          if [ -z "$winner" ] \
+             || [[ $(basename "$generation") < $(basename "$winner") ]]; then
+            winner=$generation
+          fi
+          ;;
+        *) return 1 ;;
+      esac
+    done
+    if [ "$live_owner" = 0 ] && [ "$winner" = "$owner" ]; then
+      fm_pending_reply_txn_owner_write \
+        "$owner" "$pid" "$identity" "$lock_token" owned || return 1
+      printf -v "$result_var" '%s' "$lock_token"
+      return 0
     fi
     sleep 0.05
     attempt=$((attempt + 1))
   done
+  rm -f "$owner" 2>/dev/null || true
   return 1
 }
 
 fm_pending_reply_txn_lock_release() {  # <state-dir> <corr_id> <token>
-  local state=$1 corr=$2 token=$3 lock
+  local state=$1 corr=$2 token=$3 lock owner
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
-  [ "$(fm_pending_reply_txn_lock_value "$lock" token)" = "$token" ] || return 1
-  fm_pending_reply_txn_lock_cleanup "$lock"
+  owner="$lock/owner-$token"
+  [ -f "$owner" ] || return 1
+  [ "$(fm_pending_reply_get "$owner" token)" = "$token" ] || return 1
+  [ "$(fm_pending_reply_get "$owner" phase)" = owned ] || return 1
+  rm -f "$owner" || return 1
+  rmdir "$lock" 2>/dev/null || true
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -769,7 +829,7 @@ fm_pending_reply_reconcile_resolution() {  # <state-dir> <corr_id>
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   resolved=$(fm_pending_reply_get "$rec" resolved_epoch)
   via=$(fm_pending_reply_get "$rec" resolved_via)
-  [ -n "$delivered" ] && [ -n "$resolved" ] && [ -n "$via" ] || return 1
+  [ -n "$delivered" ] && [ -n "$resolved" ] && [ -n "$via" ] || return 2
   fm_pending_reply_set "$rec" phase resolved || return 1
   fm_pending_reply_archive_resolved "$state" "$corr"
 }
@@ -779,12 +839,15 @@ fm_pending_reply_reconcile_resolution() {  # <state-dir> <corr_id>
 fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
   local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
-  local unconfirmed=0
+  local unconfirmed=0 reconcile_rc
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   if fm_pending_reply_reconcile_resolution "$state" "$corr"; then
     return 0
+  else
+    reconcile_rc=$?
   fi
+  [ "$reconcile_rc" = 2 ] || return "$reconcile_rc"
   rec=$(fm_pending_reply_path "$state" "$corr")
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = resolved ] || [ "$phase" = retired ]; then
@@ -793,7 +856,7 @@ fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-ov
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   if [ -z "$delivered" ]; then
     marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
-    [ -f "$marker" ] || return 1
+    [ -f "$marker" ] || return 2
     delivery_entry=$(cat "$marker" 2>/dev/null || true)
     delivery_state=${delivery_entry%%=*}
     case "$delivery_state" in attempted|confirmed) ;; *) return 1 ;; esac
@@ -803,14 +866,14 @@ fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-ov
   if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
     signature=$(fm_pending_reply_file_signature "$status_file")
     previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
-    [ "$signature" != "$previous" ] || return 1
+    [ "$signature" != "$previous" ] || return 2
   fi
   line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
   if [ -z "$line" ]; then
     if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
       fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
     fi
-    return 1
+    return 2
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
@@ -1095,7 +1158,7 @@ fm_pending_reply_reconcile_recovery() {  # <state-dir> <corr_id>
 # Retains the durable unresolved record. Never loops.
 fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed now task_id summary payload parent_status outcome
+  local rec phase completed now task_id summary payload parent_status outcome resolve_rc
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1115,7 +1178,10 @@ fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   # Resolve wins if a late report arrived between completion and this call.
   if fm_pending_reply_try_resolve_locked "$state" "$corr"; then
     return 0
+  else
+    resolve_rc=$?
   fi
+  [ "$resolve_rc" = 2 ] || return "$resolve_rc"
   task_id=$(fm_pending_reply_get "$rec" task_id)
   summary=$(fm_pending_reply_get "$rec" request_summary)
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
@@ -1492,8 +1558,10 @@ fm_pending_reply_stage_force_retire_one() {  # <state-dir> <task-id> <history-st
   return "$rc"
 }
 
-fm_pending_reply_handoff_resolved_task_history() {  # <state-dir> <task-id> <history-state-dir> <source-state>
-  local state=$1 task_id=$2 history_state=$3 source_state=$4 history_dir history corr token rc
+fm_pending_reply_handoff_resolved_task_history() {  # <state-dir> <task-id> <history-state-dir> <source-state> [result-var]
+  local state=$1 task_id=$2 history_state=$3 source_state=$4 result_var=${5-}
+  local history_dir history corr token rc migrated=0
+  [ -z "$result_var" ] || printf -v "$result_var" '%s' 0
   [ "$state" != "$history_state" ] || return 0
   history_dir=$(fm_pending_reply_history_dir "$state")
   [ -d "$history_dir" ] || return 0
@@ -1508,6 +1576,7 @@ fm_pending_reply_handoff_resolved_task_history() {  # <state-dir> <task-id> <his
       if fm_pending_reply_handoff_resolved_history \
         "$state" "$corr" "$history_state" "$source_state"; then
         rc=0
+        migrated=1
       else
         rc=$?
       fi
@@ -1517,6 +1586,7 @@ fm_pending_reply_handoff_resolved_task_history() {  # <state-dir> <task-id> <his
     fm_pending_reply_txn_lock_release "$state" "$corr" "$token" || return 1
     [ "$rc" -eq 0 ] || return "$rc"
   done
+  [ -z "$result_var" ] || printf -v "$result_var" '%s' "$migrated"
 }
 
 fm_pending_reply_stage_force_retire_task() {  # <state-dir> <task_id> [history-state-dir]
@@ -1589,7 +1659,7 @@ fm_pending_reply_prepare_forced_retirement() {  # <record-path> <history-state-d
 
 fm_pending_reply_finalize_force_retire_one_locked() {  # <state-dir> <task-id> <history-state-dir> <source-state> <corr-id>
   local state=$1 task_id=$2 history_state=$3 source_state=$4 corr=$5
-  local active receipt history phase staged_history staged_source staged_from receipt_phase
+  local active receipt history phase staged_history staged_source staged_from receipt_phase resolve_rc
   active=$(fm_pending_reply_active_path "$state" "$corr")
   receipt=$(fm_pending_reply_handoff_path "$history_state" "$source_state" "$corr") || return 1
   history="$(fm_pending_reply_history_dir "$history_state")/$corr"
@@ -1611,7 +1681,12 @@ fm_pending_reply_finalize_force_retire_one_locked() {  # <state-dir> <task-id> <
         [ "$staged_history" = "$history_state" ] || return 1
         [ "$staged_source" = "$source_state" ] || return 1
         case "$staged_from" in escalated|recovery_failed|recovery_unknown) ;; *) return 1 ;; esac
-        fm_pending_reply_try_resolve_locked "$state" "$corr" || true
+        if fm_pending_reply_try_resolve_locked "$state" "$corr"; then
+          resolve_rc=0
+        else
+          resolve_rc=$?
+        fi
+        case "$resolve_rc" in 0|2) ;; *) return "$resolve_rc" ;; esac
         ;;
       *) return 1 ;;
     esac
