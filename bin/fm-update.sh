@@ -24,6 +24,8 @@
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
+#   - restart-firstmate-watcher: yes|no
+#   - restart-secondmate-watchers: <window-targets...>|none
 #   - nudge-secondmates: <window-targets...>|none   (updated live secondmates to nudge)
 #
 # Usage: fm-update.sh [--help]
@@ -50,9 +52,13 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
+restart_firstmate_watcher="no"
 ff_target "$FM_ROOT" "firstmate" origin no no
-if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
-  reread_firstmate="yes"
+if [ "$FF_STATUS" = "updated" ]; then
+  restart_firstmate_watcher="yes"
+  if [ -n "$FF_INSTR" ]; then
+    reread_firstmate="yes"
+  fi
 fi
 
 # --- secondmates -----------------------------------------------------------
@@ -84,4 +90,6 @@ fi
 # --- caller action summary -------------------------------------------------
 
 echo "reread-firstmate: $reread_firstmate"
+echo "restart-firstmate-watcher: $restart_firstmate_watcher"
+echo "restart-secondmate-watchers:${FF_NUDGE_WINDOWS:- none}"
 echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"

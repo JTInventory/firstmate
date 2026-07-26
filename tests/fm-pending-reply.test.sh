@@ -441,7 +441,7 @@ test_failed_owner_promotion_removes_waiter() {
   pass "failed owner promotion removes its waiter generation"
 }
 
-test_live_legacy_waiter_is_drained() {
+test_live_legacy_waiter_fails_closed() {
   local home state corr lock identity token
   home=$(setup_parent live-legacy-waiter)
   state="$home/state"
@@ -454,14 +454,12 @@ test_live_legacy_waiter_is_drained() {
     "identity=$identity" \
     "token=legacy-waiter" \
     "phase=waiting" > "$lock/owner-legacy-waiter"
-  FM_PENDING_REPLY_LEGACY_DRAIN_POLLS=2 \
-    fm_pending_reply_txn_lock_acquire "$state" "$corr" token \
-    || fail "live-legacy-waiter: abandoned pre-ticket waiter was not drained"
-  [ ! -e "$lock/owner-legacy-waiter" ] \
-    || fail "live-legacy-waiter: pre-ticket waiter remained"
-  fm_pending_reply_txn_lock_release "$state" "$corr" "$token" \
-    || fail "live-legacy-waiter: migrated transaction did not release"
-  pass "live legacy waiter drains before ticket ownership"
+  if fm_pending_reply_txn_lock_acquire "$state" "$corr" token; then
+    fail "live-legacy-waiter: ticket owner bypassed a live legacy waiter"
+  fi
+  [ -e "$lock/owner-legacy-waiter" ] \
+    || fail "live-legacy-waiter: live legacy generation was reclaimed"
+  pass "live legacy waiter remains fail-closed pending watcher restart"
 }
 
 test_escalation_publication_failure_retries() {
@@ -1302,7 +1300,7 @@ test_concurrent_escalation_publishes_once
 test_incomplete_transaction_lock_is_reclaimed
 test_stale_generation_reclaim_preserves_new_owner
 test_failed_owner_promotion_removes_waiter
-test_live_legacy_waiter_is_drained
+test_live_legacy_waiter_fails_closed
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
