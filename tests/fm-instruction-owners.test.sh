@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
 AGENTS="$ROOT/AGENTS.md"
 TMP_ROOT=$(fm_test_tmproot fm-instruction-owners)
@@ -48,7 +50,7 @@ assert_grep 'the same crewmate owns direct-PR reconciliation' "$AGENTS" \
   "direct-PR conflict reconciliation lost its owner"
 assert_grep 'Firstmate, never the worker, runs the guarded `bin/fm-pr-check.sh <id> <PR url>`' "$AGENTS" \
   "direct-PR reconciliation lost Firstmate-owned readiness verification"
-assert_grep 'paused: reconciliation-ready PR <url>' "$AGENTS" \
+assert_grep 'PR ready: <url>' "$AGENTS" \
   "direct-PR reconciliation lost its nonterminal check handoff"
 
 for legacy_phrase in \
@@ -179,7 +181,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost recovery state and onto mismatch blocker"
   assert_contains "$path" 'Do not rerun pre-rebase ancestry validation against rewritten `HEAD`' \
     "$path_name reruns invalid ancestry checks during recovery"
-  assert_contains "$path" 'Set `DEFAULT_OID=$(git rev-parse refs/remotes/origin/$DEFAULT)` and `PRE_HEAD=$(git rev-parse HEAD)`' \
+  assert_contains "$path" 'Set `DEFAULT_OID=$(git rev-parse "$BASE_FETCH_REF")` and `PRE_HEAD=$(git rev-parse HEAD)`' \
     "$path_name lost default and pre-rebase HEAD snapshots"
   assert_contains "$path" 'derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again, and require `CURRENT_BRANCH == BRANCH`; detached `HEAD` or mismatch must append `blocked: direct-PR branch changed before rebase` and stop' \
     "$path_name lost pre-rebase attached-branch validation"
@@ -209,13 +211,17 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost FEATURE_REF initialization"
   assert_contains "$path" 'If the remote still matches, resume only the validated active rebase' \
     "$path_name lost checkpoint remote-match validation"
-  assert_contains "$path" 'git fetch "$PUSH_ENDPOINT" "+$BASE_REF:refs/remotes/origin/$DEFAULT"' \
+  assert_contains "$path" '`PRIVATE_REF_ROOT=refs/firstmate/direct-pr/$TASK_ID`, `BASE_FETCH_REF=$PRIVATE_REF_ROOT/base`, and `FEATURE_FETCH_REF=$PRIVATE_REF_ROOT/feature`' \
+    "$path_name lost task-scoped private fetch refs"
+  assert_contains "$path" 'destination namespace is bound by the validated checkpoint to this task, repository, base, and feature identity and must not be shared with another task' \
+    "$path_name lost private-ref identity binding"
+  assert_contains "$path" 'git fetch "$PUSH_ENDPOINT" "+$BASE_REF:$BASE_FETCH_REF"' \
     "$path_name lost explicit default-ref fetch"
   assert_contains "$path" 'git ls-remote --exit-code "$PUSH_ENDPOINT" "$FEATURE_REF"' \
     "$path_name lost remote feature lookup guard"
-  assert_contains "$path" 'git fetch "$PUSH_ENDPOINT" "+$FEATURE_REF:refs/remotes/origin/fm/parallel-direct-pr"' \
+  assert_contains "$path" 'git fetch "$PUSH_ENDPOINT" "+$FEATURE_REF:$FEATURE_FETCH_REF"' \
     "$path_name lost explicit feature-ref fetch"
-  assert_contains "$path" 'EXPECTED=$(git rev-parse refs/remotes/origin/fm/parallel-direct-pr)' \
+  assert_contains "$path" 'EXPECTED=$(git rev-parse "$FEATURE_FETCH_REF")' \
     "$path_name lost fetched feature OID snapshot"
   assert_contains "$path" 'git merge-base --is-ancestor "$EXPECTED" HEAD' \
     "$path_name lost feature-history ancestry guard"
@@ -350,11 +356,13 @@ assert_contains "$POST_CONFLICT_PATH" 'require exit 0; exit 2 means the publishe
   "post-conflict path lost published feature lookup guard"
 assert_contains "$POST_CONFLICT_PATH" 'append `blocked: published remote feature lookup failed` and stop for either case' \
   "post-conflict path lost published-feature blocker"
-assert_contains "$POST_CONFLICT_PATH" 'After exact PR reconciliation, append exactly one nonterminal status line `paused: reconciliation-ready PR {url} checkpoint=$LEASE_CHECKPOINT task=$TASK_ID workflow=$WORKFLOW post_head=$POST_HEAD` and stop, retaining both exact state files' \
+assert_contains "$POST_CONFLICT_PATH" 'After exact PR reconciliation, append exactly one nonterminal status line `PR ready: {url} checkpoint=$LEASE_CHECKPOINT task=$TASK_ID workflow=$WORKFLOW post_head=$POST_HEAD` and stop, retaining both exact state files' \
   "post-conflict path lost the precise nonterminal readiness handoff"
+assert_contains "$POST_CONFLICT_PATH" 'This existing actionable status must wake Firstmate immediately through the shared status classifier' \
+  "post-conflict path lost the actionable classifier contract"
 assert_contains "$POST_CONFLICT_PATH" 'Do not run `fm-pr-check`, remove checkpoint state, or emit `done`' \
   "post-conflict path lets the worker cross the Firstmate ownership boundary"
-assert_contains "$POST_CONFLICT_PATH" 'Firstmate owns `bin/fm-pr-check.sh "$TASK_ID" "{url}"` and its metadata and poll writes' \
+assert_contains "$POST_CONFLICT_PATH" 'Firstmate owns the single `bin/fm-pr-check.sh "$TASK_ID" "{url}"` call and its metadata and poll writes' \
   "post-conflict path does not assign readiness checking to Firstmate"
 assert_contains "$POST_CONFLICT_PATH" 'repeat every endpoint, live-default, head, and PR validation, remove the validated checkpoint and stable task-specific `LEASE_CHECKPOINT_TMP`, and complete reconciliation' \
   "post-conflict path cleans up without revalidating after Firstmate confirmation"
@@ -382,11 +390,20 @@ for forbidden_endpoint_command in \
     fail "generated direct-PR brief uses origin instead of the bound push endpoint: $forbidden_endpoint_command"
   fi
 done
+if grep -Fq 'refs/remotes/origin/' "$DIRECT_PR_BRIEF"; then
+  fail "generated direct-PR brief writes shared origin tracking refs"
+fi
+CLASSIFIER_STATUS="$BRIEF_HOME/state/direct-pr-reconciliation.status"
+printf '%s\n' 'PR ready: https://github.com/example/repo/pull/1 checkpoint=/tmp/checkpoint task=task workflow=post-conflict post_head=abc' > "$CLASSIFIER_STATUS"
+signal_reason_is_actionable "$CLASSIFIER_STATUS" \
+  || fail "existing status classifier did not surface the direct-PR PR-ready handoff"
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
   || fail "generated direct-PR brief must emit one completion signal"
 assert_grep 'After initial PR opening, or after Firstmate-confirmed post-conflict cleanup, append `done: PR {url}` to the status file and stop.' "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost terminal completion boundary"
+assert_grep 'When that later `done` arrives, Firstmate relays the already-armed PR state and must not run `fm-pr-check` or publish its metadata and poll a second time.' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief can register post-conflict PR state twice"
 
 make_direct_pr_teardown_fixture() {
   local id=$1 fake
@@ -434,36 +451,38 @@ META
 MODE_REFUSAL_ID=direct-pr-mode-refusal
 MODE_REFUSAL_HOME=$(make_direct_pr_teardown_fixture "$MODE_REFUSAL_ID")
 MODE_REFUSAL_PRIMARY="$MODE_REFUSAL_HOME/state/$MODE_REFUSAL_ID.direct-pr-lease"
+MODE_REFUSAL_TEMP="$MODE_REFUSAL_HOME/state/$MODE_REFUSAL_ID.direct-pr-lease.tmp"
 printf '%s\n' fixture > "$MODE_REFUSAL_PRIMARY"
+printf '%s\n' partial > "$MODE_REFUSAL_TEMP"
 chmod 0644 "$MODE_REFUSAL_PRIMARY"
+chmod 0644 "$MODE_REFUSAL_TEMP"
+MODE_REFUSAL_ERR="$MODE_REFUSAL_HOME/teardown.err"
 if ( cd "$MODE_REFUSAL_HOME" && env -u NO_MISTAKES_GATE \
   PATH="$MODE_REFUSAL_HOME/bin:$PATH" FM_HOME="$MODE_REFUSAL_HOME" \
   FM_ROOT_OVERRIDE="$MODE_REFUSAL_HOME" FM_STATE_OVERRIDE="$MODE_REFUSAL_HOME/state" \
-  "$MODE_REFUSAL_HOME/bin/fm-teardown.sh" "$MODE_REFUSAL_ID" --force >/dev/null 2>&1 ); then
+  "$MODE_REFUSAL_HOME/bin/fm-teardown.sh" "$MODE_REFUSAL_ID" --force >/dev/null 2>"$MODE_REFUSAL_ERR" ); then
   fail "teardown accepted a mode-0644 durable direct-PR checkpoint"
 fi
+grep -qxF "REFUSED: unsafe direct-PR task state $MODE_REFUSAL_PRIMARY; preserving task state." "$MODE_REFUSAL_ERR" \
+  || fail "teardown mode refusal did not report the exact unsafe primary checkpoint"
 [ -f "$MODE_REFUSAL_PRIMARY" ] \
   || fail "teardown removed the refused mode-0644 durable checkpoint"
+[ -f "$MODE_REFUSAL_TEMP" ] \
+  || fail "teardown removed the stale temp after refusing the durable checkpoint"
 [ -f "$MODE_REFUSAL_HOME/state/$MODE_REFUSAL_ID.meta" ] \
   || fail "teardown removed task state after refusing the durable checkpoint"
 
-STALE_TEMP_ID=direct-pr-stale-temp
-STALE_TEMP_HOME=$(make_direct_pr_teardown_fixture "$STALE_TEMP_ID")
-STALE_TEMP_PRIMARY="$STALE_TEMP_HOME/state/$STALE_TEMP_ID.direct-pr-lease"
-STALE_TEMP_FILE="$STALE_TEMP_HOME/state/$STALE_TEMP_ID.direct-pr-lease.tmp"
-printf '%s\n' fixture > "$STALE_TEMP_PRIMARY"
-printf '%s\n' partial > "$STALE_TEMP_FILE"
-chmod 0600 "$STALE_TEMP_PRIMARY"
-chmod 0644 "$STALE_TEMP_FILE"
-STALE_TEMP_ERR="$STALE_TEMP_HOME/teardown.err"
-if ! ( cd "$STALE_TEMP_HOME" && env -u NO_MISTAKES_GATE \
-  PATH="$STALE_TEMP_HOME/bin:$PATH" FM_HOME="$STALE_TEMP_HOME" \
-  FM_ROOT_OVERRIDE="$STALE_TEMP_HOME" FM_STATE_OVERRIDE="$STALE_TEMP_HOME/state" \
-  "$STALE_TEMP_HOME/bin/fm-teardown.sh" "$STALE_TEMP_ID" --force >/dev/null 2>"$STALE_TEMP_ERR" ); then
-  sed -n '1,20p' "$STALE_TEMP_ERR" >&2
+chmod 0600 "$MODE_REFUSAL_PRIMARY"
+if ! ( cd "$MODE_REFUSAL_HOME" && env -u NO_MISTAKES_GATE \
+  PATH="$MODE_REFUSAL_HOME/bin:$PATH" FM_HOME="$MODE_REFUSAL_HOME" \
+  FM_ROOT_OVERRIDE="$MODE_REFUSAL_HOME" FM_STATE_OVERRIDE="$MODE_REFUSAL_HOME/state" \
+  "$MODE_REFUSAL_HOME/bin/fm-teardown.sh" "$MODE_REFUSAL_ID" --force >/dev/null 2>"$MODE_REFUSAL_ERR" ); then
+  sed -n '1,20p' "$MODE_REFUSAL_ERR" >&2
   fail "teardown rejected a private primary with a same-owner non-private stale temp"
 fi
-[ ! -e "$STALE_TEMP_PRIMARY" ] && [ ! -e "$STALE_TEMP_FILE" ] \
+[ ! -e "$MODE_REFUSAL_PRIMARY" ] && [ ! -e "$MODE_REFUSAL_TEMP" ] \
   || fail "teardown did not remove both exact validated direct-PR state files"
+[ ! -e "$MODE_REFUSAL_HOME/state/$MODE_REFUSAL_ID.meta" ] \
+  || fail "teardown did not complete after the same primary was changed to mode 0600"
 
 pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
