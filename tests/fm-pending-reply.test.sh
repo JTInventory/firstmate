@@ -528,6 +528,12 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   fi
   [ -z "$(fm_pending_reply_extract_corr "corr=${corr}0")" ] \
     || fail "longer correlation token must not extract a 16-hex prefix"
+  printf 'done [corr=%sg]: nonhex suffix\n' "$corr" >> "$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "nonhex-suffixed correlation token must not resolve by prefix"
+  fi
+  [ -z "$(fm_pending_reply_extract_corr "corr=${corr}g")" ] \
+    || fail "nonhex-suffixed correlation token must not extract a 16-hex prefix"
   [ -z "$(fm_pending_reply_extract_corr "notcorr=${corr}")" ] \
     || fail "embedded correlation label must not extract as a token"
   printf 'working: still thinking\n' >> "$state/hibit.status"

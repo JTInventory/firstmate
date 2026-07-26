@@ -48,6 +48,9 @@
 #   retired_epoch=
 #   retired_via=
 #   retired_from=
+#   retirement_staged_epoch=
+#   retirement_history_state=
+#   retirement_staged_from=
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_sightings=   comma-separated identities of counted sightings
 #   wrong_home_scan_signature=
@@ -73,7 +76,7 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
-FM_PENDING_REPLY_CORR_RE='(^|[^[:alnum:]_])corr=[A-Fa-f0-9]+'
+FM_PENDING_REPLY_CORR_RE='(^|[^[:alnum:]_])corr=([A-Fa-f0-9]{16})($|[^[:alnum:]_])'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
 
 fm_pending_reply_now() {
@@ -141,24 +144,23 @@ fm_pending_reply_corr_token() {  # <corr_id>
 
 # Extract the first corr=<16hex> token from free text, or empty.
 fm_pending_reply_extract_corr() {  # <text>
-  local text=$1 match
-  while IFS= read -r match; do
-    case "$match" in corr=*) ;; *) match=${match:1} ;; esac
-    [ "${#match}" -eq 21 ] || continue
-    printf '%s' "${match#corr=}" | tr 'A-F' 'a-f'
-    return 0
-  done < <(printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null || true)
+  local text=$1
+  if [[ $text =~ $FM_PENDING_REPLY_CORR_RE ]]; then
+    printf '%s' "${BASH_REMATCH[2]}" | tr 'A-F' 'a-f'
+  fi
   return 0
 }
 
 # 0 if <text> carries the exact correlation token for <corr_id>.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token match
-  token=$(fm_pending_reply_corr_token "$corr")
-  while IFS= read -r match; do
-    case "$match" in corr=*) ;; *) match=${match:1} ;; esac
-    [ "$match" = "$token" ] && return 0
-  done < <(printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null || true)
+  local text=$1 corr=$2 match consumed
+  corr=$(printf '%s' "$corr" | tr 'A-F' 'a-f')
+  while [[ $text =~ $FM_PENDING_REPLY_CORR_RE ]]; do
+    match=$(printf '%s' "${BASH_REMATCH[2]}" | tr 'A-F' 'a-f')
+    [ "$match" = "$corr" ] && return 0
+    consumed=${BASH_REMATCH[0]}
+    text=${text#*"$consumed"}
+  done
   return 1
 }
 
@@ -292,6 +294,9 @@ resolved_via=
 retired_epoch=
 retired_via=
 retired_from=
+retirement_staged_epoch=
+retirement_history_state=
+retirement_staged_from=
 wrong_home_hits=0
 wrong_home_sightings=
 wrong_home_scan_signature=
@@ -486,11 +491,17 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 }
 
 fm_pending_reply_archive_terminal() {  # <state-dir> <corr_id> [history-state-dir]
-  local state=$1 corr=$2 history_state=${3:-$1} active history_dir history phase
+  local state=$1 corr=$2 history_state=${3:-$1} active history_dir history phase staged_state
   active=$(fm_pending_reply_active_path "$state" "$corr")
   [ -f "$active" ] || return 0
   phase=$(fm_pending_reply_get "$active" phase)
   case "$phase" in resolved|retired) ;; *) return 1 ;; esac
+  if [ "$phase" = resolved ]; then
+    staged_state=$(fm_pending_reply_get "$active" retirement_history_state)
+    if [ -n "$staged_state" ]; then
+      rm -f "$(fm_pending_reply_history_dir "$staged_state")/.retire-$corr" || return 1
+    fi
+  fi
   history_dir=$(fm_pending_reply_history_dir "$history_state")
   mkdir -p "$history_dir" || return 1
   chmod 700 "$history_dir" 2>/dev/null || true
@@ -1134,8 +1145,8 @@ fm_pending_reply_task_force_retirable() {  # <state-dir> <task_id>
   return 0
 }
 
-fm_pending_reply_force_retire_task() {  # <state-dir> <task_id> [history-state-dir]
-  local state=$1 task_id=$2 history_state=${3:-$1} dir rec corr phase now
+fm_pending_reply_stage_force_retire_task() {  # <state-dir> <task_id> [history-state-dir]
+  local state=$1 task_id=$2 history_state=${3:-$1} dir rec corr phase source_phase now
   fm_pending_reply_task_force_retirable "$state" "$task_id" || return 1
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
@@ -1146,17 +1157,122 @@ fm_pending_reply_force_retire_task() {  # <state-dir> <task_id> [history-state-d
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     phase=$(fm_pending_reply_get "$rec" phase)
+    source_phase=$phase
     case "$phase" in
       resolved|retired)
-        fm_pending_reply_archive_terminal "$state" "$corr" "$history_state" || return 1
+        fm_pending_reply_archive_terminal "$state" "$corr" || return 1
         ;;
-      escalated|recovery_failed|recovery_unknown)
-        fm_pending_reply_set "$rec" retired_epoch "$now" || return 1
-        fm_pending_reply_set "$rec" retired_via forced-teardown || return 1
-        fm_pending_reply_set "$rec" retired_from "$phase" || return 1
-        fm_pending_reply_set "$rec" phase retired || return 1
-        fm_pending_reply_archive_terminal "$state" "$corr" "$history_state" || return 1
+      recovery_failed|recovery_unknown)
+        fm_pending_reply_maybe_escalate "$state" "$corr" || return 1
+        rec=$(fm_pending_reply_active_path "$state" "$corr")
+        [ -f "$rec" ] || continue
+        phase=$(fm_pending_reply_get "$rec" phase)
+        [ "$phase" = escalated ] || return 1
+        ;&
+      escalated)
+        fm_pending_reply_set "$rec" retirement_staged_epoch "$now" || return 1
+        fm_pending_reply_set "$rec" retirement_history_state "$history_state" || return 1
+        fm_pending_reply_set "$rec" retirement_staged_from "$source_phase" || return 1
+        fm_pending_reply_prepare_forced_retirement "$rec" "$history_state" || return 1
         ;;
     esac
+  done
+}
+
+fm_pending_reply_prepare_forced_retirement() {  # <record-path> <history-state-dir>
+  local rec=$1 history_state=$2 corr task_id staged_from history_dir history staged tmp line now
+  corr=$(fm_pending_reply_get "$rec" corr_id)
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  staged_from=$(fm_pending_reply_get "$rec" retirement_staged_from)
+  [ -n "$corr" ] && [ -n "$task_id" ] || return 1
+  case "$staged_from" in escalated|recovery_failed|recovery_unknown) ;; *) return 1 ;; esac
+  history_dir=$(fm_pending_reply_history_dir "$history_state")
+  mkdir -p "$history_dir" || return 1
+  chmod 700 "$history_dir" 2>/dev/null || true
+  history="$history_dir/$corr"
+  staged="$history_dir/.retire-$corr"
+  if [ -f "$history" ]; then
+    [ "$(fm_pending_reply_get "$history" corr_id)" = "$corr" ] || return 1
+    [ "$(fm_pending_reply_get "$history" task_id)" = "$task_id" ] || return 1
+    [ "$(fm_pending_reply_get "$history" phase)" = retired ] || return 1
+    [ "$(fm_pending_reply_get "$history" retired_via)" = forced-teardown ] || return 1
+    [ "$(fm_pending_reply_get "$history" retired_from)" = "$staged_from" ] || return 1
+    return 0
+  fi
+  if [ -f "$staged" ]; then
+    [ "$(fm_pending_reply_get "$staged" corr_id)" = "$corr" ] || return 1
+    [ "$(fm_pending_reply_get "$staged" task_id)" = "$task_id" ] || return 1
+    [ "$(fm_pending_reply_get "$staged" phase)" = retired ] || return 1
+    [ "$(fm_pending_reply_get "$staged" retired_via)" = forced-teardown ] || return 1
+    [ "$(fm_pending_reply_get "$staged" retired_from)" = "$staged_from" ] || return 1
+    return 0
+  fi
+  tmp="$history_dir/.${corr}.retire.$$"
+  : > "$tmp" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      phase=*|retired_epoch=*|retired_via=*|retired_from=*|retirement_staged_epoch=*|retirement_history_state=*|retirement_staged_from=*) continue ;;
+    esac
+    printf '%s\n' "$line" >> "$tmp" || return 1
+  done < "$rec"
+  now=$(fm_pending_reply_now)
+  printf '%s\n' \
+    "retired_epoch=$now" \
+    "retired_via=forced-teardown" \
+    "retired_from=$staged_from" \
+    "phase=retired" >> "$tmp" || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  [ ! -e "$staged" ] || return 1
+  mv "$tmp" "$staged"
+}
+
+fm_pending_reply_finalize_force_retire_task() {  # <state-dir> <task_id> [history-state-dir]
+  local state=$1 task_id=$2 history_state=${3:-$1} dir rec phase staged_history
+  local history_dir staged corr history found=0
+  dir=$(fm_pending_reply_dir "$state")
+  if [ -d "$dir" ]; then
+    for rec in "$dir"/*; do
+      [ -f "$rec" ] || continue
+      [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+      phase=$(fm_pending_reply_get "$rec" phase)
+      case "$phase" in
+        resolved|retired) continue ;;
+        escalated)
+          staged_history=$(fm_pending_reply_get "$rec" retirement_history_state)
+          [ "$staged_history" = "$history_state" ] || return 1
+          found=1
+          ;;
+        *) return 1 ;;
+      esac
+    done
+  fi
+  history_dir=$(fm_pending_reply_history_dir "$history_state")
+  for staged in "$history_dir"/.retire-*; do
+    [ -f "$staged" ] || continue
+    [ "$(fm_pending_reply_get "$staged" task_id)" = "$task_id" ] || continue
+    corr=$(fm_pending_reply_get "$staged" corr_id)
+    [ -n "$corr" ] || return 1
+    [ "$(fm_pending_reply_get "$staged" phase)" = retired ] || return 1
+    [ "$(fm_pending_reply_get "$staged" retired_via)" = forced-teardown ] || return 1
+    history="$history_dir/$corr"
+    if [ -f "$history" ]; then
+      [ "$(fm_pending_reply_get "$history" task_id)" = "$task_id" ] || return 1
+      [ "$(fm_pending_reply_get "$history" phase)" = retired ] || return 1
+      [ "$(fm_pending_reply_get "$history" retired_via)" = forced-teardown ] || return 1
+      [ "$(fm_pending_reply_get "$history" retired_from)" = \
+        "$(fm_pending_reply_get "$staged" retired_from)" ] || return 1
+      rm -f "$staged" || return 1
+    else
+      mv "$staged" "$history" || return 1
+    fi
+    found=1
+  done
+  [ "$found" = 1 ] || return 1
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    rm -f "$rec" || return 1
   done
 }
