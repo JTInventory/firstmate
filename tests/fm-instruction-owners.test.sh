@@ -77,13 +77,35 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost conflict resolution"
   assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "HEAD:$FEATURE_REF"' \
     "$path_name lost explicit lease and push refspec"
+  assert_contains "$path" 'Keep `EXPECTED` unchanged across the rebase and transient push retries' \
+    "$path_name lost preserved lease OID retry"
+  assert_contains "$path" 'retry that same lease push' \
+    "$path_name lost unchanged-remote retry"
+  assert_contains "$path" 'restart this workflow and ancestry validation only after a lease rejection or confirmed remote change' \
+    "$path_name restarts ancestry validation without a lease rejection or remote change"
+  assert_contains "$path" 'blocked: remote feature retry lookup failed' \
+    "$path_name lost retry lookup blocker"
+  assert_contains "$path" 'and stop' \
+    "$path_name lost explicit blocker stop"
 done
 assert_contains "$PRE_PR_PATH" '0 means the feature ref exists, 2 means it is absent, and any other status is a lookup failure' \
   "pre-PR path lost distinct feature lookup outcomes"
+assert_contains "$PRE_PR_PATH" 'blocked: remote feature lookup failed' \
+  "pre-PR path lost lookup-failure blocker"
+assert_contains "$PRE_PR_PATH" 'set `EXPECTED=`' \
+  "pre-PR path lost absent-feature lease initialization"
+assert_contains "$PRE_PR_PATH" 'Open the PR with `gh-axi` only after the push succeeds' \
+  "pre-PR path can open a PR before safe publication"
 assert_contains "$POST_CONFLICT_PATH" 'require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure' \
   "post-conflict path lost published feature lookup guard"
+assert_contains "$POST_CONFLICT_PATH" 'blocked: published remote feature lookup failed' \
+  "post-conflict path lost published-feature blocker"
+assert_contains "$POST_CONFLICT_PATH" 'Reconciliation is complete only after the push succeeds' \
+  "post-conflict path can complete before safe publication"
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
   || fail "generated direct-PR brief must emit one completion signal"
+assert_grep 'After opening or reconciling the PR, append `done: PR {url}` to the status file and stop.' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost terminal completion boundary"
 
 pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
