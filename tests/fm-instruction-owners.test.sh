@@ -61,6 +61,20 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost DEFAULT initialization"
   assert_contains "$path" 'set `FEATURE_REF=refs/heads/fm/parallel-direct-pr`' \
     "$path_name lost FEATURE_REF initialization"
+  assert_contains "$path" 'set `FEATURE_REF=refs/heads/fm/parallel-direct-pr` and `LEASE_CHECKPOINT=.fm-direct-pr-lease`' \
+    "$path_name lost task-local lease checkpoint"
+  assert_contains "$path" 'Atomically write `expected=$EXPECTED` and `phase=pre-rebase` to `LEASE_CHECKPOINT` before rebasing' \
+    "$path_name lost durable pre-rebase lease checkpoint"
+  assert_contains "$path" 'atomically update `LEASE_CHECKPOINT` to `phase=ready-to-push` while preserving its `expected=$EXPECTED`' \
+    "$path_name lost durable ready-to-push phase"
+  assert_contains "$path" 'When the remote still matches the checkpoint' \
+    "$path_name lost checkpoint remote-match validation"
+  assert_contains "$path" 'without rerunning pre-rebase ancestry validation against rewritten `HEAD`' \
+    "$path_name reruns invalid ancestry checks during recovery"
+  assert_contains "$path" 'When the remote has moved, clear `LEASE_CHECKPOINT` and restart safe validation' \
+    "$path_name lost confirmed-remote-movement cleanup"
+  assert_contains "$path" 'After the push succeeds, clear `LEASE_CHECKPOINT`' \
+    "$path_name lost successful-publication checkpoint cleanup"
   assert_contains "$path" 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' \
     "$path_name lost explicit default-ref fetch"
   assert_contains "$path" 'git ls-remote --exit-code origin "$FEATURE_REF"' \
@@ -77,30 +91,28 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost conflict resolution"
   assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "HEAD:$FEATURE_REF"' \
     "$path_name lost explicit lease and push refspec"
-  assert_contains "$path" 'Keep `EXPECTED` unchanged across the rebase and transient push retries' \
-    "$path_name lost preserved lease OID retry"
   assert_contains "$path" 'retry that same lease push' \
     "$path_name lost unchanged-remote retry"
-  assert_contains "$path" 'restart this workflow and ancestry validation only after a lease rejection or confirmed remote change' \
-    "$path_name restarts ancestry validation without a lease rejection or remote change"
-  assert_contains "$path" 'blocked: remote feature retry lookup failed' \
+  assert_contains "$path" 'if the retry lookup fails, append `blocked: remote feature retry lookup failed` and stop' \
     "$path_name lost retry lookup blocker"
-  assert_contains "$path" 'and stop' \
-    "$path_name lost explicit blocker stop"
+  assert_contains "$path" 'A malformed checkpoint or lookup failure must append `blocked: direct-PR lease recovery failed` and stop' \
+    "$path_name lost fail-closed checkpoint recovery"
+  assert_contains "$path" 'if the ancestry check fails, append `blocked: remote feature branch diverged; refusing to overwrite remote-only commits` and stop' \
+    "$path_name lost fail-closed divergence blocker"
 done
 assert_contains "$PRE_PR_PATH" '0 means the feature ref exists, 2 means it is absent, and any other status is a lookup failure' \
   "pre-PR path lost distinct feature lookup outcomes"
-assert_contains "$PRE_PR_PATH" 'blocked: remote feature lookup failed' \
+assert_contains "$PRE_PR_PATH" 'any other status is a lookup failure that must append `blocked: remote feature lookup failed` and stop' \
   "pre-PR path lost lookup-failure blocker"
 assert_contains "$PRE_PR_PATH" 'set `EXPECTED=`' \
   "pre-PR path lost absent-feature lease initialization"
-assert_contains "$PRE_PR_PATH" 'Open the PR with `gh-axi` only after the push succeeds' \
+assert_contains "$PRE_PR_PATH" 'After the push succeeds, clear `LEASE_CHECKPOINT`, then open the PR with `gh-axi`' \
   "pre-PR path can open a PR before safe publication"
 assert_contains "$POST_CONFLICT_PATH" 'require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure' \
   "post-conflict path lost published feature lookup guard"
-assert_contains "$POST_CONFLICT_PATH" 'blocked: published remote feature lookup failed' \
+assert_contains "$POST_CONFLICT_PATH" 'append `blocked: published remote feature lookup failed` and stop for either case' \
   "post-conflict path lost published-feature blocker"
-assert_contains "$POST_CONFLICT_PATH" 'Reconciliation is complete only after the push succeeds' \
+assert_contains "$POST_CONFLICT_PATH" 'After the push succeeds, clear `LEASE_CHECKPOINT`; only then is reconciliation complete' \
   "post-conflict path can complete before safe publication"
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
