@@ -53,19 +53,21 @@ printf '%s\n' '- direct-project [direct-PR] - direct PR fixture (added 2026-07-2
 FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" parallel-direct-pr direct-project >/dev/null \
   || fail "direct-PR brief scaffold failed"
 DIRECT_PR_BRIEF="$BRIEF_HOME/data/parallel-direct-pr/brief.md"
-assert_grep 'resolve `DEFAULT` from `refs/remotes/origin/HEAD`, falling back only to an existing local `main` or `master`' "$DIRECT_PR_BRIEF" \
-  "generated direct-PR brief lost default-branch resolution"
-FETCH_REFSPEC_COUNT=$(grep -Fc 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' "$DIRECT_PR_BRIEF")
-[ "$FETCH_REFSPEC_COUNT" -eq 2 ] \
-  || fail "generated direct-PR brief must explicitly fetch the default ref in both reconciliation paths"
-assert_grep 'rebase onto `origin/$DEFAULT`, and resolve ordinary conflicts before pushing' "$DIRECT_PR_BRIEF" \
-  "generated direct-PR brief lost pre-PR conflict resolution"
-assert_grep 'parallel work made the open PR conflict, you still own reconciliation' "$DIRECT_PR_BRIEF" \
-  "generated direct-PR brief lost post-PR reconciliation ownership"
-assert_grep 'rebase onto `origin/$DEFAULT`, and resolve ordinary conflicts; then update the open PR' "$DIRECT_PR_BRIEF" \
-  "generated direct-PR brief lost post-PR conflict resolution"
-assert_grep 'git push --force-with-lease origin fm/parallel-direct-pr' "$DIRECT_PR_BRIEF" \
-  "generated direct-PR brief lost guarded published-branch update"
+PRE_PR_PATH=$(grep -F 'When it is implemented and committed' "$DIRECT_PR_BRIEF")
+POST_CONFLICT_PATH=$(grep -F 'If firstmate later tells you that parallel work made the open PR conflict' "$DIRECT_PR_BRIEF")
+for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
+  path=${!path_name}
+  assert_contains "$path" 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' \
+    "$path_name lost explicit default-ref fetch"
+  assert_contains "$path" 'git fetch origin "+$FEATURE_REF:refs/remotes/origin/fm/parallel-direct-pr"' \
+    "$path_name lost explicit feature-ref fetch"
+  assert_contains "$path" 'EXPECTED=$(git rev-parse refs/remotes/origin/fm/parallel-direct-pr)' \
+    "$path_name lost fetched feature OID snapshot"
+  assert_contains "$path" 'rebase onto `origin/$DEFAULT` and resolve ordinary conflicts' \
+    "$path_name lost conflict resolution"
+  assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "HEAD:$FEATURE_REF"' \
+    "$path_name lost explicit lease and push refspec"
+done
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
   || fail "generated direct-PR brief must emit one completion signal"
