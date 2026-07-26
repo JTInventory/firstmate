@@ -85,16 +85,24 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost fail-closed checkpoint identity validation"
   assert_contains "$path" 'a lookup failure must append `blocked: direct-PR lease recovery lookup failed` and stop' \
     "$path_name lost fail-closed recovery lookup"
-  assert_contains "$path" 'If it still matches and `phase=rebase-in-progress`: an active rebase may use Git'\''s expected detached `HEAD` only when its metadata records `refs/heads/$BRANCH` as the original branch, `pre_head=` as the original head, and `default_oid=` as the exact onto target; then resume only that recorded rebase' \
+  assert_contains "$path" 'On recovery, detect active rebase metadata before remote-movement cleanup' \
+    "$path_name lost active-rebase-first recovery ordering"
+  assert_contains "$path" 'An active rebase is valid only with `phase=rebase-in-progress` and metadata recording `refs/heads/$BRANCH` as the original branch, `pre_head=` as the original head, and `default_oid=` as the exact onto target' \
     "$path_name lost active-rebase branch, head, and onto proof"
-  assert_contains "$path" 'otherwise append `blocked: active direct-PR rebase metadata mismatch` and stop' \
+  assert_contains "$path" 'Git'\''s expected detached `HEAD` is allowed only in that validated state, otherwise append `blocked: active direct-PR rebase metadata mismatch` and stop' \
     "$path_name lost active-rebase metadata blocker"
+  assert_contains "$path" 'If the remote moved from `expected=` during that validated active rebase, retain `LEASE_CHECKPOINT` and its bound state, append `blocked: remote feature moved during active direct-PR rebase; checkpoint retained`, and stop without cleanup or restart' \
+    "$path_name lost active-rebase remote-movement checkpoint retention"
+  assert_contains "$path" 'If the remote moved with no active rebase, remove the validated checkpoint and its task-specific temporary artifacts, then restart safe validation' \
+    "$path_name lost bounded non-active remote-movement cleanup"
   assert_contains "$path" 'With no active rebase, require attached `CURRENT_BRANCH == branch=`' \
     "$path_name lost attached-state recovery boundary"
   assert_contains "$path" 'When `HEAD == pre_head=`, either atomically persist `pre_head=` as `post_head=` with `phase=ready-to-push` for a proven no-op where `default_oid=` is already an ancestor of `HEAD`, or safely restart `git rebase "$DEFAULT_OID"` and perform the same ready-state rewrite after it completes' \
     "$path_name lost no-active pre-head restart and no-op recovery"
-  assert_contains "$path" 'when `HEAD` differs, accept completed rebase recovery only when `ORIG_HEAD` equals `pre_head=`, the reflog contains the matching rebase start at `default_oid=` and successful finish on `branch=`, and `default_oid=` is an ancestor of `HEAD`' \
-    "$path_name lost immutable completed-rebase proof"
+  assert_contains "$path" 'When `HEAD` differs, accept completed rebase recovery only when `ORIG_HEAD` equals `pre_head=`, the latest metadata-bound matching rebase finish is the newest branch reflog entry, that finish result OID equals current `HEAD`, no later branch movement exists, the matching rebase start names `default_oid=`, and `default_oid=` is an ancestor of `HEAD`' \
+    "$path_name lost exact immutable completed-rebase proof"
+  assert_contains "$path" 'If the finish result differs from `HEAD` or any later branch movement exists, append `blocked: completed direct-PR rebase result moved; refusing recovery` and stop' \
+    "$path_name lost completed-rebase movement blocker"
   assert_contains "$path" 'Then atomically persist that exact `HEAD` as `post_head=` with `phase=ready-to-push`' \
     "$path_name lost recoverable ready-state transition"
   assert_contains "$path" 'If that recovery rewrite fails, remove only the validated task-specific temporary artifact, append `blocked: direct-PR recovered ready checkpoint write failed`, and stop without pushing' \
@@ -131,7 +139,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost successful-publication checkpoint cleanup"
   assert_contains "$path" 'FEATURE_REF=refs/heads/fm/parallel-direct-pr' \
     "$path_name lost FEATURE_REF initialization"
-  assert_contains "$path" 'If it still matches and `phase=rebase-in-progress`:' \
+  assert_contains "$path" 'If the remote still matches, resume only the validated active rebase' \
     "$path_name lost checkpoint remote-match validation"
   assert_contains "$path" 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' \
     "$path_name lost explicit default-ref fetch"
