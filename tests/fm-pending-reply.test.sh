@@ -386,7 +386,7 @@ test_stale_generation_reclaim_preserves_new_owner() {
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
   mkdir -p "$lock"
   fm_pending_reply_txn_owner_write \
-    "$lock/owner-stale-token" 99999999 dead-owner stale-token owned \
+    "$lock/owner-stale-token" 99999999 dead-owner stale-token owned 1 \
     || fail "stale-generation-lock: stale fixture setup failed"
   log="$home/critical.log"
   : > "$log"
@@ -413,6 +413,32 @@ test_stale_generation_reclaim_preserves_new_owner() {
   [ ! -e "$lock/owner-stale-token" ] \
     || fail "stale-generation-lock: stale generation remained"
   pass "stale generation reclaim preserves the live owner"
+}
+
+test_failed_owner_promotion_removes_waiter() {
+  local home state corr lock
+  home=$(setup_parent failed-owner-promotion)
+  state="$home/state"
+  corr=4223456789abcdef
+  lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
+  (
+    eval "$(declare -f fm_pending_reply_txn_owner_write \
+      | sed '1s/fm_pending_reply_txn_owner_write/fm_pending_reply_txn_owner_write_real/')"
+    fm_pending_reply_txn_owner_write() {
+      if [ "$5" = owned ]; then
+        return 1
+      fi
+      fm_pending_reply_txn_owner_write_real "$@"
+    }
+    local token
+    if fm_pending_reply_txn_lock_acquire "$state" "$corr" token; then
+      exit 1
+    fi
+    if compgen -G "$lock/owner-*" >/dev/null; then
+      exit 1
+    fi
+  ) || fail "failed-owner-promotion: failed promotion left a live waiter"
+  pass "failed owner promotion removes its waiter generation"
 }
 
 test_escalation_publication_failure_retries() {
@@ -1244,6 +1270,7 @@ test_second_missed_turn_escalates_once_and_stays_durable
 test_concurrent_escalation_publishes_once
 test_incomplete_transaction_lock_is_reclaimed
 test_stale_generation_reclaim_preserves_new_owner
+test_failed_owner_promotion_removes_waiter
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable

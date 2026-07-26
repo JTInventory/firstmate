@@ -1056,13 +1056,44 @@ test_nested_secondmate_teardown_handoffs_archived_resolution() {
   mv "$case_dir/home/state/pending-replies/$corr" "$source_history"
   printf '%s\n' "resolved_epoch=2" "resolved_via=status" >> "$source_history"
 
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "kill-window -t fm-nested-x1") exit 1 ;;
+  "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
+    printf '%s\n' '@3|fm-nested-x1'
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "nested-archived-resolved-reply: forced teardown should succeed"
+  expect_code 1 "$rc" "nested-archived-resolved-reply: first endpoint close should fail"
   history="$case_dir/state/pending-reply-history/$corr"
+  assert_present "$history" \
+    "nested-archived-resolved-reply: failed close must retain migrated history"
+  if ! compgen -G "$case_dir/state/pending-reply-history/.handoff-*" >/dev/null; then
+    fail "nested-archived-resolved-reply: failed close lost its handoff receipt"
+  fi
+
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/retry-stdout" 2> "$case_dir/retry-stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nested-archived-resolved-reply: forced teardown should succeed"
   assert_present "$history" \
     "nested-archived-resolved-reply: archived history must migrate before home deletion"
   [ "$(sed -n 's/^phase=//p' "$history")" = resolved ] \
