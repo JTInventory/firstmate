@@ -134,7 +134,7 @@ validate_direct_pr_state_cleanup() {
       echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
       return 1
     fi
-    mode=$(stat -c '%a' "$artifact" 2>/dev/null) || return 1
+    mode=$(fm_pr_file_mode "$artifact") || return 1
     if [ "$mode" != 600 ]; then
       echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
       return 1
