@@ -1591,6 +1591,9 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   (
     sleep 1
     touch "$state/.last-watcher-beat"
@@ -1630,6 +1633,9 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   # watcher can ever be confirmed - the honest answer is FAILED, not healthy.
   mkdir "$state/.watch.lock"
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   touch -t 200001010000 "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
   armpid=$!

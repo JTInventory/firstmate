@@ -267,7 +267,7 @@ fi
 stopped_watcher=0
 pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
 if fm_pid_alive "$pid"; then
-  if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME"; then
+  if ! fm_watcher_lock_matches_pid "$WATCH_LOCK" "$pid" "$FM_HOME" "$WATCH"; then
     echo "PR_CHECK_MIGRATION: watcher ownership is ambiguous; review state/.watch.lock before rearming polls" >&2
     exit 1
   fi

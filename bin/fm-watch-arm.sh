@@ -191,6 +191,11 @@ watch_output_has_wake() {
   grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
 }
 
+watch_output_has_startup_failure() {
+  local out=$1
+  grep -Eq '^(PR_CHECK_MIGRATION:|watcher: PR check migration blocked)' "$out" 2>/dev/null
+}
+
 print_watch_output() {
   local out=$1
   [ -s "$out" ] && cat "$out"
@@ -369,6 +374,10 @@ while :; do
   if ! fm_pid_alive "$child"; then
     if watch_output_has_wake "$WATCH_OUT"; then
       finish_cycle
+    fi
+    if watch_output_has_startup_failure "$WATCH_OUT"; then
+      print_watch_output "$WATCH_OUT"
+      exit 1
     fi
     # A detached watcher can lose a startup singleton race before the peer's
     # beacon becomes fresh. Keep the arm's confirmation window open so it can
