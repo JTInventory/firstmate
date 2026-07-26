@@ -46,8 +46,10 @@ assert_grep 'captain wants it shipped, promote the task in place' "$AGENTS" \
   "intake contract lost genuine scout promotion"
 assert_grep 'the same crewmate owns direct-PR reconciliation' "$AGENTS" \
   "direct-PR conflict reconciliation lost its owner"
-assert_grep 'after any reconciliation, require `fm-pr-check` to exit zero before cleanup or relaying the PR' "$AGENTS" \
-  "direct-PR reconciliation lost readiness verification"
+assert_grep 'Firstmate, never the worker, runs the guarded `bin/fm-pr-check.sh <id> <PR url>`' "$AGENTS" \
+  "direct-PR reconciliation lost Firstmate-owned readiness verification"
+assert_grep 'paused: reconciliation-ready PR <url>' "$AGENTS" \
+  "direct-PR reconciliation lost its nonterminal check handoff"
 
 for legacy_phrase in \
   'load `diagnostic-reasoning`' \
@@ -66,10 +68,10 @@ FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" parallel-direct-pr direct-project 
   || fail "direct-PR brief scaffold failed"
 DIRECT_PR_BRIEF="$BRIEF_HOME/data/parallel-direct-pr/brief.md"
 PRE_PR_PATH=$(sed -n '/^Before initial direct-PR publication:/,/^If firstmate later tells you that parallel work made the open PR conflict/p' "$DIRECT_PR_BRIEF" | sed '$d')
-POST_CONFLICT_PATH=$(sed -n '/^If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation:/,/^After opening or reconciling the PR/p' "$DIRECT_PR_BRIEF" | sed '$d')
+POST_CONFLICT_PATH=$(sed -n '/^If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation:/,/^After initial PR opening, or after Firstmate-confirmed post-conflict cleanup/p' "$DIRECT_PR_BRIEF" | sed '$d')
 for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
   path=${!path_name}
-  assert_contains "$path" 'Resolve `DEFAULT` from `refs/remotes/origin/HEAD`' \
+  assert_contains "$path" 'Query the live default with `git ls-remote --symref "$PUSH_ENDPOINT" HEAD`' \
     "$path_name lost DEFAULT initialization"
   assert_contains "$path" 'Set `TASK_ID=parallel-direct-pr`, `FEATURE_REF=refs/heads/fm/parallel-direct-pr`, `BRANCH=fm/parallel-direct-pr`' \
     "$path_name lost task, feature, or branch initialization"
@@ -81,15 +83,19 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost initial branch-state blocker"
   assert_contains "$path" '`REPO_ID=$(git rev-parse --path-format=absolute --git-common-dir)`' \
     "$path_name lost repository identity initialization"
-  assert_contains "$path" 'set `CURRENT_BASE_REF=refs/heads/$DEFAULT`' \
+  assert_contains "$path" 'set `CURRENT_BASE_REF=refs/heads/<branch>`, `CURRENT_BASE_BRANCH=<branch>`, and `DEFAULT=$CURRENT_BASE_BRANCH`' \
     "$path_name lost exact base-ref initialization"
-  assert_contains "$path" 'Resolve exactly one canonical push repository identity as `CURRENT_REMOTE_REPO` from `git remote get-url --push --all origin`' \
+  assert_contains "$path" 'Resolve exactly one validated `PUSH_ENDPOINT` from `git remote get-url --push --all origin`' \
     "$path_name lost canonical push-repository lookup"
-  assert_contains "$path" 'require `git ls-remote --exit-code origin "$CURRENT_BASE_REF"` to return exactly one base OID' \
+  assert_contains "$path" 'including a configured `remote.origin.pushurl`' \
+    "$path_name ignores a distinct origin push endpoint"
+  assert_contains "$path" 'Define the portable helper `fm_checkpoint_mode() { if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1" 2>/dev/null; else stat -c %a "$1" 2>/dev/null; fi; }` in this fresh-shell prelude' \
+    "$path_name does not define an operational portable mode helper"
+  assert_contains "$path" 'require `git ls-remote --exit-code "$PUSH_ENDPOINT" "$CURRENT_BASE_REF"` to return exactly that one base OID' \
     "$path_name lost live base-ref existence proof"
-  assert_contains "$path" 'Before every recovery, push, or PR lookup, repeat these live lookups and require the live canonical repository and base ref to equal the bound `REMOTE_REPO` and `BASE_REF`' \
+  assert_contains "$path" 'Before every recovery, fetch, lease lookup, push, or PR lookup, repeat these live endpoint and symref lookups and require the exact endpoint, canonical repository, full base ref, and short base branch to equal the bound `PUSH_ENDPOINT`, `REMOTE_REPO`, `BASE_REF`, and `BASE_BRANCH`' \
     "$path_name lost remote/base revalidation boundary"
-  assert_contains "$path" 'retargeting, default-branch change, lookup failure, deletion, or ambiguity must append `blocked: direct-PR remote or base identity changed; checkpoint retained` and stop without cleanup' \
+  assert_contains "$path" 'endpoint retargeting, default-branch change, lookup failure, deletion, or ambiguity must append `blocked: direct-PR endpoint or base identity changed; checkpoint retained` and stop without cleanup' \
     "$path_name does not fail closed on remote/base movement"
   assert_contains "$path" "LEASE_CHECKPOINT='$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease'" \
     "$path_name lost index-safe task checkpoint location"
@@ -97,13 +103,13 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost stable atomic temporary checkpoint path"
   assert_contains "$path" 'outside the project worktree and Git index' \
     "$path_name lost index-safe checkpoint contract"
-  assert_contains "$path" 'A valid checkpoint must contain exactly `repo=`, `remote_repo=`, `base_ref=`, `task=`, `feature_ref=`, `branch=`, `workflow=`, `expected=`, `default_oid=`, `pre_head=`, `post_head=`, `phase=`, and `attempt=`' \
+  assert_contains "$path" 'A valid checkpoint must contain exactly `repo=`, `push_endpoint=`, `remote_repo=`, `base_ref=`, `base_branch=`, `task=`, `feature_ref=`, `branch=`, `workflow=`, `expected=`, `default_oid=`, `pre_head=`, `post_head=`, `phase=`, and `attempt=`' \
     "$path_name lost complete checkpoint binding"
-  assert_contains "$path" 'Parse it only as data: read exactly one line for each literal key, split each line only at its first `=`, and assign `CHECKPOINT_REPO`, `CHECKPOINT_REMOTE_REPO`, `CHECKPOINT_BASE_REF`, `CHECKPOINT_TASK`, `CHECKPOINT_FEATURE_REF`, `CHECKPOINT_BRANCH`, `CHECKPOINT_WORKFLOW`, `CHECKPOINT_EXPECTED`, `CHECKPOINT_DEFAULT_OID`, `CHECKPOINT_PRE_HEAD`, `CHECKPOINT_POST_HEAD`, `CHECKPOINT_PHASE`, and `CHECKPOINT_ATTEMPT`; reject duplicate, missing, unknown, or invalid fields' \
+  assert_contains "$path" 'Parse it only as data: read exactly one line for each literal key, split each line only at its first `=`, and assign `CHECKPOINT_REPO`, `CHECKPOINT_PUSH_ENDPOINT`, `CHECKPOINT_REMOTE_REPO`, `CHECKPOINT_BASE_REF`, `CHECKPOINT_BASE_BRANCH`, `CHECKPOINT_TASK`, `CHECKPOINT_FEATURE_REF`, `CHECKPOINT_BRANCH`, `CHECKPOINT_WORKFLOW`, `CHECKPOINT_EXPECTED`, `CHECKPOINT_DEFAULT_OID`, `CHECKPOINT_PRE_HEAD`, `CHECKPOINT_POST_HEAD`, `CHECKPOINT_PHASE`, and `CHECKPOINT_ATTEMPT`; reject duplicate, missing, unknown, or invalid fields' \
     "$path_name lost safe checkpoint parsing"
   assert_contains "$path" 'Never source or eval checkpoint bytes' \
     "$path_name can execute checkpoint bytes"
-  assert_contains "$path" 'After all validation, explicitly hydrate `REPO_ID=$CHECKPOINT_REPO`, `REMOTE_REPO=$CHECKPOINT_REMOTE_REPO`, `BASE_REF=$CHECKPOINT_BASE_REF`, `TASK_ID=$CHECKPOINT_TASK`, `FEATURE_REF=$CHECKPOINT_FEATURE_REF`, `BRANCH=$CHECKPOINT_BRANCH`, `WORKFLOW=$CHECKPOINT_WORKFLOW`, `EXPECTED=$CHECKPOINT_EXPECTED`, `DEFAULT_OID=$CHECKPOINT_DEFAULT_OID`, `PRE_HEAD=$CHECKPOINT_PRE_HEAD`, `POST_HEAD=$CHECKPOINT_POST_HEAD`, `PHASE=$CHECKPOINT_PHASE`, and `ATTEMPT=$CHECKPOINT_ATTEMPT` before any recovery action' \
+  assert_contains "$path" 'After all validation, explicitly hydrate `REPO_ID=$CHECKPOINT_REPO`, `PUSH_ENDPOINT=$CHECKPOINT_PUSH_ENDPOINT`, `REMOTE_REPO=$CHECKPOINT_REMOTE_REPO`, `BASE_REF=$CHECKPOINT_BASE_REF`, `BASE_BRANCH=$CHECKPOINT_BASE_BRANCH`, `DEFAULT=$CHECKPOINT_BASE_BRANCH`, `TASK_ID=$CHECKPOINT_TASK`, `FEATURE_REF=$CHECKPOINT_FEATURE_REF`, `BRANCH=$CHECKPOINT_BRANCH`, `WORKFLOW=$CHECKPOINT_WORKFLOW`, `EXPECTED=$CHECKPOINT_EXPECTED`, `DEFAULT_OID=$CHECKPOINT_DEFAULT_OID`, `PRE_HEAD=$CHECKPOINT_PRE_HEAD`, `POST_HEAD=$CHECKPOINT_POST_HEAD`, `PHASE=$CHECKPOINT_PHASE`, and `ATTEMPT=$CHECKPOINT_ATTEMPT` before any recovery action' \
     "$path_name lost checkpoint-to-variable hydration"
   assert_contains "$path" 'Enforce the exact phase tuple before action: `rebase-in-progress` requires `ATTEMPT=0` and empty `POST_HEAD`; `ready-to-push` requires nonempty `POST_HEAD` and `ATTEMPT` 0, 1, or 2; `push-exhausted` requires nonempty `POST_HEAD` and `ATTEMPT=2`; `published-awaiting-pr` requires nonempty `POST_HEAD` and `ATTEMPT` 0, 1, or 2' \
     "$path_name lost exact phase and attempt tuples"
@@ -117,15 +123,15 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost pre-checkpoint fresh-shell reconstruction"
   assert_contains "$path" 'Validate the primary checkpoint before handling the stable task-specific temporary target' \
     "$path_name lost primary-before-temporary validation ordering"
-  assert_contains "$path" 'Reject a checkpoint that is a symlink, non-regular file, unexpectedly owned, not mode 0600 according to `fm_pr_file_mode`, or malformed' \
+  assert_contains "$path" 'Reject a checkpoint that is a symlink, non-regular file, unexpectedly owned, not mode 0600 according to `fm_checkpoint_mode "$LEASE_CHECKPOINT"`, or malformed' \
     "$path_name accepts a non-private durable checkpoint"
   assert_contains "$path" 'If `LEASE_CHECKPOINT_TMP` exists, reject it when it is a symlink, non-regular file, or unexpectedly owned; otherwise remove that exact same-task stale temporary file without parsing it, preserving the primary checkpoint' \
     "$path_name lost bounded stale temporary recovery"
   CHECKPOINT_STEP=$(printf '%s\n' "$path" | sed -n '/^2\./p')
-  if grep -Fq 'fm_pr_file_mode "$LEASE_CHECKPOINT_TMP"' <<<"$CHECKPOINT_STEP"; then
+  if grep -Fq 'fm_checkpoint_mode "$LEASE_CHECKPOINT_TMP"' <<<"$CHECKPOINT_STEP"; then
     fail "$path_name incorrectly requires a mode for the interruption-prone stale temp"
   fi
-  assert_contains "$path" 'require `CHECKPOINT_REMOTE_REPO == CURRENT_REMOTE_REPO` and `CHECKPOINT_BASE_REF == CURRENT_BASE_REF`' \
+  assert_contains "$path" 'require `CHECKPOINT_PUSH_ENDPOINT == PUSH_ENDPOINT`, `CHECKPOINT_REMOTE_REPO == CURRENT_REMOTE_REPO`, `CHECKPOINT_BASE_REF == CURRENT_BASE_REF`, and `CHECKPOINT_BASE_BRANCH == CURRENT_BASE_BRANCH`' \
     "$path_name accepts retargeted remote or base identity"
   assert_contains "$path" 'Otherwise append `blocked: direct-PR lease checkpoint identity mismatch; refusing recovery` and stop' \
     "$path_name lost fail-closed checkpoint identity validation"
@@ -153,13 +159,13 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost bounded non-active remote-movement cleanup"
   assert_contains "$path" 'With no active rebase, require attached `CURRENT_BRANCH == BRANCH`' \
     "$path_name lost attached-state recovery boundary"
-  assert_contains "$path" 'When `HEAD == PRE_HEAD`, either use the complete thirteen-field atomic transition to preserve `repo=$REPO_ID`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, and `pre_head=$PRE_HEAD`, set `post_head=$PRE_HEAD`, `phase=ready-to-push`, and `attempt=0`, write with mode 0600 through `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT` for a proven no-op where `DEFAULT_OID` is already an ancestor of `HEAD`; or safely restart `git rebase "$DEFAULT_OID"` and perform that same complete ready-state transition after it completes' \
+  assert_contains "$path" 'When `HEAD == PRE_HEAD`, either use the complete fifteen-field atomic transition to preserve `repo=$REPO_ID`, `push_endpoint=$PUSH_ENDPOINT`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `base_branch=$BASE_BRANCH`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, and `pre_head=$PRE_HEAD`, set `post_head=$PRE_HEAD`, `phase=ready-to-push`, and `attempt=0`, write with mode 0600 through `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT` for a proven no-op where `DEFAULT_OID` is already an ancestor of `HEAD`; or safely restart `git rebase "$DEFAULT_OID"` and perform that same complete ready-state transition after it completes' \
     "$path_name lost no-active pre-head restart and no-op recovery"
   assert_contains "$path" 'When `HEAD` differs, accept completed rebase recovery only when the latest metadata-bound matching rebase finish is the newest branch reflog entry, that finish result OID equals current `HEAD`, no later branch movement exists, the recorded branch equals `BRANCH`, the matching rebase transition'\''s source OID equals `PRE_HEAD`, the matching rebase start names `DEFAULT_OID`, and `DEFAULT_OID` is an ancestor of `HEAD`' \
     "$path_name lost exact immutable completed-rebase proof"
   assert_contains "$path" 'If the source OID differs from `PRE_HEAD`, the finish result differs from `HEAD`, or any later branch movement exists, append `blocked: completed direct-PR rebase transition mismatch; refusing recovery` and stop' \
     "$path_name lost completed-rebase transition blocker"
-  assert_contains "$path" 'Then use the complete thirteen-field atomic transition to preserve `repo=$REPO_ID`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, and `pre_head=$PRE_HEAD`, set `post_head` to that exact `HEAD`, `phase=ready-to-push`, and `attempt=0`, write with mode 0600 through `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT`' \
+  assert_contains "$path" 'Then use the complete fifteen-field atomic transition to preserve `repo=$REPO_ID`, `push_endpoint=$PUSH_ENDPOINT`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `base_branch=$BASE_BRANCH`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, and `pre_head=$PRE_HEAD`, set `post_head` to that exact `HEAD`, `phase=ready-to-push`, and `attempt=0`, write with mode 0600 through `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT`' \
     "$path_name lost recoverable ready-state transition"
   assert_contains "$path" 'If that recovery rewrite fails, remove only the validated stable `LEASE_CHECKPOINT_TMP`, append `blocked: direct-PR recovered ready checkpoint write failed`, and stop without pushing' \
     "$path_name lost fail-closed recovered ready-state rewrite"
@@ -177,7 +183,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost default and pre-rebase HEAD snapshots"
   assert_contains "$path" 'derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again, and require `CURRENT_BRANCH == BRANCH`; detached `HEAD` or mismatch must append `blocked: direct-PR branch changed before rebase` and stop' \
     "$path_name lost pre-rebase attached-branch validation"
-  assert_contains "$path" 'Atomically write all thirteen bound fields, including `remote_repo=$REMOTE_REPO` and `base_ref=$BASE_REF`, through `LEASE_CHECKPOINT_TMP` with mode 0600, `workflow=' \
+  assert_contains "$path" 'Atomically write all fifteen bound fields, including `push_endpoint=$PUSH_ENDPOINT`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, and `base_branch=$BASE_BRANCH`, through `LEASE_CHECKPOINT_TMP` with mode 0600, `workflow=' \
     "$path_name lost durable rebase-in-progress checkpoint"
   assert_contains "$path" '`post_head=` empty, `phase=rebase-in-progress`, and `attempt=0`' \
     "$path_name lost initial attempt state"
@@ -185,7 +191,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost publication HEAD snapshot"
   assert_contains "$path" 'derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again, and require `CURRENT_BRANCH == BRANCH`; detached `HEAD` or mismatch must append `blocked: direct-PR branch changed after rebase` and stop' \
     "$path_name lost post-rebase attached-branch validation"
-  assert_contains "$path" 'preserving `repo=$REPO_ID`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, and `pre_head=$PRE_HEAD`, while setting `post_head=$POST_HEAD`, `phase=ready-to-push`, and `attempt=0`' \
+  assert_contains "$path" 'preserving `repo=$REPO_ID`, `push_endpoint=$PUSH_ENDPOINT`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `base_branch=$BASE_BRANCH`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, and `pre_head=$PRE_HEAD`, while setting `post_head=$POST_HEAD`, `phase=ready-to-push`, and `attempt=0`' \
     "$path_name lost ready-to-push identity and HEAD binding"
   assert_contains "$path" 'If this second write or rename fails, remove only the validated stable `LEASE_CHECKPOINT_TMP`, append `blocked: direct-PR ready checkpoint write failed; recover from rebase-in-progress state`, and stop without pushing' \
     "$path_name lost fail-closed second checkpoint rewrite"
@@ -197,17 +203,17 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost atomic-write cleanup and blocker"
   assert_contains "$path" 'remove the validated checkpoint and its stable task-specific `LEASE_CHECKPOINT_TMP`, then restart safe validation' \
     "$path_name lost confirmed-remote-movement cleanup"
-  assert_contains "$path" 'After either push succeeds or remote classification proves `POST_HEAD` is published, atomically preserve `repo=$REPO_ID`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, `pre_head=$PRE_HEAD`, `post_head=$POST_HEAD`, and `attempt=$ATTEMPT`, set `phase=published-awaiting-pr`' \
+  assert_contains "$path" 'After either push succeeds or remote classification proves `POST_HEAD` is published, atomically preserve `repo=$REPO_ID`, `push_endpoint=$PUSH_ENDPOINT`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `base_branch=$BASE_BRANCH`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, `pre_head=$PRE_HEAD`, `post_head=$POST_HEAD`, and `attempt=$ATTEMPT`, set `phase=published-awaiting-pr`' \
     "$path_name lost durable post-publication transition"
   assert_contains "$path" 'FEATURE_REF=refs/heads/fm/parallel-direct-pr' \
     "$path_name lost FEATURE_REF initialization"
   assert_contains "$path" 'If the remote still matches, resume only the validated active rebase' \
     "$path_name lost checkpoint remote-match validation"
-  assert_contains "$path" 'git fetch origin "+$BASE_REF:refs/remotes/origin/$DEFAULT"' \
+  assert_contains "$path" 'git fetch "$PUSH_ENDPOINT" "+$BASE_REF:refs/remotes/origin/$DEFAULT"' \
     "$path_name lost explicit default-ref fetch"
-  assert_contains "$path" 'git ls-remote --exit-code origin "$FEATURE_REF"' \
+  assert_contains "$path" 'git ls-remote --exit-code "$PUSH_ENDPOINT" "$FEATURE_REF"' \
     "$path_name lost remote feature lookup guard"
-  assert_contains "$path" 'git fetch origin "+$FEATURE_REF:refs/remotes/origin/fm/parallel-direct-pr"' \
+  assert_contains "$path" 'git fetch "$PUSH_ENDPOINT" "+$FEATURE_REF:refs/remotes/origin/fm/parallel-direct-pr"' \
     "$path_name lost explicit feature-ref fetch"
   assert_contains "$path" 'EXPECTED=$(git rev-parse refs/remotes/origin/fm/parallel-direct-pr)' \
     "$path_name lost fetched feature OID snapshot"
@@ -217,7 +223,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost feature-history divergence blocker"
   assert_contains "$path" 'Rebase onto the immutable `DEFAULT_OID` with `git rebase "$DEFAULT_OID"` and resolve ordinary conflicts' \
     "$path_name lost immutable-base conflict resolution"
-  assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"' \
+  assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" "$PUSH_ENDPOINT" "$POST_HEAD:$FEATURE_REF"' \
     "$path_name lost immutable publication OID and explicit lease"
   assert_contains "$path" 'before the second and final identical push' \
     "$path_name lost bounded identical retry"
@@ -250,7 +256,7 @@ for unsafe_checkpoint_fixture in \
 done
 assert_contains "$PRE_PR_PATH" 'then enter step 9 directly and execute its complete initial-publication workflow: remote classification, bounded identical retry, lease-rejection cleanup and restart, transition to published-awaiting-pr, and separate PR reconciliation' \
   'initial ready-state recovery lost the complete publication workflow'
-assert_contains "$POST_CONFLICT_PATH" 'then enter step 9 directly and execute its complete post-conflict publication workflow: remote classification, bounded identical retry, lease-rejection cleanup and restart, transition to published-awaiting-pr, separate open-PR reconciliation, and reconciliation completion' \
+assert_contains "$POST_CONFLICT_PATH" 'then enter step 9 directly and execute its complete post-conflict publication workflow: remote classification, bounded identical retry, lease-rejection cleanup and restart, transition to published-awaiting-pr, separate open-PR reconciliation, a nonterminal Firstmate-owned readiness-check handoff, and the following single terminal completion after confirmation or blocked status' \
   'post-conflict ready-state recovery lost the complete publication workflow'
 assert_contains "$PRE_PR_PATH" '`WORKFLOW=initial-publication`' \
   'initial publication lost workflow initialization'
@@ -279,17 +285,17 @@ for step_name in PRE_PR_STEP9 POST_CONFLICT_STEP9; do
     "$step_name lost publication-state precondition"
   assert_contains "$step" 'The checkpoint attempt is the total authorized push count across every invocation' \
     "$step_name lost cross-invocation attempt bound"
-  assert_contains "$step" 'Immediately before every remote classification or push, repeat the step 1 canonical remote/base revalidation and retain the checkpoint on any blocker' \
+  assert_contains "$step" 'Immediately before every remote classification or push, repeat the step 1 exact endpoint and live symref revalidation and retain the checkpoint on any blocker' \
     "$step_name lost pre-push remote/base revalidation"
-  assert_contains "$step" 'Every attempt or exhaustion transition must atomically preserve `repo=$REPO_ID`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, `pre_head=$PRE_HEAD`, and `post_head=$POST_HEAD`, change only the defined `phase` and `attempt`, write all thirteen validated fields with mode 0600 through stable `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT`' \
+  assert_contains "$step" 'Every attempt or exhaustion transition must atomically preserve `repo=$REPO_ID`, `push_endpoint=$PUSH_ENDPOINT`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `base_branch=$BASE_BRANCH`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, `pre_head=$PRE_HEAD`, and `post_head=$POST_HEAD`, change only the defined `phase` and `attempt`, write all fifteen validated fields with mode 0600 through stable `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT`' \
     "$step_name lost complete atomic attempt-transition contract"
   assert_contains "$step" 'On any such write or rename failure, remove only the validated stable `LEASE_CHECKPOINT_TMP`, retain the primary checkpoint, append `blocked: direct-PR publication checkpoint transition failed`, and stop without pushing' \
     "$step_name lost attempt-transition failure cleanup"
-  assert_contains "$step" 'Classify `git ls-remote --exit-code origin "$FEATURE_REF"` as exit 0 with its OID, exit 2 with no ref, or any other status as `blocked: remote feature retry lookup failed` and stop' \
+  assert_contains "$step" 'Classify `git ls-remote --exit-code "$PUSH_ENDPOINT" "$FEATURE_REF"` as exit 0 with its OID, exit 2 with no ref, or any other status as `blocked: remote feature retry lookup failed` and stop' \
     "$step_name lost explicit retry lookup outcomes"
   assert_contains "$step" 'On movement, remove the validated checkpoint and stable task-specific `LEASE_CHECKPOINT_TMP`, then restart safe validation' \
     "$step_name lost lease-rejection cleanup and restart"
-  assert_contains "$step" 'For `ATTEMPT=0`, atomically rewrite the validated checkpoint with `attempt=1` and, after the rename succeeds, set `ATTEMPT=1` in memory before the first `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`; a transition failure uses that cleanup and blocker without pushing' \
+  assert_contains "$step" 'For `ATTEMPT=0`, atomically rewrite the validated checkpoint with `attempt=1` and, after the rename succeeds, set `ATTEMPT=1` in memory before the first `git push --force-with-lease="$FEATURE_REF:$EXPECTED" "$PUSH_ENDPOINT" "$POST_HEAD:$FEATURE_REF"`; a transition failure uses that cleanup and blocker without pushing' \
     "$step_name does not persist the first authorized attempt"
   assert_contains "$step" 'If that push fails or recovery starts with `ATTEMPT=1`, classify the remote first: published proceeds to the published-state transition, movement restarts, and unchanged atomically rewrites `attempt=2` and, after the rename succeeds, sets `ATTEMPT=2` in memory before the second and final identical push' \
     "$step_name lost interruption-safe first-failure recovery"
@@ -299,13 +305,13 @@ for step_name in PRE_PR_STEP9 POST_CONFLICT_STEP9; do
     "$step_name lost durable retry exhaustion"
   assert_contains "$step" 'Recovery from `PHASE=push-exhausted` performs no remote lookup or automatic push and retains that blocker' \
     "$step_name grants new attempts after exhaustion"
-  assert_contains "$step" 'After either push succeeds or remote classification proves `POST_HEAD` is published, atomically preserve `repo=$REPO_ID`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, `pre_head=$PRE_HEAD`, `post_head=$POST_HEAD`, and `attempt=$ATTEMPT`, set `phase=published-awaiting-pr`, write all thirteen fields with mode 0600 through stable `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT`' \
+  assert_contains "$step" 'After either push succeeds or remote classification proves `POST_HEAD` is published, atomically preserve `repo=$REPO_ID`, `push_endpoint=$PUSH_ENDPOINT`, `remote_repo=$REMOTE_REPO`, `base_ref=$BASE_REF`, `base_branch=$BASE_BRANCH`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `workflow=$WORKFLOW`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, `pre_head=$PRE_HEAD`, `post_head=$POST_HEAD`, and `attempt=$ATTEMPT`, set `phase=published-awaiting-pr`, write all fifteen fields with mode 0600 through stable `LEASE_CHECKPOINT_TMP`, and rename it to `LEASE_CHECKPOINT`' \
     "$step_name lost published-awaiting-pr transition"
   assert_contains "$step" 'If that write or rename fails, remove only the validated stable `LEASE_CHECKPOINT_TMP`, retain the durable prior checkpoint, append `blocked: direct-PR published checkpoint transition failed; prior checkpoint retained`, and stop before any PR action' \
     "$step_name lost fail-closed published transition"
-  assert_contains "$step" 'Immediately repeat the step 1 canonical remote/base revalidation, then revalidate `git ls-remote --exit-code origin "$FEATURE_REF"`: exit 0 must return exactly `POST_HEAD`; exit 2 must append `blocked: published direct-PR feature ref deleted; checkpoint retained`; any other status must append `blocked: published direct-PR feature lookup failed; checkpoint retained`; and a different OID must append `blocked: published direct-PR feature moved; checkpoint retained`' \
+  assert_contains "$step" 'Immediately repeat the step 1 exact endpoint and live symref revalidation, then revalidate `git ls-remote --exit-code "$PUSH_ENDPOINT" "$FEATURE_REF"`: exit 0 must return exactly `POST_HEAD`; exit 2 must append `blocked: published direct-PR feature ref deleted; checkpoint retained`; any other status must append `blocked: published direct-PR feature lookup failed; checkpoint retained`; and a different OID must append `blocked: published direct-PR feature moved; checkpoint retained`' \
     "$step_name lost published remote-head revalidation"
-  assert_contains "$step" 'List PRs in all states using the exact filters repository `REMOTE_REPO`, head `BRANCH`, and base ref `BASE_REF`' \
+  assert_contains "$step" 'List PRs in all states using the exact filters repository `REMOTE_REPO`, head `BRANCH`, and base branch `BASE_BRANCH`' \
     "$step_name does not reconcile all PR states"
   assert_contains "$step" 'require every match to have those exact repository, head, and base identities' \
     "$step_name lost exact PR identity validation"
@@ -316,7 +322,7 @@ assert_contains "$PRE_PR_STEP9" 'Exit 0 at `POST_HEAD` proves publication alread
   'initial retry lookup lost absent-ref classification'
 assert_contains "$POST_CONFLICT_STEP9" 'Exit 0 at `POST_HEAD` proves publication already succeeded; exit 0 at `EXPECTED` means unchanged; a different OID or exit 2 means movement' \
   'post-conflict retry lookup lost deletion classification'
-assert_contains "$PRE_PR_STEP9" 'before the first `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
+assert_contains "$PRE_PR_STEP9" 'before the first `git push --force-with-lease="$FEATURE_REF:$EXPECTED" "$PUSH_ENDPOINT" "$POST_HEAD:$FEATURE_REF"`' \
   "initial publication step lost guarded push"
 assert_contains "$PRE_PR_STEP9" 'With no match, open exactly one PR with `gh-axi`, then re-list all states and require exactly one open match whose head OID equals `POST_HEAD`' \
   "initial publication step lost existing-PR reconciliation"
@@ -324,10 +330,10 @@ assert_contains "$PRE_PR_STEP9" 'If the sole match is open, require its head OID
   "initial publication accepts an open PR at another head"
 assert_contains "$PRE_PR_STEP9" 'Multiple matches or lookup failure must append `blocked: direct-PR PR identity reconciliation failed; checkpoint retained` and stop' \
   "initial publication does not block ambiguous PR identity"
-assert_contains "$POST_CONFLICT_STEP9" 'before the first `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
+assert_contains "$POST_CONFLICT_STEP9" 'before the first `git push --force-with-lease="$FEATURE_REF:$EXPECTED" "$PUSH_ENDPOINT" "$POST_HEAD:$FEATURE_REF"`' \
   "post-conflict publication step lost guarded push"
-assert_contains "$POST_CONFLICT_STEP9" 'only then is reconciliation complete' \
-  "post-conflict publication step lost completion boundary"
+assert_contains "$POST_CONFLICT_STEP9" 'Only after Firstmate confirms that guarded check passed for the same canonical PR URL and retained checkpoint identity may the worker start a fresh step 10 invocation' \
+  "post-conflict publication step lost Firstmate confirmation boundary"
 assert_contains "$POST_CONFLICT_STEP9" 'Require the sole open PR head OID to equal `POST_HEAD`; otherwise append `blocked: direct-PR PR head moved; checkpoint retained` and stop' \
   "post-conflict publication accepts an open PR at another head"
 assert_contains "$POST_CONFLICT_STEP9" 'No match, multiple matches, or lookup failure must append `blocked: direct-PR PR identity reconciliation failed; checkpoint retained` and stop' \
@@ -344,8 +350,14 @@ assert_contains "$POST_CONFLICT_PATH" 'require exit 0; exit 2 means the publishe
   "post-conflict path lost published feature lookup guard"
 assert_contains "$POST_CONFLICT_PATH" 'append `blocked: published remote feature lookup failed` and stop for either case' \
   "post-conflict path lost published-feature blocker"
-assert_contains "$POST_CONFLICT_PATH" 'Rerun `fm-pr-check` and require exit zero. On nonzero append `blocked: direct-PR post-conflict PR check failed; checkpoint retained`, retain both exact state files, and stop. Only after exit zero remove the validated checkpoint and stable task-specific `LEASE_CHECKPOINT_TMP`; only then is reconciliation complete' \
-  "post-conflict path can clean up before PR confirmation"
+assert_contains "$POST_CONFLICT_PATH" 'After exact PR reconciliation, append exactly one nonterminal status line `paused: reconciliation-ready PR {url} checkpoint=$LEASE_CHECKPOINT task=$TASK_ID workflow=$WORKFLOW post_head=$POST_HEAD` and stop, retaining both exact state files' \
+  "post-conflict path lost the precise nonterminal readiness handoff"
+assert_contains "$POST_CONFLICT_PATH" 'Do not run `fm-pr-check`, remove checkpoint state, or emit `done`' \
+  "post-conflict path lets the worker cross the Firstmate ownership boundary"
+assert_contains "$POST_CONFLICT_PATH" 'Firstmate owns `bin/fm-pr-check.sh "$TASK_ID" "{url}"` and its metadata and poll writes' \
+  "post-conflict path does not assign readiness checking to Firstmate"
+assert_contains "$POST_CONFLICT_PATH" 'repeat every endpoint, live-default, head, and PR validation, remove the validated checkpoint and stable task-specific `LEASE_CHECKPOINT_TMP`, and complete reconciliation' \
+  "post-conflict path cleans up without revalidating after Firstmate confirmation"
 TEARDOWN_VALIDATOR=$(sed -n '/^validate_direct_pr_state_cleanup()/,/^}/p' "$ROOT/bin/fm-teardown.sh")
 TEARDOWN_STATE_RM=$(sed -n '/^rm -f "$STATE\/$ID.status"/,/direct-pr-lease.tmp/p' "$ROOT/bin/fm-teardown.sh")
 assert_contains "$TEARDOWN_VALIDATOR" '"$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"' \
@@ -362,10 +374,96 @@ assert_no_grep 'DOD_REWRITTEN' "$ROOT/bin/fm-brief.sh" \
   "direct-PR brief still uses a rewrite pass"
 assert_grep "Stay inside this worktree except for the status file, the task-specific Firstmate checkpoint at '$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease', and its exact stable temporary sibling at '$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease.tmp'; modify nothing else outside it." "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost its bounded state-path exception"
+for forbidden_endpoint_command in \
+  'git fetch origin' \
+  'git ls-remote --exit-code origin' \
+  'origin "$POST_HEAD:$FEATURE_REF"'; do
+  if grep -Fq "$forbidden_endpoint_command" "$DIRECT_PR_BRIEF"; then
+    fail "generated direct-PR brief uses origin instead of the bound push endpoint: $forbidden_endpoint_command"
+  fi
+done
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
   || fail "generated direct-PR brief must emit one completion signal"
-assert_grep 'After opening or reconciling the PR, append `done: PR {url}` to the status file and stop.' "$DIRECT_PR_BRIEF" \
+assert_grep 'After initial PR opening, or after Firstmate-confirmed post-conflict cleanup, append `done: PR {url}` to the status file and stop.' "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost terminal completion boundary"
+
+make_direct_pr_teardown_fixture() {
+  local id=$1 fake
+  fake="$TMP_ROOT/teardown-$id"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data" "$fake/config"
+  ln -s "$ROOT/bin/fm-teardown.sh" "$fake/bin/fm-teardown.sh"
+  ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
+  ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
+  ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
+  cat > "$fake/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fake/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
+fm_tasks_axi_backend_available() { return 1; }
+SH
+  cat > "$fake/bin/fm-task-identity-lib.sh" <<'SH'
+fm_assert_task_branch_matches_meta() { return 0; }
+SH
+  cat > "$fake/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake/bin/fm-guard.sh" "$fake/bin/fm-fleet-sync.sh" "$fake/bin/tmux"
+  cat > "$fake/state/$id.meta" <<META
+window=fakeses:fm-$id
+worktree=$fake/nonexistent-worktree
+project=$fake/nonexistent-project
+harness=claude
+kind=ship
+mode=direct-PR
+yolo=off
+backend=tmux
+META
+  printf '%s\n' "$fake"
+}
+
+MODE_REFUSAL_ID=direct-pr-mode-refusal
+MODE_REFUSAL_HOME=$(make_direct_pr_teardown_fixture "$MODE_REFUSAL_ID")
+MODE_REFUSAL_PRIMARY="$MODE_REFUSAL_HOME/state/$MODE_REFUSAL_ID.direct-pr-lease"
+printf '%s\n' fixture > "$MODE_REFUSAL_PRIMARY"
+chmod 0644 "$MODE_REFUSAL_PRIMARY"
+if ( cd "$MODE_REFUSAL_HOME" && env -u NO_MISTAKES_GATE \
+  PATH="$MODE_REFUSAL_HOME/bin:$PATH" FM_HOME="$MODE_REFUSAL_HOME" \
+  FM_ROOT_OVERRIDE="$MODE_REFUSAL_HOME" FM_STATE_OVERRIDE="$MODE_REFUSAL_HOME/state" \
+  "$MODE_REFUSAL_HOME/bin/fm-teardown.sh" "$MODE_REFUSAL_ID" --force >/dev/null 2>&1 ); then
+  fail "teardown accepted a mode-0644 durable direct-PR checkpoint"
+fi
+[ -f "$MODE_REFUSAL_PRIMARY" ] \
+  || fail "teardown removed the refused mode-0644 durable checkpoint"
+[ -f "$MODE_REFUSAL_HOME/state/$MODE_REFUSAL_ID.meta" ] \
+  || fail "teardown removed task state after refusing the durable checkpoint"
+
+STALE_TEMP_ID=direct-pr-stale-temp
+STALE_TEMP_HOME=$(make_direct_pr_teardown_fixture "$STALE_TEMP_ID")
+STALE_TEMP_PRIMARY="$STALE_TEMP_HOME/state/$STALE_TEMP_ID.direct-pr-lease"
+STALE_TEMP_FILE="$STALE_TEMP_HOME/state/$STALE_TEMP_ID.direct-pr-lease.tmp"
+printf '%s\n' fixture > "$STALE_TEMP_PRIMARY"
+printf '%s\n' partial > "$STALE_TEMP_FILE"
+chmod 0600 "$STALE_TEMP_PRIMARY"
+chmod 0644 "$STALE_TEMP_FILE"
+STALE_TEMP_ERR="$STALE_TEMP_HOME/teardown.err"
+if ! ( cd "$STALE_TEMP_HOME" && env -u NO_MISTAKES_GATE \
+  PATH="$STALE_TEMP_HOME/bin:$PATH" FM_HOME="$STALE_TEMP_HOME" \
+  FM_ROOT_OVERRIDE="$STALE_TEMP_HOME" FM_STATE_OVERRIDE="$STALE_TEMP_HOME/state" \
+  "$STALE_TEMP_HOME/bin/fm-teardown.sh" "$STALE_TEMP_ID" --force >/dev/null 2>"$STALE_TEMP_ERR" ); then
+  sed -n '1,20p' "$STALE_TEMP_ERR" >&2
+  fail "teardown rejected a private primary with a same-owner non-private stale temp"
+fi
+[ ! -e "$STALE_TEMP_PRIMARY" ] && [ ! -e "$STALE_TEMP_FILE" ] \
+  || fail "teardown did not remove both exact validated direct-PR state files"
 
 pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
