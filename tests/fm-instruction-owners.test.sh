@@ -53,11 +53,14 @@ printf '%s\n' '- direct-project [direct-PR] - direct PR fixture (added 2026-07-2
 FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" parallel-direct-pr direct-project >/dev/null \
   || fail "direct-PR brief scaffold failed"
 DIRECT_PR_BRIEF="$BRIEF_HOME/data/parallel-direct-pr/brief.md"
-assert_grep 'rebase onto the authoritative default branch and resolve ordinary conflicts before pushing' "$DIRECT_PR_BRIEF" \
+assert_grep 'run `git fetch origin`, rebase onto the fetched authoritative remote default-branch ref' "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost pre-PR reconciliation"
 assert_grep 'parallel work made the open PR conflict, you still own reconciliation' "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost post-PR reconciliation ownership"
-assert_grep 'push the updated branch, and append `done: PR {url}` again' "$DIRECT_PR_BRIEF" \
-  "generated direct-PR brief lost reconciliation completion signaling"
+assert_grep 'git push --force-with-lease origin fm/parallel-direct-pr' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost guarded published-branch update"
+DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
+[ "$DONE_SIGNAL_COUNT" -eq 1 ] \
+  || fail "generated direct-PR brief must emit one completion signal"
 
 pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
