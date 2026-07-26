@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 AGENTS="$ROOT/AGENTS.md"
+TMP_ROOT=$(fm_test_tmproot fm-instruction-owners)
 
 for phrase in \
   'consult existing reports and established evidence' \
@@ -45,5 +46,18 @@ for legacy_phrase in \
     fail "legacy intake contract restored '$legacy_phrase'"
   fi
 done
+
+BRIEF_HOME="$TMP_ROOT/direct-pr-home"
+mkdir -p "$BRIEF_HOME/data" "$BRIEF_HOME/state"
+printf '%s\n' '- direct-project [direct-PR] - direct PR fixture (added 2026-07-26)' > "$BRIEF_HOME/data/projects.md"
+FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" parallel-direct-pr direct-project >/dev/null \
+  || fail "direct-PR brief scaffold failed"
+DIRECT_PR_BRIEF="$BRIEF_HOME/data/parallel-direct-pr/brief.md"
+assert_grep 'rebase onto the authoritative default branch and resolve ordinary conflicts before pushing' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost pre-PR reconciliation"
+assert_grep 'parallel work made the open PR conflict, you still own reconciliation' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost post-PR reconciliation ownership"
+assert_grep 'push the updated branch, and append `done: PR {url}` again' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost reconciliation completion signaling"
 
 pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
