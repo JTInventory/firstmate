@@ -53,10 +53,17 @@ printf '%s\n' '- direct-project [direct-PR] - direct PR fixture (added 2026-07-2
 FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" parallel-direct-pr direct-project >/dev/null \
   || fail "direct-PR brief scaffold failed"
 DIRECT_PR_BRIEF="$BRIEF_HOME/data/parallel-direct-pr/brief.md"
-assert_grep 'run `git fetch origin`, rebase onto the fetched authoritative remote default-branch ref' "$DIRECT_PR_BRIEF" \
-  "generated direct-PR brief lost pre-PR reconciliation"
+assert_grep 'resolve `DEFAULT` from `refs/remotes/origin/HEAD`, falling back only to an existing local `main` or `master`' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost default-branch resolution"
+FETCH_REFSPEC_COUNT=$(grep -Fc 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' "$DIRECT_PR_BRIEF")
+[ "$FETCH_REFSPEC_COUNT" -eq 2 ] \
+  || fail "generated direct-PR brief must explicitly fetch the default ref in both reconciliation paths"
+assert_grep 'rebase onto `origin/$DEFAULT`, and resolve ordinary conflicts before pushing' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost pre-PR conflict resolution"
 assert_grep 'parallel work made the open PR conflict, you still own reconciliation' "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost post-PR reconciliation ownership"
+assert_grep 'rebase onto `origin/$DEFAULT`, and resolve ordinary conflicts; then update the open PR' "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost post-PR conflict resolution"
 assert_grep 'git push --force-with-lease origin fm/parallel-direct-pr' "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost guarded published-branch update"
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")

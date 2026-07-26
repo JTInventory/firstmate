@@ -241,8 +241,8 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, run \`git fetch origin\`, rebase onto the fetched authoritative remote default-branch ref, and resolve ordinary conflicts before pushing your branch and opening a PR with \`gh-axi\`.
-If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation: run \`git fetch origin\`, rebase onto that fetched remote default-branch ref, resolve ordinary conflicts, and update the open PR with \`git push --force-with-lease origin fm/$ID\`.
+When it is implemented and committed, resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`; run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`, rebase onto \`origin/\$DEFAULT\`, and resolve ordinary conflicts before pushing your branch and opening a PR with \`gh-axi\`.
+If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation: resolve \`DEFAULT\` the same way, run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`, rebase onto \`origin/\$DEFAULT\`, and resolve ordinary conflicts; then update the open PR with \`git push --force-with-lease origin fm/$ID\`.
 After opening or reconciling the PR, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
