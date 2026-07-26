@@ -441,6 +441,29 @@ test_failed_owner_promotion_removes_waiter() {
   pass "failed owner promotion removes its waiter generation"
 }
 
+test_live_legacy_waiter_is_drained() {
+  local home state corr lock identity token
+  home=$(setup_parent live-legacy-waiter)
+  state="$home/state"
+  corr=4323456789abcdef
+  lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
+  mkdir -p "$lock"
+  identity=$(fm_pending_reply_pid_identity "$$")
+  printf '%s\n' \
+    "pid=$$" \
+    "identity=$identity" \
+    "token=legacy-waiter" \
+    "phase=waiting" > "$lock/owner-legacy-waiter"
+  FM_PENDING_REPLY_LEGACY_DRAIN_POLLS=2 \
+    fm_pending_reply_txn_lock_acquire "$state" "$corr" token \
+    || fail "live-legacy-waiter: abandoned pre-ticket waiter was not drained"
+  [ ! -e "$lock/owner-legacy-waiter" ] \
+    || fail "live-legacy-waiter: pre-ticket waiter remained"
+  fm_pending_reply_txn_lock_release "$state" "$corr" "$token" \
+    || fail "live-legacy-waiter: migrated transaction did not release"
+  pass "live legacy waiter drains before ticket ownership"
+}
+
 test_escalation_publication_failure_retries() {
   local home state corr rec target escalations
   home=$(setup_parent escalation-retry)
@@ -957,7 +980,7 @@ test_partial_resolution_reconciles_after_restart() {
 }
 
 test_correlations_reuse_only_for_matching_open_task() {
-  local dir fb log home state got corr1 corr2 corr3 rec
+  local dir fb log home state got corr1 corr2 corr3 corr4 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_parent corr-reuse)
@@ -976,6 +999,14 @@ test_correlations_reuse_only_for_matching_open_task() {
   rec=$(fm_pending_reply_path "$state" "$corr2")
   [ "$(fm_pending_reply_get "$rec" task_id)" = other ] \
     || fail "cross-task expectation must belong to the new target"
+  run_send "$fb" "$home" "$log" fm-domain "quote corr=$corr1 in a new request" \
+    || fail "quoted-correlation follow-up failed"
+  corr4=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  [ -n "$corr4" ] && [ "$corr4" != "$corr1" ] \
+    || fail "free-text correlation must not reuse an open expectation"
+  rec=$(fm_pending_reply_path "$state" "$corr4")
+  [ "$(fm_pending_reply_get "$rec" task_id)" = domain ] \
+    || fail "quoted-correlation expectation must belong to the current target"
   printf 'done [corr=%s]: complete\n' "$corr1" > "$state/domain.status"
   fm_pending_reply_try_resolve "$state" "$corr1" || fail "first expectation should resolve"
   run_send "$fb" "$home" "$log" fm-domain "${FM_FROMFIRST_MARK}corr=${corr1} follow-up" \
@@ -1271,6 +1302,7 @@ test_concurrent_escalation_publishes_once
 test_incomplete_transaction_lock_is_reclaimed
 test_stale_generation_reclaim_preserves_new_owner
 test_failed_owner_promotion_removes_waiter
+test_live_legacy_waiter_is_drained
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable

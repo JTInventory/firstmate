@@ -66,6 +66,8 @@
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
+#   FM_PENDING_REPLY_LEGACY_DRAIN_POLLS
+#                                 unchanged pre-ticket waiter polls before reclaim
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
@@ -177,13 +179,18 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
   local existing_pid existing_identity existing_token actual attempt=0 generation
   local incomplete_signature='' incomplete_seen=0 current_signature
   local winner winner_ticket winner_token live_owner live_choosing max_ticket
+  local legacy_present legacy_owned legacy_snapshot legacy_signature='' legacy_seen=0
+  local legacy_drain_polls=${FM_PENDING_REPLY_LEGACY_DRAIN_POLLS:-240} max_attempts
+  case "$legacy_drain_polls" in ''|*[!0-9]*) legacy_drain_polls=240 ;; esac
+  [ "$legacy_drain_polls" -gt 0 ] || legacy_drain_polls=240
+  max_attempts=$((legacy_drain_polls + 200))
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
   mkdir -p "$(dirname "$lock")" || return 1
   pid=${BASHPID:-$$}
   identity=$(fm_pending_reply_pid_identity "$pid") || return 1
   lock_token="$pid-$RANDOM-$(fm_pending_reply_now)"
   owner="$lock/owner-$lock_token"
-  while [ "$attempt" -lt 200 ]; do
+  while [ "$attempt" -lt "$max_attempts" ]; do
     if [ -f "$lock" ] && [ ! -d "$lock" ]; then
       existing_pid=$(fm_pending_reply_txn_lock_value "$lock" pid)
       existing_identity=$(fm_pending_reply_txn_lock_value "$lock" identity)
@@ -234,6 +241,67 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
     fi
     incomplete_signature=
     incomplete_seen=0
+    legacy_present=0
+    legacy_owned=0
+    legacy_snapshot=
+    for generation in "$lock"/owner-*; do
+      [ -f "$generation" ] || continue
+      existing_pid=$(fm_pending_reply_get "$generation" pid)
+      existing_identity=$(fm_pending_reply_get "$generation" identity)
+      existing_token=$(fm_pending_reply_get "$generation" token)
+      phase=$(fm_pending_reply_get "$generation" phase)
+      ticket=$(fm_pending_reply_get "$generation" ticket)
+      actual=$(fm_pending_reply_pid_identity "$existing_pid" 2>/dev/null || true)
+      if [ -z "$existing_pid" ] || [ -z "$existing_identity" ] || [ -z "$existing_token" ] \
+         || [ "$actual" != "$existing_identity" ]; then
+        [ "$(fm_pending_reply_get "$generation" token)" = "$existing_token" ] \
+          && rm -f "$generation" 2>/dev/null
+        continue
+      fi
+      [ -z "$ticket" ] || continue
+      case "$phase" in
+        waiting) ;;
+        owned) legacy_owned=1 ;;
+        *) rm -f "$owner" 2>/dev/null || true; return 1 ;;
+      esac
+      legacy_present=1
+      legacy_snapshot="${legacy_snapshot}$(basename "$generation"):$(fm_pending_reply_file_signature "$generation")
+"
+    done
+    if [ "$legacy_present" = 1 ]; then
+      rm -f "$owner" 2>/dev/null || true
+      current_signature=$(printf '%s' "$legacy_snapshot" | cksum 2>/dev/null)
+      if [ "$current_signature" = "$legacy_signature" ]; then
+        legacy_seen=$((legacy_seen + 1))
+      else
+        legacy_signature=$current_signature
+        legacy_seen=0
+      fi
+      if [ "$legacy_owned" = 0 ] && [ "$legacy_seen" -ge "$legacy_drain_polls" ]; then
+        for generation in "$lock"/owner-*; do
+          [ -f "$generation" ] || continue
+          [ -z "$(fm_pending_reply_get "$generation" ticket)" ] || continue
+          [ "$(fm_pending_reply_get "$generation" phase)" = waiting ] || continue
+          existing_pid=$(fm_pending_reply_get "$generation" pid)
+          existing_identity=$(fm_pending_reply_get "$generation" identity)
+          existing_token=$(fm_pending_reply_get "$generation" token)
+          actual=$(fm_pending_reply_pid_identity "$existing_pid" 2>/dev/null || true)
+          [ -n "$existing_token" ] && [ "$actual" = "$existing_identity" ] \
+            && [ "$(fm_pending_reply_get "$generation" token)" = "$existing_token" ] \
+            && [ -z "$(fm_pending_reply_get "$generation" ticket)" ] \
+            && [ "$(fm_pending_reply_get "$generation" phase)" = waiting ] \
+            && rm -f "$generation" 2>/dev/null
+        done
+        legacy_signature=
+        legacy_seen=0
+        continue
+      fi
+      sleep 0.05
+      attempt=$((attempt + 1))
+      continue
+    fi
+    legacy_signature=
+    legacy_seen=0
     if [ ! -f "$owner" ]; then
       if ! fm_pending_reply_txn_owner_write \
         "$owner" "$pid" "$identity" "$lock_token" choosing 0; then
@@ -257,13 +325,22 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
         fi
         case "$phase" in
           waiting|owned)
-            case "$ticket" in ''|*[!0-9]*) rm -f "$owner" 2>/dev/null || true; return 1 ;; esac
+            case "$ticket" in
+              '') legacy_present=1; break ;;
+              *[!0-9]*) rm -f "$owner" 2>/dev/null || true; return 1 ;;
+            esac
             [ "$ticket" -le "$max_ticket" ] || max_ticket=$ticket
             ;;
           choosing) ;;
           *) rm -f "$owner" 2>/dev/null || true; return 1 ;;
         esac
       done
+      if [ "$legacy_present" = 1 ]; then
+        rm -f "$owner" 2>/dev/null || true
+        sleep 0.05
+        attempt=$((attempt + 1))
+        continue
+      fi
       ticket=$((max_ticket + 1))
       if ! fm_pending_reply_txn_owner_write \
         "$owner" "$pid" "$identity" "$lock_token" waiting "$ticket"; then
@@ -294,6 +371,11 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
       fi
       case "$phase" in
         owned)
+          if [ -z "$ticket" ]; then
+            legacy_present=1
+            break
+          fi
+          case "$ticket" in *[!0-9]*) rm -f "$owner" 2>/dev/null || true; return 1 ;; esac
           if [ "$existing_token" = "$lock_token" ]; then
             printf -v "$result_var" '%s' "$lock_token"
             return 0
@@ -304,7 +386,10 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
           live_choosing=1
           ;;
         waiting)
-          case "$ticket" in ''|*[!0-9]*) rm -f "$owner" 2>/dev/null || true; return 1 ;; esac
+          case "$ticket" in
+            '') legacy_present=1; break ;;
+            *[!0-9]*) rm -f "$owner" 2>/dev/null || true; return 1 ;;
+          esac
           if [ -z "$winner" ] || [ "$ticket" -lt "$winner_ticket" ] \
              || { [ "$ticket" -eq "$winner_ticket" ] \
                   && [[ $existing_token < $winner_token ]]; }; then
@@ -316,6 +401,12 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
         *) rm -f "$owner" 2>/dev/null || true; return 1 ;;
       esac
     done
+    if [ "$legacy_present" = 1 ]; then
+      rm -f "$owner" 2>/dev/null || true
+      sleep 0.05
+      attempt=$((attempt + 1))
+      continue
+    fi
     if [ "$live_choosing" = 0 ] && [ "$live_owner" = 0 ] && [ "$winner" = "$owner" ]; then
       if ! fm_pending_reply_txn_owner_write \
         "$owner" "$pid" "$identity" "$lock_token" owned "$winner_ticket"; then
