@@ -516,11 +516,9 @@ fm_pending_reply_archive_terminal() {  # <state-dir> <corr_id> [history-state-di
   if [ "$phase" = resolved ]; then
     staged_state=$(fm_pending_reply_get "$active" retirement_history_state)
     source_state=$(fm_pending_reply_get "$active" retirement_source_state)
-    if [ -n "$staged_state" ]; then
-      if [ -n "$source_state" ]; then
-        rm -f "$(fm_pending_reply_handoff_path "$staged_state" "$source_state" "$corr")" || return 1
-      fi
-      rm -f "$(fm_pending_reply_history_dir "$staged_state")/.retire-$corr" || return 1
+    if [ -n "$staged_state" ] && [ -n "$source_state" ]; then
+      fm_pending_reply_promote_resolved_record "$active" "$staged_state" "$source_state"
+      return $?
     fi
   fi
   history_dir=$(fm_pending_reply_history_dir "$history_state")
@@ -559,30 +557,57 @@ fm_pending_reply_prepare_resolved_handoff() {  # <history-path> <history-state-d
   mv "$tmp" "$receipt"
 }
 
-fm_pending_reply_handoff_resolved_history() {  # <state-dir> <corr_id> <history-state-dir> <source-state>
-  local state=$1 corr=$2 history_state=$3 source_state=$4 source_history history_dir history
-  source_history="$(fm_pending_reply_history_dir "$state")/$corr"
-  [ -f "$source_history" ] || return 1
-  [ "$(fm_pending_reply_get "$source_history" phase)" = resolved ] || return 1
-  fm_pending_reply_set "$source_history" retirement_history_state "$history_state" || return 1
-  fm_pending_reply_set "$source_history" retirement_source_state "$source_state" || return 1
+fm_pending_reply_promote_resolved_record() {  # <record-path> <history-state-dir> <source-state>
+  local record=$1 history_state=$2 source_state=$3 corr task_id history_dir history receipt tmp line
+  [ -f "$record" ] || return 1
+  corr=$(fm_pending_reply_get "$record" corr_id)
+  task_id=$(fm_pending_reply_get "$record" task_id)
+  [ -n "$corr" ] && [ -n "$task_id" ] || return 1
+  [ "$(fm_pending_reply_get "$record" phase)" = resolved ] || return 1
   history_dir=$(fm_pending_reply_history_dir "$history_state")
   mkdir -p "$history_dir" || return 1
   chmod 700 "$history_dir" 2>/dev/null || true
   history="$history_dir/$corr"
-  if [ "$source_history" != "$history" ]; then
+  if [ "$record" != "$history" ]; then
     if [ -f "$history" ]; then
       [ "$(fm_pending_reply_get "$history" corr_id)" = "$corr" ] || return 1
-      [ "$(fm_pending_reply_get "$history" task_id)" = \
-        "$(fm_pending_reply_get "$source_history" task_id)" ] || return 1
+      [ "$(fm_pending_reply_get "$history" task_id)" = "$task_id" ] || return 1
       [ "$(fm_pending_reply_get "$history" phase)" = resolved ] || return 1
       [ "$(fm_pending_reply_get "$history" retirement_source_state)" = "$source_state" ] || return 1
-      rm -f "$source_history" || return 1
     else
-      mv "$source_history" "$history" || return 1
+      tmp="$history_dir/.${corr}.resolved.$$"
+      : > "$tmp" || return 1
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in retirement_source_state=*|retirement_history_state=*) continue ;; esac
+        printf '%s\n' "$line" >> "$tmp" || return 1
+      done < "$record"
+      printf '%s\n' \
+        "retirement_history_state=$history_state" \
+        "retirement_source_state=$source_state" >> "$tmp" || return 1
+      chmod 600 "$tmp" 2>/dev/null || true
+      mv "$tmp" "$history" || return 1
     fi
+    rm -f "$record" || return 1
+  else
+    fm_pending_reply_set "$history" retirement_history_state "$history_state" || return 1
+    fm_pending_reply_set "$history" retirement_source_state "$source_state" || return 1
   fi
+  receipt=$(fm_pending_reply_handoff_path "$history_state" "$source_state" "$corr") || return 1
+  rm -f "$receipt" "$history_dir/.retire-$corr" || return 1
   fm_pending_reply_prepare_resolved_handoff "$history" "$history_state" "$source_state"
+}
+
+fm_pending_reply_handoff_resolved_history() {  # <state-dir> <corr_id> <history-state-dir> <source-state>
+  local state=$1 corr=$2 history_state=$3 source_state=$4 source_history history
+  source_history="$(fm_pending_reply_history_dir "$state")/$corr"
+  history="$(fm_pending_reply_history_dir "$history_state")/$corr"
+  if [ -f "$source_history" ]; then
+    fm_pending_reply_promote_resolved_record "$source_history" "$history_state" "$source_state"
+  elif [ -f "$history" ]; then
+    fm_pending_reply_promote_resolved_record "$history" "$history_state" "$source_state"
+  else
+    return 1
+  fi
 }
 
 fm_pending_reply_archive_resolved() {  # <state-dir> <corr_id>

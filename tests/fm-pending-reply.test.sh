@@ -974,6 +974,40 @@ test_force_retirement_receipts_are_source_bound() {
   pass "forced-retirement receipts remain bound to their source state"
 }
 
+test_staged_resolution_promotes_before_receipt_cleanup() {
+  (
+    local home state retained corr rec source receipt history
+    home=$(setup_parent staged-resolution-order)
+    state="$home/state"
+    retained="$TMP_ROOT/staged-resolution-retained/state"
+    mkdir -p "$retained"
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "late reply")
+    fm_pending_reply_mark_delivered "$state" "$corr" \
+      || fail "staged-resolution-order: delivery setup failed"
+    rec=$(fm_pending_reply_active_path "$state" "$corr")
+    fm_pending_reply_set "$rec" phase escalated \
+      || fail "staged-resolution-order: phase setup failed"
+    source=$(fm_pending_reply_source_identity "$state")
+    fm_pending_reply_stage_force_retire_task "$state" hibit "$retained" \
+      || fail "staged-resolution-order: retirement staging failed"
+    receipt=$(fm_pending_reply_handoff_path "$retained" "$source" "$corr")
+    [ -f "$receipt" ] || fail "staged-resolution-order: forced receipt was not staged"
+    printf 'done [corr=%s]: arrived during teardown\n' "$corr" > "$state/hibit.status"
+    fm_pending_reply_prepare_resolved_handoff() { return 1; }
+    if fm_pending_reply_try_resolve "$state" "$corr"; then
+      fail "staged-resolution-order: injected receipt failure should propagate"
+    fi
+    history="$(fm_pending_reply_history_dir "$retained")/$corr"
+    [ -f "$history" ] \
+      || fail "staged-resolution-order: retained history was not committed first"
+    [ "$(fm_pending_reply_get "$history" phase)" = resolved ] \
+      || fail "staged-resolution-order: retained history lost the resolution"
+    [ ! -f "$rec" ] \
+      || fail "staged-resolution-order: source remained after retained commit"
+  ) || fail "staged resolved-history ordering regression failed"
+  pass "staged resolution commits retained history before receipt cleanup"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1001,5 +1035,6 @@ test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 test_force_retirement_receipts_are_source_bound
+test_staged_resolution_promotes_before_receipt_cleanup
 
 printf 'ok - all pending-reply tests passed\n'
