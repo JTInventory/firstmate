@@ -471,7 +471,7 @@ Before commissioning an investigation, consult existing reports and established 
 - **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is appropriate for investigation, diagnosis, planning, reproduction, or audit work when the captain explicitly requests a separate knowledge or design deliverable or unresolved uncertainty could materially change whether or what to build.
 
 If established evidence already answers an informational question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise implementation question when useful rather than dispatching speculative design work; never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
-A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code; load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
+A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 
 Then classify readiness:
 
@@ -533,7 +533,7 @@ Because `fm-send` to a `kind=secondmate` target marks the request as from-firstm
 A ship task's path from `done` to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
 
 - **no-mistakes** - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
-- **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal landed-work check.
+- **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Before opening the PR, and again if parallel work makes the open PR conflict, the same crewmate owns direct-PR reconciliation: rebase onto the authoritative base, resolve ordinary conflicts, push the updated branch, and report `done: PR <url>` again. Skip the Validate step and go straight to PR ready; after any reconciliation, rerun `fm-pr-check` before relaying the PR. Teardown uses the normal landed-work check.
 - **local-only** - no remote, no PR. The crewmate stops at `done: ready in branch fm/<id>`. Review the diff with `bin/fm-review-diff.sh <id>`, relay a one-paragraph summary to the captain, and on approval run `bin/fm-merge-local.sh <id>` to fast-forward local `main` (it refuses anything but a clean fast-forward - if it does, have the crewmate rebase). No `fm-pr-check`. Then teardown, whose safety check requires the branch already merged into local `main`, OR the work pushed to any remote (a fork counts - relevant for upstream-contribution PRs on a local-only-registered project).
 
 When reviewing any crewmate branch diff, use `bin/fm-review-diff.sh <id>` rather than `git diff <default>...branch` directly.

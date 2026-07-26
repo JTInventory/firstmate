@@ -31,5 +31,19 @@ assert_grep 'captain explicitly requests a separate knowledge or design delivera
   "intake contract lost captain-requested separate scouts"
 assert_grep 'captain wants it shipped, promote the task in place' "$AGENTS" \
   "intake contract lost genuine scout promotion"
+assert_grep 'the same crewmate owns direct-PR reconciliation' "$AGENTS" \
+  "direct-PR conflict reconciliation lost its owner"
+assert_grep 'after any reconciliation, rerun `fm-pr-check`' "$AGENTS" \
+  "direct-PR reconciliation lost readiness verification"
+
+for legacy_phrase in \
+  'load `diagnostic-reasoning`' \
+  'that is a scout task; dispatch it instead of doing the digging yourself' \
+  '**Blocked:** touches the same files or subsystem' \
+  'same repo plus overlapping area means serialize'; do
+  if grep -Fq -- "$legacy_phrase" "$AGENTS"; then
+    fail "legacy intake contract restored '$legacy_phrase'"
+  fi
+done
 
 pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
