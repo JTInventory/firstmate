@@ -53,21 +53,35 @@ printf '%s\n' '- direct-project [direct-PR] - direct PR fixture (added 2026-07-2
 FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" parallel-direct-pr direct-project >/dev/null \
   || fail "direct-PR brief scaffold failed"
 DIRECT_PR_BRIEF="$BRIEF_HOME/data/parallel-direct-pr/brief.md"
-PRE_PR_PATH=$(grep -F 'When it is implemented and committed' "$DIRECT_PR_BRIEF")
-POST_CONFLICT_PATH=$(grep -F 'If firstmate later tells you that parallel work made the open PR conflict' "$DIRECT_PR_BRIEF")
+PRE_PR_PATH=$(sed -n '/^Before initial direct-PR publication:/,/^If firstmate later tells you that parallel work made the open PR conflict/p' "$DIRECT_PR_BRIEF" | sed '$d')
+POST_CONFLICT_PATH=$(sed -n '/^If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation:/,/^After opening or reconciling the PR/p' "$DIRECT_PR_BRIEF" | sed '$d')
 for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
   path=${!path_name}
+  assert_contains "$path" 'Resolve `DEFAULT` from `refs/remotes/origin/HEAD`' \
+    "$path_name lost DEFAULT initialization"
+  assert_contains "$path" 'set `FEATURE_REF=refs/heads/fm/parallel-direct-pr`' \
+    "$path_name lost FEATURE_REF initialization"
   assert_contains "$path" 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' \
     "$path_name lost explicit default-ref fetch"
+  assert_contains "$path" 'git ls-remote --exit-code origin "$FEATURE_REF"' \
+    "$path_name lost remote feature lookup guard"
   assert_contains "$path" 'git fetch origin "+$FEATURE_REF:refs/remotes/origin/fm/parallel-direct-pr"' \
     "$path_name lost explicit feature-ref fetch"
   assert_contains "$path" 'EXPECTED=$(git rev-parse refs/remotes/origin/fm/parallel-direct-pr)' \
     "$path_name lost fetched feature OID snapshot"
-  assert_contains "$path" 'rebase onto `origin/$DEFAULT` and resolve ordinary conflicts' \
+  assert_contains "$path" 'git merge-base --is-ancestor "$EXPECTED" HEAD' \
+    "$path_name lost feature-history ancestry guard"
+  assert_contains "$path" 'blocked: remote feature branch diverged; refusing to overwrite remote-only commits' \
+    "$path_name lost feature-history divergence blocker"
+  assert_contains "$path" 'Rebase onto `origin/$DEFAULT` and resolve ordinary conflicts' \
     "$path_name lost conflict resolution"
   assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "HEAD:$FEATURE_REF"' \
     "$path_name lost explicit lease and push refspec"
 done
+assert_contains "$PRE_PR_PATH" '0 means the feature ref exists, 2 means it is absent, and any other status is a lookup failure' \
+  "pre-PR path lost distinct feature lookup outcomes"
+assert_contains "$POST_CONFLICT_PATH" 'require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure' \
+  "post-conflict path lost published feature lookup guard"
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
   || fail "generated direct-PR brief must emit one completion signal"

@@ -241,8 +241,20 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`, and set \`FEATURE_REF=refs/heads/fm/$ID\`; run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`; if \`git ls-remote --exit-code origin "\$FEATURE_REF"\` confirms the feature ref exists, run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\` and snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`, otherwise set \`EXPECTED\` empty only after confirming the ref is absent and stop on lookup or fetch errors; rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts, then push with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\` and open the PR with \`gh-axi\`.
-If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation: resolve \`DEFAULT\` and \`FEATURE_REF\` the same way; run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`; require \`git ls-remote --exit-code origin "\$FEATURE_REF"\` to confirm the published feature ref exists, run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\`, and snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`; rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts, then update the open PR with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\`.
+Before initial direct-PR publication:
+1. Resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`, and set \`FEATURE_REF=refs/heads/fm/$ID\`.
+2. Run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`.
+3. Run \`git ls-remote --exit-code origin "\$FEATURE_REF"\` and inspect its exit status: 0 means the feature ref exists, 2 means it is absent, and any other status is a lookup failure that must append \`blocked: remote feature lookup failed\` and stop.
+4. When the feature ref exists, run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\`, snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`, and require \`git merge-base --is-ancestor "\$EXPECTED" HEAD\`; if the ancestry check fails, append \`blocked: remote feature branch diverged; refusing to overwrite remote-only commits\` and stop. When exit 2 confirmed the feature ref is absent, set \`EXPECTED=\`.
+5. Rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts.
+6. Push with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\` and open the PR with \`gh-axi\`.
+If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation:
+1. Resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`, and set \`FEATURE_REF=refs/heads/fm/$ID\`.
+2. Run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`.
+3. Run \`git ls-remote --exit-code origin "\$FEATURE_REF"\` and require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure, so append \`blocked: published remote feature lookup failed\` and stop for either case.
+4. Run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\`, snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`, and require \`git merge-base --is-ancestor "\$EXPECTED" HEAD\`; if the ancestry check fails, append \`blocked: remote feature branch diverged; refusing to overwrite remote-only commits\` and stop.
+5. Rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts.
+6. Update the open PR with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\`.
 After opening or reconciling the PR, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
