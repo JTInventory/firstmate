@@ -99,7 +99,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost attached-state recovery boundary"
   assert_contains "$path" 'When `HEAD == pre_head=`, either atomically persist `pre_head=` as `post_head=` with `phase=ready-to-push` for a proven no-op where `default_oid=` is already an ancestor of `HEAD`, or safely restart `git rebase "$DEFAULT_OID"` and perform the same ready-state rewrite after it completes' \
     "$path_name lost no-active pre-head restart and no-op recovery"
-  assert_contains "$path" 'When `HEAD` differs, accept completed rebase recovery only when `ORIG_HEAD` equals `pre_head=`, the latest metadata-bound matching rebase finish is the newest branch reflog entry, that finish result OID equals current `HEAD`, no later branch movement exists, the matching rebase start names `default_oid=`, and `default_oid=` is an ancestor of `HEAD`' \
+  assert_contains "$path" 'When `HEAD` differs, accept completed rebase recovery only when the latest metadata-bound matching rebase finish is the newest branch reflog entry, that finish result OID equals current `HEAD`, no later branch movement exists, the recorded branch equals `branch=`, the matching rebase start names `default_oid=`, and `default_oid=` is an ancestor of `HEAD`' \
     "$path_name lost exact immutable completed-rebase proof"
   assert_contains "$path" 'If the finish result differs from `HEAD` or any later branch movement exists, append `blocked: completed direct-PR rebase result moved; refusing recovery` and stop' \
     "$path_name lost completed-rebase movement blocker"
@@ -135,7 +135,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost atomic-write cleanup and blocker"
   assert_contains "$path" 'remove the validated checkpoint and its task-specific temporary artifacts, then restart safe validation' \
     "$path_name lost confirmed-remote-movement cleanup"
-  assert_contains "$path" 'After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts' \
+  assert_contains "$path" 'After either push succeeds, remove the validated checkpoint and its task-specific temporary artifacts' \
     "$path_name lost successful-publication checkpoint cleanup"
   assert_contains "$path" 'FEATURE_REF=refs/heads/fm/parallel-direct-pr' \
     "$path_name lost FEATURE_REF initialization"
@@ -159,24 +159,47 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost immutable publication OID and explicit lease"
   assert_contains "$path" 'retry that identical `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
     "$path_name lost identical immutable retry"
-  assert_contains "$path" 'if the retry lookup fails, append `blocked: remote feature retry lookup failed` and stop' \
-    "$path_name lost retry lookup blocker"
   assert_contains "$path" 'if the ancestry check fails, append `blocked: remote feature branch diverged; refusing to overwrite remote-only commits` and stop' \
     "$path_name lost fail-closed divergence blocker"
 done
+PRE_PR_STEP9=$(printf '%s\n' "$PRE_PR_PATH" | sed -n '/^9\./,$p')
+POST_CONFLICT_STEP9=$(printf '%s\n' "$POST_CONFLICT_PATH" | sed -n '/^9\./,$p')
+for step_name in PRE_PR_STEP9 POST_CONFLICT_STEP9; do
+  step=${!step_name}
+  assert_contains "$step" 'Before pushing, derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again and require `CURRENT_BRANCH == BRANCH` and `$(git rev-parse HEAD) == POST_HEAD`; detached `HEAD` or mismatch must append `blocked: direct-PR publication state changed; refusing push` and stop' \
+    "$step_name lost publication-state precondition"
+  assert_contains "$step" 'If it fails, query the remote feature ref; a lookup failure must append `blocked: remote feature retry lookup failed` and stop' \
+    "$step_name lost first-push failure lookup"
+  assert_contains "$step" 'If the remote differs from `EXPECTED`, remove the validated checkpoint and its task-specific temporary artifacts and restart safe validation' \
+    "$step_name lost lease-rejection cleanup and restart"
+  assert_contains "$step" 'If the remote still equals `EXPECTED`, retry that identical `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
+    "$step_name lost unchanged-remote bounded retry"
+  assert_contains "$step" 'If the retry fails, query the remote once more: on lookup failure append `blocked: remote feature retry lookup failed` and stop; on remote movement remove the validated checkpoint and its task-specific temporary artifacts and restart safe validation; when the remote still equals `EXPECTED`, retain the checkpoint, append `blocked: direct-PR publication retry exhausted; checkpoint retained`, and stop' \
+    "$step_name lost terminal second-retry outcomes"
+  assert_contains "$step" 'After either push succeeds, remove the validated checkpoint and its task-specific temporary artifacts' \
+    "$step_name lost successful publication cleanup"
+done
+assert_contains "$PRE_PR_STEP9" 'Push with `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
+  "initial publication step lost guarded push"
+assert_contains "$PRE_PR_STEP9" 'then open the PR with `gh-axi`' \
+  "initial publication step lost post-push PR creation"
+assert_contains "$POST_CONFLICT_STEP9" 'Update the open PR with `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
+  "post-conflict publication step lost guarded push"
+assert_contains "$POST_CONFLICT_STEP9" 'only then is reconciliation complete' \
+  "post-conflict publication step lost completion boundary"
 assert_contains "$PRE_PR_PATH" '0 means the feature ref exists, 2 means it is absent, and any other status is a lookup failure' \
   "pre-PR path lost distinct feature lookup outcomes"
 assert_contains "$PRE_PR_PATH" 'any other status is a lookup failure that must append `blocked: remote feature lookup failed` and stop' \
   "pre-PR path lost lookup-failure blocker"
 assert_contains "$PRE_PR_PATH" 'set `EXPECTED=`' \
   "pre-PR path lost absent-feature lease initialization"
-assert_contains "$PRE_PR_PATH" 'After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts, then open the PR with `gh-axi`' \
+assert_contains "$PRE_PR_PATH" 'After either push succeeds, remove the validated checkpoint and its task-specific temporary artifacts, then open the PR with `gh-axi`' \
   "pre-PR path can open a PR before safe publication"
 assert_contains "$POST_CONFLICT_PATH" 'require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure' \
   "post-conflict path lost published feature lookup guard"
 assert_contains "$POST_CONFLICT_PATH" 'append `blocked: published remote feature lookup failed` and stop for either case' \
   "post-conflict path lost published-feature blocker"
-assert_contains "$POST_CONFLICT_PATH" 'After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts; only then is reconciliation complete' \
+assert_contains "$POST_CONFLICT_PATH" 'After either push succeeds, remove the validated checkpoint and its task-specific temporary artifacts; only then is reconciliation complete' \
   "post-conflict path can complete before safe publication"
 assert_grep "Stay inside this worktree except for the status file and the task-specific Firstmate checkpoint at '$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease'; modify nothing else outside it." "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost its bounded state-path exception"
