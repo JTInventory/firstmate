@@ -99,16 +99,16 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost attached-state recovery boundary"
   assert_contains "$path" 'When `HEAD == pre_head=`, either atomically persist `pre_head=` as `post_head=` with `phase=ready-to-push` for a proven no-op where `default_oid=` is already an ancestor of `HEAD`, or safely restart `git rebase "$DEFAULT_OID"` and perform the same ready-state rewrite after it completes' \
     "$path_name lost no-active pre-head restart and no-op recovery"
-  assert_contains "$path" 'When `HEAD` differs, accept completed rebase recovery only when the latest metadata-bound matching rebase finish is the newest branch reflog entry, that finish result OID equals current `HEAD`, no later branch movement exists, the recorded branch equals `branch=`, the matching rebase start names `default_oid=`, and `default_oid=` is an ancestor of `HEAD`' \
+  assert_contains "$path" 'When `HEAD` differs, accept completed rebase recovery only when the latest metadata-bound matching rebase finish is the newest branch reflog entry, that finish result OID equals current `HEAD`, no later branch movement exists, the recorded branch equals `branch=`, the matching rebase transition'\''s source OID equals `pre_head=`, the matching rebase start names `default_oid=`, and `default_oid=` is an ancestor of `HEAD`' \
     "$path_name lost exact immutable completed-rebase proof"
-  assert_contains "$path" 'If the finish result differs from `HEAD` or any later branch movement exists, append `blocked: completed direct-PR rebase result moved; refusing recovery` and stop' \
-    "$path_name lost completed-rebase movement blocker"
+  assert_contains "$path" 'If the source OID differs from `pre_head=`, the finish result differs from `HEAD`, or any later branch movement exists, append `blocked: completed direct-PR rebase transition mismatch; refusing recovery` and stop' \
+    "$path_name lost completed-rebase transition blocker"
   assert_contains "$path" 'Then atomically persist that exact `HEAD` as `post_head=` with `phase=ready-to-push`' \
     "$path_name lost recoverable ready-state transition"
   assert_contains "$path" 'If that recovery rewrite fails, remove only the validated task-specific temporary artifact, append `blocked: direct-PR recovered ready checkpoint write failed`, and stop without pushing' \
     "$path_name lost fail-closed recovered ready-state rewrite"
-  assert_contains "$path" 'For `phase=ready-to-push`, require attached `CURRENT_BRANCH == branch=` and current `HEAD` to equal the nonempty `post_head=`, then resume only `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
-    "$path_name lost publication-head-bound push resume"
+  assert_contains "$path" 'For `phase=ready-to-push`, require attached `CURRENT_BRANCH == branch=` and current `HEAD` to equal the nonempty `post_head=`' \
+    "$path_name lost publication-head-bound recovery precondition"
   assert_contains "$path" 'Any other detached state or head, phase, branch, repository, task, ref, or onto mismatch must append `blocked: direct-PR lease checkpoint state mismatch; refusing recovery` and stop' \
     "$path_name lost recovery state and onto mismatch blocker"
   assert_contains "$path" 'Do not rerun pre-rebase ancestry validation against rewritten `HEAD`' \
@@ -162,6 +162,10 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
   assert_contains "$path" 'if the ancestry check fails, append `blocked: remote feature branch diverged; refusing to overwrite remote-only commits` and stop' \
     "$path_name lost fail-closed divergence blocker"
 done
+assert_contains "$PRE_PR_PATH" 'then enter step 9 and execute its complete initial-publication workflow: remote classification, bounded identical retry, lease-rejection cleanup and restart, checkpoint cleanup, PR opening, and the following single terminal completion or blocked status. Never perform only a bare push' \
+  'initial ready-state recovery lost the complete publication workflow'
+assert_contains "$POST_CONFLICT_PATH" 'then enter step 9 and execute its complete post-conflict publication workflow: remote classification, bounded identical retry, lease-rejection cleanup and restart, checkpoint cleanup, open-PR continuation, reconciliation completion, and the following single terminal completion or blocked status. Never perform only a bare push' \
+  'post-conflict ready-state recovery lost the complete publication workflow'
 PRE_PR_STEP9=$(printf '%s\n' "$PRE_PR_PATH" | sed -n '/^9\./,$p')
 POST_CONFLICT_STEP9=$(printf '%s\n' "$POST_CONFLICT_PATH" | sed -n '/^9\./,$p')
 for step_name in PRE_PR_STEP9 POST_CONFLICT_STEP9; do
