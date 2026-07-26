@@ -63,8 +63,10 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost task, feature, or branch initialization"
   assert_contains "$path" 'Derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)`' \
     "$path_name lost current symbolic branch derivation"
-  assert_contains "$path" 'if `HEAD` is detached or `CURRENT_BRANCH != BRANCH`, append `blocked: direct-PR requires attached branch fm/parallel-direct-pr` and stop' \
-    "$path_name lost initial detached-HEAD and branch-mismatch blocker"
+  assert_contains "$path" 'An attached branch must equal `BRANCH`; a detached `HEAD` is allowed only when `LEASE_CHECKPOINT` exists and step 3 proves an active rebase for the bound branch and base' \
+    "$path_name lost bounded detached-HEAD recovery entry"
+  assert_contains "$path" 'Otherwise append `blocked: direct-PR requires attached branch fm/parallel-direct-pr` and stop' \
+    "$path_name lost initial branch-state blocker"
   assert_contains "$path" '`REPO_ID=$(git rev-parse --path-format=absolute --git-common-dir)`' \
     "$path_name lost repository identity initialization"
   assert_contains "$path" "LEASE_CHECKPOINT='$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease'" \
@@ -75,30 +77,32 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost index-safe checkpoint contract"
   assert_contains "$path" 'A valid checkpoint must contain exactly `repo=`, `task=`, `feature_ref=`, `branch=`, `expected=`, `default_oid=`, `pre_head=`, `post_head=`, and `phase=`' \
     "$path_name lost complete checkpoint binding"
-  assert_contains "$path" 'Require its repository, task, feature ref, branch, and the freshly derived attached `CURRENT_BRANCH` to equal `REPO_ID`, `TASK_ID`, `FEATURE_REF`, `BRANCH`, and `BRANCH`' \
+  assert_contains "$path" 'Require its repository, task, feature ref, and branch to equal `REPO_ID`, `TASK_ID`, `FEATURE_REF`, and `BRANCH`; when `HEAD` is attached, also require freshly derived `CURRENT_BRANCH == BRANCH`' \
     "$path_name lost checkpoint identity validation"
   assert_contains "$path" 'Reject a pre-existing checkpoint or temporary target that is a symlink, non-regular file, unexpectedly owned, or malformed by appending `blocked: direct-PR lease checkpoint invalid; refusing recovery` and stop' \
     "$path_name lost fail-closed checkpoint target validation"
-  assert_contains "$path" 'otherwise append `blocked: direct-PR lease checkpoint identity mismatch; refusing recovery` and stop' \
+  assert_contains "$path" 'Otherwise append `blocked: direct-PR lease checkpoint identity mismatch; refusing recovery` and stop' \
     "$path_name lost fail-closed checkpoint identity validation"
   assert_contains "$path" 'a lookup failure must append `blocked: direct-PR lease recovery lookup failed` and stop' \
     "$path_name lost fail-closed recovery lookup"
-  assert_contains "$path" 'for `phase=rebase-in-progress`, resume an active rebase only when its recorded original head equals `pre_head=`' \
-    "$path_name lost active-rebase head-bound recovery"
-  assert_contains "$path" 'if no rebase is active and `HEAD` differs from `pre_head=`, accept the completed rebase boundary only when `ORIG_HEAD` equals `pre_head=`' \
-    "$path_name lost interrupted rebase-to-ready recovery"
-  assert_contains "$path" 'the latest branch reflog entry is the matching successful rebase finish, and `default_oid=` is an ancestor of `HEAD`' \
-    "$path_name lost durable completed-rebase proof"
-  assert_contains "$path" 'then atomically persist that exact `HEAD` as `post_head=` with `phase=ready-to-push`' \
+  assert_contains "$path" 'If it still matches and `phase=rebase-in-progress`: an active rebase may use Git'\''s expected detached `HEAD` only when its metadata records `refs/heads/$BRANCH` as the original branch, `pre_head=` as the original head, and `default_oid=` as the exact onto target; then resume only that recorded rebase' \
+    "$path_name lost active-rebase branch, head, and onto proof"
+  assert_contains "$path" 'otherwise append `blocked: active direct-PR rebase metadata mismatch` and stop' \
+    "$path_name lost active-rebase metadata blocker"
+  assert_contains "$path" 'With no active rebase, require attached `CURRENT_BRANCH == branch=`' \
+    "$path_name lost attached-state recovery boundary"
+  assert_contains "$path" 'When `HEAD == pre_head=`, either atomically persist `pre_head=` as `post_head=` with `phase=ready-to-push` for a proven no-op where `default_oid=` is already an ancestor of `HEAD`, or safely restart `git rebase "$DEFAULT_OID"` and perform the same ready-state rewrite after it completes' \
+    "$path_name lost no-active pre-head restart and no-op recovery"
+  assert_contains "$path" 'when `HEAD` differs, accept completed rebase recovery only when `ORIG_HEAD` equals `pre_head=`, the reflog contains the matching rebase start at `default_oid=` and successful finish on `branch=`, and `default_oid=` is an ancestor of `HEAD`' \
+    "$path_name lost immutable completed-rebase proof"
+  assert_contains "$path" 'Then atomically persist that exact `HEAD` as `post_head=` with `phase=ready-to-push`' \
     "$path_name lost recoverable ready-state transition"
   assert_contains "$path" 'If that recovery rewrite fails, remove only the validated task-specific temporary artifact, append `blocked: direct-PR recovered ready checkpoint write failed`, and stop without pushing' \
     "$path_name lost fail-closed recovered ready-state rewrite"
-  assert_contains "$path" 'For `phase=ready-to-push`, require current `HEAD` to equal the nonempty `post_head=` and resume only the same explicit lease push' \
+  assert_contains "$path" 'For `phase=ready-to-push`, require attached `CURRENT_BRANCH == branch=` and current `HEAD` to equal the nonempty `post_head=`, then resume only `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
     "$path_name lost publication-head-bound push resume"
-  assert_contains "$path" 'Before either recovery action, derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again and require it to equal `branch=`' \
-    "$path_name lost recovery-time current branch validation"
-  assert_contains "$path" 'detached `HEAD` or any head, phase, branch, repository, task, or ref mismatch must append `blocked: direct-PR lease checkpoint state mismatch; refusing recovery` and stop' \
-    "$path_name lost recovery detached-HEAD and mismatch blocker"
+  assert_contains "$path" 'Any other detached state or head, phase, branch, repository, task, ref, or onto mismatch must append `blocked: direct-PR lease checkpoint state mismatch; refusing recovery` and stop' \
+    "$path_name lost recovery state and onto mismatch blocker"
   assert_contains "$path" 'Do not rerun pre-rebase ancestry validation against rewritten `HEAD`' \
     "$path_name reruns invalid ancestry checks during recovery"
   assert_contains "$path" 'Set `DEFAULT_OID=$(git rev-parse refs/remotes/origin/$DEFAULT)` and `PRE_HEAD=$(git rev-parse HEAD)`' \
@@ -127,7 +131,7 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost successful-publication checkpoint cleanup"
   assert_contains "$path" 'FEATURE_REF=refs/heads/fm/parallel-direct-pr' \
     "$path_name lost FEATURE_REF initialization"
-  assert_contains "$path" 'If it still matches:' \
+  assert_contains "$path" 'If it still matches and `phase=rebase-in-progress`:' \
     "$path_name lost checkpoint remote-match validation"
   assert_contains "$path" 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' \
     "$path_name lost explicit default-ref fetch"
@@ -141,12 +145,12 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost feature-history ancestry guard"
   assert_contains "$path" 'blocked: remote feature branch diverged; refusing to overwrite remote-only commits' \
     "$path_name lost feature-history divergence blocker"
-  assert_contains "$path" 'Rebase onto `origin/$DEFAULT` and resolve ordinary conflicts' \
-    "$path_name lost conflict resolution"
-  assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "HEAD:$FEATURE_REF"' \
-    "$path_name lost explicit lease and push refspec"
-  assert_contains "$path" 'retry that same lease push' \
-    "$path_name lost unchanged-remote retry"
+  assert_contains "$path" 'Rebase onto the immutable `DEFAULT_OID` with `git rebase "$DEFAULT_OID"` and resolve ordinary conflicts' \
+    "$path_name lost immutable-base conflict resolution"
+  assert_contains "$path" 'git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"' \
+    "$path_name lost immutable publication OID and explicit lease"
+  assert_contains "$path" 'retry that identical `git push --force-with-lease="$FEATURE_REF:$EXPECTED" origin "$POST_HEAD:$FEATURE_REF"`' \
+    "$path_name lost identical immutable retry"
   assert_contains "$path" 'if the retry lookup fails, append `blocked: remote feature retry lookup failed` and stop' \
     "$path_name lost retry lookup blocker"
   assert_contains "$path" 'if the ancestry check fails, append `blocked: remote feature branch diverged; refusing to overwrite remote-only commits` and stop' \
