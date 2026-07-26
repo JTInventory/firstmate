@@ -278,6 +278,8 @@ test_spawn_split_and_inherit() {
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
+  mkdir -p "$w/home/data"
+  printf 'shared spawn preference\n' > "$w/home/data/captain-shared.md"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -294,7 +296,9 @@ test_spawn_split_and_inherit() {
     || fail "split: home backlog-backend not inherited as manual"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
-  pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
+  [ "$(cat "$sm/data/captain-shared.md" 2>/dev/null)" = "shared spawn preference" ] \
+    || fail "split: captain-shared did not converge during secondmate spawn"
+  pass "B2 spawn: secondmate runs the secondmate harness; its home inherits config and captain-shared"
 }
 
 # Backward-compat: secondmate-harness absent -> the secondmate launches on the
@@ -531,8 +535,9 @@ run_bootstrap() {
 }
 
 run_config_push() {
-  local w=$1
-  PATH="$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_CONFIG_PUSH_NO_GUARD=1 \
+  local w=$1 fakebin
+  fakebin=$(make_fake_toolchain "$w")
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_CONFIG_PUSH_NO_GUARD=1 \
     "$ROOT/bin/fm-config-push.sh"
 }
 
@@ -582,6 +587,55 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   [ -e "$w/sm/config/backlog-backend" ] \
     && fail "sweep: home backlog-backend not removed after the primary cleared it"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
+}
+
+test_shared_captain_preferences_converge_read_only() {
+  local w head report quarantine_count override
+  w=$(new_world captain-shared)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  printf '# Main-authoritative shared preferences\nalpha\n' > "$w/home/data/captain-shared.md"
+  report="$w/shared.report"
+  : > "$report"
+  FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_secondmate_inheritance "$w/home" "$w/sm" "$w/home/config" "$w/home/data"
+  cmp -s "$w/home/data/captain-shared.md" "$w/sm/data/captain-shared.md" \
+    || fail "captain-shared bytes did not propagate"
+  [ "$(stat -c '%a' "$w/sm/data/captain-shared.md")" = 444 ] \
+    || fail "captain-shared destination must remain read-only"
+  assert_contains "$(cat "$report")" $'data/captain-shared.md\tpushed' \
+    "captain-shared push was not reported"
+
+  override="$w/override-data"
+  mkdir -p "$override"
+  printf 'override-authoritative\n' > "$override/captain-shared.md"
+  printf 'stale-home-data\n' > "$w/home/data/captain-shared.md"
+  FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_secondmate_inheritance "$w/home" "$w/sm" "$w/home/config" "$override"
+  [ "$(cat "$w/sm/data/captain-shared.md")" = override-authoritative ] \
+    || fail "captain-shared propagation ignored the active data override"
+
+  chmod u+w "$w/sm/data/captain-shared.md"
+  printf 'secondmate-local divergence\n' > "$w/sm/data/captain-shared.md"
+  printf '# Main-authoritative shared preferences\nbeta\n' > "$w/home/data/captain-shared.md"
+  : > "$report"
+  FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_secondmate_inheritance "$w/home" "$w/sm" "$w/home/config" "$w/home/data" 2>"$w/shared.err"
+  assert_contains "$(cat "$w/sm/data/captain-shared.md")" "beta" \
+    "divergent captain-shared destination did not reconverge"
+  quarantine_count=$(find "$w/sm/data" -maxdepth 1 -type f -name '.captain-shared.quarantine.*' | wc -l | tr -d ' ')
+  [ "$quarantine_count" = 2 ] || fail "each divergent captain-shared value was not quarantined exactly once"
+  assert_contains "$(cat "$w/shared.err")" "SECONDMATE_SYNC: quarantined divergent data/captain-shared.md" \
+    "captain-shared quarantine did not emit its durable diagnostic"
+
+  rm -f "$w/home/data/captain-shared.md"
+  FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_secondmate_inheritance "$w/home" "$w/sm" "$w/home/config" "$w/home/data" 2>/dev/null
+  [ ! -e "$w/sm/data/captain-shared.md" ] \
+    || fail "primary captain-shared absence did not remove the downstream copy"
+  quarantine_count=$(find "$w/sm/data" -maxdepth 1 -type f -name '.captain-shared.quarantine.*' | wc -l | tr -d ' ')
+  [ "$quarantine_count" = 3 ] || fail "captain-shared absence did not quarantine the prior downstream bytes"
+  pass "captain-shared preferences converge read-only with guarded quarantine and absence mirroring"
 }
 
 # Convergence is independent of the tracked-files fast-forward: a home already
@@ -668,14 +722,14 @@ test_bootstrap_sweep_surfaces_config_propagation_failure() {
 
   out=$(run_bootstrap "$w")
 
-  fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: config inheritance failed' || true)
+  fail_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: inheritance failed' || true)
   [ -n "$fail_line" ] || fail "bootstrap did not surface config propagation failure (got: $out)"
   [ -d "$w/sm/config/crew-harness" ] || fail "failed propagation removed the wrong path"
   pass "B11 bootstrap sweep surfaces config propagation failures"
 }
 
-test_config_push_propagates_reports_without_ff_or_nudge() {
-  local w c1 sm_real old_head out err status out2 tmp
+test_config_push_propagates_reports_without_ff_and_sends_reread() {
+  local w c1 sm_real old_head out err status out2 tmp instruction generation_count
   w=$(new_world config-push-basic)
   c1=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$c1"
@@ -707,8 +761,11 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "config push did not report crew-harness as pushed"
   assert_contains "$out" "backlog-backend: pushed" \
     "config push did not report backlog-backend as pushed"
-  assert_not_contains "$out" "NUDGE_SECONDMATES" \
-    "config push must not nudge secondmates"
+  instruction=$(find "$w/sm/state" -maxdepth 1 -type f -name '.fm-inherited-config-reread.*' ! -name '*.pending' | head -1)
+  [ -n "$instruction" ] || fail "config push did not publish a CONFIG_REREAD instruction"
+  assert_contains "$(cat "$instruction")" "BEGIN config/crew-harness" \
+    "config reread instruction omitted changed crew-harness bytes"
+  generation_count=$(find "$w/sm/state" -maxdepth 1 -type f -name '.fm-inherited-config-reread.*' ! -name '*.pending' | wc -l | tr -d ' ')
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$old_head" ] \
     || fail "config push fast-forwarded tracked files"
   [ ! -s "$err" ] || fail "clean config push wrote unexpected stderr: $(cat "$err")"
@@ -721,7 +778,9 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report crew-harness as unchanged"
   assert_contains "$out2" "backlog-backend: unchanged" \
     "idempotent config push did not report backlog-backend as unchanged"
-  pass "B12 config-push propagates via shared live discovery, reports items, and does not fast-forward or nudge"
+  [ "$(find "$w/sm/state" -maxdepth 1 -type f -name '.fm-inherited-config-reread.*' ! -name '*.pending' | wc -l | tr -d ' ')" = "$generation_count" ] \
+    || fail "idempotent config push published a redundant reread generation"
+  pass "B12 config-push propagates under lock, sends exact reread content, and does not fast-forward"
 }
 
 test_config_push_reports_skips_dirty_and_invalid_home() {
@@ -755,7 +814,7 @@ test_config_push_reports_skips_dirty_and_invalid_home() {
   expect_code 0 "$status" "warnings-only config push should exit zero"
   assert_contains "$out" "secondmate dirty ($dirty_real):" \
     "config push did not report dirty home"
-  assert_contains "$out" "home: dirty working tree - config-only push continuing" \
+  assert_contains "$out" "home: dirty working tree - inheritance-only push continuing" \
     "config push did not surface dirty state"
   assert_contains "$out" "secondmate stale ($stale_real):" \
     "config push did not report stale home"
@@ -803,11 +862,12 @@ test_spawn_secondmate_profile_reread_and_explicit_axes_win
 test_spawn_invalid_secondmate_profile_refused
 test_spawn_unverified_secondmate_harness_refused
 test_bootstrap_sweep_propagates_and_reconverges
+test_shared_captain_preferences_converge_read_only
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_no_inheritance_is_noop
 test_bootstrap_sweep_surfaces_config_propagation_failure
-test_config_push_propagates_reports_without_ff_or_nudge
+test_config_push_propagates_reports_without_ff_and_sends_reread
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
 

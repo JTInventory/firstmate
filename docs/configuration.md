@@ -25,24 +25,63 @@ Homes may also carry a `## Secondmate Backlogs` inventory section with `- <secon
 
 ## Runtime backend (`config/backend` / `FM_BACKEND`)
 
-The runtime session-provider backend controls where task endpoints are created, captured, sent, watched, and killed.
-Tmux remains the default. Herdr is an experimental opt-in backend for Herdr 0.7.x with protocol 14 or newer. New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, `FM_BACKEND`, the first non-empty line of local gitignored `config/backend`, then runtime auto-detection (`$TMUX` first, `HERDR_ENV=1` second), then default `tmux`.
-Unknown values are rejected. Default tmux task metadata omits `backend=tmux`; readers treat a missing `backend=` as tmux for compatibility.
-The `config/backend` file is local to a firstmate home and is not inherited by secondmate homes.
-When Herdr resolves, bootstrap checks `herdr`, `jq`, and `treehouse`; otherwise Herdr is not a required tool. See [herdr-backend.md](herdr-backend.md) for the guarded `fm-herdr-lab.sh` workflow. Herdr remains a session provider only: treehouse still provides worktrees.
-Herdr adds presentation-label and exact-endpoint metadata while retaining `window=` compatibility. The field, routing, and recovery contract lives in [herdr-backend.md](herdr-backend.md#task-display-labels-presentation-split-from-identity); tmux workspace and window naming remain unchanged.
+The runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
+`tmux` is the verified reference backend; `herdr` is the experimental backend (see [`docs/herdr-backend.md`](herdr-backend.md)).
+Treehouse remains the worktree provider for both backends because Herdr, like tmux, is only a session provider.
+New spawns choose the backend in this order: an explicit `--backend` flag firstmate passes when it spawns a task, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then default `tmux`.
+If both runtime markers are present, `$TMUX` wins because it is the innermost provider.
+Auto-detected Herdr prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
+Any value other than `tmux` or `herdr` is rejected.
+The session-start secondmate liveness sweep uses a deeper `fm_backend_agent_alive` probe where verified.
+That probe can classify tmux and Herdr secondmate endpoints as `alive`, `dead`, or `unknown`.
+A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
+A backend spawn refusal from a missing dependency or version gate is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
+Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
+A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
+Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
+A metadata-routed selector returns the recorded `window=` backend target, and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
+Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
+These sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
+`fm-teardown.sh <id>` takes a task id directly and uses the same recorded backend target fields after loading `state/<id>.meta`.
+By default, Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
+The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
+The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns its behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
+The flag is default-off and inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
+Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
+The `config/backend` file is not inherited by secondmate homes.
+
+## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
+
+The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
+It currently supports only `tmux` and `herdr` supervisor panes.
+Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
+Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then falls back to `tmux`.
+That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
+Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
+Selecting any other supervisor backend refuses at daemon startup instead of trying the wrong injection primitives.
+
+## Away-mode wedge alarm channels (config/wedge-alarm)
+
+When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
+Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
+`config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
+`FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
+Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
+An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
+A missing or failing channel logs and falls through to the next, never crashing the daemon.
+This section is the channel reference; `config/wedge-alarm` is a plain local file containing the listed directives.
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` as `bash bin/fm-run-behavior-tests.sh`.
-The guard fails closed if direct push resolution, the no-mistakes gate, or no-mistakes status would target `kunchenguid/firstmate`; this captain-owned lane must target `JTInventory/firstmate`.
-It does not treat an upstream-owner `origin` fetch URL as a PR target by itself when controlled-fork proof shows delivery through `fork/main`, no-mistakes status, the no-mistakes gate, and a safe resolved `origin` push target.
-The runner executes the guard first, requires `tmux` on `PATH`, prints `tmux -V`, and discovers every `tests/*.test.sh` file in sorted order.
-It runs up to four tests in parallel by default, bounded by the host CPU count.
-Set `FM_TEST_JOBS=1` to preserve the legacy serial behavior, or set another positive integer for bounded local parallelism.
-Each test runs with a private `TMPDIR` and `GOTMPDIR`, and the runner removes inherited `FM_HOME`, `FM_ROOT_OVERRIDE`, `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_CONFIG_OVERRIDE`, and `FM_PROJECTS_OVERRIDE` so tests do not share a supervisor home.
-The runner waits for each scheduled test, reports every failure, and exits non-zero after the batch completes if any test failed.
-The CI workflow remains an independent full `tests/*.test.sh` loop in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), so local parallelism does not change CI coverage or its serial execution boundary.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
+That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
+It does not set `commands.test` to a complete `tests/*.test.sh` walk.
+Local no-mistakes Test stays intent-targeted; [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) owns the broad portable and required real-Herdr lane composition.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for local test entry points, `bin/fm-test-run.sh --help` for exact selection mechanics, and [herdr-backend.md](herdr-backend.md) for the real-Herdr lane's verification and isolation rationale.
+The Phase 2 concurrent isolation proof for the portable parallel candidate set is owned by `bin/fm-test-isolation-proof.sh`; it does not enable production CI sharding.
 
 ## Captain preferences (data/captain.md)
 
@@ -90,8 +129,8 @@ Missing file, omitted keys, and explicit `"default"` values preserve `model=defa
 Explicit `--model` or `--effort` on `fm-spawn.sh --secondmate` overrides the file for that one launch.
 An explicit harness argument to `fm-spawn.sh` still overrides either harness config file for that spawn only.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
-When that file is absent, `fm-spawn.sh` uses the deterministic route's model and effort for crewmate and scout launches if the active crew harness still matches the routed harness.
-The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` into secondmate homes at secondmate spawn, during the bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates, dispatch profiles, and backlog backend use the primary values.
+The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
+Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 `config/secondmate-profile.json` is not inherited either; use inherited `config/crew-dispatch.json` for a secondmate home's own future crewmate and scout defaults.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
@@ -126,12 +165,23 @@ If compatible `tasks-axi` is already on `PATH`, bootstrap records it as `TASKS_A
 When it is absent or incompatible, bootstrap reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and firstmate keeps hand-editing `data/backlog.md` until installation is approved and completed.
 When `config/backlog-backend=manual`, bootstrap hand-edits and does not suggest installing `tasks-axi`.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
-Bootstrap also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
-It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms; local-only and no-origin skips stay silent.
-Bootstrap also runs the guarded local secondmate sync for recorded live secondmate homes, then propagates declared inheritable local config into each validated live home.
-It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason or config inheritance failed, and `NUDGE_SECONDMATES:` only when a running home advanced and its instruction surface changed.
-For a mid-session inherited config edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, and `backlog-backend` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
+In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
+It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
+Normal completed runs keep local-only and no-origin skips silent.
+If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
+A killed refresh (or a teardown process kill) can leave an orphaned `.git/packed-refs.lock` in a clone, which makes the next refresh's fetch fail with Git's `Unable to create '...packed-refs.lock': File exists`.
+On that signature only, `fm-fleet-sync.sh` retries the fetch with a bounded wait for the lock to self-clear, then removes the lock and retries once more only when it can prove the lock stale, exactly like the `fm-teardown.sh` `index.lock` recovery.
+It never removes a live lock, leaves any other failure shape untouched, and prints every wait, retry, and removal to stderr plus a one-line `recovered:` summary to stdout on success so that this session-start relay still surfaces the recovery.
+The locked session-start bootstrap step also runs the guarded local secondmate sync for recorded live secondmate homes, then propagates declared inherited local material into each validated live home.
+It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
+When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
+If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
+The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
+For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
+The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
@@ -268,10 +318,10 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode poll shim)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
-FM_CAPTAIN_APPROVED_MERGE=1 # one-command marker required by fm-pr-merge.sh after explicit captain approval; do not set as standing configuration
-FM_CREW_STATE_NM_TIMEOUT=10   # total seconds shared by all no-mistakes queries in one fm-crew-state.sh invocation; 0-86400 only, invalid or out-of-range values use 10
-FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by provably-working watcher triage
-FM_SUPERVISION_PAUSE_RECONCILE_SECS=5   # total seconds shared across paused-worker fm-crew-state reconciliation in one supervision collection; 0-86400 only, invalid or out-of-range values use 5
+FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
+FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
+FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
+FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
@@ -294,9 +344,11 @@ FM_WATCH_SESSION_AFK_DELAY=15    # seconds watch-session sleeps while the AFK da
 FM_WATCH_SESSION_TMUX_SESSION=firstmate-watch   # tmux session name for durable watch-session runner windows
 FM_WATCH_SESSION_TMUX_WINDOW=   # optional tmux window name; default is fm-watch-<home/state hash>
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
-FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # status regex that makes watcher and daemon signal/stale/scan output captain-relevant
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working non-terminal stale pane escalates; not-provably-working stale wakes surface immediately
-FM_PAUSE_RESURFACE_SECS=3600       # positive whole seconds before a declared paused external wait re-surfaces once; 0 or invalid values use 3600, and active runs always win
+FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
+FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
+FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
+FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone

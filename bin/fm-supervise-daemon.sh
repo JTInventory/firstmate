@@ -347,6 +347,19 @@ classify_stale() {  # <window> <state>
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+    # Independent of free-text captain-relevant matching: a nonterminal progress
+    # verb (working:) must never take the terminal stale path. Seen-status dedupe
+    # must not permanently suppress or clear possible-wedge aging merely because
+    # prose once looked captain-relevant. Real terminal verbs and legacy free-text
+    # captain lines without those verbs keep the terminal escalate/dedupe path.
+    if ! status_is_terminal_verb "$last"; then
+      case "$(status_line_verb "$last")" in
+        working|resolved|captain-held)
+          printf 'self|transient stale (%s): %s' "$win" "$last"
+          return
+          ;;
+      esac
+    fi
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
@@ -405,6 +418,12 @@ pause_marker_record() {  # <window> <state>
   if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
     _now > "$marker"
   fi
+}
+
+pause_marker_remove() {  # <window> <state>
+  local win=$1 state=$2 key
+  key=$(_stale_key "$(task_for_endpoint "$win" "$state")")
+  rm -f "$state/.subsuper-paused-$key"
 }
 
 pause_marker_record_status() {  # <status-file> <state>
@@ -857,27 +876,60 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
-  if [ "$action" = "escalate" ]; then
-    log "escalate: $reason -> $distilled"
-    if [ "$kind" = signal ]; then
-      pause_marker_record_signal "$arg" "$state"
-    fi
-    escalate_add "$state" "$distilled"
-    # A terminal-stale escalate must not leave a persistence marker behind, or
-    # housekeeping re-escalates the same pane as a false wedge later.
-    [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
-    mark_escalated_seen "$kind" "$arg" "$state"
-    [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
-  elif [ "$action" = pause ]; then
-    pause_marker_record "$arg" "$state"
-    stale_marker_remove "$arg" "$state"
-    log "self-handle paused external wait: $reason -> $distilled"
-  else
-    # Transient (non-terminal) stale: record/refresh the marker so housekeeping
-    # can age it; the persistence recheck, not this wake, escalates a wedge.
-    [ "$kind" = "stale" ] && stale_marker_record "$arg" "$state"
-    log "self-handle: $reason -> $distilled"
-  fi
+  [ "$kind" = signal ] && pause_marker_record_signal "$arg" "$state"
+  case "$action" in
+    escalate)
+      log "escalate: $reason -> $distilled"
+      escalate_add "$state" "$distilled"
+      # A terminal-stale escalate must not leave a persistence marker behind, or
+      # housekeeping re-escalates the same pane as a false wedge later.
+      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+      mark_escalated_seen "$kind" "$arg" "$state"
+      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      ;;
+    pause)
+      # Declared external-wait pause: record a pause marker (long re-surface
+      # cadence in housekeeping) and drop any wedge stale marker, so a pane that
+      # transitioned working->paused is not still wedge-aged. Only stale produces
+      # this action.
+      if [ "$kind" = "stale" ]; then
+        stale_marker_remove "$arg" "$state"
+        pause_marker_record "$arg" "$state"
+      fi
+      log "self-handle (paused): $reason -> $distilled"
+      ;;
+    *)
+      # Transient (non-terminal) stale: record/refresh the wedge marker so
+      # housekeeping can age it, and drop any pause marker (a crew that left its
+      # pause reverts to normal wedge aging). The persistence recheck, not this
+      # wake, escalates a wedge.
+      if [ "$kind" = "stale" ]; then
+        task=$(window_to_task "$arg" "$state")
+        last=$(last_status_line "$state/$task.status")
+        # Clear wedge aging only for terminal (or legacy free-text) captain lines.
+        # Nonterminal progress verbs keep possible-wedge markers even if free text
+        # once looked captain-relevant or was written into a seen marker.
+        _clear_wedge=0
+        if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+          if status_is_terminal_verb "$last"; then
+            _clear_wedge=1
+          else
+            case "$(status_line_verb "$last")" in
+              working|resolved|captain-held) _clear_wedge=0 ;;
+              *) _clear_wedge=1 ;;
+            esac
+          fi
+        fi
+        if [ "$_clear_wedge" = 1 ]; then
+          stale_marker_remove "$arg" "$state"
+        else
+          pause_marker_remove "$arg" "$state"
+          stale_marker_record "$arg" "$state"
+        fi
+      fi
+      log "self-handle: $reason -> $distilled"
+      ;;
+  esac
 }
 
 # --- log --------------------------------------------------------------------

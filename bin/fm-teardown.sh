@@ -20,7 +20,24 @@
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
-# product - teardown proceeds once the report exists, and refuses without it.
+# product. Teardown proceeds only once the report exists and the shared
+# unresolved-decision completion gate verifies its captain-held inventory.
+# Before destructive cleanup, teardown validates task check artifacts and any
+# matching quarantine entries as ordinary single-link files on the state
+# device. It refuses and preserves task state when that proof fails; otherwise
+# it removes the task's check, trust record, PR sidecar, publication record, and
+# quarantine entries with the rest of the volatile state.
+# Orca tasks use the same safety checks, then close the recorded terminal and
+# remove the recorded worktree through `orca worktree rm`; teardown never guesses
+# an Orca target from ambient CLI state.
+# A Herdr presentation journal never authorizes cleanup. Teardown still closes
+# only the exact task pane from ordinary endpoint metadata and never calls
+# `workspace close`. It retires the non-authoritative journal only when a
+# read-only token correlation agrees with that endpoint and pane closure is
+# confirmed. Otherwise the journal stays quarantined for manual inspection.
+# Projected closes share the presentation-order lock, refuse to close the
+# captain's active tab, and restore the exact response-derived pre-close tab
+# if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -154,6 +171,42 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   grep "^$key=" "$meta" | cut -d= -f2- || true
+}
+
+teardown_herdr_endpoint_focus_safe() {
+  local target=$1 session pane state lock attempt=0 held=0 close_status=1
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  [ "$state" = dead ] && return 0
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  lock=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock"; then
+      held=1
+      break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$held" = 1 ] || return 1
+  if fm_backend_herdr_projection_teardown_close "$session" "$pane"; then
+    close_status=0
+  else
+    close_status=$?
+  fi
+  fm_lock_release "$lock" || true
+  return "$close_status"
+}
+
+teardown_backend_endpoint() {
+  local backend=$1 target=$2
+  case "$backend" in
+    herdr) teardown_herdr_endpoint_focus_safe "$target" ;;
+    *) fm_backend_kill "$backend" "$target" ;;
+  esac
 }
 
 remove_grok_turnend_auth() {
@@ -597,7 +650,7 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ -n "$child_t" ]; then
-      if ! fm_backend_kill "$child_backend" "$child_t" 2>/dev/null; then
+      if ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
         echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
         return 1
       fi
@@ -606,16 +659,18 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home"
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
+        cleanup_firstmate_home_children "$child_home" || return 1
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
+          || safe_rm_rf_child_worktree "$child_wt" "$child_proj" \
+          || return 1
       else
-        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return 1
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
@@ -713,13 +768,58 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if ! fm_backend_kill "$BACKEND" "$T" 2>/dev/null; then
-  echo "REFUSED: could not kill task $ID window $T; refusing to delete task state" >&2
-  exit 1
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_WORKSPACE=
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_source herdr || {
+    echo "REFUSED: could not load Herdr teardown support for $ID; preserving task state and worktree" >&2
+    exit 1
+  }
+  fm_backend_herdr_parse_target "$T" || {
+    echo "REFUSED: invalid Herdr target $T for $ID; preserving task state and worktree" >&2
+    exit 1
+  }
+fi
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  HERDR_META_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_META_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_META_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_META_PANE" ] \
+     && [ "$T" = "$HERDR_META_SESSION:$HERDR_META_PANE" ]; then
+    if fm_backend_herdr_projection_endpoint_matches_journal \
+      "$HERDR_META_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+      "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+      HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+    fi
+  fi
+fi
+
+if [ "$BACKEND" = herdr ]; then
+  if ! teardown_herdr_endpoint_focus_safe "$T"; then
+    echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
+    exit 1
+  fi
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+    echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+  fi
+elif [ "$BACKEND" != orca ]; then
+  if ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
+    echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
+    exit 1
+  fi
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
+  if ! cleanup_firstmate_home_children "$HOME_PATH"; then
+    echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent state and home" >&2
+    exit 1
+  fi
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -734,9 +834,18 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project.
-  teardown_treehouse_return "$WT" "$PROJ" "worktree"
+  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # left by a killed crew process; see the script header for retry and stale-lock proof.
+  post_lock_cleanup_check=
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+    post_lock_cleanup_check=validate_worktree_teardown_safety
+  fi
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
 fi
+
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"

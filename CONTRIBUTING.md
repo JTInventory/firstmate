@@ -68,67 +68,29 @@ See [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyam
 Check and test the toolbelt before pushing:
 
 ```sh
-bash -n bin/*.sh                          # syntax-check the toolbelt
-bin/fm-lint.sh                              # lint the toolbelt and behavior tests with CI's pinned ShellCheck
-FM_TEST_JOBS=1 bash bin/fm-run-behavior-tests.sh                   # serial local gate replay
-FM_TEST_JOBS=2 bash bin/fm-run-behavior-tests.sh                   # bounded parallel local run
-tests/fm-wake-queue.test.sh               # durable wake queue losslessness, catch-up, double-drain, duplicate-collapse, and drain liveness guard tests
-tests/fm-watcher-lock.test.sh             # watcher singleton, lock-race, watch-arm liveness, and guard-warning tests
-tests/fm-wake-lib-locale.test.sh          # locale-stable watcher PID identity regression test
-tests/fm-watch-triage.test.sh             # always-on watcher triage: benign absorb, actionable surface, stale wedge threshold, bounded paused-wait re-surface, heartbeat backstop, and afk one-shot coherence
-tests/fm-daemon.test.sh                   # sub-supervisor classifier, /afk presence-gating, bounded paused-wait re-surface, max-defer, composer, and fm-send submit tests
-tests/fm-send-settle.test.sh              # fm-send post-submit settle pause, tuning, disable, and --key bypass tests
-tests/fm-send-popup-settle.test.sh        # fm-send pre-Enter popup-settle selection for slash commands, codex $skill invocations, and marked codex secondmate text
-tests/fm-send-codex-secondmate-submit-retry.test.sh # fm-send delayed final Enter for marked Codex secondmate text after generic retries report pending
-tests/fm-send-secondmate-marker.test.sh   # fm-send from-firstmate marker for kind=secondmate targets: marked vs crewmate/explicit/--key, and the exact marker byte sequence
-tests/fm-send-secondmate-marker-herdr-e2e.test.sh # opt-in real Herdr lab e2e for secondmate marker delivery and unmarked direct input
-tests/fm-send-strict.test.sh              # fm-send refuses unresolved bare targets
-tests/fm-wake-daemon-lifecycle-e2e.test.sh # watcher + daemon lifecycle e2e: restart catch-up, batching, dedupe, stale-pane routing, and digest injection
-tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, and escape-free peek tests
-tests/fm-afk-inject-e2e.test.sh           # event-driven private-socket e2e for afk injection: partial-input deferral, swallowed-Enter retry, and single clean digest
-tests/fm-backend-herdr-workspace-per-home-e2e.test.sh # opt-in real Herdr lab e2e for per-home workspace isolation and teardown boundaries
-tests/fm-backend-herdr-respawn-idem-e2e.test.sh # opt-in real Herdr lab e2e for restart-idempotent husk replacement and live-duplicate refusal
-tests/fm-backend-herdr-prune-safety-e2e.test.sh # opt-in real Herdr lab e2e for adopted-workspace prune safety and fresh-workspace seed pruning
-tests/fm-afk-launch.test.sh               # JT AFK launch/return detachment, process-group reap survival, and idempotent start
-tests/fm-bootstrap.test.sh                # bootstrap dependency, feature-probe, crew-dispatch, and secondmate-profile reporting tests
-tests/fm-gitignore-boundary.test.sh       # local fleet directory ignore boundary for config/, reports/, and backups/
-tests/fm-no-mistakes-pr-target-guard.test.sh # no-mistakes PR target guard for captain-fork delivery, controlled-fork origin fetches, push URLs, gate remotes, and status output
-tests/fm-no-mistakes-required-workflow.test.sh # required-workflow guard for live PR-body lookup and the no-mistakes marker
-tests/fm-gotmp.test.sh                    # GOTMPDIR-safe temp handling for tests and scripts that must avoid a read-only repo filesystem
-tests/fm-gate-refuse.test.sh              # no-mistakes gate marker/path refusal for spawn, send, and teardown
-tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard, teardown cleanup, session-lock detection, and immutable tmux-window targeting fixture tests
-tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, packed-refs lock recovery, benign skips, deterministic single-clone resolution, and bootstrap relay
-tests/fm-backlog-audit.test.sh            # read-only backlog/state drift audit findings, persistent secondmate inventory, and no-change contract
-tests/fm-route.test.sh                    # deterministic route profiles, overrides, risk flags, and downgrade handling
-tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, dry-run preview, and .env-presence activation tests
-tests/fm-memory-lookup.test.sh            # manual Cognee memory lookup fallback, source-path verification, and optional brief append
-tests/fm-cbm.test.sh                      # optional CBM config, allowlist, brief/env injection, index targeting, and soft-failure behavior
-tests/fm-cognee-lookup-gate.test.sh       # fail-closed Cognee automatic/manual gate markers and unsafe-evidence rejection
-tests/fm-cognee-lookup.test.sh            # Cognee dry-run/live lookup wrapper, redacted telemetry, retry, and source verification behavior
-tests/fm-cognee-session-cost-probe.test.sh # disabled Cognee session/cost probe planner, endpoint allowlist, and redacted JSONL output
-tests/fm-cognee-source-verify.test.sh     # Cognee answer reference parsing, manifest matching, local source reopen, and telemetry
-tests/fm-cognee-telemetry.test.sh         # secret-safe Cognee telemetry schema, redaction flags, IDs, and env-file loading
-tests/fm-cognee-brief-rules.test.sh       # generated briefs include the trial-only, hint-only Cognee memory rules
-tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection, spawn/brief isolation, and immutable tmux-window targeting fixture tests
-tests/fm-spawn-batch.test.sh              # batch dispatch, local-config isolation, and FM_HOME project-path scoping tests
-tests/fm-spawn-route.test.sh              # spawn records route profile/model/effort metadata, uses verified immutable tmux window IDs with cleanup on setup failure, and appends the JT PR Intake Governor for matching PR-mode ship briefs without changing launch behavior
-tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, immutable tmux-window targeting, launch templates, batch forwarding, secondmate exemption, and secondmate launch profile threading
-tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
-tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, and spawn hook tests
-tests/fm-secondmate-harness.test.sh       # secondmate-vs-crewmate harness resolution, secondmate launch profiles, primary-to-secondmate config inheritance, and config-push tests
-tests/fm-secondmate-lifecycle-e2e.test.sh # persistent secondmate routing, seeding, backlog handoff, spawn, recovery, teardown, and FM_HOME flow tests
-tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter, handoff validation, and teardown boundary tests
-tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety, transient Git index-lock return retries, and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, PR-head metadata, tasks-axi/manual backlog reminder, --force override
-tests/fm-pr-merge.test.sh                 # captain-gated PR merge wrapper: approval marker, qualified GitHub URL parsing, PR-evidence recording, squash default, and repository-override refusal
-tests/fm-crew-state.test.sh               # fm-crew-state.sh current-state reconciliation: run-step authority including closed panes, stale needs-decision/blocked superseded by a resumed run, genuine-parked, cross-branch attribution, pane/status-log fallback, scout skip, torn-down/missing-meta graceful
-tests/fm-crew-state-ci-ready.test.sh      # active no-mistakes CI monitor with green checks reports PR readiness while merge/close monitoring continues
-tests/fm-task-identity.test.sh            # task branch/meta identity guard for PR check, diff review, and teardown helpers
-tests/fm-watch-session.test.sh            # durable home-scoped watcher tmux runner start/status/stop and re-arm delay behavior
-tests/fm-supervision-model.test.sh        # read-only supervision checklist, away-mode injection-wedge surfacing, secondmate/scout classification boundaries, and `firstmate.supervision.v1.1` JSON/schema output
+for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
+bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
+bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
+bin/fm-test-run.sh --family pure-contract-unit   # one declared family (serial, timed)
+bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
+bin/fm-test-run.sh --all   # intentional complete suite (optional local full run)
+bin/fm-test-isolation-proof.sh --list   # proven parallel candidate set (Phase 2; not production sharding)
+bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json   # concurrent isolation proof only
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
 ```
+
+`bin/fm-test-run.sh` is the single owner of serial behavior-suite selection, per-script timing markers, family totals, and the optional JSON timing artifact.
+Its header and `--help` own the flags, family labels, and changed-file map; this section only documents the entry points.
+`bin/fm-test-isolation-proof.sh` is the single owner of the Phase 2 concurrent isolation proof for a bounded, audited portable candidate set.
+It does not enable production CI sharding or general local `--jobs` on the serial runner; its `--help` output and focused tests own the candidate set and execution contract.
+Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
+CI owns the broad portable and required real-Herdr lane composition in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Use `bin/fm-test-run.sh --help` for the exact family exclusion and required gate-skip flags when reproducing either lane locally.
+Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
+Tests that need real Herdr or another explicit opt-in (such as the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
+The [Herdr backend guide](docs/herdr-backend.md) owns the lane's safety and isolation rationale, including why live harness credential tests remain opt-in.
 
 ## Questions
 

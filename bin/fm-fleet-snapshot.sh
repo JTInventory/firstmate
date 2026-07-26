@@ -97,10 +97,9 @@ current_from_status() {
 json_tasks=''
 shopt -s nullglob
 meta_files=("$STATE"/*.meta)
-if [ "${#meta_files[@]}" -gt 0 ]; then
-  mapfile -t meta_files < <(printf '%s\n' "${meta_files[@]}" | sort)
-fi
-for meta in "${meta_files[@]}"; do
+# Shell pathname expansion is already sorted. Avoid Bash 4's mapfile so this
+# read-only snapshot remains runnable with stock macOS Bash 3.2.
+for meta in "${meta_files[@]+"${meta_files[@]}"}"; do
   id=$(basename "$meta" .meta)
   worktree=$(meta_value "$meta" worktree)
   project=$(meta_value "$meta" project)

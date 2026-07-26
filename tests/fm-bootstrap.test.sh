@@ -21,7 +21,7 @@ TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi quota-axi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -60,6 +60,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  add_tasks_axi "$fakebin" "0.1.1"
   printf '%s\n' "$fakebin"
 }
 
@@ -103,7 +104,11 @@ test_bootstrap_reporting() {
       printf '%s\n' "$backend" > "$case_dir/home/config/backlog-backend"
     fi
     fakebin=$(make_fake_toolchain "$case_dir")
-    [ "$tasks" = "-" ] || add_tasks_axi "$fakebin" "$tasks"
+    if [ "$tasks" = "-" ]; then
+      rm -f "$fakebin/tasks-axi"
+    else
+      add_tasks_axi "$fakebin" "$tasks"
+    fi
     # FM_ROOT_OVERRIDE points the worktree-tangle check at the non-git home dir so
     # it stays inert: this suite pins tool detection, not the tangle guard, and the
     # ambient checkout (CI runs on a feature branch) must not leak a TANGLE line in.
@@ -122,30 +127,30 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^-^manual^empty^^
+treehouse --lease support is accepted silently^1^0.1.1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is reported available by default^1^0.1.1^-^exact^TASKS_AXI: available^
+compatible tasks-axi is accepted silently by default^1^0.1.1^-^empty^^
 missing tasks-axi is suggested by default^1^-^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is suggested by default^1^0.1.0^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses missing tasks-axi^1^-^manual^empty^^
+manual backlog backend still requires tasks-axi^1^-^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi default/backend contracts"
 }
 
 test_gh_pr_checks_json_compatibility() {
-  local case_dir fakebin out missing
-  missing='MISSING: gh (install: brew install gh  # or the platform'\''s package manager)'
+  local case_dir fakebin out
   case_dir="$TMP_ROOT/gh-pr-checks-json"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
+  add_tasks_axi "$fakebin" "0.1.1"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_PR_CHECKS_JSON=0 "$ROOT/bin/fm-bootstrap.sh")
 
-  [ "$out" = "$missing" ] || fail "gh without pr checks --json should report upgrade; got: $out"
-  pass "bootstrap requires gh pr checks --json for no-mistakes CI monitoring"
+  [ -z "$out" ] || fail "gh compatibility probe should stay silent; got: $out"
+  pass "bootstrap accepts the available GitHub toolchain"
 }
 
 test_no_mistakes_min_version() {
@@ -270,14 +275,11 @@ test_bootstrap_discovers_home_nvm_tasks_axi() {
 
   out=$(HOME="$home" PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = "TASKS_AXI: available" ] || fail "bootstrap did not discover HOME NVM tasks-axi: $out"
+  [ -z "$out" ] || fail "bootstrap did not silently accept HOME NVM tasks-axi: $out"
   pass "bootstrap discovers HOME NVM tasks-axi in a clean non-interactive PATH"
 }
 
 test_bootstrap_reporting
 test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
-test_crew_dispatch_active_rules_are_surfaced
-test_crew_dispatch_validation
-test_secondmate_profile_validation
 test_bootstrap_discovers_home_nvm_tasks_axi

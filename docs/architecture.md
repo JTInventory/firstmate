@@ -11,15 +11,28 @@ firstmate's full operating manual for the orchestrator agent itself is [`AGENTS.
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
 Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, check-script output such as PR merge polling or an X mention, terminal stale panes, non-terminal stale panes whose crew is not provably working, provably-working non-terminal stale panes that persist past `FM_STALE_ESCALATE_SECS`, valid declared external waits that reach `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
-No-verb wakes, such as `working:` notes, bare turn-ended signals, and fresh non-terminal stale panes, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a pane busy signature.
+No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code or a backend busy signature.
+A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
+Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
+Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
+Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, re-arm no-ops, elapsed waiting time, and absorbed benign wakes stay silent; an idle crew costs you nothing.
 Crew status files are append-only wake-event logs, not current-state fields.
-`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crew's own branch and keeps that run-step authoritative even if the pane has closed. During no-mistakes CI monitoring, it reads the current CI-log marker so green checks awaiting captain merge report as ready rather than as still validating.
-Only when no matching run exists does it fall back to the pane busy-signature and then the status log; a dead pane without a run reports unknown instead of trusting a stale log. A valid `paused: <reason>` log is an explicit external wait, distinct from `blocked:` and `working:`; an active run always wins over a stale pause, and an empty pause reason remains unknown.
-Optional X mode rides the same check path: bootstrap drops a local `state/x-watch.check.sh` shim only after the user opts in with `FMX_PAIRING_TOKEN`, and non-X homes keep the default watcher behavior.
+`bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
+The script header owns the exact run-head ancestry rules.
+During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
+The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
+Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
+In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
+For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the rendered busy signature before deciding the crew is not working.
+For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
+`bin/fm-bearings-snapshot.sh` provides the bounded human-facing projection from the structured fleet contract instead of reparsing raw fleet files.
+The script header owns the exact JSON schema.
 
 Routine re-arms go through `bin/fm-watch-arm.sh`, which launches the watcher in its own session/process group, follows it as a tracked follower, verifies it is genuinely alive with a fresh liveness beacon, and prints exactly one honest status line (`started` / `attached` / `follower already waiting` / restart-only `healthy` / `FAILED`, the last exiting non-zero). A per-home arm lock prevents duplicate healthy-cycle followers from stacking.
 On `attached` it stays live until the existing verified cycle ends, so a background-notify harness does not receive an empty false wake from a healthy no-op exit.
@@ -34,44 +47,38 @@ It also classifies a scout report as teardown work before PR or missing-worktree
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
-### Watcher truth table
+A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through `bin/fm-afk-launch.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
+The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
+Terminal verbs remain captain-relevant, while a nonterminal progress verb cannot become terminal merely because its prose contains a legacy free-text token such as `merged`; bare legacy free-text lines remain compatible.
+The always-on watcher also uses that library's absorb classification on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon maintains distinct wedge and declared-pause recheck cadences.
+In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound.
+The daemon escalates captain-relevant events, plus a bounded recheck for a declared pause that remains idle, as one batched, single-line digest prefixed with a terminal-safe U+2063 sentinel marker so firstmate can tell daemon injections apart from real messages.
+Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
+Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr uses native busy state, native agent-state submit confirmation on idle baselines, and its ANSI-aware structural composer classifier for pending-input guards and submit fallback.
+The tmux submit core (shared `fm_tmux_submit_enter_core`) treats a busy pane + retries-exhausted + composer-still-pending as a queued Enter (opencode 1.18.4 accepts Enter mid-turn and queues it for after the turn), reported as `empty` so the daemon and `fm-send` do not re-send; an idle pane keeps the `pending` verdict as a genuine swallow. Herdr accepts the same busy queue only after successful Enter transport when contemporaneous native state is still busy and the pending composer still contains the exact submitted text; autocomplete-expanded content retries instead.
+Composer-content classification has one shared owner, `bin/fm-composer-lib.sh`, used by tmux and Herdr after each adapter performs its own capture and composer-row recognition.
+The daemon injects only into an affirmatively `empty` composer, so both `pending` and `unknown` defer and a bare dead-shell prompt cannot receive an escalation; the complete policy is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
+Unsupported supervisor backends refuse at daemon startup.
+Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+On an unmarked return, `bin/fm-afk-launch.sh stop` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
+`fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 Three watcher-adjacent commands prove different things:
 
-| Command | What it proves | What it does not prove |
-| --- | --- | --- |
-| `bin/fm-watch-arm.sh` | Starts or confirms the inner watcher and fails loudly unless the watcher PID, lock identity, and fresh beacon agree. | It is not a durable tmux runner; it is one verified arm cycle. |
-| `bin/fm-guard.sh` | Conservatively warns when fleet scripts cannot prove a live watcher for this home, including stale beacon or lock mismatch cases. | In restricted shells that cannot see `/proc`, it may warn because it cannot prove PID identity, even when a host-level watcher is alive. |
-| `bin/fm-watch-session.sh status` | Confirms the durable runner tmux window for this home exists. | It does not inspect the runner's last `fm-watch-arm.sh` output and is not proof that the inner watcher is currently healthy. |
-
-When these surfaces disagree, use `bin/fm-watch-arm.sh` as the watcher-health source of truth: it either confirms the live watcher and beacon or exits non-zero. Use `bin/fm-watch-session.sh status` only to check the runner window, and treat `bin/fm-guard.sh` as a conservative pull-based warning that errs loud when process identity cannot be proved.
-
-A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
-The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs and status-scan primitives.
-The always-on watcher also uses that library's provably-working predicate on no-verb signal and non-terminal-stale paths, while the daemon keeps its away-mode stale recheck unchanged.
-A valid `paused: <reason>` is absorbed as an intentional external wait, but it is not an indefinite mute: the watcher stores its first-seen `.paused-*` marker and the away-mode daemon stores the corresponding `.subsuper-paused-*` marker in the existing home state directory. Both use `FM_PAUSE_RESURFACE_SECS` (default 3600 seconds) as the shared cadence, emit at most one bounded local re-surface per interval, and clear their markers when the pause ends, the pane disappears, or an authoritative active run wins.
-The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
-Its injection path uses the selected backend's composer detection and verified submit primitive; tmux shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, while Herdr uses its pane reads and send primitives. Stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
-The read-only supervision model surfaces a non-empty wedge marker as the high-severity `supervision:inject-wedged` checklist item owned by firstmate, including the marker detail, without clearing the marker or attempting recovery.
-`fm-send.sh` selects a pre-Enter popup-settle for slash commands, codex `$...` skill invocations, and marked ordinary text sent to codex secondmates using the target's recorded `harness=` and `kind=` meta.
-If that marked Codex secondmate path still looks pending after the generic Enter retries, `fm-send.sh` waits once more and sends one final Enter before reporting failure.
-After successful text sends, it adds its own `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay either fm-send-only pause.
-
-## Runtime session-provider backend
-
-The runtime backend is the session-provider layer below firstmate's lifecycle scripts.
-`bin/fm-backend.sh` owns selection, metadata helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` and `bin/backends/herdr.sh` own the backend-specific command primitives used by spawn, send, peek, watch, teardown, and crew-state.
-New spawns select a backend from `fm-spawn.sh --backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection (`$TMUX` first, `HERDR_ENV=1` second), then default `tmux`.
-Tmux remains the default and production path. Herdr is an experimental opt-in backend for Herdr 0.7.x/protocol 14+; unknown names fail loudly, and default tmux tasks omit `backend=tmux` from metadata. A missing `backend=` still means tmux.
-When `HERDR_ENV=1` is present without explicit configuration, Herdr is auto-detected; `$TMUX` wins when nested. Herdr tasks use one workspace per firstmate home and one tab per task, while treehouse remains the worktree provider. New Herdr tabs separate their one-time readable display label from the full task id and exact response-derived tab/pane ids; tmux naming remains unchanged. The AFK daemon supports Herdr supervisor target resolution and injection when explicitly selected. On capable Herdr protocol-16 sessions, the watcher can also use the native `pane.agent_status_changed` stream as an optional fast path; capability, socket, subscription, and reader failures fall back to polling. The detailed Herdr lifecycle, label, recovery, and safety contract lives in [herdr-backend.md](herdr-backend.md).
-The existing poll loop remains the fail-closed event-source backstop for Herdr and the normal event source for tmux, so the default wake/stale behavior remains unchanged.
-
-Generated ship and scout briefs carry a shared no-mistakes daemon ownership boundary: workers must not stop, restart, or update the daemon; daemon errors are reported as `blocked:` and only firstmate manages the shared instance. The exact generated rule is owned by `bin/fm-brief.sh`.
-
-For a bounded operator read, `bin/fm-fleet-snapshot.sh --json` is the local
-structured source for backlog, task metadata, status events, and worktree facts.
-`bin/fm-bearings-snapshot.sh` projects that source into a compact view and keeps
-remote PR discovery opt-in and soft-failing.
+The runtime backend is the session-provider layer below firstmate's scripts.
+It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, live-window fallback lookup, agent-process liveness probes where verified, and endpoint teardown.
+`bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter, and `bin/backends/herdr.sh` is the experimental task-spawn adapter.
+New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then default `tmux`.
+Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`; auto-detected Herdr prints a one-time opt-out notice and auto-detected tmux stays silent.
+Unknown backend names fail loudly.
+For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
+`fm-watch.sh` polls each window's backend for a busy state: tmux reports unknown and preserves the original pane-tail-regex detection unchanged; Herdr's `agent.get` semantic state (working/idle/done/blocked) is consulted first for stale detection, with unknown native states falling back to the same regex.
+That poll loop is the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
+For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [herdr-backend.md](herdr-backend.md#push-events-and-polling-fallback) owns the mechanism, capability gates, and verification evidence.
+The deeper session-start agent-process liveness probe is separate from that busy-state poll; tmux and Herdr both have verified classifiers for secondmate recovery.
+Herdr is experimental and can be selected explicitly or by runtime auto-detection: treehouse remains the worktree provider for it exactly as it is for tmux (herdr is a session provider only), and its full verification - the container shape decision, created-vs-adopted default-tab prune safety, restored-layout husk respawn idempotency, verified CLI facts, ANSI-preserved ghost/placeholder classification through the shared extractor, a verified small-`--lines` capture bug and its workaround, and known gaps - is recorded in `docs/herdr-backend.md`.
+Herdr's durable default container shape is workspace-per-home plus tab-per-task: the primary home uses workspace label `firstmate`, secondmate homes use `2ndmate-<secondmate-id>`, and recovery/list-live scopes to the current `FM_HOME`'s workspace.
+Its optional default-off presentation projection may place one clean new task in a disposable workspace without changing endpoint authority or lifecycle ownership; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns that conditional design and its narrow home-local restored-shell cleanup at locked session start.
 
 ## Worktrees, not branches in your checkout
 
@@ -146,11 +153,11 @@ Secondmate homes stay on the same firstmate version as the primary checkout.
 On main firstmate bootstrap, `fm-bootstrap.sh` fast-forwards each live secondmate home recorded in `state/*.meta` to the primary default-branch commit with no origin fetch.
 The live signal is a `state/<id>.meta` record with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 A tracked-files fast-forward leaves the home's gitignored `data/`, `state/`, `config/`, `projects/`, `reports/`, `backups/`, and `.no-mistakes/` directories untouched.
-Bootstrap separately propagates the primary's declared inheritable local config, currently `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, into each validated live secondmate home so that secondmate's own crewmates, dispatch profiles, and backlog backend use the primary settings.
+Bootstrap separately propagates the primary's declared inheritable local material—`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, `config/herdr-presentation-spaces`, and the guarded read-only `data/captain-shared.md` copy—into each validated live secondmate home.
 That propagation is primary-authoritative, re-runs even when tracked files were already current, mirrors absence when the primary clears the value, and deliberately never copies `config/secondmate-harness` or `config/secondmate-profile.json`.
 Dirty, diverged, unsafe, or in-flight homes are reported and left unchanged by the tracked-file sync.
 Only a running secondmate home that actually advanced and changed `AGENTS.md`, `bin/`, or `.agents/skills/` is listed for a re-read nudge.
-`fm-config-push.sh` is the focused mid-session version of that same inheritance path: it discovers the same live secondmate homes, calls the same propagation helper, and reports per-home/per-item results without running the tracked-file fast-forward or sending reread nudges.
+`fm-config-push.sh` is the focused mid-session version of that same inheritance path: it discovers the same live secondmate homes, calls the same propagation helper, reports per-home/per-item results without running the tracked-file fast-forward, and sends `CONFIG_REREAD` pointers for changed inherited config.
 `fm-spawn.sh --secondmate` performs the same guarded local fast-forward before launch or recovery respawn; skipped syncs warn and the secondmate launches unchanged.
 Secondmate spawn also propagates the same inheritable config before launch.
 
@@ -160,8 +167,7 @@ Secondmate agents can run on a different verified harness than crewmates.
 `fm-spawn.sh --secondmate` re-reads that profile on each launch or recovery respawn, while explicit `--model` and `--effort` still win for one spawn.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
-`config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces hand-editing across the fleet.
-`config/secondmate-harness` and `config/secondmate-profile.json` are primary-local and are not inherited into secondmate homes.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.
 
 The `data/secondmates.md` line schema and the secondmate environment variables are documented in [configuration.md](configuration.md).
 

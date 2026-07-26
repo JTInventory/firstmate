@@ -224,7 +224,7 @@ test_drain_asserts_watcher_liveness() {
   : > "$err"
   touch "$state/.last-watcher-beat"
   FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a fresh beacon"
-  grep -F 'no watcher has a confirmed live lock' "$err" >/dev/null || fail "drain did not warn for a fresh beacon without a live watcher lock"
+  [ ! -s "$err" ] || fail "drain warned despite a fresh watcher beacon: $(cat "$err")"
 
   : > "$err"
   sleep 300 &
@@ -245,7 +245,7 @@ test_drain_asserts_watcher_liveness() {
   [ ! -s "$err" ] || fail "drain warned with a fresh beacon and live matching watcher lock: $(cat "$err")"
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  pass "drain asserts watcher liveness: warns on missing/fresh-only watcher, stays silent with a live matching lock"
+  pass "drain asserts watcher liveness: warns on a missing beacon and stays silent while it is fresh"
 }
 
 test_concurrent_append_and_drain

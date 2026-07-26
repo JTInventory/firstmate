@@ -16,7 +16,8 @@ The captain may override that file at bootstrap or later; a per-task instruction
 Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
 `config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
 An absent or `default` `config/secondmate-harness` therefore behaves exactly as the crew harness did before this knob existed (secondmates launched on the crew harness); setting it splits the two.
-`config/crew-dispatch.json` and `config/crew-harness` are inherited by secondmate homes (the primary pushes them down so a secondmate's own crewmates use the primary's dispatch profiles and static harness value), while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
+The [`secondmate-provisioning` skill](../secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.
+This skill owns only the harness-relevant consequence: a secondmate's own crewmates use the primary's inherited dispatch profiles and static harness value, while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
 Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
 If `config/crew-harness` is unset or `default`, there is no concrete value to inherit, so the secondmate's own crewmates fall back to the secondmate's own/detected harness rather than the primary's effective crewmate harness.
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
@@ -114,7 +115,16 @@ The decision persists for the repo, so later worktrees of the same project skip 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
 
-## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.3)
+**Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
+The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.
+Codex Stop hooks block on exit 2 and expose `stop_hook_active` for the same one-block loop safety Claude uses.
+Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
+Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
+The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
+Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
+The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
+
+## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 
 | Fact | Value |
 |---|---|
@@ -126,6 +136,31 @@ No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
+
+**Busy-queued Enter (opencode 1.18.4, tmux and Herdr).**
+While opencode is mid-turn, the composer accepts Enter as a "send when the turn
+ends" keystroke but does not clear the typed text from the composer until the
+turn actually finishes.
+Without a fix, every `fm-send` to a busy opencode pane exits non-zero on a
+false "Enter swallowed", and every daemon escalation that lands while the
+primary is mid-turn is treated as wedged.
+The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) now falls back
+to `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means
+the Enter was accepted and queued (reported as `empty` so the caller does not
+re-send), while an idle pane keeps `pending` as a genuine swallow. Herdr accepts
+the busy queue only after Enter transport succeeds, contemporaneous native state
+remains busy, and the pending composer still contains the exact submitted text;
+autocomplete-expanded content retries.
+Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
+scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
+cleared -> `empty`, idle + cleared -> `empty`), and
+`tests/fm-backend-herdr.test.sh` covers Herdr queue, autocomplete, and transport failure.
+
+**Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
+The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
+Throwing from `session.idle` does not block `opencode run`, so the primary adapter treats the event as passive and uses `client.session.promptAsync` to force one follow-up turn when `bin/fm-turnend-guard.sh` returns 2.
+The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher wake supervision and coordinates with the guard plugin before the guard tries a blind-turn follow-up.
+The follow-up was verified in the interactive TUI; `opencode run` can exit before displaying a queued follow-up, so the adapter is fail-open in headless mode.
 
 ## pi (VERIFIED 2026-06-11)
 

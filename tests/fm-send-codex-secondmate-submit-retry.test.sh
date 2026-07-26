@@ -53,6 +53,9 @@ case "${1:-}" in
   capture-pane)
     count=0
     [ -f "$FM_ENTER_COUNT" ] && count=$(cat "$FM_ENTER_COUNT")
+    if [ "${FM_UNKNOWN_AFTER_ENTER:-0}" -gt 0 ] && [ "$count" -ge "$FM_UNKNOWN_AFTER_ENTER" ]; then
+      exit 1
+    fi
     if [ "$count" -ge "${FM_EMPTY_AFTER_ENTER:-1}" ]; then
       printf '\xe2\x94\x82 \xe2\x94\x82\n'
     else
@@ -99,6 +102,7 @@ run_send() {  # <dir> <empty-after-enter> -- <args...>
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_SEND_LOG="$log" FM_ENTER_COUNT="$enters" FM_SLEEP_LOG="$sleeps" \
     FM_EMPTY_AFTER_ENTER="$empty_after" \
+    FM_UNKNOWN_AFTER_ENTER="${FM_UNKNOWN_AFTER_ENTER:-0}" \
     FM_SEND_RETRIES=3 FM_SEND_SLEEP=0.4 FM_SEND_SETTLE=0 \
     "$SEND" "$@" 2>"$err"; rc=$?
   printf '%s\n' "$rc"
@@ -142,6 +146,18 @@ test_non_codex_secondmate_keeps_generic_retry_behavior() {
   pass "fm-send: non-Codex secondmates keep the generic submit retry behavior"
 }
 
+test_codex_secondmate_rejects_unknown_final_confirmation() {
+  local dir rc count
+  dir=$(setup_case codex-sm-unknown codex secondmate)
+  rc=$(FM_UNKNOWN_AFTER_ENTER=4 run_send "$dir" 5 fm-target "check the queue")
+  expect_code 1 "$rc" "codex secondmate should fail when final Enter confirmation is unreadable"
+  count=$(cat "$dir/enter.count")
+  [ "$count" = 4 ] || fail "codex secondmate unknown confirmation: expected 4 Enter attempts, got $count"
+  assert_contains "$(cat "$dir/stderr.log")" "could not be confirmed" "unknown final confirmation should fail closed"
+  pass "fm-send: marked Codex secondmate rejects unknown final Enter confirmation"
+}
+
 test_codex_secondmate_gets_delayed_final_enter
 test_codex_crewmate_keeps_generic_retry_behavior
 test_non_codex_secondmate_keeps_generic_retry_behavior
+test_codex_secondmate_rejects_unknown_final_confirmation

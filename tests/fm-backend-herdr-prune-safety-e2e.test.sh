@@ -80,17 +80,35 @@ fi
 
 LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace label should be 'firstmate', got '$LIVE_LABEL' - repro setup is wrong"
-# JT binds workspace ownership with a home-identity token before adoption. Bind
-# this deliberately pre-existing workspace to the test's primary-shaped home;
-# the safety property remains the same: its seeded tab labeled "1" already has
-# a live process and must never become a prune candidate.
-fm_backend_herdr_workspace_bind_home "$SESSION" "$LIVE_WSID" \
-  || fail "could not bind the pre-existing startup workspace to the test home identity"
+# The adopted adapter resolves flat home workspaces by their per-home label.
+# This deliberately pre-existing workspace therefore exercises the real
+# label-collision adoption path directly.
 pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with the primary home's own label"
 
 # Simulate a live long-running agent in that pane: a heartbeat loop that
 # appends to a marker file, so liveness is independently verifiable (not just
 # "the pane object still exists").
+PANE_READY=false
+READY_SAMPLES=0
+for _ in $(seq 1 100); do
+  PROCESS_INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$LIVE_PANE_ID" 2>/dev/null || true)
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+    .result.process_info as $process
+    | ($process.foreground_processes | length == 1)
+      and ($process.foreground_processes[0].pid == $process.shell_pid)
+  ' >/dev/null 2>&1; then
+    READY_SAMPLES=$((READY_SAMPLES + 1))
+    if [ "$READY_SAMPLES" -ge 10 ]; then
+      PANE_READY=true
+      break
+    fi
+  else
+    READY_SAMPLES=0
+  fi
+  sleep 0.1
+done
+[ "$PANE_READY" = true ] || fail "the startup workspace's shell did not become ready"
+
 MARKER="$SCRATCH/heartbeat.log"
 fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
   "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" >/dev/null 2>&1 \

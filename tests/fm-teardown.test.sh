@@ -733,6 +733,97 @@ SH
   pass "forced secondmate teardown retries a transient child worktree index lock"
 }
 
+test_forced_secondmate_teardown_propagates_child_close_failure() {
+  local case_dir rc home child
+  case_dir=$(make_case forced-child-close-failure)
+  home="$case_dir/home"
+  child="$case_dir/wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$home/state/child-x1.meta" \
+    "window=firstmate:fm-child-x1" \
+    "worktree=$child" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "kill-window -t firstmate:fm-child-x1") exit 1 ;;
+  "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
+    printf '%s\n' '@2|firstmate:fm-child-x1'
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forced-child-close-failure: parent teardown must fail closed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "forced-child-close-failure: parent metadata must survive child close refusal"
+  assert_present "$home/state/child-x1.meta" \
+    "forced-child-close-failure: child metadata must survive child close refusal"
+  [ -d "$home" ] || fail "forced-child-close-failure: parent home was removed after child close refusal"
+  grep -q "child cleanup failed" "$case_dir/stderr" \
+    || fail "forced-child-close-failure: refusal did not identify child cleanup"
+  grep -Fq 'cleanup_firstmate_home_children "$child_home" || return 1' "$TEARDOWN" \
+    || fail "recursive secondmate cleanup does not propagate nested child failure"
+  pass "forced and recursive secondmate teardown propagate child close failures"
+}
+
+test_herdr_teardown_helper_locks_and_closes_focus_safe() {
+  local dir function_source close_log
+  dir="$TMP_ROOT/herdr-focus-safe-helper"
+  mkdir -p "$dir/state"
+  close_log="$dir/close"
+  function_source=$(sed -n '/^teardown_herdr_endpoint_focus_safe()/,/^}/p' "$TEARDOWN")
+  FUNCTION_SOURCE="$function_source" SCRIPT_DIR="$ROOT/bin" STATE="$dir/state" CLOSE_LOG="$close_log" \
+    bash -c '
+      eval "$FUNCTION_SOURCE"
+      fm_backend_source() { return 0; }
+      fm_backend_herdr_parse_target() {
+        FM_BACKEND_HERDR_SESSION=${1%%:*}
+        FM_BACKEND_HERDR_PANE=${1#*:}
+      }
+      fm_backend_herdr_pane_agent_state() { printf live; }
+      fm_backend_herdr_presentation_session_lock_path() { printf "%s/presentation.lock" "$STATE"; }
+      fm_backend_herdr_projection_teardown_close() {
+        printf "%s:%s\n" "$1" "$2" > "$CLOSE_LOG"
+      }
+      teardown_herdr_endpoint_focus_safe fmtest:w9:p4
+    ' || fail "focus-safe Herdr teardown helper refused a verifiable exact close"
+  [ "$(cat "$close_log")" = fmtest:w9:p4 ] \
+    || fail "focus-safe Herdr teardown helper did not close the exact response-derived pane"
+  [ ! -e "$dir/state/presentation.lock" ] \
+    || fail "focus-safe Herdr teardown helper did not release its session lock"
+  pass "Herdr teardown serializes every exact endpoint close through focus-safe verification"
+}
+
+test_projection_journal_retires_before_worktree_return() {
+  local retire_line return_line
+  retire_line=$(grep -n '^    rm -f "$HERDR_PRESENTATION_JOURNAL"$' "$TEARDOWN" | cut -d: -f1)
+  return_line=$(grep -n '^  teardown_treehouse_return "$WT"' "$TEARDOWN" | cut -d: -f1)
+  [ -n "$retire_line" ] && [ -n "$return_line" ] && [ "$retire_line" -lt "$return_line" ] \
+    || fail "confirmed projection journal retirement must precede the fallible worktree return"
+  grep -Fq 'teardown_backend_endpoint "$child_backend" "$child_t"' "$TEARDOWN" \
+    || fail "forced child Herdr teardown bypasses the shared focus-safe endpoint closer"
+  pass "confirmed projection journals retire before return failure and child teardown shares safe closure"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -754,3 +845,6 @@ test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_teardown_retries_transient_index_lock
 test_forced_secondmate_teardown_retries_child_index_lock
+test_forced_secondmate_teardown_propagates_child_close_failure
+test_herdr_teardown_helper_locks_and_closes_focus_safe
+test_projection_journal_retires_before_worktree_return

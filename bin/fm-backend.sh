@@ -16,12 +16,15 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 FM_BACKEND_KNOWN="tmux herdr"
 
-fm_backend_is_known() {  # <name>
-  local name=$1 known
-  for known in $FM_BACKEND_KNOWN; do
-    [ "$name" = "$known" ] && return 0
-  done
+fm_backend_list_contains() {  # <space-delimited-list> <name>
+  local list=$1 name=$2
+  case "$name" in *[[:space:]]*) return 1 ;; esac
+  case " $list " in *" $name "*) return 0 ;; esac
   return 1
+}
+
+fm_backend_is_known() {  # <name>
+  fm_backend_list_contains "$FM_BACKEND_KNOWN" "$1"
 }
 
 # Detect the innermost session provider. A tmux pane nested inside Herdr has
@@ -81,6 +84,13 @@ fm_backend_required_tools() {  # <backend>
     herdr) printf '%s' 'herdr jq treehouse' ;;
     *) return 1 ;;
   esac
+}
+
+fm_backend_required_tool_available() {  # <backend> <tool>
+  local backend=$1 tool=$2 required
+  required=$(fm_backend_required_tools "$backend") || return 1
+  fm_backend_list_contains "$required" "$tool" || return 1
+  command -v "$tool" >/dev/null 2>&1
 }
 
 fm_backend_validate() {  # <name>
@@ -162,6 +172,24 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_HERDR_SOURCED=1
       fi
       ;;
+  esac
+}
+
+fm_backend_agent_state() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unverified'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_agent_state "$target" ;;
+    herdr) fm_backend_herdr_agent_state "$target" ;;
+    *) printf 'unverified' ;;
+  esac
+}
+
+fm_backend_agent_alive() {  # <backend> <target>
+  case "$(fm_backend_agent_state "$1" "$2")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
+    *) printf 'unknown' ;;
   esac
 }
 
@@ -327,7 +355,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-fm_backend_submit_enter() {  # <backend> <target> <retries> <enter-sleep>
+fm_backend_submit_enter() {  # <backend> <target> <retries> <enter-sleep> [expected-text]
   local backend=$1; shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
@@ -358,11 +386,9 @@ fm_backend_busy_state() {  # <backend> <target> -> busy|idle|unknown
 }
 
 fm_backend_agent_alive() {  # <backend> <target> -> alive|dead|unknown
-  local backend=$1
-  shift
-  fm_backend_source "$backend" || { printf unknown; return 0; }
-  case "$backend" in
-    herdr) fm_backend_herdr_agent_alive "$@" ;;
+  case "$(fm_backend_agent_state "$1" "$2")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
     *) printf unknown ;;
   esac
 }
@@ -372,14 +398,31 @@ fm_backend_pane_readable() {  # <backend> <target>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_pane_readable "$@" ;;
-    herdr) fm_backend_herdr_pane_readable "$@" ;;
+    herdr) fm_backend_herdr_target_ready "$@" ;;
     *) echo "error: no pane-readability implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 
-# Supervisor callers use this name for the same backend-neutral existence probe.
+# Cheap passive existence probe. In particular, the Herdr path must not call
+# target_ready because that helper may start a server during a read-only fleet
+# digest.
 fm_backend_target_exists() {  # <backend> <target>
-  fm_backend_pane_readable "$@"
+  local backend=$1 target=$2 session pane
+  case "$backend" in
+    tmux)
+      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
+      ;;
+    *)
+      fm_backend_pane_readable "$@"
+      ;;
+  esac
 }
 
 fm_backend_composer_state() {  # <backend> <target> [text] -> empty|pending|unknown

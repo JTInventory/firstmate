@@ -39,16 +39,47 @@ export FM_HOME="$STATE_DIR" FM_STATE_OVERRIDE="$STATE_DIR"
 . "$DAEMON"
 fm_backend_source herdr || fail "could not load the Herdr backend"
 
-container_raw=$(fm_backend_herdr_container_ensure /tmp) || fail "could not ensure the lab workspace"
-container=${container_raw%%$'\t'*}
-seeded_tab=${container_raw#*$'\t'}
-task_ids=$(fm_backend_herdr_create_task "$container" fm-afk-supervisor /tmp "$seeded_tab") \
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "could not ensure the lab workspace"
+CONTAINER=${CONTAINER_RAW%%$'\t'*}
+SEEDED_TAB=${CONTAINER_RAW#*$'\t'}
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-afk-supervisor /tmp "$SEEDED_TAB") \
   || fail "could not create the lab supervisor pane"
-read -r _tab_id PANE_ID <<EOF
-$task_ids
+read -r _TAB_ID PANE_ID <<EOF
+$TASK_IDS
 EOF
 [ -n "$PANE_ID" ] || fail "lab supervisor task did not return a pane id"
 TARGET="$SESSION:$PANE_ID"
+
+# Herdr can return the created pane before its interactive shell is ready to
+# receive Enter. Require a stable shell-owned foreground before launching the
+# fixture, or the command can remain typed but unsubmitted in the shell buffer.
+PANE_READY=false
+READY_SAMPLES=0
+for _ in $(seq 1 100); do
+  PROCESS_INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE_ID" 2>/dev/null || true)
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+    .result.process_info as $process
+    | ($process.foreground_processes | length == 1)
+      and ($process.foreground_processes[0].pid == $process.shell_pid)
+  ' >/dev/null 2>&1; then
+    READY_SAMPLES=$((READY_SAMPLES + 1))
+    if [ "$READY_SAMPLES" -ge 10 ]; then
+      PANE_READY=true
+      break
+    fi
+  else
+    READY_SAMPLES=0
+  fi
+  sleep 0.1
+done
+[ "$PANE_READY" = true ] || fail "the supervisor pane's shell did not become ready"
+
+# A second, independent live task tab in the same workspace, mirroring the tmux
+# e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
+# only watches state/*.status mtimes, no window/pane dependency), but kept for
+# parity so this test's shape matches the tmux e2e's.
+fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp >/dev/null \
+  || fail "could not create the fake crewmate scratch tab"
 
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
@@ -59,7 +90,9 @@ old_stty=$(stty -g 2>/dev/null || true)
 cleanup() { [ -z "$old_stty" ] || stty "$old_stty" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 buf=
-redraw() { printf '\r\033[K> %s' "$buf"; }
+# Use an agent-composer glyph so the fixture exercises Herdr's composer
+# confirmation path. A bare shell prompt is deliberately classified unknown.
+redraw() { printf '\r\033[K› %s' "$buf"; }
 submit() {
   local hex
   hex=$(printf '%s' "$buf" | od -An -tx1 | tr -d ' \n')

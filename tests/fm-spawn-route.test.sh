@@ -308,13 +308,13 @@ EOF
   printf '%s\n' 'Unsafe id should not launch.' > "$home/data/$id/brief.md"
   out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 2 "$status" "spawn unsafe metachar id should fail"
-  assert_contains "$out" "unsafe task id" "spawn did not explain metachar id rejection"
+  assert_contains "$out" "invalid task id" "spawn did not explain metachar id rejection"
   assert_absent "$home/state/$id.meta" "unsafe metachar id must not record meta"
 
   id='../evil'
   out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 2 "$status" "spawn path-traversal id should fail"
-  assert_contains "$out" "unsafe task id" "spawn did not explain path traversal id rejection"
+  assert_contains "$out" "invalid task id" "spawn did not explain path traversal id rejection"
 
   pass "unsafe task ids are rejected before spawn side effects"
 }

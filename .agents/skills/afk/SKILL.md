@@ -121,6 +121,22 @@ Enter; Herdr uses its pane composer read.
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
 
+**Busy-queued Enter exception (tmux backend, opencode 1.18.4).** While opencode
+is mid-turn, Enter is accepted and queued for after the current turn but the
+composer keeps showing the typed text the whole time, so the cleared-composer
+check alone false-positives on a swallowed Enter for every steer sent to a
+busy opencode pane. The shared `fm_tmux_submit_enter_core` falls back to
+`fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
+Enter was accepted and queued (reported as `empty` so the caller does not
+re-send), while an idle pane keeps `pending` as a genuine swallow. The
+strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
+and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
+verification - this exception is a busy queue treated as a delivered Enter,
+not a swallowed one. Herdr applies the same exception only after successful
+Enter transport when contemporaneous native state remains busy and the pending
+composer still contains the exact submitted text; autocomplete-expanded content
+retries.
+
 ## Classification policy
 
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
@@ -137,24 +153,17 @@ the two never run their triage at the same time.
 
 Classify each wake this way:
 
-- `signal` whose status content has no captain-relevant verb
-  (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
-  -> self-handle. Captain-relevant verb -> escalate.
-  A valid `paused: <reason>` is a declared external wait, not a wedge: record it
-  for re-review. A paused secondmate is included in the digest immediately so
-  its parent can see the handoff, then follows the same re-review cadence.
+- `signal` with a terminal captain verb (`done:`, `needs-decision:`, `blocked:`, or `failed:`) -> escalate.
+  A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
+  Other signals with no captain-relevant status -> self-handle.
+- `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
+  If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
-- `stale` with a terminal status -> escalate. Non-terminal stale is transient:
-  record a marker and self-handle. If the pane is still idle past
-  `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a
-  possible wedge. This bounds wedge-detection latency to the threshold plus a
-  tick: a delay, never a loss. Healthy crewmates are autonomous and do not wait
-  on firstmate mid-task.
-  A still-valid `paused: <reason>` instead uses `FM_PAUSE_RESURFACE_SECS`
-  (default 3600): housekeeping confirms that no active or terminal run
-  superseded it, then adds one "recheck the declared wait" digest item and
-  resets the cadence. It clears the pause marker when the status changes, the
-  pane disappears, or work resumes.
+- `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
+  Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
+  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
+  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+  Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
@@ -201,16 +210,29 @@ the marker lets firstmate distinguish it from a real captain message.
   classification or relay, so the digest text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
-- **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale`
-  both check the seen-status marker before escalating, so a status escalated by
-  one path is not re-escalated by another in the same digest.
-- **Auto-discovered supervisor pane** - the daemon selects
-  `FM_SUPERVISOR_BACKEND=tmux|herdr` from explicit configuration or the runtime
-  markers, then resolves `FM_SUPERVISOR_TARGET` or that backend's runtime pane
-  marker. Tmux falls back to `firstmate:0` with a warning; Herdr requires
-  `HERDR_PANE_ID` or an explicit target. Unsupported backends are refused at
-  startup. The target/backend resolution source is logged so a
-  wrong-but-resolving fallback is detectable.
+- **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
+  The marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
+- **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
+  (tmux vs herdr) and TARGET independently, mirroring
+  `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
+  override, then `$TMUX_PANE` set (tmux), then `$HERDR_ENV=1` with
+  `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
+  `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
+  `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
+  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
+  `firstmate:0` fallback with a warning. Both resolution sources are logged at
+  startup so a wrong-but-resolving fallback is detectable. Other runtime
+  backends other than tmux and Herdr are not supported as
+  supervisor backends; the daemon refuses loudly at startup instead of
+  misapplying tmux primitives to a pane that isn't one
+  (docs/herdr-backend.md "Away-mode supervisor support").
+
+## Stale-artifact lifecycle
+
+Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
+Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
+This section owns the stale-artifact lifecycle contract.
 
 ## Reliability properties
 
