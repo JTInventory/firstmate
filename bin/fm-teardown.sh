@@ -78,6 +78,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -780,6 +782,11 @@ remove_secondmate_registry_entry() {
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+  if fm_pending_reply_task_has_open "$STATE" "$ID"; then
+    echo "REFUSED: secondmate $ID still has an open pending reply in $STATE/pending-replies." >&2
+    echo "Wait for a correlated done, needs-decision, blocked, or failed report before teardown." >&2
+    exit 1
+  fi
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi

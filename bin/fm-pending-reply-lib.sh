@@ -99,8 +99,23 @@ fm_pending_reply_dir() {  # <state-dir>
   printf '%s/pending-replies' "$state"
 }
 
-fm_pending_reply_path() {  # <state-dir> <corr_id>
+fm_pending_reply_history_dir() {  # <state-dir>
+  printf '%s/pending-reply-history' "$1"
+}
+
+fm_pending_reply_active_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+fm_pending_reply_path() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 active history
+  active=$(fm_pending_reply_active_path "$state" "$corr")
+  history="$(fm_pending_reply_history_dir "$state")/$corr"
+  if [ -f "$active" ] || [ ! -f "$history" ]; then
+    printf '%s' "$active"
+  else
+    printf '%s' "$history"
+  fi
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -159,7 +174,7 @@ fm_pending_reply_get() {  # <record-path> <key>
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(fm_pending_reply_active_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -400,6 +415,8 @@ fm_pending_reply_line_resolves() {  # <line> <corr_id>
   [ -n "$line" ] && [ -n "$corr" ] || return 1
   case "$line" in
     *pending-reply-missed*) return 1 ;;
+    done:*|done[[:space:]]*|needs-decision:*|needs-decision[[:space:]]*|blocked:*|blocked[[:space:]]*|failed:*|failed[[:space:]]*) ;;
+    *) return 1 ;;
   esac
   fm_pending_reply_text_has_corr "$line" "$corr"
 }
@@ -455,6 +472,36 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
+fm_pending_reply_archive_resolved() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 active history_dir history phase
+  active=$(fm_pending_reply_active_path "$state" "$corr")
+  [ -f "$active" ] || return 0
+  phase=$(fm_pending_reply_get "$active" phase)
+  [ "$phase" = resolved ] || return 1
+  history_dir=$(fm_pending_reply_history_dir "$state")
+  mkdir -p "$history_dir" || return 1
+  chmod 700 "$history_dir" 2>/dev/null || true
+  history="$history_dir/$corr"
+  mv -f "$active" "$history"
+}
+
+fm_pending_reply_reconcile_resolution() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec phase delivered resolved via
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  if [ "$phase" = resolved ]; then
+    fm_pending_reply_archive_resolved "$state" "$corr"
+    return $?
+  fi
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  resolved=$(fm_pending_reply_get "$rec" resolved_epoch)
+  via=$(fm_pending_reply_get "$rec" resolved_via)
+  [ -n "$delivered" ] && [ -n "$resolved" ] && [ -n "$via" ] || return 1
+  fm_pending_reply_set "$rec" phase resolved || return 1
+  fm_pending_reply_archive_resolved "$state" "$corr"
+}
+
 # Idempotently resolve an expectation from a correlated parent report.
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
@@ -463,6 +510,10 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
+  if fm_pending_reply_reconcile_resolution "$state" "$corr"; then
+    return 0
+  fi
+  rec=$(fm_pending_reply_path "$state" "$corr")
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = resolved ]; then
     return 0
@@ -491,14 +542,14 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
-  fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
     rm -f "$marker" 2>/dev/null || true
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
-  return 0
+  fm_pending_reply_set "$rec" phase resolved || return 1
+  fm_pending_reply_archive_resolved "$state" "$corr"
 }
 
 # Observe backend busy/idle evidence for the active turn without reading chat.
@@ -939,7 +990,13 @@ fm_pending_reply_tick() {  # <state-dir>
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" != resolved ] || continue
+    if [ "$phase" = resolved ]; then
+      fm_pending_reply_archive_resolved "$state" "$corr" || true
+      continue
+    fi
+    if fm_pending_reply_reconcile_resolution "$state" "$corr"; then
+      continue
+    fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)

@@ -474,6 +474,7 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "delivery-unknown escalation should publish once, got $escalations"
     printf 'done [corr=%s]: late report proves delivery\n' "$prepared_corr" >> "$state/hibit.status"
     fm_pending_reply_tick "$state" || fail "watcher should accept a late delivery report"
+    prepared_rec=$(fm_pending_reply_path "$state" "$prepared_corr")
     [ "$(phase_of "$state" "$prepared_corr")" = resolved ] \
       || fail "late report should resolve escalated delivery-unknown"
     [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5760 ] \
@@ -492,6 +493,7 @@ test_delivery_confirmation_fallback_reconciles() {
     printf 'done [corr=%s]: report proves delivery\n' "$reported_corr" >> "$state/hibit.status"
     fm_pending_reply_try_resolve "$state" "$reported_corr" \
       || fail "attempted delivery with a report should resolve directly"
+    reported_rec=$(fm_pending_reply_path "$state" "$reported_corr")
     [ "$(phase_of "$state" "$reported_corr")" = resolved ] \
       || fail "correlated report should resolve attempted delivery"
     [ "$(fm_pending_reply_get "$reported_rec" delivered_epoch)" = 5800 ] \
@@ -523,6 +525,10 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   printf 'working: still thinking\n' >> "$state/hibit.status"
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     fail "unrelated working line must not resolve"
+  fi
+  printf 'working [corr=%s]: still thinking\n' "$corr" >> "$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "correlated progress line must not resolve"
   fi
   printf 'done: finished without corr\n' >> "$state/hibit.status"
   if fm_pending_reply_try_resolve "$state" "$corr"; then
@@ -757,6 +763,10 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_pending_reply_mark_delivered "$state" "$resolved"
     printf 'done [corr=%s]: complete\n' "$resolved" > "$state/resolved.status"
     fm_pending_reply_try_resolve "$state" "$resolved" || fail "resolved fixture should resolve"
+    [ ! -e "$(fm_pending_reply_active_path "$state" "$resolved")" ] \
+      || fail "resolved fixture should leave the active scan directory"
+    [ -f "$(fm_pending_reply_history_dir "$state")/$resolved" ] \
+      || fail "resolved fixture should remain in durable history"
     escalated=$(fm_pending_reply_create "$home" "$state" escalated "escalated request")
     fm_pending_reply_mark_delivered "$state" "$escalated"
     rec=$(fm_pending_reply_path "$state" "$escalated")
@@ -802,6 +812,25 @@ test_tick_skips_terminal_and_reuses_target_observation() {
       || fail "unchanged wrong-home logs should retain their scan signature"
   ) || fail "terminal-skip and observation-cache regression failed"
   pass "tick skips terminal records and reuses target observations"
+}
+
+test_partial_resolution_reconciles_after_restart() {
+  local home state corr rec history
+  home=$(setup_parent partial-resolution)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=10150
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "restart resolution")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_active_path "$state" "$corr")
+  fm_pending_reply_set "$rec" resolved_epoch 10150 || fail "partial resolved epoch should persist"
+  fm_pending_reply_set "$rec" resolved_via status || fail "partial resolved route should persist"
+  fm_pending_reply_tick "$state" || fail "restart tick should reconcile partial resolution"
+  history="$(fm_pending_reply_history_dir "$state")/$corr"
+  [ ! -e "$rec" ] || fail "reconciled resolution should leave the active scan directory"
+  [ -f "$history" ] || fail "reconciled resolution should retain durable history"
+  [ "$(fm_pending_reply_get "$history" phase)" = resolved ] \
+    || fail "reconciled resolution should commit terminal phase last"
+  pass "partial resolution reconciles and archives after restart"
 }
 
 test_correlations_reuse_only_for_matching_open_task() {
@@ -918,6 +947,7 @@ test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_tick_skips_terminal_and_reuses_target_observation
+test_partial_resolution_reconciles_after_restart
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation

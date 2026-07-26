@@ -785,6 +785,40 @@ SH
   pass "forced and recursive secondmate teardown propagate child close failures"
 }
 
+test_secondmate_teardown_refuses_open_pending_reply() {
+  local case_dir rc home corr
+  case_dir=$(make_case secondmate-open-reply)
+  home="$case_dir/home"
+  corr=0123456789abcdef
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$case_dir/state/pending-replies"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$case_dir/state/pending-replies/$corr" \
+    "corr_id=$corr" \
+    "task_id=task-x1" \
+    "phase=awaiting_report"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "secondmate-open-reply: teardown must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "secondmate-open-reply: parent metadata must survive refusal"
+  [ -d "$home" ] || fail "secondmate-open-reply: secondmate home was removed"
+  grep -Fq "open pending reply" "$case_dir/stderr" \
+    || fail "secondmate-open-reply: refusal did not identify the open reply"
+  pass "secondmate teardown preserves routing while a reply remains open"
+}
+
 test_herdr_teardown_helper_locks_and_closes_focus_safe() {
   local dir function_source close_log
   dir="$TMP_ROOT/herdr-focus-safe-helper"
@@ -846,5 +880,6 @@ test_gh_error_and_content_absent_refuses
 test_teardown_retries_transient_index_lock
 test_forced_secondmate_teardown_retries_child_index_lock
 test_forced_secondmate_teardown_propagates_child_close_failure
+test_secondmate_teardown_refuses_open_pending_reply
 test_herdr_teardown_helper_locks_and_closes_focus_safe
 test_projection_journal_retires_before_worktree_return
