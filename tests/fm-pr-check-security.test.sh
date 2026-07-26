@@ -2112,6 +2112,34 @@ test_nonexecuting_migration() {
   pass "migration never executes legacy checks, preserves X mode, quarantines ambiguity, and is idempotent"
 }
 
+test_legacy_custom_check_remains_armed() {
+  local dir state rc
+  dir=$(make_case legacy-custom-check)
+  state="$dir/home/state"
+  fm_write_meta "$state/custom.meta" \
+    'window=fm-custom' \
+    'kind=ship'
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-ready" > "$state/custom.check.sh"
+  chmod 0644 "$state/custom.check.sh"
+
+  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "legacy custom-check migration failed: $(cat "$dir/migrate.err")"
+  [ -f "$state/custom.check.sh" ] || fail "legacy custom check was quarantined"
+  [ "$(file_mode "$state/custom.check.sh")" = 700 ] || fail "legacy custom check was not made private"
+  fm_custom_check_registered "$state" custom || fail "legacy custom check was not byte-bound"
+
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0 FM_CHECK_INTERVAL=0 \
+    FM_SIGNAL_GRACE=0 PATH="$dir/fakebin:$BASE_PATH" "$WATCH" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "migrated custom check did not run: $(cat "$dir/watch.err")"
+  assert_grep "check: $state/custom.check.sh: custom-ready" "$dir/watch.out" \
+    "migrated custom check did not preserve its wake behavior"
+  pass "legacy custom checks remain armed through byte-bound migration"
+}
+
 test_historical_x_shim_transition_matrix() {
   local dir state shim marker_kind executed rc variant target alias
   for marker_kind in unmarked completed safe-scan; do
@@ -3339,6 +3367,7 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_parser_matrix
+test_legacy_custom_check_remains_armed
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only
