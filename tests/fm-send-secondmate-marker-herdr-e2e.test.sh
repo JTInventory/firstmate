@@ -131,11 +131,15 @@ done
 marked_line=$(grep -F -- "$REQUEST" "$LOG_FILE" 2>/dev/null | head -n 1 || true)
 marked_hex=${marked_line%%$'\t'*}
 marked_text=${marked_line#*$'\t'}
-expected_hex=$(printf '%s' "${FM_FROMFIRST_MARK}${REQUEST}" | od -An -tx1 | tr -d ' \n')
+marker_ok=0
+case "$marked_text" in
+  "${FM_FROMFIRST_MARK}"corr=[a-f0-9]*" $REQUEST") marker_ok=1 ;;
+esac
+expected_hex=$(printf '%s' "$marked_text" | od -An -tx1 | tr -d ' \n')
 marked_count=$(grep -F -- "$REQUEST" "$LOG_FILE" 2>/dev/null | wc -l | tr -d '[:space:]')
 submission_count=$(wc -l < "$LOG_FILE" | tr -d '[:space:]')
 [ "$marked_count" = 1 ] && [ "$submission_count" = 1 ] \
-  && [ "$marked_text" = "${FM_FROMFIRST_MARK}${REQUEST}" ] && [ "$marked_hex" = "$expected_hex" ] \
+  && [ "$marker_ok" = 1 ] && [ "$marked_hex" = "$expected_hex" ] \
   || fail "fm-send did not deliver exactly one terminal-safe marker through Herdr (expected=$expected_hex got=$marked_hex; text=$(printf '%s' "$marked_text" | od -An -tx1 | tr -d ' \\n'); log=$(od -An -tx1 "$LOG_FILE" 2>/dev/null | tr -d ' \\n'); pane=$(fm_backend_herdr_capture "$TARGET" 40 2>/dev/null || true))"
 pass "real Herdr lab: secondmate fm-send delivers exactly one from-firstmate marker"
 

@@ -117,8 +117,8 @@ test_codex_secondmate_gets_delayed_final_enter() {
   [ "$count" = 4 ] || fail "codex secondmate: expected 4 Enter attempts, got $count"
   got=$(cat "$dir/send.log")
   case "$got" in
-    "$FM_FROMFIRST_MARK"check\ the\ queue) : ;;
-    *) fail "codex secondmate: expected marker+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    "$FM_FROMFIRST_MARK"corr=[a-f0-9]*" check the queue") : ;;
+    *) fail "codex secondmate: expected marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
   assert_contains "$(cat "$dir/sleep.log")" "1.2" "codex secondmate delayed retry should sleep before the final Enter"
   pass "fm-send: marked Codex secondmate text gets one delayed final Enter"

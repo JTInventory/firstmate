@@ -455,6 +455,7 @@ A secondmate is itself a firstmate, so a request reaches it in its own chat, whi
 So `fm-send` to a bare `fm-<id>` whose meta is `kind=secondmate` automatically prepends the terminal-safe U+2063 from-firstmate marker (`bin/fm-marker-lib.sh`) without stripping trailing newlines; the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
 For codex secondmates, that marked ordinary-text path also uses the longer pre-Enter settle so the already-typed request is not left unsubmitted by input timing.
 Expect and read that response on the status/doc path the same way you read any other status signal; do not peek the secondmate's chat for the answer.
+The parent owns a durable correlation record for every marked request. It requests one bounded repost after a completed turn without a correlated report, then escalates once if the repost is also missed; `bin/fm-pending-reply-lib.sh` owns that recovery contract.
 A captain typing directly into the secondmate's window is unmarked and stays a conversational captain intervention, so do not relay captain-destined chat through this path; the marker is applied only by `fm-send` to a `kind=secondmate` target.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
 If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.

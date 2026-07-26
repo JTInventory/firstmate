@@ -11,6 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 The repository-root `/config/`, `/reports/`, and `/backups/` directories are gitignored local fleet material.
 The ignore rules are root-anchored, so same-named directories nested under tracked shared surfaces such as `docs/examples/` and `tests/` remain trackable.
 Keep reusable configuration examples under [`docs/examples/`](examples/) and copy them into the local `config/` directory when needed.
+Parent-owned secondmate reply expectations are private runtime state under `state/pending-replies/`; `bin/fm-pending-reply-lib.sh` owns their exact schema, recovery, escalation, and retention rules.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -387,6 +388,7 @@ FM_COGNEE_TIMEOUT_MS=30000 # connect and request timeout budget for live lookup
 FM_COGNEE_TELEMETRY_FILE=  # default: $FM_HOME/data/cognee/telemetry.jsonl
 FM_COGNEE_EVIDENCE_ROOT=/root/firstmate/data   # local evidence root for fm-cognee-lookup-gate.sh
 FM_COGNEE_AUTO_LOOKUP=0    # must be 1 plus all evidence markers before automatic lookup is allowed
+FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=tmux         # AFK supervisor injection backend; tmux default, herdr experimental opt-in
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor target (override; auto-discovers tmux or HERDR_SESSION:HERDR_PANE_ID)
