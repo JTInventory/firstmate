@@ -1046,6 +1046,32 @@ test_nested_secondmate_late_report_handoffs_resolved_history() {
   pass "late nested reports migrate resolved history before teardown"
 }
 
+test_nested_secondmate_teardown_handoffs_archived_resolution() {
+  local case_dir rc corr source_history history
+  case_dir=$(make_case nested-archived-resolved-reply)
+  corr=3193456789abcdef
+  write_nested_secondmate_reply_fixture "$case_dir" resolved "$corr"
+  source_history="$case_dir/home/state/pending-reply-history/$corr"
+  mkdir -p "$(dirname "$source_history")"
+  mv "$case_dir/home/state/pending-replies/$corr" "$source_history"
+  printf '%s\n' "resolved_epoch=2" "resolved_via=status" >> "$source_history"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nested-archived-resolved-reply: forced teardown should succeed"
+  history="$case_dir/state/pending-reply-history/$corr"
+  assert_present "$history" \
+    "nested-archived-resolved-reply: archived history must migrate before home deletion"
+  [ "$(sed -n 's/^phase=//p' "$history")" = resolved ] \
+    || fail "nested-archived-resolved-reply: resolved phase was not retained"
+  [ ! -e "$case_dir/home" ] && [ ! -e "$case_dir/nested-home" ] \
+    || fail "nested-archived-resolved-reply: retired homes were not removed"
+  pass "recursive teardown migrates already archived nested history"
+}
+
 test_nested_secondmate_teardown_failure_keeps_active_reply() {
   local case_dir rc corr home active history
   case_dir=$(make_case nested-staged-close-failure)
@@ -1155,6 +1181,7 @@ test_forced_secondmate_teardown_failure_keeps_active_reply
 test_nested_secondmate_teardown_refuses_unescalated_reply
 test_nested_secondmate_teardown_handoffs_escalated_reply
 test_nested_secondmate_late_report_handoffs_resolved_history
+test_nested_secondmate_teardown_handoffs_archived_resolution
 test_nested_secondmate_teardown_failure_keeps_active_reply
 test_herdr_teardown_helper_locks_and_closes_focus_safe
 test_projection_journal_retires_before_worktree_return

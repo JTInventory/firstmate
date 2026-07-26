@@ -359,6 +359,25 @@ test_concurrent_escalation_publishes_once() {
   pass "concurrent escalation publishes one blocked status"
 }
 
+test_incomplete_transaction_lock_is_reclaimed() {
+  local home state corr lock
+  home=$(setup_parent incomplete-lock)
+  state="$home/state"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "recover incomplete lock")
+  fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "incomplete-lock: delivery setup failed"
+  printf 'done [corr=%s]: lock recovered\n' "$corr" > "$state/hibit.status"
+  lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "incomplete-lock: abandoned acquisition was not reclaimed"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "incomplete-lock: recovered transaction did not resolve"
+  [ ! -e "$lock" ] || fail "incomplete-lock: lock remained after recovery"
+  pass "incomplete transaction locks are reclaimed"
+}
+
 test_escalation_publication_failure_retries() {
   local home state corr rec target escalations
   home=$(setup_parent escalation-retry)
@@ -1063,6 +1082,90 @@ test_staging_reconciles_already_archived_nested_resolution() {
   pass "staging reconciles a resolution that won the lock race"
 }
 
+test_wrong_home_scan_preserves_staged_transaction() {
+  local home state retained sm_home corr rec source token detector
+  home=$(setup_parent wrong-home-stage-lock)
+  state="$home/state"
+  retained="$TMP_ROOT/wrong-home-stage-retained/state"
+  sm_home="$TMP_ROOT/wrong-home-stage-secondmate"
+  mkdir -p "$retained" "$sm_home/state"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "diagnostic writer lock")
+  fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "wrong-home-stage-lock: delivery setup failed"
+  rec=$(fm_pending_reply_active_path "$state" "$corr")
+  source=$(fm_pending_reply_source_identity "$state")
+  printf 'done [corr=%s]: wrong home\n' "$corr" > "$sm_home/state/hibit.status"
+  fm_pending_reply_txn_lock_acquire "$state" "$corr" token \
+    || fail "wrong-home-stage-lock: could not hold transaction lock"
+  fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" &
+  detector=$!
+  sleep 0.1
+  fm_pending_reply_set_retirement_stage \
+    "$rec" 123 "$retained" escalated "$source" \
+    || fail "wrong-home-stage-lock: staging setup failed"
+  fm_pending_reply_txn_lock_release "$state" "$corr" "$token" \
+    || fail "wrong-home-stage-lock: could not release transaction lock"
+  wait "$detector" || fail "wrong-home-stage-lock: detector failed"
+  [ "$(fm_pending_reply_get "$rec" retirement_history_state)" = "$retained" ] \
+    || fail "wrong-home-stage-lock: diagnostic write erased staged history"
+  [ "$(fm_pending_reply_get "$rec" retirement_source_state)" = "$source" ] \
+    || fail "wrong-home-stage-lock: diagnostic write erased staged source"
+  pass "wrong-home diagnostics serialize with retirement staging"
+}
+
+test_finalizer_rechecks_late_resolution_under_lock() {
+  local home state retained corr rec source history receipt
+  home=$(setup_parent finalizer-late-resolution)
+  state="$home/state"
+  retained="$TMP_ROOT/finalizer-late-resolution-retained/state"
+  mkdir -p "$retained"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "resolve during finalization")
+  fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "finalizer-late-resolution: delivery setup failed"
+  rec=$(fm_pending_reply_active_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated \
+    || fail "finalizer-late-resolution: phase setup failed"
+  source=$(fm_pending_reply_source_identity "$state")
+  fm_pending_reply_stage_force_retire_task "$state" hibit "$retained" \
+    || fail "finalizer-late-resolution: staging failed"
+  printf 'done [corr=%s]: final report\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_finalize_force_retire_task "$state" hibit "$retained" "$source" \
+    || fail "finalizer-late-resolution: finalization failed"
+  history="$(fm_pending_reply_history_dir "$retained")/$corr"
+  receipt=$(fm_pending_reply_handoff_path "$retained" "$source" "$corr")
+  [ "$(fm_pending_reply_get "$history" phase)" = resolved ] \
+    || fail "finalizer-late-resolution: retired receipt beat late resolution"
+  [ ! -f "$rec" ] || fail "finalizer-late-resolution: active record remained"
+  [ ! -f "$receipt" ] || fail "finalizer-late-resolution: receipt remained"
+  pass "finalization rechecks late resolution under correlation lock"
+}
+
+test_finalizer_recovers_cleared_history_marker_with_active_record() {
+  local home state retained corr rec source receipt history
+  home=$(setup_parent finalizer-cleared-marker)
+  state="$home/state"
+  retained="$TMP_ROOT/finalizer-cleared-marker-retained/state"
+  mkdir -p "$retained"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "retry cleared marker")
+  rec=$(fm_pending_reply_active_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated \
+    || fail "finalizer-cleared-marker: phase setup failed"
+  source=$(fm_pending_reply_source_identity "$state")
+  fm_pending_reply_stage_force_retire_task "$state" hibit "$retained" \
+    || fail "finalizer-cleared-marker: staging failed"
+  receipt=$(fm_pending_reply_handoff_path "$retained" "$source" "$corr")
+  history="$(fm_pending_reply_history_dir "$retained")/$corr"
+  mv "$receipt" "$history"
+  fm_pending_reply_clear_retirement_stage "$history" \
+    || fail "finalizer-cleared-marker: crash fixture setup failed"
+  fm_pending_reply_finalize_force_retire_task "$state" hibit "$retained" "$source" \
+    || fail "finalizer-cleared-marker: retry rejected durable history"
+  [ ! -f "$rec" ] || fail "finalizer-cleared-marker: active record remained"
+  [ "$(fm_pending_reply_get "$history" phase)" = retired ] \
+    || fail "finalizer-cleared-marker: durable history was lost"
+  pass "finalization recovers cleared history markers"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1072,6 +1175,7 @@ test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_concurrent_escalation_publishes_once
+test_incomplete_transaction_lock_is_reclaimed
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
@@ -1093,5 +1197,8 @@ test_failed_send_discards_undelivered_expectation
 test_force_retirement_receipts_are_source_bound
 test_staged_resolution_promotes_before_receipt_cleanup
 test_staging_reconciles_already_archived_nested_resolution
+test_wrong_home_scan_preserves_staged_transaction
+test_finalizer_rechecks_late_resolution_under_lock
+test_finalizer_recovers_cleared_history_marker_with_active_record
 
 printf 'ok - all pending-reply tests passed\n'

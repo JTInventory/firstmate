@@ -749,13 +749,18 @@ cleanup_firstmate_home_children() {
     child_retire_staged=0
     child_retire_source=
     if [ "$child_kind" = secondmate ]; then
+      child_retire_source=$(fm_pending_reply_source_identity "$sub_state") || return 1
       if fm_pending_reply_task_has_open "$sub_state" "$child_id"; then
-        child_retire_source=$(fm_pending_reply_source_identity "$sub_state") || return 1
         if ! fm_pending_reply_stage_force_retire_task "$sub_state" "$child_id" "$STATE"; then
           echo "REFUSED: could not stage pending replies for child secondmate $child_id." >&2
           return 1
         fi
         child_retire_staged=1
+      fi
+      if ! fm_pending_reply_handoff_resolved_task_history \
+        "$sub_state" "$child_id" "$STATE" "$child_retire_source"; then
+        echo "REFUSED: could not hand off resolved reply history for child secondmate $child_id." >&2
+        return 1
       fi
     fi
     if [ -n "$child_t" ]; then
