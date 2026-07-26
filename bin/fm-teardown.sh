@@ -298,6 +298,7 @@ validate_pr_poll_cleanup() {
   fi
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-replacement" \
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
@@ -310,6 +311,7 @@ validate_pr_poll_cleanup() {
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-replacement" \
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
@@ -325,6 +327,15 @@ validate_pr_poll_cleanup() {
       echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
       return 1
     }
+  fi
+  if [ -e "$state_dir/$id.pr-poll-replacement" ] \
+    || [ -L "$state_dir/$id.pr-poll-replacement" ]; then
+    fm_pr_poll_replacement_parse "$state_dir/$id.pr-poll-replacement" \
+      && fm_pr_poll_replacement_receipt_valid "$state_dir" "$id" \
+        "$FM_PR_REPLACE_EXPECTED_HEAD" || {
+          echo "REFUSED: invalid PR-poll replacement receipt; preserving task state." >&2
+          return 1
+        }
   fi
   [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
   if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
@@ -352,6 +363,7 @@ remove_pr_poll_artifacts() {
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-replacement" \
     "$state_dir/$id.check-trust" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"

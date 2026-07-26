@@ -89,6 +89,24 @@ FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_REPLACE_ID=
+FM_PR_REPLACE_PROVIDER=
+FM_PR_REPLACE_URL=
+FM_PR_REPLACE_HOST=
+FM_PR_REPLACE_PATH=
+FM_PR_REPLACE_NUMBER=
+FM_PR_REPLACE_PRIOR_HEAD=
+FM_PR_REPLACE_EXPECTED_HEAD=
+FM_PR_REPLACE_DATA_HASH=
+FM_PR_REPLACE_TEMPLATE_HASH=
+FM_PR_REPLACE_DATA_IDENTITY=
+FM_PR_REPLACE_CHECK_IDENTITY=
+FM_PR_REPLACE_REG_HASH=
+FM_PR_REPLACE_REG_IDENTITY=
+FM_PR_REPLACE_RECEIPT_HASH=
+FM_PR_REPLACE_RECEIPT_IDENTITY=
+FM_PR_POLL_REPLACEMENT_ACTIVE=0
+FM_PR_POLL_REPLACEMENT_COMPLETE=0
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -654,6 +672,227 @@ fm_pr_poll_snapshot_matches() {
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" ] || return 1
   [ "$reg_hash" = "$FM_PR_POLL_SNAPSHOT_REG_HASH" ] || return 1
   [ "$reg_identity" = "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" ]
+}
+
+# A guarded direct-PR replacement cannot atomically rename its three poll
+# files. This receipt instead makes every crash point recoverable. It binds the
+# exact old generation and the expected new head. Recovery removes only a
+# validated old or partial-new generation, then deterministically republishes
+# the expected generation.
+fm_pr_poll_replacement_parse() {
+  local file=$1 version id provider url host path number prior_head expected_head
+  local data_hash template_hash data_identity check_identity reg_hash reg_identity _extra
+  FM_PR_REPLACE_ID=
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  exec 8< "$file" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r id <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r url <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r prior_head <&8 || { exec 8<&-; return 1; }
+  IFS= read -r expected_head <&8 || { exec 8<&-; return 1; }
+  IFS= read -r data_hash <&8 || { exec 8<&-; return 1; }
+  IFS= read -r template_hash <&8 || { exec 8<&-; return 1; }
+  IFS= read -r data_identity <&8 || { exec 8<&-; return 1; }
+  IFS= read -r check_identity <&8 || { exec 8<&-; return 1; }
+  IFS= read -r reg_hash <&8 || { exec 8<&-; return 1; }
+  IFS= read -r reg_identity <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then exec 8<&-; return 1; fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-replacement-v1 ] || return 1
+  fm_pr_task_id_valid "$id" && fm_pr_url_parse "$url" || return 1
+  [ "$provider" = "$FM_PR_PROVIDER" ] && [ "$host" = "$FM_PR_HOST" ] \
+    && [ "$path" = "$FM_PR_PATH" ] && [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  fm_pr_head_valid "$prior_head" && fm_pr_head_valid "$expected_head" \
+    && [ "$prior_head" != "$expected_head" ] || return 1
+  [[ "$data_hash" =~ ^[0-9a-f]{64}$ ]] && [[ "$template_hash" =~ ^[0-9a-f]{64}$ ]] \
+    && [[ "$data_identity" =~ ^[0-9]+:[0-9]+$ ]] \
+    && [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] \
+    && [[ "$reg_hash" =~ ^[0-9a-f]{64}$ ]] \
+    && [[ "$reg_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  FM_PR_REPLACE_ID=$id
+  FM_PR_REPLACE_PROVIDER=$provider
+  FM_PR_REPLACE_URL=$url
+  FM_PR_REPLACE_HOST=$host
+  FM_PR_REPLACE_PATH=$path
+  FM_PR_REPLACE_NUMBER=$number
+  FM_PR_REPLACE_PRIOR_HEAD=$prior_head
+  FM_PR_REPLACE_EXPECTED_HEAD=$expected_head
+  FM_PR_REPLACE_DATA_HASH=$data_hash
+  FM_PR_REPLACE_TEMPLATE_HASH=$template_hash
+  FM_PR_REPLACE_DATA_IDENTITY=$data_identity
+  FM_PR_REPLACE_CHECK_IDENTITY=$check_identity
+  FM_PR_REPLACE_REG_HASH=$reg_hash
+  FM_PR_REPLACE_REG_IDENTITY=$reg_identity
+}
+
+fm_pr_poll_replacement_receipt_valid() {
+  local state=$1 id=$2 expected_head=$3 receipt state_device meta recorded_head count=0
+  receipt="$state/$id.pr-poll-replacement"
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_private_file_valid "$receipt" 600 "$state_device" || return 1
+  fm_pr_poll_replacement_parse "$receipt" || return 1
+  [ "$FM_PR_REPLACE_ID" = "$id" ] && [ "$FM_PR_REPLACE_EXPECTED_HEAD" = "$expected_head" ] || return 1
+  meta="$state/$id.meta"
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  [ "$FM_PR_META_PROVIDER" = "$FM_PR_REPLACE_PROVIDER" ] \
+    && [ "$FM_PR_META_URL" = "$FM_PR_REPLACE_URL" ] \
+    && [ "$FM_PR_META_HOST" = "$FM_PR_REPLACE_HOST" ] \
+    && [ "$FM_PR_META_PATH" = "$FM_PR_REPLACE_PATH" ] \
+    && [ "$FM_PR_META_NUMBER" = "$FM_PR_REPLACE_NUMBER" ] || return 1
+  recorded_head=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in pr_head=*) count=$((count + 1)); recorded_head=${line#pr_head=} ;; esac
+  done < "$meta"
+  [ "$count" -eq 1 ] \
+    && { [ "$recorded_head" = "$FM_PR_REPLACE_PRIOR_HEAD" ] \
+      || [ "$recorded_head" = "$FM_PR_REPLACE_EXPECTED_HEAD" ]; } || return 1
+  FM_PR_REPLACE_RECEIPT_HASH=$(fm_pr_sha256 "$receipt") || return 1
+  FM_PR_REPLACE_RECEIPT_IDENTITY=$(fm_pr_file_identity "$receipt") || return 1
+}
+
+fm_pr_poll_replacement_publish() {
+  local state=$1 id=$2 prior_head=$3 expected_head=$4 receipt tmp state_device
+  fm_pr_poll_snapshot_matches "$state" "$id" "$FM_PR_POLL_TEMPLATE" || return 1
+  [ "$FM_PR_POLL_SNAPSHOT_ID" = "$id" ] || return 1
+  fm_pr_head_valid "$prior_head" && fm_pr_head_valid "$expected_head" \
+    && [ "$prior_head" != "$expected_head" ] || return 1
+  receipt="$state/$id.pr-poll-replacement"
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$receipt" "$state_device" || return 1
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-replacement.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-replacement-v1 "$id" "$FM_PR_POLL_SNAPSHOT_PROVIDER" \
+      "$FM_PR_POLL_SNAPSHOT_URL" "$FM_PR_POLL_SNAPSHOT_HOST" \
+      "$FM_PR_POLL_SNAPSHOT_PATH" "$FM_PR_POLL_SNAPSHOT_NUMBER" \
+      "$prior_head" "$expected_head" "$FM_PR_POLL_SNAPSHOT_DATA_HASH" \
+      "$FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH" "$FM_PR_POLL_SNAPSHOT_DATA_IDENTITY" \
+      "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" "$FM_PR_POLL_SNAPSHOT_REG_HASH" \
+      "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" > "$tmp" \
+    || ! chmod 0600 "$tmp" || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_poll_replacement_parse "$tmp" || [ "$FM_PR_REPLACE_ID" != "$id" ] \
+    || ! fm_pr_poll_snapshot_matches "$state" "$id" "$FM_PR_POLL_TEMPLATE" \
+    || ! mv -f -- "$tmp" "$receipt"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_pr_poll_replacement_receipt_valid "$state" "$id" "$expected_head"
+}
+
+fm_pr_poll_replacement_old_state_valid() {
+  local state=$1 id=$2 check data registration hc=0 hd=0 hr=0 state_device
+  state_device=$(fm_pr_file_device "$state") || return 1
+  check="$state/$id.check.sh"; data="$state/$id.pr-poll"; registration="$state/$id.pr-poll-registration"
+  [ ! -e "$check" ] && [ ! -L "$check" ] || hc=1
+  [ ! -e "$data" ] && [ ! -L "$data" ] || hd=1
+  [ ! -e "$registration" ] && [ ! -L "$registration" ] || hr=1
+  if [ "$hc" -eq 1 ]; then
+    [ "$hd" -eq 1 ] && [ "$hr" -eq 1 ] || return 1
+    fm_pr_private_file_valid "$check" 600 "$state_device" \
+      && [ "$(fm_pr_sha256 "$check")" = "$FM_PR_REPLACE_TEMPLATE_HASH" ] \
+      && [ "$(fm_pr_file_identity "$check")" = "$FM_PR_REPLACE_CHECK_IDENTITY" ] || return 1
+  fi
+  if [ "$hr" -eq 1 ]; then
+    [ "$hd" -eq 1 ] || return 1
+    fm_pr_private_file_valid "$registration" 600 "$state_device" \
+      && [ "$(fm_pr_sha256 "$registration")" = "$FM_PR_REPLACE_REG_HASH" ] \
+      && [ "$(fm_pr_file_identity "$registration")" = "$FM_PR_REPLACE_REG_IDENTITY" ] || return 1
+  fi
+  if [ "$hd" -eq 1 ]; then
+    fm_pr_private_file_valid "$data" 600 "$state_device" \
+      && [ "$(fm_pr_sha256 "$data")" = "$FM_PR_REPLACE_DATA_HASH" ] \
+      && [ "$(fm_pr_file_identity "$data")" = "$FM_PR_REPLACE_DATA_IDENTITY" ] || return 1
+  fi
+}
+
+fm_pr_poll_replacement_partial_new_valid() {
+  local state=$1 id=$2 template=$3 state_device check data registration hc=0 hd=0 hr=0
+  local data_hash data_identity check_hash check_identity
+  state_device=$(fm_pr_file_device "$state") || return 1
+  check="$state/$id.check.sh"; data="$state/$id.pr-poll"; registration="$state/$id.pr-poll-registration"
+  [ ! -e "$check" ] && [ ! -L "$check" ] || hc=1
+  [ ! -e "$data" ] && [ ! -L "$data" ] || hd=1
+  [ ! -e "$registration" ] && [ ! -L "$registration" ] || hr=1
+  [ "$hc" -eq 0 ] || { [ "$hd" -eq 1 ] && [ "$hr" -eq 1 ]; } || return 1
+  [ "$hr" -eq 0 ] || [ "$hd" -eq 1 ] || return 1
+  if [ "$data" ] && [ "$hd" -eq 1 ]; then
+    fm_pr_private_file_valid "$data" 600 "$state_device" && fm_pr_poll_data_parse "$data" \
+      && [ "$FM_PR_DATA_PROVIDER" = "$FM_PR_REPLACE_PROVIDER" ] \
+      && [ "$FM_PR_DATA_URL" = "$FM_PR_REPLACE_URL" ] || return 1
+    data_hash=$(fm_pr_sha256 "$data") || return 1
+    data_identity=$(fm_pr_file_identity "$data") || return 1
+  fi
+  if [ "$hc" -eq 1 ]; then
+    fm_pr_private_file_valid "$check" 600 "$state_device" && cmp -s "$template" "$check" || return 1
+    check_hash=$(fm_pr_sha256 "$check") || return 1
+    check_identity=$(fm_pr_file_identity "$check") || return 1
+  fi
+  if [ "$hr" -eq 1 ]; then
+    fm_pr_private_file_valid "$registration" 600 "$state_device" \
+      && fm_pr_poll_registration_parse "$registration" \
+      && [ "$FM_PR_REG_ID" = "$id" ] && [ "$FM_PR_REG_URL" = "$FM_PR_REPLACE_URL" ] \
+      && [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] \
+      && [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
+    if [ "$hc" -eq 1 ]; then
+      [ "$FM_PR_REG_TEMPLATE_HASH" = "$check_hash" ] \
+        && [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
+    fi
+  fi
+}
+
+fm_pr_poll_replacement_remove_present() {
+  local state=$1 id=$2 state_device path hash identity suffix
+  state_device=$(fm_pr_file_device "$state") || return 1
+  for suffix in check.sh pr-poll-registration pr-poll; do
+    path="$state/$id.$suffix"
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    hash=$(fm_pr_sha256 "$path") && identity=$(fm_pr_file_identity "$path") || return 1
+    fm_pr_poll_retirement_remove_exact "$path" "$state_device" "$identity" "$hash" || return 1
+  done
+}
+
+fm_pr_poll_replacement_finish() {
+  local state=$1 id=$2 template=$3 expected_head=$4 receipt state_device
+  fm_pr_poll_replacement_receipt_valid "$state" "$id" "$expected_head" || return 1
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
+  [ "$FM_PR_DATA_URL" = "$FM_PR_REPLACE_URL" ] || return 1
+  receipt="$state/$id.pr-poll-replacement"
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
+    "$FM_PR_REPLACE_RECEIPT_IDENTITY" "$FM_PR_REPLACE_RECEIPT_HASH"
+}
+
+fm_pr_poll_replacement_recover_one() {
+  local state=$1 id=$2 template=$3 expected_head=$4 receipt artifact_count=0 artifact
+  FM_PR_POLL_REPLACEMENT_ACTIVE=0
+  FM_PR_POLL_REPLACEMENT_COMPLETE=0
+  receipt="$state/$id.pr-poll-replacement"
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 0
+  fm_pr_poll_replacement_receipt_valid "$state" "$id" "$expected_head" || return 1
+  FM_PR_POLL_REPLACEMENT_ACTIVE=1
+  if fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
+    if grep -qxF "pr_head=$expected_head" "$state/$id.meta"; then
+      fm_pr_poll_replacement_finish "$state" "$id" "$template" "$expected_head" || return 1
+      FM_PR_POLL_REPLACEMENT_ACTIVE=0
+      FM_PR_POLL_REPLACEMENT_COMPLETE=1
+      return 0
+    fi
+  fi
+  for artifact in "$state/$id.check.sh" "$state/$id.pr-poll" "$state/$id.pr-poll-registration"; do
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] || artifact_count=$((artifact_count + 1))
+  done
+  [ "$artifact_count" -eq 0 ] && return 0
+  if fm_pr_poll_replacement_old_state_valid "$state" "$id" \
+    || fm_pr_poll_replacement_partial_new_valid "$state" "$id" "$template"; then
+    fm_pr_poll_replacement_remove_present "$state" "$id" || return 1
+    return 0
+  fi
+  return 1
 }
 
 fm_pr_poll_retirement_parse() {
