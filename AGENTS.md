@@ -465,18 +465,18 @@ Do not spawn a direct crewmate for work that belongs to a secondmate scope unles
 If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.
 When you create a new secondmate, hand its in-scope queued items off from the main backlog into its home with `bin/fm-backlog-handoff.sh` so it owns its domain's queue from day one (section 6).
 
-Then classify the shape:
+Before commissioning an investigation, consult existing reports and established evidence; then classify the shape:
 
-- **Ship** (the default): the deliverable is a change to the project. It ships through the project's delivery mode: `no-mistakes`, `direct-PR`, or `local-only`.
-- **Scout:** the deliverable is knowledge - an investigation, a plan, a bug reproduction, an audit. It ends in a report at `data/<id>/report.md`, never a PR. When the captain asks "what's wrong", "how would we", or "find out why" about a project, that is a scout task; dispatch it instead of doing the digging yourself.
+- **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
+- **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is appropriate for investigation, diagnosis, planning, reproduction, or audit work when the captain explicitly requests a separate knowledge or design deliverable or unresolved uncertainty could materially change whether or what to build.
+
+If established evidence already answers an informational question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise implementation question when useful rather than dispatching speculative design work; never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
+A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code; load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
 Then classify readiness:
 
-- **Dispatchable:** no overlap with in-flight tasks. Dispatch immediately. There is no concurrency cap.
-- **Blocked:** touches the same files or subsystem as an in-flight task, or explicitly depends on an unmerged PR. Record it in `data/backlog.md` with `blocked-by: <id>` and tell the captain what work is waiting and why. Scout tasks are read-mostly and almost never block on anything.
-
-Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
-For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
+- Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
+- Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 
 Write the brief per section 11.
 
