@@ -144,6 +144,43 @@ validate_direct_pr_state_cleanup() {
   done
 }
 
+DIRECT_PR_REF_REPO=
+validate_direct_pr_ref_cleanup() {
+  local candidate prefix ref refs
+  [ "$MODE" = direct-PR ] || return 0
+  for candidate in "$WT" "$PROJ"; do
+    [ -d "$candidate" ] || continue
+    git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
+    DIRECT_PR_REF_REPO=$candidate
+    break
+  done
+  [ -n "$DIRECT_PR_REF_REPO" ] || return 0
+  prefix="refs/firstmate/direct-pr/$ID"
+  refs=$(git -C "$DIRECT_PR_REF_REPO" for-each-ref --format='%(refname)' "$prefix/") || return 1
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    case "$ref" in
+      "$prefix/base"|"$prefix/feature") ;;
+      *)
+        echo "REFUSED: ambiguous direct-PR private ref namespace $prefix; preserving task state." >&2
+        return 1
+        ;;
+    esac
+  done <<EOF
+$refs
+EOF
+}
+
+cleanup_direct_pr_refs() {
+  local prefix ref
+  [ -n "$DIRECT_PR_REF_REPO" ] || return 0
+  prefix="refs/firstmate/direct-pr/$ID"
+  for ref in "$prefix/base" "$prefix/feature"; do
+    git -C "$DIRECT_PR_REF_REPO" update-ref -d "$ref" || return 1
+  done
+  [ -z "$(git -C "$DIRECT_PR_REF_REPO" for-each-ref --format='%(refname)' "$prefix/")" ]
+}
+
 TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
 TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-1}
 case "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS" in
@@ -924,6 +961,7 @@ fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 validate_direct_pr_state_cleanup || exit 1
+validate_direct_pr_ref_cleanup || exit 1
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
@@ -978,6 +1016,11 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
     exit 1
   fi
 fi
+
+cleanup_direct_pr_refs || {
+  echo "REFUSED: direct-PR private ref cleanup failed for $ID; preserving task state and worktree" >&2
+  exit 1
+}
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
