@@ -332,6 +332,33 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   pass "second missed turn escalates once and remains durable"
 }
 
+test_concurrent_escalation_publishes_once() {
+  local home state corr rec escalations
+  home=$(setup_parent concurrent-escalation)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4250
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "concurrent miss")
+  fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "concurrent-escalation: delivery setup failed"
+  rec=$(fm_pending_reply_active_path "$state" "$corr")
+  fm_pending_reply_set "$rec" recovery_delivery_outcome unknown \
+    || fail "concurrent-escalation: outcome setup failed"
+  fm_pending_reply_set "$rec" phase recovery_unknown \
+    || fail "concurrent-escalation: phase setup failed"
+  for _ in 1 2 3 4 5 6 7 8; do
+    (
+      fm_pending_reply_maybe_escalate "$state" "$corr" >/dev/null 2>&1 || true
+    ) &
+  done
+  wait
+  escalations=$(grep -Fc "pending-reply-id=$corr" "$state/hibit.status")
+  [ "$escalations" = 1 ] \
+    || fail "concurrent-escalation: expected one blocked line, got $escalations"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "concurrent-escalation: final phase must be escalated"
+  pass "concurrent escalation publishes one blocked status"
+}
+
 test_escalation_publication_failure_retries() {
   local home state corr rec target escalations
   home=$(setup_parent escalation-retry)
@@ -1004,8 +1031,36 @@ test_staged_resolution_promotes_before_receipt_cleanup() {
       || fail "staged-resolution-order: retained history lost the resolution"
     [ ! -f "$rec" ] \
       || fail "staged-resolution-order: source remained after retained commit"
+    rm -f "$receipt"
+    fm_pending_reply_finalize_force_retire_task "$state" hibit "$retained" "$source" \
+      || fail "staged-resolution-order: finalizer rejected receipt-free retained history"
   ) || fail "staged resolved-history ordering regression failed"
   pass "staged resolution commits retained history before receipt cleanup"
+}
+
+test_staging_reconciles_already_archived_nested_resolution() {
+  local home state retained corr source history
+  home=$(setup_parent staged-resolution-reconcile)
+  state="$home/state"
+  retained="$TMP_ROOT/staged-resolution-reconcile-retained/state"
+  mkdir -p "$retained"
+  corr=$(fm_pending_reply_create "$home" "$state" nested "resolved before stage commit")
+  fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "staged-resolution-reconcile: delivery setup failed"
+  printf 'done [corr=%s]: won staging race\n' "$corr" > "$state/nested.status"
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "staged-resolution-reconcile: resolution setup failed"
+  source=$(fm_pending_reply_source_identity "$state")
+  fm_pending_reply_stage_force_retire_task "$state" nested "$retained" \
+    || fail "staged-resolution-reconcile: staging did not reconcile history"
+  history="$(fm_pending_reply_history_dir "$retained")/$corr"
+  [ -f "$history" ] \
+    || fail "staged-resolution-reconcile: resolved history stayed in nested state"
+  [ ! -f "$(fm_pending_reply_history_dir "$state")/$corr" ] \
+    || fail "staged-resolution-reconcile: local resolved history was not migrated"
+  fm_pending_reply_finalize_force_retire_task "$state" nested "$retained" "$source" \
+    || fail "staged-resolution-reconcile: migrated history was not finalizable"
+  pass "staging reconciles a resolution that won the lock race"
 }
 
 # --- run --------------------------------------------------------------------
@@ -1016,6 +1071,7 @@ test_recovery_send_uses_strict_fm_target
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
+test_concurrent_escalation_publishes_once
 test_escalation_publication_failure_retries
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
@@ -1036,5 +1092,6 @@ test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 test_force_retirement_receipts_are_source_bound
 test_staged_resolution_promotes_before_receipt_cleanup
+test_staging_reconciles_already_archived_nested_resolution
 
 printf 'ok - all pending-reply tests passed\n'
