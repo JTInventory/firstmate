@@ -522,6 +522,14 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     fail "stale/wrong corr must not resolve"
   fi
+  printf 'done [corr=%s0]: prefix collision\n' "$corr" >> "$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "longer correlation token must not resolve by prefix"
+  fi
+  [ -z "$(fm_pending_reply_extract_corr "corr=${corr}0")" ] \
+    || fail "longer correlation token must not extract a 16-hex prefix"
+  [ -z "$(fm_pending_reply_extract_corr "notcorr=${corr}")" ] \
+    || fail "embedded correlation label must not extract as a token"
   printf 'working: still thinking\n' >> "$state/hibit.status"
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     fail "unrelated working line must not resolve"

@@ -708,6 +708,10 @@ validate_firstmate_home_children_removal() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      if ! fm_pending_reply_task_force_retirable "$sub_state" "$child_id"; then
+        echo "REFUSED: child secondmate $child_id has a pending reply that has not reached escalation." >&2
+        return 1
+      fi
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
@@ -739,6 +743,12 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    if [ "$child_kind" = secondmate ]; then
+      if ! fm_pending_reply_force_retire_task "$sub_state" "$child_id" "$STATE"; then
+        echo "REFUSED: could not hand off pending replies for child secondmate $child_id." >&2
+        return 1
+      fi
+    fi
     if [ -n "$child_t" ]; then
       if ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
         echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
@@ -783,9 +793,14 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if fm_pending_reply_task_has_open "$STATE" "$ID"; then
-    echo "REFUSED: secondmate $ID still has an open pending reply in $STATE/pending-replies." >&2
-    echo "Wait for a correlated done, needs-decision, blocked, or failed report before teardown." >&2
-    exit 1
+    if [ "$FORCE" = "--force" ] \
+       && fm_pending_reply_force_retire_task "$STATE" "$ID"; then
+      :
+    else
+      echo "REFUSED: secondmate $ID still has an open pending reply in $STATE/pending-replies." >&2
+      echo "Wait for a correlated report or escalation before captain-approved forced teardown." >&2
+      exit 1
+    fi
   fi
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1

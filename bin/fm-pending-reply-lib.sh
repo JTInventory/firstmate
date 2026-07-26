@@ -32,7 +32,7 @@
 #                           (empty until delivery; delivery never resolves)
 #   phase=                  awaiting_report | delivery_unknown | recovery_sending |
 #                           recovery_sent | recovery_failed | recovery_unknown |
-#                           escalated | resolved
+#                           escalated | resolved | retired
 #   turn_seen_busy=         0|1 after delivery for the original request turn
 #   request_turn_completed_epoch=
 #   recovery_attempted_epoch=
@@ -45,6 +45,9 @@
 #   escalated_epoch=
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
+#   retired_epoch=
+#   retired_via=
+#   retired_from=
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_sightings=   comma-separated identities of counted sightings
 #   wrong_home_scan_signature=
@@ -70,7 +73,7 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
-FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
+FM_PENDING_REPLY_CORR_RE='(^|[^[:alnum:]_])corr=[A-Fa-f0-9]+'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
 
 fm_pending_reply_now() {
@@ -138,17 +141,24 @@ fm_pending_reply_corr_token() {  # <corr_id>
 
 # Extract the first corr=<16hex> token from free text, or empty.
 fm_pending_reply_extract_corr() {  # <text>
-  local text=$1
-  printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null | head -1 | cut -d= -f2- | tr 'A-F' 'a-f' || true
+  local text=$1 match
+  while IFS= read -r match; do
+    case "$match" in corr=*) ;; *) match=${match:1} ;; esac
+    [ "${#match}" -eq 21 ] || continue
+    printf '%s' "${match#corr=}" | tr 'A-F' 'a-f'
+    return 0
+  done < <(printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null || true)
+  return 0
 }
 
 # 0 if <text> carries the exact correlation token for <corr_id>.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token
+  local text=$1 corr=$2 token match
   token=$(fm_pending_reply_corr_token "$corr")
-  case "$text" in
-    *"$token"*) return 0 ;;
-  esac
+  while IFS= read -r match; do
+    case "$match" in corr=*) ;; *) match=${match:1} ;; esac
+    [ "$match" = "$token" ] && return 0
+  done < <(printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null || true)
   return 1
 }
 
@@ -279,6 +289,9 @@ recovery_turn_completed_epoch=
 escalated_epoch=
 resolved_epoch=
 resolved_via=
+retired_epoch=
+retired_via=
+retired_from=
 wrong_home_hits=0
 wrong_home_sightings=
 wrong_home_scan_signature=
@@ -472,17 +485,27 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
-fm_pending_reply_archive_resolved() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 active history_dir history phase
+fm_pending_reply_archive_terminal() {  # <state-dir> <corr_id> [history-state-dir]
+  local state=$1 corr=$2 history_state=${3:-$1} active history_dir history phase
   active=$(fm_pending_reply_active_path "$state" "$corr")
   [ -f "$active" ] || return 0
   phase=$(fm_pending_reply_get "$active" phase)
-  [ "$phase" = resolved ] || return 1
-  history_dir=$(fm_pending_reply_history_dir "$state")
+  case "$phase" in resolved|retired) ;; *) return 1 ;; esac
+  history_dir=$(fm_pending_reply_history_dir "$history_state")
   mkdir -p "$history_dir" || return 1
   chmod 700 "$history_dir" 2>/dev/null || true
   history="$history_dir/$corr"
-  mv -f "$active" "$history"
+  [ ! -e "$history" ] || return 1
+  mv "$active" "$history"
+}
+
+fm_pending_reply_archive_resolved() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 active
+  active=$(fm_pending_reply_active_path "$state" "$corr")
+  if [ -f "$active" ] && [ "$(fm_pending_reply_get "$active" phase)" != resolved ]; then
+    return 1
+  fi
+  fm_pending_reply_archive_terminal "$state" "$corr"
 }
 
 fm_pending_reply_reconcile_resolution() {  # <state-dir> <corr_id>
@@ -490,8 +513,8 @@ fm_pending_reply_reconcile_resolution() {  # <state-dir> <corr_id>
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
-  if [ "$phase" = resolved ]; then
-    fm_pending_reply_archive_resolved "$state" "$corr"
+  if [ "$phase" = resolved ] || [ "$phase" = retired ]; then
+    fm_pending_reply_archive_terminal "$state" "$corr"
     return $?
   fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -515,7 +538,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   fi
   rec=$(fm_pending_reply_path "$state" "$corr")
   phase=$(fm_pending_reply_get "$rec" phase)
-  if [ "$phase" = resolved ]; then
+  if [ "$phase" = resolved ] || [ "$phase" = retired ]; then
     return 0
   fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -990,8 +1013,8 @@ fm_pending_reply_tick() {  # <state-dir>
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
-    if [ "$phase" = resolved ]; then
-      fm_pending_reply_archive_resolved "$state" "$corr" || true
+    if [ "$phase" = resolved ] || [ "$phase" = retired ]; then
+      fm_pending_reply_archive_terminal "$state" "$corr" || true
       continue
     fi
     if fm_pending_reply_reconcile_resolution "$state" "$corr"; then
@@ -1073,7 +1096,7 @@ fm_pending_reply_tick() {  # <state-dir>
 
 # True when any open (non-resolved) pending reply exists for a task.
 fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
-  local state=$1 task_id=$2 dir rec phase tid
+  local state=$1 task_id=$2 dir rec corr phase tid
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 1
   for rec in "$dir"/*; do
@@ -1081,8 +1104,59 @@ fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
     tid=$(fm_pending_reply_get "$rec" task_id)
     [ "$tid" = "$task_id" ] || continue
     phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" != resolved ] || continue
+    case "$phase" in
+      resolved|retired)
+        corr=$(fm_pending_reply_get "$rec" corr_id)
+        [ -n "$corr" ] || corr=$(basename "$rec")
+        fm_pending_reply_archive_terminal "$state" "$corr" || return 0
+        continue
+        ;;
+    esac
     return 0
   done
   return 1
+}
+
+fm_pending_reply_task_force_retirable() {  # <state-dir> <task_id>
+  local state=$1 task_id=$2 dir rec phase tid
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    tid=$(fm_pending_reply_get "$rec" task_id)
+    [ "$tid" = "$task_id" ] || continue
+    phase=$(fm_pending_reply_get "$rec" phase)
+    case "$phase" in
+      resolved|retired|escalated|recovery_failed|recovery_unknown) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+fm_pending_reply_force_retire_task() {  # <state-dir> <task_id> [history-state-dir]
+  local state=$1 task_id=$2 history_state=${3:-$1} dir rec corr phase now
+  fm_pending_reply_task_force_retirable "$state" "$task_id" || return 1
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  now=$(fm_pending_reply_now)
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ -n "$corr" ] || corr=$(basename "$rec")
+    phase=$(fm_pending_reply_get "$rec" phase)
+    case "$phase" in
+      resolved|retired)
+        fm_pending_reply_archive_terminal "$state" "$corr" "$history_state" || return 1
+        ;;
+      escalated|recovery_failed|recovery_unknown)
+        fm_pending_reply_set "$rec" retired_epoch "$now" || return 1
+        fm_pending_reply_set "$rec" retired_via forced-teardown || return 1
+        fm_pending_reply_set "$rec" retired_from "$phase" || return 1
+        fm_pending_reply_set "$rec" phase retired || return 1
+        fm_pending_reply_archive_terminal "$state" "$corr" "$history_state" || return 1
+        ;;
+    esac
+  done
 }
