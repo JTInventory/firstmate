@@ -91,6 +91,7 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+LEASE_CHECKPOINT_FILE=$(shell_quote "$STATE/$ID.direct-pr-lease")
 
 COGNEE_BRIEF_RULES=$(cat <<'EOF'
 # Cognee memory hints
@@ -237,26 +238,31 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE2="2. Stay inside this worktree except for the status file and the task-specific Firstmate checkpoint at $LEASE_CHECKPOINT_FILE; modify nothing else outside it."
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 Before initial direct-PR publication:
-1. Resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`, and set \`FEATURE_REF=refs/heads/fm/$ID\` and \`LEASE_CHECKPOINT=.fm-direct-pr-lease\`.
-2. If \`LEASE_CHECKPOINT\` exists, load its exact \`expected=\` and \`phase=\` values and query the remote feature ref without changing them. A malformed checkpoint or lookup failure must append \`blocked: direct-PR lease recovery failed\` and stop. When the remote still matches the checkpoint, resume \`phase=pre-rebase\` by finishing the rebase or resume \`phase=ready-to-push\` with the same explicit lease push, without rerunning pre-rebase ancestry validation against rewritten \`HEAD\`. When the remote has moved, clear \`LEASE_CHECKPOINT\` and restart safe validation from step 1.
-3. Run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`.
-4. Run \`git ls-remote --exit-code origin "\$FEATURE_REF"\` and inspect its exit status: 0 means the feature ref exists, 2 means it is absent, and any other status is a lookup failure that must append \`blocked: remote feature lookup failed\` and stop.
-5. When the feature ref exists, run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\`, snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`, and require \`git merge-base --is-ancestor "\$EXPECTED" HEAD\`; if the ancestry check fails, append \`blocked: remote feature branch diverged; refusing to overwrite remote-only commits\` and stop. When exit 2 confirmed the feature ref is absent, set \`EXPECTED=\`. Atomically write \`expected=\$EXPECTED\` and \`phase=pre-rebase\` to \`LEASE_CHECKPOINT\` before rebasing.
-6. Rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts, then atomically update \`LEASE_CHECKPOINT\` to \`phase=ready-to-push\` while preserving its \`expected=\$EXPECTED\`.
-7. Push with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\`. If the push fails and the remote still matches the checkpoint, retry that same lease push; if the retry lookup fails, append \`blocked: remote feature retry lookup failed\` and stop. After a lease rejection or confirmed remote movement, clear \`LEASE_CHECKPOINT\` and restart safe validation. After the push succeeds, clear \`LEASE_CHECKPOINT\`, then open the PR with \`gh-axi\`.
+1. Resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`. Set \`TASK_ID=$ID\`, \`FEATURE_REF=refs/heads/fm/$ID\`, \`BRANCH=fm/$ID\`, \`REPO_ID=\$(git rev-parse --path-format=absolute --git-common-dir)\`, \`LEASE_CHECKPOINT=$LEASE_CHECKPOINT_FILE\`, and \`LEASE_CHECKPOINT_TMP=\$LEASE_CHECKPOINT.tmp.\$\$\`. This Firstmate-owned task state is outside the project worktree and Git index.
+2. Reject a pre-existing checkpoint or temporary target that is a symlink, non-regular file, unexpectedly owned, or malformed by appending \`blocked: direct-PR lease checkpoint invalid; refusing recovery\` and stop. A valid checkpoint must contain exactly \`repo=\`, \`task=\`, \`feature_ref=\`, \`branch=\`, \`expected=\`, \`pre_head=\`, \`post_head=\`, and \`phase=\`. Require its repository, task, feature ref, and branch to equal \`REPO_ID\`, \`TASK_ID\`, \`FEATURE_REF\`, and \`BRANCH\`; otherwise append \`blocked: direct-PR lease checkpoint identity mismatch; refusing recovery\` and stop.
+3. On recovery, query the remote feature ref; a lookup failure must append \`blocked: direct-PR lease recovery lookup failed\` and stop. If the remote moved from the checkpoint's \`expected=\`, remove the validated checkpoint and its task-specific temporary artifacts, then restart safe validation from step 1. If it still matches: for \`phase=pre-rebase\`, require current \`HEAD\` to equal \`pre_head=\` (or an active rebase whose recorded original head equals it), require \`post_head=\` to be empty, and resume only that recorded rebase; for \`phase=ready-to-push\`, require current \`HEAD\` to equal the nonempty \`post_head=\` and resume only the same explicit lease push. Any head, phase, branch, repository, task, or ref mismatch must append \`blocked: direct-PR lease checkpoint state mismatch; refusing recovery\` and stop. Do not rerun pre-rebase ancestry validation against rewritten \`HEAD\`.
+4. Run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`.
+5. Run \`git ls-remote --exit-code origin "\$FEATURE_REF"\` and inspect its exit status: 0 means the feature ref exists, 2 means it is absent, and any other status is a lookup failure that must append \`blocked: remote feature lookup failed\` and stop.
+6. When the feature ref exists, run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\`, snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`, and require \`git merge-base --is-ancestor "\$EXPECTED" HEAD\`; if the ancestry check fails, append \`blocked: remote feature branch diverged; refusing to overwrite remote-only commits\` and stop. When exit 2 confirmed the feature ref is absent, set \`EXPECTED=\`.
+7. Set \`PRE_HEAD=\$(git rev-parse HEAD)\` and atomically write all eight bound fields through \`LEASE_CHECKPOINT_TMP\` with mode 0600, \`post_head=\` empty, and \`phase=pre-rebase\`, then rename it to \`LEASE_CHECKPOINT\`. A write or rename failure must remove only the validated task-specific temporary artifact, append \`blocked: direct-PR lease checkpoint write failed\`, and stop.
+8. Rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts. Set \`POST_HEAD=\$(git rev-parse HEAD)\`, then atomically rewrite all eight bound fields through \`LEASE_CHECKPOINT_TMP\`, preserving \`repo=\$REPO_ID\`, \`task=\$TASK_ID\`, \`feature_ref=\$FEATURE_REF\`, \`branch=\$BRANCH\`, \`expected=\$EXPECTED\`, and \`pre_head=\$PRE_HEAD\`, while setting \`post_head=\$POST_HEAD\` and \`phase=ready-to-push\`.
+9. Push with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\`. If the push fails and the remote still matches the checkpoint, retry that same lease push; if the retry lookup fails, append \`blocked: remote feature retry lookup failed\` and stop. After a lease rejection or confirmed remote movement, remove the validated checkpoint and its task-specific temporary artifacts and restart safe validation. After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts, then open the PR with \`gh-axi\`.
 If firstmate later tells you that parallel work made the open PR conflict, you still own reconciliation:
-1. Resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`, and set \`FEATURE_REF=refs/heads/fm/$ID\` and \`LEASE_CHECKPOINT=.fm-direct-pr-lease\`.
-2. If \`LEASE_CHECKPOINT\` exists, load its exact \`expected=\` and \`phase=\` values and query the remote feature ref without changing them. A malformed checkpoint or lookup failure must append \`blocked: direct-PR lease recovery failed\` and stop. When the remote still matches the checkpoint, resume \`phase=pre-rebase\` by finishing the rebase or resume \`phase=ready-to-push\` with the same explicit lease push, without rerunning pre-rebase ancestry validation against rewritten \`HEAD\`. When the remote has moved, clear \`LEASE_CHECKPOINT\` and restart safe validation from step 1.
-3. Run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`.
-4. Run \`git ls-remote --exit-code origin "\$FEATURE_REF"\` and require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure, so append \`blocked: published remote feature lookup failed\` and stop for either case.
-5. Run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\`, snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`, and require \`git merge-base --is-ancestor "\$EXPECTED" HEAD\`; if the ancestry check fails, append \`blocked: remote feature branch diverged; refusing to overwrite remote-only commits\` and stop. Atomically write \`expected=\$EXPECTED\` and \`phase=pre-rebase\` to \`LEASE_CHECKPOINT\` before rebasing.
-6. Rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts, then atomically update \`LEASE_CHECKPOINT\` to \`phase=ready-to-push\` while preserving its \`expected=\$EXPECTED\`.
-7. Update the open PR with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\`. If the push fails and the remote still matches the checkpoint, retry that same lease push; if the retry lookup fails, append \`blocked: remote feature retry lookup failed\` and stop. After a lease rejection or confirmed remote movement, clear \`LEASE_CHECKPOINT\` and restart safe validation. After the push succeeds, clear \`LEASE_CHECKPOINT\`; only then is reconciliation complete.
+1. Resolve \`DEFAULT\` from \`refs/remotes/origin/HEAD\`, falling back only to an existing local \`main\` or \`master\`. Set \`TASK_ID=$ID\`, \`FEATURE_REF=refs/heads/fm/$ID\`, \`BRANCH=fm/$ID\`, \`REPO_ID=\$(git rev-parse --path-format=absolute --git-common-dir)\`, \`LEASE_CHECKPOINT=$LEASE_CHECKPOINT_FILE\`, and \`LEASE_CHECKPOINT_TMP=\$LEASE_CHECKPOINT.tmp.\$\$\`. This Firstmate-owned task state is outside the project worktree and Git index.
+2. Reject a pre-existing checkpoint or temporary target that is a symlink, non-regular file, unexpectedly owned, or malformed by appending \`blocked: direct-PR lease checkpoint invalid; refusing recovery\` and stop. A valid checkpoint must contain exactly \`repo=\`, \`task=\`, \`feature_ref=\`, \`branch=\`, \`expected=\`, \`pre_head=\`, \`post_head=\`, and \`phase=\`. Require its repository, task, feature ref, and branch to equal \`REPO_ID\`, \`TASK_ID\`, \`FEATURE_REF\`, and \`BRANCH\`; otherwise append \`blocked: direct-PR lease checkpoint identity mismatch; refusing recovery\` and stop.
+3. On recovery, query the remote feature ref; a lookup failure must append \`blocked: direct-PR lease recovery lookup failed\` and stop. If the remote moved from the checkpoint's \`expected=\`, remove the validated checkpoint and its task-specific temporary artifacts, then restart safe validation from step 1. If it still matches: for \`phase=pre-rebase\`, require current \`HEAD\` to equal \`pre_head=\` (or an active rebase whose recorded original head equals it), require \`post_head=\` to be empty, and resume only that recorded rebase; for \`phase=ready-to-push\`, require current \`HEAD\` to equal the nonempty \`post_head=\` and resume only the same explicit lease push. Any head, phase, branch, repository, task, or ref mismatch must append \`blocked: direct-PR lease checkpoint state mismatch; refusing recovery\` and stop. Do not rerun pre-rebase ancestry validation against rewritten \`HEAD\`.
+4. Run \`git fetch origin "+refs/heads/\$DEFAULT:refs/remotes/origin/\$DEFAULT"\`.
+5. Run \`git ls-remote --exit-code origin "\$FEATURE_REF"\` and require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure, so append \`blocked: published remote feature lookup failed\` and stop for either case.
+6. Run \`git fetch origin "+\$FEATURE_REF:refs/remotes/origin/fm/$ID"\`, snapshot \`EXPECTED=\$(git rev-parse refs/remotes/origin/fm/$ID)\`, and require \`git merge-base --is-ancestor "\$EXPECTED" HEAD\`; if the ancestry check fails, append \`blocked: remote feature branch diverged; refusing to overwrite remote-only commits\` and stop.
+7. Set \`PRE_HEAD=\$(git rev-parse HEAD)\` and atomically write all eight bound fields through \`LEASE_CHECKPOINT_TMP\` with mode 0600, \`post_head=\` empty, and \`phase=pre-rebase\`, then rename it to \`LEASE_CHECKPOINT\`. A write or rename failure must remove only the validated task-specific temporary artifact, append \`blocked: direct-PR lease checkpoint write failed\`, and stop.
+8. Rebase onto \`origin/\$DEFAULT\` and resolve ordinary conflicts. Set \`POST_HEAD=\$(git rev-parse HEAD)\`, then atomically rewrite all eight bound fields through \`LEASE_CHECKPOINT_TMP\`, preserving \`repo=\$REPO_ID\`, \`task=\$TASK_ID\`, \`feature_ref=\$FEATURE_REF\`, \`branch=\$BRANCH\`, \`expected=\$EXPECTED\`, and \`pre_head=\$PRE_HEAD\`, while setting \`post_head=\$POST_HEAD\` and \`phase=ready-to-push\`.
+9. Update the open PR with \`git push --force-with-lease="\$FEATURE_REF:\$EXPECTED" origin "HEAD:\$FEATURE_REF"\`. If the push fails and the remote still matches the checkpoint, retry that same lease push; if the retry lookup fails, append \`blocked: remote feature retry lookup failed\` and stop. After a lease rejection or confirmed remote movement, remove the validated checkpoint and its task-specific temporary artifacts and restart safe validation. After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts; only then is reconciliation complete.
 After opening or reconciling the PR, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The captain reviews and merges the PR; firstmate relays it.
 EOF
@@ -265,6 +271,7 @@ EOF
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE2="2. Stay inside this worktree except for the status file; modify nothing else outside it."
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
@@ -279,6 +286,7 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    RULE2="2. Stay inside this worktree except for the status file; modify nothing else outside it."
     DOD=$(cat <<EOF
 # Definition of done
 The task is complete only when committed on your branch.
@@ -317,7 +325,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+$RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

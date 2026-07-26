@@ -59,22 +59,54 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
   path=${!path_name}
   assert_contains "$path" 'Resolve `DEFAULT` from `refs/remotes/origin/HEAD`' \
     "$path_name lost DEFAULT initialization"
-  assert_contains "$path" 'set `FEATURE_REF=refs/heads/fm/parallel-direct-pr`' \
-    "$path_name lost FEATURE_REF initialization"
-  assert_contains "$path" 'set `FEATURE_REF=refs/heads/fm/parallel-direct-pr` and `LEASE_CHECKPOINT=.fm-direct-pr-lease`' \
-    "$path_name lost task-local lease checkpoint"
-  assert_contains "$path" 'Atomically write `expected=$EXPECTED` and `phase=pre-rebase` to `LEASE_CHECKPOINT` before rebasing' \
-    "$path_name lost durable pre-rebase lease checkpoint"
-  assert_contains "$path" 'atomically update `LEASE_CHECKPOINT` to `phase=ready-to-push` while preserving its `expected=$EXPECTED`' \
-    "$path_name lost durable ready-to-push phase"
-  assert_contains "$path" 'When the remote still matches the checkpoint' \
-    "$path_name lost checkpoint remote-match validation"
-  assert_contains "$path" 'without rerunning pre-rebase ancestry validation against rewritten `HEAD`' \
+  assert_contains "$path" 'Set `TASK_ID=parallel-direct-pr`, `FEATURE_REF=refs/heads/fm/parallel-direct-pr`, `BRANCH=fm/parallel-direct-pr`' \
+    "$path_name lost task, feature, or branch initialization"
+  assert_contains "$path" '`REPO_ID=$(git rev-parse --path-format=absolute --git-common-dir)`' \
+    "$path_name lost repository identity initialization"
+  assert_contains "$path" "LEASE_CHECKPOINT='$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease'" \
+    "$path_name lost index-safe task checkpoint location"
+  assert_contains "$path" '`LEASE_CHECKPOINT_TMP=$LEASE_CHECKPOINT.tmp.$$`' \
+    "$path_name lost atomic temporary checkpoint path"
+  assert_contains "$path" 'outside the project worktree and Git index' \
+    "$path_name lost index-safe checkpoint contract"
+  assert_contains "$path" 'A valid checkpoint must contain exactly `repo=`, `task=`, `feature_ref=`, `branch=`, `expected=`, `pre_head=`, `post_head=`, and `phase=`' \
+    "$path_name lost complete checkpoint binding"
+  assert_contains "$path" 'Require its repository, task, feature ref, and branch to equal `REPO_ID`, `TASK_ID`, `FEATURE_REF`, and `BRANCH`' \
+    "$path_name lost checkpoint identity validation"
+  assert_contains "$path" 'Reject a pre-existing checkpoint or temporary target that is a symlink, non-regular file, unexpectedly owned, or malformed by appending `blocked: direct-PR lease checkpoint invalid; refusing recovery` and stop' \
+    "$path_name lost fail-closed checkpoint target validation"
+  assert_contains "$path" 'otherwise append `blocked: direct-PR lease checkpoint identity mismatch; refusing recovery` and stop' \
+    "$path_name lost fail-closed checkpoint identity validation"
+  assert_contains "$path" 'a lookup failure must append `blocked: direct-PR lease recovery lookup failed` and stop' \
+    "$path_name lost fail-closed recovery lookup"
+  assert_contains "$path" 'for `phase=pre-rebase`, require current `HEAD` to equal `pre_head=`' \
+    "$path_name lost pre-rebase head-bound recovery"
+  assert_contains "$path" 'require `post_head=` to be empty, and resume only that recorded rebase' \
+    "$path_name lost pre-rebase phase-specific resume"
+  assert_contains "$path" 'for `phase=ready-to-push`, require current `HEAD` to equal the nonempty `post_head=` and resume only the same explicit lease push' \
+    "$path_name lost publication-head-bound push resume"
+  assert_contains "$path" 'Any head, phase, branch, repository, task, or ref mismatch must append `blocked: direct-PR lease checkpoint state mismatch; refusing recovery` and stop' \
+    "$path_name lost fail-closed recovery state validation"
+  assert_contains "$path" 'Do not rerun pre-rebase ancestry validation against rewritten `HEAD`' \
     "$path_name reruns invalid ancestry checks during recovery"
-  assert_contains "$path" 'When the remote has moved, clear `LEASE_CHECKPOINT` and restart safe validation' \
+  assert_contains "$path" 'Set `PRE_HEAD=$(git rev-parse HEAD)`' \
+    "$path_name lost pre-rebase HEAD snapshot"
+  assert_contains "$path" 'atomically write all eight bound fields through `LEASE_CHECKPOINT_TMP` with mode 0600, `post_head=` empty, and `phase=pre-rebase`' \
+    "$path_name lost durable pre-rebase checkpoint"
+  assert_contains "$path" 'Set `POST_HEAD=$(git rev-parse HEAD)`' \
+    "$path_name lost publication HEAD snapshot"
+  assert_contains "$path" 'preserving `repo=$REPO_ID`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `expected=$EXPECTED`, and `pre_head=$PRE_HEAD`, while setting `post_head=$POST_HEAD` and `phase=ready-to-push`' \
+    "$path_name lost ready-to-push identity and HEAD binding"
+  assert_contains "$path" 'A write or rename failure must remove only the validated task-specific temporary artifact, append `blocked: direct-PR lease checkpoint write failed`, and stop' \
+    "$path_name lost atomic-write cleanup and blocker"
+  assert_contains "$path" 'remove the validated checkpoint and its task-specific temporary artifacts, then restart safe validation' \
     "$path_name lost confirmed-remote-movement cleanup"
-  assert_contains "$path" 'After the push succeeds, clear `LEASE_CHECKPOINT`' \
+  assert_contains "$path" 'After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts' \
     "$path_name lost successful-publication checkpoint cleanup"
+  assert_contains "$path" 'FEATURE_REF=refs/heads/fm/parallel-direct-pr' \
+    "$path_name lost FEATURE_REF initialization"
+  assert_contains "$path" 'If it still matches:' \
+    "$path_name lost checkpoint remote-match validation"
   assert_contains "$path" 'git fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT"' \
     "$path_name lost explicit default-ref fetch"
   assert_contains "$path" 'git ls-remote --exit-code origin "$FEATURE_REF"' \
@@ -95,8 +127,6 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost unchanged-remote retry"
   assert_contains "$path" 'if the retry lookup fails, append `blocked: remote feature retry lookup failed` and stop' \
     "$path_name lost retry lookup blocker"
-  assert_contains "$path" 'A malformed checkpoint or lookup failure must append `blocked: direct-PR lease recovery failed` and stop' \
-    "$path_name lost fail-closed checkpoint recovery"
   assert_contains "$path" 'if the ancestry check fails, append `blocked: remote feature branch diverged; refusing to overwrite remote-only commits` and stop' \
     "$path_name lost fail-closed divergence blocker"
 done
@@ -106,14 +136,16 @@ assert_contains "$PRE_PR_PATH" 'any other status is a lookup failure that must a
   "pre-PR path lost lookup-failure blocker"
 assert_contains "$PRE_PR_PATH" 'set `EXPECTED=`' \
   "pre-PR path lost absent-feature lease initialization"
-assert_contains "$PRE_PR_PATH" 'After the push succeeds, clear `LEASE_CHECKPOINT`, then open the PR with `gh-axi`' \
+assert_contains "$PRE_PR_PATH" 'After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts, then open the PR with `gh-axi`' \
   "pre-PR path can open a PR before safe publication"
 assert_contains "$POST_CONFLICT_PATH" 'require exit 0; exit 2 means the published feature ref is missing, and any other status is a lookup failure' \
   "post-conflict path lost published feature lookup guard"
 assert_contains "$POST_CONFLICT_PATH" 'append `blocked: published remote feature lookup failed` and stop for either case' \
   "post-conflict path lost published-feature blocker"
-assert_contains "$POST_CONFLICT_PATH" 'After the push succeeds, clear `LEASE_CHECKPOINT`; only then is reconciliation complete' \
+assert_contains "$POST_CONFLICT_PATH" 'After the push succeeds, remove the validated checkpoint and its task-specific temporary artifacts; only then is reconciliation complete' \
   "post-conflict path can complete before safe publication"
+assert_grep "Stay inside this worktree except for the status file and the task-specific Firstmate checkpoint at '$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease'; modify nothing else outside it." "$DIRECT_PR_BRIEF" \
+  "generated direct-PR brief lost its bounded state-path exception"
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
   || fail "generated direct-PR brief must emit one completion signal"
