@@ -8,6 +8,32 @@ set -u
 
 WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
 MARKER='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-required-workflow.XXXXXX")
+trap 'rm -rf "$TMP_ROOT"' EXIT
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+SIGNATURE_DATE_STATE="$TMP_ROOT/date-state"
+SIGNATURE_GH_LOG="$TMP_ROOT/gh.log"
+SIGNATURE_OUTPUT="$TMP_ROOT/signature-output"
+export SIGNATURE_DATE_STATE SIGNATURE_GH_LOG
+
+cat > "$FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$SIGNATURE_GH_LOG"
+SH
+cat > "$FAKEBIN/date" <<'SH'
+#!/usr/bin/env bash
+if [ -s "$SIGNATURE_DATE_STATE" ]; then
+  printf '190\n'
+else
+  printf '100\n' > "$SIGNATURE_DATE_STATE"
+  printf '100\n'
+fi
+SH
+cat > "$FAKEBIN/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$FAKEBIN/gh" "$FAKEBIN/date" "$FAKEBIN/sleep"
 
 extract_signature_script() {
   awk '
@@ -20,7 +46,14 @@ extract_signature_script() {
 signature_result() {
   local body=$1 script
   script=$(extract_signature_script)
-  PR_NUMBER=418 PR_AUTHOR=synthetic-fork-contributor PR_BODY="$body" bash -c "$script" >/dev/null 2>&1
+  : > "$SIGNATURE_DATE_STATE"
+  : > "$SIGNATURE_GH_LOG"
+  GITHUB_REPOSITORY=JTInventory/firstmate \
+    PR_NUMBER=418 \
+    PR_AUTHOR=synthetic-fork-contributor \
+    PR_BODY="$body" \
+    PATH="$FAKEBIN:$PATH" \
+    bash -c "$script" > "$SIGNATURE_OUTPUT" 2>&1
 }
 
 render_group() {
@@ -41,6 +74,10 @@ test_signature_sequence_at_fixed_head() {
   if signature_result 'Synthetic unsigned edit'; then
     fail "unsigned edited event must fail"
   fi
+  assert_grep '::error::This PR was not raised through no-mistakes.' "$SIGNATURE_OUTPUT" \
+    "unsigned edited event did not reach the compliance rejection"
+  assert_grep 'api repos/JTInventory/firstmate/pulls/418 --jq .body' "$SIGNATURE_GH_LOG" \
+    "unsigned edited event did not use the controlled live-body lookup"
   signature_result "Synthetic signed edit\n$MARKER" || fail "signed edited event must succeed"
   pass "fixed-head signed opened, unsigned edited, signed edited yields 0/1/0"
 }
