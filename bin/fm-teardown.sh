@@ -134,10 +134,12 @@ validate_direct_pr_state_cleanup() {
       echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
       return 1
     fi
-    mode=$(fm_pr_file_mode "$artifact") || return 1
-    if [ "$mode" != 600 ]; then
-      echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
-      return 1
+    if [ "$artifact" = "$STATE/$ID.direct-pr-lease" ]; then
+      mode=$(fm_pr_file_mode "$artifact") || return 1
+      if [ "$mode" != 600 ]; then
+        echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
+        return 1
+      fi
     fi
   done
 }
