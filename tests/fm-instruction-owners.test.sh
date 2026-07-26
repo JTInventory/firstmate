@@ -377,15 +377,19 @@ assert_contains "$POST_CONFLICT_PATH" 'This existing actionable status must wake
   "post-conflict path lost the actionable classifier contract"
 assert_contains "$POST_CONFLICT_PATH" 'Do not run `fm-pr-check`, remove checkpoint state, or emit `done`' \
   "post-conflict path lets the worker cross the Firstmate ownership boundary"
-assert_contains "$POST_CONFLICT_PATH" 'before invoking `bin/fm-pr-check.sh "$TASK_ID" "{canonical url}"`, Firstmate must parse the primary sixteen-field checkpoint, revalidate the exact repository/head/base identity and require the PR head OID equals `POST_HEAD`, then atomically preserve every field, set canonical `pr_url={canonical url}` and `phase=pr-check-pending`' \
+assert_contains "$POST_CONFLICT_PATH" 'before invoking the guarded check, Firstmate must parse the primary sixteen-field checkpoint, revalidate the exact repository/head/base identity and require the PR head OID equals `POST_HEAD`, then atomically preserve every field, set canonical `pr_url={canonical url}` and `phase=pr-check-pending`' \
   "post-conflict path can publish before the pending receipt"
-assert_contains "$POST_CONFLICT_PATH" 'If all exact artifacts already exist, atomically advance to `pr-check-confirmed` without rerunning the check' \
-  "post-conflict pending recovery can duplicate publication"
-assert_contains "$POST_CONFLICT_PATH" 'If task metadata contains neither `pr=` nor `pr_head=` and all three poll artifacts are provably absent, run `fm-pr-check` exactly once' \
-  "post-conflict pending recovery cannot prove safe first publication"
-assert_contains "$POST_CONFLICT_PATH" 'Any partial, mismatched, ambiguous, failed, or interrupted publication retains `pr-check-pending`, appends `blocked: direct-PR PR-check artifact reconciliation failed; checkpoint retained`, and never reruns automatically' \
+assert_contains "$POST_CONFLICT_PATH" '"$FM_ROOT/bin/fm-pr-check.sh" --expected-head "$POST_HEAD" --prior-head "$EXPECTED" --expected-repo "$REMOTE_REPO" --expected-base "$BASE_BRANCH" --expected-branch "$BRANCH" "$TASK_ID" "$PR_URL"' \
+  "post-conflict pending recovery lacks an operational guarded helper invocation"
+assert_contains "$POST_CONFLICT_PATH" 'a complete internally consistent artifact set bound to the same task and canonical identity at the immediately checkpointed prior published head `EXPECTED`' \
+  "post-conflict pending recovery rejects the exact prior generation"
+assert_contains "$POST_CONFLICT_PATH" 'the helper refuses partial, foreign, ambiguous, unbound, or any other generation' \
+  "post-conflict pending recovery accepts an unsafe artifact generation"
+assert_contains "$POST_CONFLICT_PATH" 'before metadata, poll, registration, migration, or retirement writes, and lookup failure or mismatch must produce zero writes' \
+  "post-conflict guarded check can publish before expected-head validation"
+assert_contains "$POST_CONFLICT_PATH" 'Any failed or interrupted publication retains `pr-check-pending`, appends `blocked: direct-PR PR-check artifact reconciliation failed; checkpoint retained`' \
   "post-conflict pending recovery does not fail closed"
-assert_contains "$POST_CONFLICT_PATH" 'after exit zero, revalidate the complete exact artifact set and metadata head, then atomically advance to `pr-check-confirmed`' \
+assert_contains "$POST_CONFLICT_PATH" 'After helper exit zero, Firstmate must use that same operational validation interface to require the complete exact artifact set and metadata `pr_head=POST_HEAD`, then atomically advance to `pr-check-confirmed`' \
   "post-conflict first publication lacks confirmed receipt"
 assert_contains "$POST_CONFLICT_PATH" 'validate the private namespace contains only `BASE_FETCH_REF` and `FEATURE_FETCH_REF`, delete both exact refs in one `git update-ref --stdin` transaction' \
   "post-conflict finalization does not retire exact private refs transactionally"
@@ -563,6 +567,13 @@ fi
 grep -qF 'REFUSED: ambiguous direct-PR private ref namespace' "$REF_CLEANUP_ERR" \
   || fail "teardown did not report private-ref namespace ambiguity"
 git -C "$REF_CLEANUP_REPO" update-ref -d "refs/firstmate/direct-pr/$REF_CLEANUP_ID/ambiguous"
+REF_CLEANUP_LEASE="$REF_CLEANUP_HOME/state/$REF_CLEANUP_ID.direct-pr-lease"
+REF_CLEANUP_LEASE_TMP="$REF_CLEANUP_HOME/state/$REF_CLEANUP_ID.direct-pr-lease.tmp"
+printf 'durable-checkpoint\n' > "$REF_CLEANUP_LEASE"
+chmod 0600 "$REF_CLEANUP_LEASE"
+printf 'stable-temporary\n' > "$REF_CLEANUP_LEASE_TMP"
+REF_CLEANUP_LEASE_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE")
+REF_CLEANUP_LEASE_TMP_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE_TMP")
 REF_TRANSACTION_FLAG="$REF_CLEANUP_HOME/fail-ref-transaction"
 REF_TRANSACTION_HOOK="$REF_CLEANUP_REPO/.git/hooks/reference-transaction"
 cat > "$REF_TRANSACTION_HOOK" <<EOF
@@ -585,6 +596,9 @@ grep -qF 'REFUSED: transactional direct-PR private ref cleanup failed' "$REF_CLE
   || fail "teardown attempted private-ref cleanup before worktree return"
 [ -f "$REF_CLEANUP_HOME/state/$REF_CLEANUP_ID.meta" ] \
   || fail "teardown removed task state after transactional private-ref cleanup failed"
+[ "$(shasum -a 256 "$REF_CLEANUP_LEASE")" = "$REF_CLEANUP_LEASE_HASH" ] \
+  && [ "$(shasum -a 256 "$REF_CLEANUP_LEASE_TMP")" = "$REF_CLEANUP_LEASE_TMP_HASH" ] \
+  || fail "transactional private-ref cleanup failure changed direct-PR checkpoints"
 [ -n "$(git -C "$REF_CLEANUP_REPO" show-ref --verify --hash "refs/firstmate/direct-pr/$REF_CLEANUP_ID/base")" ] \
   && [ -n "$(git -C "$REF_CLEANUP_REPO" show-ref --verify --hash "refs/firstmate/direct-pr/$REF_CLEANUP_ID/feature")" ] \
   || fail "transactional private-ref cleanup failure deleted only part of the ref set"
@@ -598,5 +612,7 @@ if ! ( cd "$REF_CLEANUP_HOME" && env -u NO_MISTAKES_GATE \
 fi
 [ -z "$(git -C "$REF_CLEANUP_REPO" for-each-ref --format='%(refname)' "refs/firstmate/direct-pr/$REF_CLEANUP_ID/")" ] \
   || fail "teardown retained task-private direct-PR refs"
+[ ! -e "$REF_CLEANUP_LEASE" ] && [ ! -e "$REF_CLEANUP_LEASE_TMP" ] \
+  || fail "successful retry retained direct-PR checkpoints"
 
 pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"

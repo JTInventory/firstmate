@@ -6,6 +6,9 @@
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
+#        fm-pr-check.sh --expected-head <sha> --prior-head <sha>
+#          --expected-repo <owner/repo> --expected-base <branch>
+#          --expected-branch <branch> <task-id> <pr-url>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +22,34 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-task-identity-lib.sh
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
 
+EXPECTED_HEAD=
+PRIOR_HEAD=
+EXPECTED_REPO=
+EXPECTED_BASE=
+EXPECTED_BRANCH_ARG=
+if [ "${1:-}" = --expected-head ]; then
+  if [ "$#" -ne 12 ] || [ "$3" != --prior-head ] || [ "$5" != --expected-repo ] \
+    || [ "$7" != --expected-base ] || [ "$9" != --expected-branch ]; then
+    echo "error: invalid PR check request" >&2
+    exit 2
+  fi
+  EXPECTED_HEAD=$2
+  PRIOR_HEAD=$4
+  EXPECTED_REPO=$6
+  EXPECTED_BASE=$8
+  EXPECTED_BRANCH_ARG=${10}
+  shift 10
+  if ! fm_pr_head_valid "$EXPECTED_HEAD" || ! fm_pr_head_valid "$PRIOR_HEAD" \
+    || ! git check-ref-format --branch "$EXPECTED_BASE" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$EXPECTED_BRANCH_ARG" >/dev/null 2>&1; then
+    echo "error: invalid PR check request" >&2
+    exit 2
+  fi
+  case "$EXPECTED_REPO" in
+    */*) ;;
+    *) echo "error: invalid PR check request" >&2; exit 2 ;;
+  esac
+fi
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -42,13 +73,12 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
-# A prior exact merged result may have queued its durable wake immediately
-# before interruption. Finish only its identity-bound receipt before publishing
-# a replacement poll.
-fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || {
-  echo "error: pending PR poll retirement could not be validated" >&2
-  exit 1
-}
+if [ -z "$EXPECTED_HEAD" ]; then
+  fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || {
+    echo "error: pending PR poll retirement could not be validated" >&2
+    exit 1
+  }
+fi
 
 fm_assert_task_branch_matches_meta "$ID" "$META" "error" || exit 1
 
@@ -64,6 +94,86 @@ if [ "$PROVIDER" = github ]; then
   fi
 fi
 
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD=
+if [ -n "$EXPECTED_HEAD" ]; then
+  [ "$PROVIDER" = github ] && [ "$PROJECT_PATH" = "$EXPECTED_REPO" ] \
+    && [ "$EXPECTED_BRANCH" = "$EXPECTED_BRANCH_ARG" ] \
+    && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1 || {
+      echo "error: guarded PR identity could not be verified" >&2
+      exit 1
+    }
+  REMOTE_BASE=$(cd "$WT" && gh pr view "$URL" --json baseRefName -q .baseRefName 2>/dev/null) || {
+    echo "error: guarded PR identity could not be verified" >&2
+    exit 1
+  }
+  REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) || {
+    echo "error: guarded PR head could not be verified" >&2
+    exit 1
+  }
+  if [ "$REMOTE_BASE" != "$EXPECTED_BASE" ] || ! fm_pr_head_valid "$REMOTE_HEAD" \
+    || [ "$REMOTE_HEAD" != "$EXPECTED_HEAD" ]; then
+    echo "error: guarded PR identity or head mismatch" >&2
+    exit 1
+  fi
+  PR_HEAD=$REMOTE_HEAD
+
+  artifact_count=0
+  for artifact in "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] || artifact_count=$((artifact_count + 1))
+  done
+  if [ "$artifact_count" -eq 3 ]; then
+    fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || {
+      echo "error: guarded PR artifacts are partial or invalid" >&2
+      exit 1
+    }
+    [ "$FM_PR_DATA_URL" = "$URL" ] || {
+      echo "error: guarded PR artifacts have foreign identity" >&2
+      exit 1
+    }
+    recorded_head=
+    recorded_head_count=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        pr_head=*)
+          recorded_head_count=$((recorded_head_count + 1))
+          recorded_head=${line#pr_head=}
+          ;;
+      esac
+    done < "$META"
+    [ "$recorded_head_count" -eq 1 ] && fm_pr_head_valid "$recorded_head" || {
+      echo "error: guarded PR artifacts are missing a head binding" >&2
+      exit 1
+    }
+    if [ "$recorded_head" = "$EXPECTED_HEAD" ]; then
+      printf 'armed: state/%s.check.sh\n' "$ID"
+      exit 0
+    fi
+    [ "$recorded_head" = "$PRIOR_HEAD" ] || {
+      echo "error: guarded PR artifacts are not the prior generation" >&2
+      exit 1
+    }
+  elif [ "$artifact_count" -eq 0 ]; then
+    if grep -qE '^pr(_head)?=' "$META"; then
+      echo "error: guarded PR metadata is not an unpublished generation" >&2
+      exit 1
+    fi
+  else
+    echo "error: guarded PR artifacts are partial or invalid" >&2
+    exit 1
+  fi
+fi
+
+# A prior exact merged result may have queued its durable wake immediately
+# before interruption. Finish only its identity-bound receipt before publishing
+# a replacement poll.
+if [ -n "$EXPECTED_HEAD" ]; then
+  fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || {
+    echo "error: pending PR poll retirement could not be validated" >&2
+    exit 1
+  }
+fi
+
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
@@ -73,9 +183,7 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+if [ -z "$PR_HEAD" ] && [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
