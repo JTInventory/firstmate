@@ -939,6 +939,41 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_force_retirement_receipts_are_source_bound() {
+  local home_a home_b state_a state_b retained corr_a corr_b rec_a rec_b source_a source_b receipt_b
+  home_a=$(setup_parent retirement-source-a)
+  home_b=$(setup_parent retirement-source-b)
+  state_a="$home_a/state"
+  state_b="$home_b/state"
+  retained="$TMP_ROOT/retirement-retained/state"
+  mkdir -p "$retained"
+  corr_a=$(fm_pending_reply_create "$home_a" "$state_a" duplicate "source a")
+  corr_b=$(fm_pending_reply_create "$home_b" "$state_b" duplicate "source b")
+  rec_a=$(fm_pending_reply_active_path "$state_a" "$corr_a")
+  rec_b=$(fm_pending_reply_active_path "$state_b" "$corr_b")
+  fm_pending_reply_set "$rec_a" phase escalated || fail "source a phase setup failed"
+  fm_pending_reply_set "$rec_b" phase escalated || fail "source b phase setup failed"
+  source_a=$(fm_pending_reply_source_identity "$state_a")
+  source_b=$(fm_pending_reply_source_identity "$state_b")
+  fm_pending_reply_stage_force_retire_task "$state_a" duplicate "$retained" \
+    || fail "source a retirement staging failed"
+  fm_pending_reply_stage_force_retire_task "$state_b" duplicate "$retained" \
+    || fail "source b retirement staging failed"
+  receipt_b=$(fm_pending_reply_handoff_path "$retained" "$source_b" "$corr_b")
+  fm_pending_reply_finalize_force_retire_task "$state_a" duplicate "$retained" "$source_a" \
+    || fail "source a retirement finalization failed"
+  [ -f "$(fm_pending_reply_history_dir "$retained")/$corr_a" ] \
+    || fail "source a history was not finalized"
+  [ ! -f "$(fm_pending_reply_history_dir "$retained")/$corr_b" ] \
+    || fail "source a finalizer claimed source b history"
+  [ -f "$receipt_b" ] || fail "source b receipt was consumed by source a finalizer"
+  fm_pending_reply_finalize_force_retire_task "$state_b" duplicate "$retained" "$source_b" \
+    || fail "source b retirement finalization failed"
+  [ -f "$(fm_pending_reply_history_dir "$retained")/$corr_b" ] \
+    || fail "source b history was not finalized"
+  pass "forced-retirement receipts remain bound to their source state"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -965,5 +1000,6 @@ test_partial_resolution_reconciles_after_restart
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
+test_force_retirement_receipts_are_source_bound
 
 printf 'ok - all pending-reply tests passed\n'

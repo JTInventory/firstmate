@@ -880,7 +880,10 @@ test_forced_secondmate_teardown_failure_keeps_active_reply() {
   fm_write_meta "$active" \
     "corr_id=$corr" \
     "task_id=task-x1" \
-    "phase=escalated"
+    "parent_status=$case_dir/state/task-x1.status" \
+    "delivered_epoch=1" \
+    "recovery_delivery_outcome=unknown" \
+    "phase=recovery_unknown"
 
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -905,12 +908,30 @@ SH
     "secondmate-staged-close-failure: active reply must survive endpoint failure"
   [ "$(sed -n 's/^phase=//p' "$active")" = escalated ] \
     || fail "secondmate-staged-close-failure: staged reply must remain active"
+  [ "$(sed -n 's/^retirement_staged_from=//p' "$active")" = recovery_unknown ] \
+    || fail "secondmate-staged-close-failure: original recovery phase was not staged"
   [ ! -e "$history" ] \
     || fail "secondmate-staged-close-failure: failed teardown must not publish retired history"
   assert_present "$case_dir/state/task-x1.meta" \
     "secondmate-staged-close-failure: task metadata must survive endpoint failure"
   [ -d "$home" ] || fail "secondmate-staged-close-failure: home was removed"
-  pass "failed forced teardown keeps the staged reply active"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/retry-stdout" 2> "$case_dir/retry-stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "secondmate-staged-close-failure: retry should succeed"
+  assert_present "$history" \
+    "secondmate-staged-close-failure: retry must publish retained history"
+  [ "$(sed -n 's/^retired_from=//p' "$history")" = recovery_unknown ] \
+    || fail "secondmate-staged-close-failure: retry overwrote the original recovery phase"
+  pass "failed forced teardown retries with its original staged phase"
 }
 
 write_nested_secondmate_reply_fixture() {
@@ -939,6 +960,7 @@ write_nested_secondmate_reply_fixture() {
     "corr_id=$corr" \
     "task_id=nested-x1" \
     "parent_status=$home/state/nested-x1.status" \
+    "delivered_epoch=1" \
     "recovery_delivery_outcome=unknown" \
     "phase=$phase"
 }
@@ -996,6 +1018,32 @@ test_nested_secondmate_teardown_handoffs_escalated_reply() {
   [ ! -e "$case_dir/home" ] && [ ! -e "$case_dir/nested-home" ] \
     || fail "nested-escalated-reply: retired homes were not removed"
   pass "recursive teardown hands off nested reply history to durable parent state"
+}
+
+test_nested_secondmate_late_report_handoffs_resolved_history() {
+  local case_dir rc corr history
+  case_dir=$(make_case nested-late-resolved-reply)
+  corr=3173456789abcdef
+  write_nested_secondmate_reply_fixture "$case_dir" recovery_unknown "$corr"
+  printf 'done [corr=%s]: late report\n' "$corr" \
+    > "$case_dir/home/state/nested-x1.status"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nested-late-resolved-reply: forced teardown should succeed"
+  history="$case_dir/state/pending-reply-history/$corr"
+  assert_present "$history" \
+    "nested-late-resolved-reply: resolved history must migrate to retained state"
+  [ "$(sed -n 's/^phase=//p' "$history")" = resolved ] \
+    || fail "nested-late-resolved-reply: late report must remain resolved"
+  [ "$(sed -n 's/^resolved_via=//p' "$history")" = status ] \
+    || fail "nested-late-resolved-reply: resolution evidence was not retained"
+  [ ! -e "$case_dir/home" ] && [ ! -e "$case_dir/nested-home" ] \
+    || fail "nested-late-resolved-reply: retired homes were not removed"
+  pass "late nested reports migrate resolved history before teardown"
 }
 
 test_nested_secondmate_teardown_failure_keeps_active_reply() {
@@ -1106,6 +1154,7 @@ test_forced_secondmate_teardown_handoffs_escalated_reply
 test_forced_secondmate_teardown_failure_keeps_active_reply
 test_nested_secondmate_teardown_refuses_unescalated_reply
 test_nested_secondmate_teardown_handoffs_escalated_reply
+test_nested_secondmate_late_report_handoffs_resolved_history
 test_nested_secondmate_teardown_failure_keeps_active_reply
 test_herdr_teardown_helper_locks_and_closes_focus_safe
 test_projection_journal_retires_before_worktree_return

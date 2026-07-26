@@ -88,6 +88,7 @@ fi
 ID=$1
 FORCE=${2:-}
 FORCE_RETIRE_STAGED=0
+FORCE_RETIRE_SOURCE=
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -733,7 +734,7 @@ validate_child_backend() {
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
-  local child_retire_staged
+  local child_retire_staged child_retire_source
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -746,8 +747,10 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_retire_staged=0
+    child_retire_source=
     if [ "$child_kind" = secondmate ]; then
       if fm_pending_reply_task_has_open "$sub_state" "$child_id"; then
+        child_retire_source=$(fm_pending_reply_source_identity "$sub_state") || return 1
         if ! fm_pending_reply_stage_force_retire_task "$sub_state" "$child_id" "$STATE"; then
           echo "REFUSED: could not stage pending replies for child secondmate $child_id." >&2
           return 1
@@ -769,7 +772,8 @@ cleanup_firstmate_home_children() {
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return 1
       fi
       if [ "$child_retire_staged" = 1 ] \
-         && ! fm_pending_reply_finalize_force_retire_task "$sub_state" "$child_id" "$STATE"; then
+         && ! fm_pending_reply_finalize_force_retire_task \
+           "$sub_state" "$child_id" "$STATE" "$child_retire_source"; then
         echo "REFUSED: could not hand off pending replies for child secondmate $child_id." >&2
         return 1
       fi
@@ -807,6 +811,7 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
   if fm_pending_reply_task_has_open "$STATE" "$ID"; then
+    FORCE_RETIRE_SOURCE=$(fm_pending_reply_source_identity "$STATE") || exit 1
     if [ "$FORCE" = "--force" ] \
        && fm_pending_reply_stage_force_retire_task "$STATE" "$ID"; then
       FORCE_RETIRE_STAGED=1
@@ -976,7 +981,8 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
   if [ "$FORCE_RETIRE_STAGED" = 1 ] \
-     && ! fm_pending_reply_finalize_force_retire_task "$STATE" "$ID"; then
+     && ! fm_pending_reply_finalize_force_retire_task \
+       "$STATE" "$ID" "$STATE" "$FORCE_RETIRE_SOURCE"; then
     echo "error: secondmate $ID was removed but its pending-reply handoff could not be finalized" >&2
     exit 1
   fi
