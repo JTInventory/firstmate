@@ -61,6 +61,10 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost DEFAULT initialization"
   assert_contains "$path" 'Set `TASK_ID=parallel-direct-pr`, `FEATURE_REF=refs/heads/fm/parallel-direct-pr`, `BRANCH=fm/parallel-direct-pr`' \
     "$path_name lost task, feature, or branch initialization"
+  assert_contains "$path" 'Derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)`' \
+    "$path_name lost current symbolic branch derivation"
+  assert_contains "$path" 'if `HEAD` is detached or `CURRENT_BRANCH != BRANCH`, append `blocked: direct-PR requires attached branch fm/parallel-direct-pr` and stop' \
+    "$path_name lost initial detached-HEAD and branch-mismatch blocker"
   assert_contains "$path" '`REPO_ID=$(git rev-parse --path-format=absolute --git-common-dir)`' \
     "$path_name lost repository identity initialization"
   assert_contains "$path" "LEASE_CHECKPOINT='$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease'" \
@@ -69,9 +73,9 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost atomic temporary checkpoint path"
   assert_contains "$path" 'outside the project worktree and Git index' \
     "$path_name lost index-safe checkpoint contract"
-  assert_contains "$path" 'A valid checkpoint must contain exactly `repo=`, `task=`, `feature_ref=`, `branch=`, `expected=`, `pre_head=`, `post_head=`, and `phase=`' \
+  assert_contains "$path" 'A valid checkpoint must contain exactly `repo=`, `task=`, `feature_ref=`, `branch=`, `expected=`, `default_oid=`, `pre_head=`, `post_head=`, and `phase=`' \
     "$path_name lost complete checkpoint binding"
-  assert_contains "$path" 'Require its repository, task, feature ref, and branch to equal `REPO_ID`, `TASK_ID`, `FEATURE_REF`, and `BRANCH`' \
+  assert_contains "$path" 'Require its repository, task, feature ref, branch, and the freshly derived attached `CURRENT_BRANCH` to equal `REPO_ID`, `TASK_ID`, `FEATURE_REF`, `BRANCH`, and `BRANCH`' \
     "$path_name lost checkpoint identity validation"
   assert_contains "$path" 'Reject a pre-existing checkpoint or temporary target that is a symlink, non-regular file, unexpectedly owned, or malformed by appending `blocked: direct-PR lease checkpoint invalid; refusing recovery` and stop' \
     "$path_name lost fail-closed checkpoint target validation"
@@ -79,24 +83,42 @@ for path_name in PRE_PR_PATH POST_CONFLICT_PATH; do
     "$path_name lost fail-closed checkpoint identity validation"
   assert_contains "$path" 'a lookup failure must append `blocked: direct-PR lease recovery lookup failed` and stop' \
     "$path_name lost fail-closed recovery lookup"
-  assert_contains "$path" 'for `phase=pre-rebase`, require current `HEAD` to equal `pre_head=`' \
-    "$path_name lost pre-rebase head-bound recovery"
-  assert_contains "$path" 'require `post_head=` to be empty, and resume only that recorded rebase' \
-    "$path_name lost pre-rebase phase-specific resume"
-  assert_contains "$path" 'for `phase=ready-to-push`, require current `HEAD` to equal the nonempty `post_head=` and resume only the same explicit lease push' \
+  assert_contains "$path" 'for `phase=rebase-in-progress`, resume an active rebase only when its recorded original head equals `pre_head=`' \
+    "$path_name lost active-rebase head-bound recovery"
+  assert_contains "$path" 'if no rebase is active and `HEAD` differs from `pre_head=`, accept the completed rebase boundary only when `ORIG_HEAD` equals `pre_head=`' \
+    "$path_name lost interrupted rebase-to-ready recovery"
+  assert_contains "$path" 'the latest branch reflog entry is the matching successful rebase finish, and `default_oid=` is an ancestor of `HEAD`' \
+    "$path_name lost durable completed-rebase proof"
+  assert_contains "$path" 'then atomically persist that exact `HEAD` as `post_head=` with `phase=ready-to-push`' \
+    "$path_name lost recoverable ready-state transition"
+  assert_contains "$path" 'If that recovery rewrite fails, remove only the validated task-specific temporary artifact, append `blocked: direct-PR recovered ready checkpoint write failed`, and stop without pushing' \
+    "$path_name lost fail-closed recovered ready-state rewrite"
+  assert_contains "$path" 'For `phase=ready-to-push`, require current `HEAD` to equal the nonempty `post_head=` and resume only the same explicit lease push' \
     "$path_name lost publication-head-bound push resume"
-  assert_contains "$path" 'Any head, phase, branch, repository, task, or ref mismatch must append `blocked: direct-PR lease checkpoint state mismatch; refusing recovery` and stop' \
-    "$path_name lost fail-closed recovery state validation"
+  assert_contains "$path" 'Before either recovery action, derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again and require it to equal `branch=`' \
+    "$path_name lost recovery-time current branch validation"
+  assert_contains "$path" 'detached `HEAD` or any head, phase, branch, repository, task, or ref mismatch must append `blocked: direct-PR lease checkpoint state mismatch; refusing recovery` and stop' \
+    "$path_name lost recovery detached-HEAD and mismatch blocker"
   assert_contains "$path" 'Do not rerun pre-rebase ancestry validation against rewritten `HEAD`' \
     "$path_name reruns invalid ancestry checks during recovery"
-  assert_contains "$path" 'Set `PRE_HEAD=$(git rev-parse HEAD)`' \
-    "$path_name lost pre-rebase HEAD snapshot"
-  assert_contains "$path" 'atomically write all eight bound fields through `LEASE_CHECKPOINT_TMP` with mode 0600, `post_head=` empty, and `phase=pre-rebase`' \
-    "$path_name lost durable pre-rebase checkpoint"
+  assert_contains "$path" 'Set `DEFAULT_OID=$(git rev-parse refs/remotes/origin/$DEFAULT)` and `PRE_HEAD=$(git rev-parse HEAD)`' \
+    "$path_name lost default and pre-rebase HEAD snapshots"
+  assert_contains "$path" 'derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again, and require `CURRENT_BRANCH == BRANCH`; detached `HEAD` or mismatch must append `blocked: direct-PR branch changed before rebase` and stop' \
+    "$path_name lost pre-rebase attached-branch validation"
+  assert_contains "$path" 'Atomically write all nine bound fields through `LEASE_CHECKPOINT_TMP` with mode 0600, `default_oid=$DEFAULT_OID`, `post_head=` empty, and `phase=rebase-in-progress`' \
+    "$path_name lost durable rebase-in-progress checkpoint"
   assert_contains "$path" 'Set `POST_HEAD=$(git rev-parse HEAD)`' \
     "$path_name lost publication HEAD snapshot"
-  assert_contains "$path" 'preserving `repo=$REPO_ID`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `expected=$EXPECTED`, and `pre_head=$PRE_HEAD`, while setting `post_head=$POST_HEAD` and `phase=ready-to-push`' \
+  assert_contains "$path" 'derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again, and require `CURRENT_BRANCH == BRANCH`; detached `HEAD` or mismatch must append `blocked: direct-PR branch changed after rebase` and stop' \
+    "$path_name lost post-rebase attached-branch validation"
+  assert_contains "$path" 'preserving `repo=$REPO_ID`, `task=$TASK_ID`, `feature_ref=$FEATURE_REF`, `branch=$BRANCH`, `expected=$EXPECTED`, `default_oid=$DEFAULT_OID`, and `pre_head=$PRE_HEAD`, while setting `post_head=$POST_HEAD` and `phase=ready-to-push`' \
     "$path_name lost ready-to-push identity and HEAD binding"
+  assert_contains "$path" 'If this second write or rename fails, remove only the validated task-specific temporary artifact, append `blocked: direct-PR ready checkpoint write failed; recover from rebase-in-progress state`, and stop without pushing' \
+    "$path_name lost fail-closed second checkpoint rewrite"
+  assert_contains "$path" 'Before pushing, derive `CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD)` again and require `CURRENT_BRANCH == BRANCH` and `$(git rev-parse HEAD) == POST_HEAD`' \
+    "$path_name lost pre-push branch and HEAD validation"
+  assert_contains "$path" 'detached `HEAD` or mismatch must append `blocked: direct-PR publication state changed; refusing push` and stop' \
+    "$path_name lost fail-closed publication-state validation"
   assert_contains "$path" 'A write or rename failure must remove only the validated task-specific temporary artifact, append `blocked: direct-PR lease checkpoint write failed`, and stop' \
     "$path_name lost atomic-write cleanup and blocker"
   assert_contains "$path" 'remove the validated checkpoint and its task-specific temporary artifacts, then restart safe validation' \
