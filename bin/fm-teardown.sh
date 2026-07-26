@@ -144,19 +144,19 @@ validate_direct_pr_state_cleanup() {
   done
 }
 
-DIRECT_PR_REF_REPO=
+DIRECT_PR_REF_GIT_DIR=
 validate_direct_pr_ref_cleanup() {
   local candidate prefix ref refs
   [ "$MODE" = direct-PR ] || return 0
   for candidate in "$WT" "$PROJ"; do
     [ -d "$candidate" ] || continue
     git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
-    DIRECT_PR_REF_REPO=$candidate
+    DIRECT_PR_REF_GIT_DIR=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir) || return 1
     break
   done
-  [ -n "$DIRECT_PR_REF_REPO" ] || return 0
+  [ -n "$DIRECT_PR_REF_GIT_DIR" ] || return 0
   prefix="refs/firstmate/direct-pr/$ID"
-  refs=$(git -C "$DIRECT_PR_REF_REPO" for-each-ref --format='%(refname)' "$prefix/") || return 1
+  refs=$(git --git-dir="$DIRECT_PR_REF_GIT_DIR" for-each-ref --format='%(refname)' "$prefix/") || return 1
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
     case "$ref" in
@@ -172,13 +172,15 @@ EOF
 }
 
 cleanup_direct_pr_refs() {
-  local prefix ref
-  [ -n "$DIRECT_PR_REF_REPO" ] || return 0
+  local prefix refs
+  [ -n "$DIRECT_PR_REF_GIT_DIR" ] || return 0
   prefix="refs/firstmate/direct-pr/$ID"
-  for ref in "$prefix/base" "$prefix/feature"; do
-    git -C "$DIRECT_PR_REF_REPO" update-ref -d "$ref" || return 1
-  done
-  [ -z "$(git -C "$DIRECT_PR_REF_REPO" for-each-ref --format='%(refname)' "$prefix/")" ]
+  {
+    printf 'delete %s\n' "$prefix/base"
+    printf 'delete %s\n' "$prefix/feature"
+  } | git --git-dir="$DIRECT_PR_REF_GIT_DIR" update-ref --stdin || return 1
+  refs=$(git --git-dir="$DIRECT_PR_REF_GIT_DIR" for-each-ref --format='%(refname)' "$prefix/") || return 1
+  [ -z "$refs" ]
 }
 
 TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
@@ -1017,11 +1019,6 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   fi
 fi
 
-cleanup_direct_pr_refs || {
-  echo "REFUSED: direct-PR private ref cleanup failed for $ID; preserving task state and worktree" >&2
-  exit 1
-}
-
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -1062,6 +1059,10 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+cleanup_direct_pr_refs || {
+  echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
+  exit 1
+}
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
