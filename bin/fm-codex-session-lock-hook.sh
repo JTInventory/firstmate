@@ -23,9 +23,26 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 PAYLOAD=$(cat 2>/dev/null || true)
 
-command -v jq >/dev/null 2>&1 || exit 0
-EVENT=$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null) || exit 0
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+command -v node >/dev/null 2>&1 || exit 0
+PARSED=$(printf '%s' "$PAYLOAD" | node -e '
+let payload = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => payload += chunk);
+process.stdin.on("end", () => {
+  try {
+    const value = JSON.parse(payload);
+    if (!value || Array.isArray(value)
+      || typeof value.hook_event_name !== "string"
+      || typeof value.session_id !== "string") process.exit(1);
+    process.stdout.write(value.hook_event_name + "\n" + value.session_id);
+  } catch {
+    process.exit(1);
+  }
+});
+' 2>/dev/null) || exit 0
+case "$PARSED" in *$'\n'*) ;; *) exit 0 ;; esac
+EVENT=${PARSED%%$'\n'*}
+SESSION_ID=${PARSED#*$'\n'}
 [ -n "$SESSION_ID" ] || exit 0
 case "$SESSION_ID" in *[!A-Za-z0-9._:-]*) exit 0 ;; esac
 if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$CODEX_THREAD_ID" != "$SESSION_ID" ]; then

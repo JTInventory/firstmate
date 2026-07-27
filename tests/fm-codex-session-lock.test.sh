@@ -61,6 +61,32 @@ SH
   chmod +x "$dir/ps"
 }
 
+make_codex_parent_ps() {
+  local dir=$1
+  mkdir -p "$dir"
+  sed 's/^+//' > "$dir/ps" <<'SH'
++#!/usr/bin/env bash
++set -u
++pid=
++previous=
++for argument in "$@"; do
++  [ "$previous" = -p ] && pid=$argument
++  previous=$argument
++done
++case "$*" in
++  *"comm="*)
++    if [ "$pid" = "${FM_FAKE_CODEX_PID:?}" ]; then printf '%s\n' codex; else printf '%s\n' bash; fi
++    ;;
++  *"args="*)
++    if [ "$pid" = "${FM_FAKE_CODEX_PID:?}" ]; then printf '%s\n' codex; else printf '%s\n' bash; fi
++    ;;
++  *"ppid="*) printf '%s\n' "${FM_FAKE_CODEX_PID:?}" ;;
++  *) exit 1 ;;
++esac
+SH
+  chmod +x "$dir/ps"
+}
+
 run_lock() {
   local home=$1 thread=$2 fakebin=$3
   env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
@@ -86,9 +112,26 @@ test_hook_registration_preserves_jt_pretool() {
   command=$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$ROOT/.codex/hooks.json")
   # shellcheck disable=SC2016
   assert_contains "$command" 'root=$(pwd -P)' "Codex SessionEnd hook is not pwd-anchored"
+  case "$command" in *jq*) fail "Codex SessionEnd hook still requires jq" ;; esac
   jq -e '.hooks.SessionStart[0].hooks[0].timeout == 3 and .hooks.SessionEnd[0].hooks[0].timeout == 3' \
     "$ROOT/.codex/hooks.json" >/dev/null || fail "Codex lock hooks must use the three-second bound"
   pass "Codex lock hooks are bounded and preserve JT PreToolUse"
+}
+
+test_hooks_work_when_jq_fails() {
+  local home fakebin
+  home=$(make_home no-jq)
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 127' > "$fakebin/jq"
+  chmod +x "$fakebin/jq"
+  printf '{"hook_event_name":"SessionStart","session_id":"thread-no-jq"}\n' \
+    | FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq PATH="$fakebin:$BASE_PATH" bash "$HOOK"
+  [ -f "$home/state/.lock" ] || fail "SessionStart did not acquire without jq"
+  printf '{"hook_event_name":"SessionEnd","session_id":"thread-no-jq"}\n' \
+    | FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq PATH="$fakebin:$BASE_PATH" bash "$HOOK"
+  [ ! -e "$home/state/.lock" ] || fail "SessionEnd did not release without jq"
+  pass "Codex lifecycle hooks do not depend on jq"
 }
 
 test_matching_session_end_only_releases_regular_exact_owner() {
@@ -206,6 +249,24 @@ test_grok_precedence_and_primary_lock_protection() {
   pass "Grok precedence prevents Codex crewmates from stealing or releasing the primary lock"
 }
 
+test_non_codex_markers_precede_inherited_thread() {
+  local fakebin out marker value
+  fakebin="$(make_home marker-precedence)/fakebin"
+  make_any_grok_ps "$fakebin"
+  for marker in CLAUDECODE PI_CODING_AGENT GROK_AGENT; do
+    case "$marker" in
+      CLAUDECODE) value=1 ;;
+      PI_CODING_AGENT) value=true ;;
+      GROK_AGENT) value=1 ;;
+    esac
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      "$marker=$value" CODEX_THREAD_ID=inherited-thread PATH="$fakebin:$BASE_PATH" \
+      bash -c '. "$1"; fm_session_lock_owner' _ "$ROOT/bin/fm-session-lock-lib.sh")
+    case "$out" in ''|*[!0-9]*) fail "$marker inherited Codex ownership: $out" ;; esac
+  done
+  pass "Claude, Pi, and Grok markers precede inherited Codex threads"
+}
+
 test_two_homes_release_only_their_own_lock() {
   local home_a home_b owner_b
   home_a=$(make_home home-a)
@@ -222,7 +283,7 @@ test_two_homes_release_only_their_own_lock() {
 }
 
 test_numeric_legacy_lock_contract() {
-  local home fakebin sleeper out status
+  local home fakebin sleeper out status owner
   home=$(make_home numeric-legacy)
   fakebin="$home/fakebin"
   sleep 60 & sleeper=$!
@@ -233,6 +294,15 @@ test_numeric_legacy_lock_contract() {
   expect_code 1 "$status" "live numeric legacy owner must stay exclusive"
   run_hook "$home" SessionEnd new-thread
   [ "$(cat "$home/state/.lock")" = "$sleeper" ] || fail "SessionEnd removed a numeric legacy owner"
+
+  make_codex_parent_ps "$fakebin"
+  FM_FAKE_CODEX_PID="$sleeper" run_lock "$home" same-session "$fakebin" >/dev/null \
+    || fail "same session could not upgrade its numeric legacy lock"
+  owner=$(cat "$home/state/.lock")
+  [ "$owner" = "$sleeper|codex:same-session|harness" ] \
+    || fail "numeric legacy lock was not upgraded to the structured owner: $owner"
+  printf '%s\n' "$sleeper" > "$home/state/.lock"
+
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
   make_hidden_ps "$fakebin"
@@ -241,11 +311,13 @@ test_numeric_legacy_lock_contract() {
 }
 
 test_hook_registration_preserves_jt_pretool
+test_hooks_work_when_jq_fails
 test_matching_session_end_only_releases_regular_exact_owner
 test_session_start_retains_verified_harness_owner
 test_same_thread_preserves_existing_owner
 test_dead_verified_owner_is_reclaimed
 test_different_threads_remain_excluded
 test_grok_precedence_and_primary_lock_protection
+test_non_codex_markers_precede_inherited_thread
 test_two_homes_release_only_their_own_lock
 test_numeric_legacy_lock_contract

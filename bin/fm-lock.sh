@@ -76,6 +76,8 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   owner_marker=$(fm_codex_owner_marker "$owner" 2>/dev/null || true)
   if [ -n "$old_marker" ] && [ "$old_marker" = "$owner_marker" ]; then
     owner=$old
+  elif [ "$old" = "${owner%%|*}" ] && [ -n "$owner_marker" ]; then
+    :
   elif [ "$old" != "$owner" ]; then
     fm_session_lock_holder_state "$old"
     holder_status=$?

@@ -38,9 +38,16 @@ fm_harness_ancestry_pid() {
   fm_verified_harness_ancestry_pid
 }
 
+fm_codex_thread_active() {
+  [ "${CLAUDECODE:-}" != "1" ] \
+    && [ "${PI_CODING_AGENT:-}" != "true" ] \
+    && [ "${GROK_AGENT:-}" != "1" ] \
+    && [ -n "${CODEX_THREAD_ID:-}" ]
+}
+
 fm_session_lock_owner() {
   local pid
-  if [ "${GROK_AGENT:-}" != "1" ] && [ -n "${CODEX_THREAD_ID:-}" ]; then
+  if fm_codex_thread_active; then
     if pid=$(fm_verified_harness_ancestry_pid); then
       printf '%s|codex:%s|harness\n' "$pid" "$CODEX_THREAD_ID"
     else
@@ -96,7 +103,7 @@ fm_session_lock_holder_state() {
       pid=${owner%%|*}
       case "$pid" in ''|*[!0-9]*) return 3 ;; esac
       marker=$(fm_codex_owner_marker "$owner") || return 3
-      if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$CODEX_THREAD_ID" = "$marker" ]; then
+      if fm_codex_thread_active && [ "$CODEX_THREAD_ID" = "$marker" ]; then
         return 0
       fi
       kind=$(fm_codex_owner_kind "$owner") || return 3
@@ -117,7 +124,7 @@ fm_session_lock_owned_by_self() {
   local state=$1 owner marker my_pid
   owner=$(cat "$state/.lock" 2>/dev/null || true)
   if marker=$(fm_codex_owner_marker "$owner"); then
-    [ -n "${CODEX_THREAD_ID:-}" ] && [ "$CODEX_THREAD_ID" = "$marker" ]
+    fm_codex_thread_active && [ "$CODEX_THREAD_ID" = "$marker" ]
     return $?
   fi
   case "$owner" in ''|*[!0-9]*) return 1 ;; esac
