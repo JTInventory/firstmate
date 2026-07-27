@@ -134,14 +134,16 @@ run_update() {
 
 ack_firstmate_reread() {
   local w=$1 generation
-  generation=$(sed -n 's/^generation=//p' "$w/home/state/.watch-protocol-reread-required")
+  generation=$(fm_update_obligation_generation \
+    "$w/home/state/.watch-protocol-reread-required" "$w/main")
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-reread-firstmate "$generation" >/dev/null
 }
 
 ack_secondmate_nudge() {
   local w=$1 target=$2 generation
-  generation=$(sed -n 's/^generation=//p' "$w/sm1/state/.watch-protocol-reread-required")
+  generation=$(fm_update_obligation_generation \
+    "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1")
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-secondmate-nudge "$target" "$generation" >/dev/null
 }
@@ -164,9 +166,9 @@ test_updates_main_and_secondmate() {
   assert_contains "$out" "restart-firstmate-watcher: no" "updated firstmate without a watcher needs no restart"
   assert_contains "$out" "restart-secondmate-watchers: none" "updated secondmate without a watcher needs no restart"
   assert_contains "$out" "nudge-secondmates: main:fm-sm1" "updated secondmate is nudged"
-  [ -f "$w/home/state/.watch-protocol-reread-required" ] \
+  fm_update_obligation_pending "$w/home/state/.watch-protocol-reread-required" "$w/main" \
     || fail "firstmate reread obligation was not retained for acknowledgement"
-  [ -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+  fm_update_obligation_pending "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     || fail "secondmate nudge obligation was not retained for acknowledgement"
 
   # Fast-forward landed: HEAD == origin/main on both targets.
@@ -370,16 +372,16 @@ test_replays_interrupted_reread_and_nudge_obligations() {
   assert_contains "$out" "secondmate sm1: already current" "retry keeps current secondmate"
   assert_contains "$out" "reread-firstmate: yes" "retry replays firstmate reread"
   assert_contains "$out" "nudge-secondmates: main:fm-sm1" "retry replays secondmate nudge"
-  [ -f "$w/home/state/.watch-protocol-reread-required" ] \
+  fm_update_obligation_pending "$w/home/state/.watch-protocol-reread-required" "$w/main" \
     || fail "firstmate reread obligation cleared before acknowledgement"
-  [ -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+  fm_update_obligation_pending "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     || fail "secondmate nudge obligation cleared before acknowledgement"
 
   ack_firstmate_reread "$w"
   ack_secondmate_nudge "$w" main:fm-sm1
-  [ ! -f "$w/home/state/.watch-protocol-reread-required" ] \
+  ! fm_update_obligation_pending "$w/home/state/.watch-protocol-reread-required" "$w/main" \
     || fail "firstmate reread acknowledgement did not clear obligation"
-  [ ! -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+  ! fm_update_obligation_pending "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     || fail "secondmate nudge acknowledgement did not clear obligation"
   pass "T12 interrupted update obligations persist until acknowledged"
 }
@@ -454,7 +456,8 @@ test_acknowledgements_are_generation_bound() {
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-reread-firstmate "$old_generation" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "stale acknowledgement cleared a newer obligation"
-  [ "$(cat "$w/home/state/.watch-protocol-reread-required")" = "generation=$new_generation" ] \
+  [ "$(fm_update_obligation_generation \
+    "$w/home/state/.watch-protocol-reread-required" "$w/main")" = "$new_generation" ] \
     || fail "newer reread generation was not preserved"
 
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
@@ -475,63 +478,36 @@ test_herdr_target_acknowledges_exact_live_meta() {
   [ -n "$generation" ] || fail "Herdr target generation was not reported"
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-secondmate-nudge default:w1:p2 "$generation" >/dev/null
-  [ ! -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+  ! fm_update_obligation_pending "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     || fail "Herdr target acknowledgement did not clear its obligation"
   pass "T15 Herdr acknowledgements resolve exact live metadata"
 }
 
-test_atomic_generation_claims_preserve_newer_markers() {
-  local w marker signal release generation_a generation_b generation_c rc
-  w="$TMP_ROOT/t16"
-  mkdir -p "$w"
-  marker="$w/obligation"
-  signal="$w/claimed"
-  release="$w/release"
-  generation_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  generation_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  generation_c=cccccccccccccccccccccccccccccccccccccccc
+test_immutable_generations_preserve_prepared_and_newer_markers() {
+  local w marker generation_a generation_b rc
+  w=$(new_world t16)
+  marker="$w/home/state/.watch-protocol-reread-required"
+  generation_a=$(git -C "$w/main" rev-parse HEAD)
+  bump_origin "$w" readme
+  generation_b=$(git -C "$w/seed" rev-parse HEAD)
 
   fm_update_obligation_write "$marker" "$generation_a"
-  cat() {
-    case "${1:-}" in
-      "$w"/.update-obligation-claim.*)
-        touch "$signal"
-        while [ ! -f "$release" ]; do sleep 0.01; done
-        ;;
-    esac
-    command cat "$@"
-  }
-  fm_update_obligation_ack "$marker" "$generation_a" &
-  rc=$!
-  while [ ! -f "$signal" ]; do sleep 0.01; done
   fm_update_obligation_write "$marker" "$generation_b"
-  touch "$release"
-  wait "$rc" || fail "matching acknowledgement claim failed"
-  unset -f cat
-  [ "$(cat "$marker")" = "generation=$generation_b" ] \
-    || fail "acknowledgement claim deleted a newer generation"
+  [ "$(fm_update_obligation_generation "$marker" "$w/main")" = "$generation_a" ] \
+    || fail "prepared future generation became active before fast-forward"
 
-  rm -f "$signal" "$release"
-  cat() {
-    case "${1:-}" in
-      "$w"/.update-obligation-rollback.*)
-        touch "$signal"
-        while [ ! -f "$release" ]; do sleep 0.01; done
-        ;;
-    esac
-    command cat "$@"
-  }
-  fm_update_obligation_rollback "$marker" "$generation_b" \
-    "generation=$generation_a" 1 &
-  rc=$!
-  while [ ! -f "$signal" ]; do sleep 0.01; done
-  fm_update_obligation_write "$marker" "$generation_c"
-  touch "$release"
-  wait "$rc" || fail "generation rollback claim failed"
-  unset -f cat
-  [ "$(cat "$marker")" = "generation=$generation_c" ] \
-    || fail "rollback claim overwrote a newer generation"
-  pass "T16 generation claims preserve concurrent marker updates"
+  git -C "$w/main" fetch -q origin main
+  git -C "$w/main" merge -q --ff-only origin/main
+  [ "$(fm_update_obligation_generation "$marker" "$w/main")" = "$generation_b" ] \
+    || fail "newer immutable generation was not selected after fast-forward"
+  rc=0
+  fm_update_obligation_ack "$marker" "$generation_a" "$w/main" || rc=$?
+  [ "$rc" -ne 0 ] || fail "older generation acknowledged a newer checkout"
+  fm_update_obligation_ack "$marker" "$generation_b" "$w/main" \
+    || fail "current generation acknowledgement failed"
+  ! fm_update_obligation_pending "$marker" "$w/main" \
+    || fail "current acknowledgement left superseded generations"
+  pass "T16 immutable generations survive preparation and supersede safely"
 }
 
 test_skipped_update_reports_existing_generation() {
@@ -563,7 +539,7 @@ test_replays_interrupted_reread_and_nudge_obligations
 test_first_protocol_upgrade_requires_installed_updater_pass
 test_acknowledgements_are_generation_bound
 test_herdr_target_acknowledges_exact_live_meta
-test_atomic_generation_claims_preserve_newer_markers
+test_immutable_generations_preserve_prepared_and_newer_markers
 test_skipped_update_reports_existing_generation
 
 echo "# all fm-update tests passed"

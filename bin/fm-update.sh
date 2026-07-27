@@ -71,7 +71,7 @@ ack_secondmate_nudge() {
     return 1
   }
   marker="$VALIDATED_HOME/state/.watch-protocol-reread-required"
-  fm_update_obligation_ack "$marker" "$generation" || {
+  fm_update_obligation_ack "$marker" "$generation" "$VALIDATED_HOME" || {
     echo "secondmate nudge acknowledgement: generation mismatch for $target" >&2
     return 1
   }
@@ -81,7 +81,7 @@ ack_secondmate_nudge() {
 case "${1:-}" in
   --ack-reread-firstmate)
     [ $# -eq 2 ] || { usage; exit 1; }
-    fm_update_obligation_ack "$(fm_watcher_protocol_reread_marker "$STATE")" "$2" || {
+    fm_update_obligation_ack "$(fm_watcher_protocol_reread_marker "$STATE")" "$2" "$FM_ROOT" || {
       echo "firstmate reread acknowledgement: generation mismatch" >&2
       exit 1
     }
@@ -107,7 +107,7 @@ reread_firstmate="no"
 reread_firstmate_generation=""
 restart_firstmate_watcher="no"
 reread_marker=$(fm_watcher_protocol_reread_marker "$STATE")
-[ -f "$reread_marker" ] && reread_firstmate="yes"
+fm_update_obligation_pending "$reread_marker" "$FM_ROOT" && reread_firstmate="yes"
 ff_target "$FM_ROOT" "firstmate" origin no no "$reread_marker" instructions
 reread_firstmate_generation=$FF_OBLIGATION_GENERATION
 if [ "$FF_STATUS" = "updated" ]; then
@@ -124,7 +124,7 @@ if [ "$FF_STATUS" = "updated" ]; then
     exec "$installed_update"
   fi
 fi
-[ -f "$reread_marker" ] && reread_firstmate="yes"
+fm_update_obligation_pending "$reread_marker" "$FM_ROOT" && reread_firstmate="yes"
 if ! fm_watcher_protocol_restart_if_required "$FM_HOME" "$STATE" "$FM_ROOT"; then
   echo "firstmate: skipped: watcher protocol restart could not be verified" >&2
   exit 1

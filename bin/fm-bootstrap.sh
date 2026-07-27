@@ -256,7 +256,7 @@ secondmate_sync() {
     fi
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
-      fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" "$commit" || true
+      fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" "$commit" "$home" || true
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
@@ -324,7 +324,8 @@ secondmate_sync() {
       }
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
-        fm_update_obligation_ack "$home_real/state/.watch-protocol-reread-required" "$commit" || true
+        fm_update_obligation_ack "$home_real/state/.watch-protocol-reread-required" \
+          "$commit" "$home_real" || true
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
       else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"

@@ -27,142 +27,92 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
-fm_update_obligation_write_value() {
-  local marker=$1 value=$2 parent tmp
-  parent=${marker%/*}
-  mkdir -p "$parent" || return 1
-  tmp=$(mktemp "$parent/.update-obligation.XXXXXX") || return 1
-  printf '%s\n' "$value" > "$tmp" \
-    && chmod 600 "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$marker" || {
-      rm -f "$tmp" 2>/dev/null || true
-      return 1
-    }
+fm_update_obligation_records_dir() {
+  printf '%s.generations' "$1"
+}
+
+fm_update_obligation_valid_generation() {
+  [ "${#1}" -eq 40 ] || return 1
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
 }
 
 fm_update_obligation_write() {
-  fm_update_obligation_write_value "$1" "generation=$2"
+  local marker=$1 generation=$2 records tmp record
+  fm_update_obligation_valid_generation "$generation" || return 1
+  records=$(fm_update_obligation_records_dir "$marker")
+  record="$records/$generation"
+  mkdir -p "$records" || return 1
+  [ -f "$record" ] && return 0
+  tmp=$(mktemp "$records/.update-obligation.XXXXXX") || return 1
+  printf 'generation=%s\n' "$generation" > "$tmp" \
+    && chmod 600 "$tmp" 2>/dev/null \
+    && { ln "$tmp" "$record" 2>/dev/null || [ -f "$record" ]; } || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+  rm -f "$tmp"
 }
 
 fm_update_obligation_generation() {
-  local value generation
-  value=$(cat "$1" 2>/dev/null || true)
-  case "$value" in
-    generation=*) generation=${value#generation=} ;;
-    *) return 1 ;;
-  esac
-  [ "${#generation}" -eq 40 ] || return 1
-  case "$generation" in
-    *[!0-9a-f]*) return 1 ;;
-  esac
-  printf '%s\n' "$generation"
-}
-
-fm_update_obligation_restore_claim() {
-  local claim=$1 marker=$2
-  if ln "$claim" "$marker" 2>/dev/null; then
-    rm -f "$claim"
-    return 0
-  fi
-  [ -e "$marker" ] || return 1
-  rm -f "$claim"
-}
-
-fm_update_obligation_ack() {
-  local marker=$1 generation=$2 parent claim value
-  parent=${marker%/*}
-  claim=$(mktemp "$parent/.update-obligation-claim.XXXXXX") || return 1
-  if ! mv "$marker" "$claim" 2>/dev/null; then
-    rm -f "$claim"
-    return 1
-  fi
-  value=$(cat "$claim" 2>/dev/null || true)
-  if [ "$value" = "generation=$generation" ]; then
-    rm -f "$claim"
-    return 0
-  fi
-  fm_update_obligation_restore_claim "$claim" "$marker"
-  return 1
-}
-
-fm_update_obligation_rollback() {
-  local marker=$1 generation=$2 previous=$3 existed=$4 parent claim value restore
-  parent=${marker%/*}
-  claim=$(mktemp "$parent/.update-obligation-rollback.XXXXXX") || return 1
-  if ! mv "$marker" "$claim" 2>/dev/null; then
-    rm -f "$claim"
-    return 0
-  fi
-  value=$(cat "$claim" 2>/dev/null || true)
-  if [ "$value" != "generation=$generation" ]; then
-    fm_update_obligation_restore_claim "$claim" "$marker"
-    return 0
-  fi
-  if [ "$existed" -eq 1 ]; then
-    restore=$(mktemp "$parent/.update-obligation-restore.XXXXXX") || {
-      fm_update_obligation_restore_claim "$claim" "$marker"
-      return 1
-    }
-    if ! printf '%s\n' "$previous" > "$restore" \
-      || ! chmod 600 "$restore" 2>/dev/null; then
-      rm -f "$restore"
-      fm_update_obligation_restore_claim "$claim" "$marker"
-      return 1
+  local marker=$1 dir=$2 records head record generation selected=""
+  records=$(fm_update_obligation_records_dir "$marker")
+  head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$head" ] || return 1
+  [ -d "$records" ] || return 1
+  for record in "$records"/*; do
+    [ -f "$record" ] || continue
+    generation=${record##*/}
+    fm_update_obligation_valid_generation "$generation" || continue
+    git -C "$dir" merge-base --is-ancestor "$generation" "$head" 2>/dev/null || continue
+    if [ -z "$selected" ] \
+      || git -C "$dir" merge-base --is-ancestor "$selected" "$generation" 2>/dev/null; then
+      selected=$generation
     fi
-    if ! ln "$restore" "$marker" 2>/dev/null && [ ! -e "$marker" ]; then
-      rm -f "$restore"
-      fm_update_obligation_restore_claim "$claim" "$marker"
-      return 1
-    fi
-    rm -f "$restore"
-  fi
-  rm -f "$claim"
-}
-
-fm_update_obligation_replace_legacy() {
-  local marker=$1 previous=$2 generation=$3 parent claim value replacement
-  parent=${marker%/*}
-  claim=$(mktemp "$parent/.update-obligation-normalize.XXXXXX") || return 1
-  if ! mv "$marker" "$claim" 2>/dev/null; then
-    rm -f "$claim"
-    return 1
-  fi
-  value=$(cat "$claim" 2>/dev/null || true)
-  if [ "$value" != "$previous" ]; then
-    fm_update_obligation_restore_claim "$claim" "$marker"
-    return 0
-  fi
-  replacement=$(mktemp "$parent/.update-obligation-replacement.XXXXXX") || {
-    fm_update_obligation_restore_claim "$claim" "$marker"
-    return 1
-  }
-  if ! printf 'generation=%s\n' "$generation" > "$replacement" \
-    || ! chmod 600 "$replacement" 2>/dev/null; then
-    rm -f "$replacement"
-    fm_update_obligation_restore_claim "$claim" "$marker"
-    return 1
-  fi
-  if ! ln "$replacement" "$marker" 2>/dev/null && [ ! -e "$marker" ]; then
-    rm -f "$replacement"
-    fm_update_obligation_restore_claim "$claim" "$marker"
-    return 1
-  fi
-  rm -f "$replacement" "$claim"
+  done
+  [ -n "$selected" ] || return 1
+  printf '%s\n' "$selected"
 }
 
 fm_update_obligation_load() {
-  local marker=$1 dir=$2 generation value head
-  [ -n "$marker" ] && [ -f "$marker" ] || return 1
-  if generation=$(fm_update_obligation_generation "$marker"); then
-    FF_OBLIGATION_GENERATION=$generation
-    return 0
+  local marker=$1 dir=$2 head generation
+  if [ -f "$marker" ]; then
+    head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
+    [ -n "$head" ] || return 1
+    fm_update_obligation_write "$marker" "$head" || return 1
+    rm -f "$marker" || return 1
   fi
-  value=$(cat "$marker" 2>/dev/null || true)
-  head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
-  [ -n "$head" ] || return 1
-  fm_update_obligation_replace_legacy "$marker" "$value" "$head" || return 1
-  generation=$(fm_update_obligation_generation "$marker") || return 1
+  generation=$(fm_update_obligation_generation "$marker" "$dir") || return 1
   FF_OBLIGATION_GENERATION=$generation
+}
+
+fm_update_obligation_pending() {
+  local marker=$1 dir=$2
+  [ -f "$marker" ] && return 0
+  fm_update_obligation_generation "$marker" "$dir" >/dev/null
+}
+
+fm_update_obligation_ack() {
+  local marker=$1 generation=$2 dir=$3 records head record candidate
+  fm_update_obligation_valid_generation "$generation" || return 1
+  head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
+  [ "$head" = "$generation" ] || return 1
+  if [ -f "$marker" ]; then
+    fm_update_obligation_load "$marker" "$dir" || return 1
+  fi
+  records=$(fm_update_obligation_records_dir "$marker")
+  record="$records/$generation"
+  [ -f "$record" ] || return 1
+  for record in "$records"/*; do
+    [ -f "$record" ] || continue
+    candidate=${record##*/}
+    fm_update_obligation_valid_generation "$candidate" || continue
+    if git -C "$dir" merge-base --is-ancestor "$candidate" "$generation" 2>/dev/null; then
+      rm -f "$record" || return 1
+    fi
+  done
+  return 0
 }
 
 default_branch() {
@@ -416,7 +366,6 @@ FF_INSTR=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
   local obligation_marker=${6:-} obligation_mode=${7:-always}
-  local obligation_existed=0 obligation_previous=""
   FF_STATUS="skipped"
   FF_INSTR=""
   FF_OBLIGATION_GENERATION=""
@@ -429,7 +378,7 @@ ff_target() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  if [ -n "$obligation_marker" ] && [ -f "$obligation_marker" ]; then
+  if [ -n "$obligation_marker" ] && fm_update_obligation_pending "$obligation_marker" "$dir"; then
     fm_update_obligation_load "$obligation_marker" "$dir" || {
       echo "$label: skipped: update obligation is invalid"
       return 0
@@ -498,10 +447,6 @@ ff_target() {
   instr=$(changed_instr "$dir" "$base")
   if [ -n "$obligation_marker" ] \
     && { [ "$obligation_mode" = always ] || [ -n "$instr" ]; }; then
-    if [ -f "$obligation_marker" ]; then
-      obligation_existed=1
-      obligation_previous=$(cat "$obligation_marker" 2>/dev/null || true)
-    fi
     if ! fm_update_obligation_write "$obligation_marker" "$base_rev"; then
       echo "$label: skipped: update obligation could not be persisted"
       return 0
@@ -510,14 +455,21 @@ ff_target() {
   fi
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
-    if [ -n "$FF_OBLIGATION_GENERATION" ]; then
-      fm_update_obligation_rollback "$obligation_marker" "$FF_OBLIGATION_GENERATION" \
-        "$obligation_previous" "$obligation_existed" || true
+    if [ -n "$obligation_marker" ]; then
+      fm_update_obligation_load "$obligation_marker" "$dir" 2>/dev/null || \
+        FF_OBLIGATION_GENERATION=""
     fi
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
   after=$(git -C "$dir" rev-parse --short HEAD)
+  if [ -n "$obligation_marker" ] \
+    && fm_update_obligation_pending "$obligation_marker" "$dir"; then
+    fm_update_obligation_load "$obligation_marker" "$dir" || {
+      echo "$label: skipped: update obligation is invalid"
+      return 0
+    }
+  fi
   FF_STATUS="updated"
   FF_INSTR="$instr"
   if [ -n "$instr" ]; then
@@ -571,7 +523,7 @@ process_secondmate() {
     ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
   fi
   pending_reread=0
-  [ -f "$reread_marker" ] && pending_reread=1
+  fm_update_obligation_pending "$reread_marker" "$home_real" && pending_reread=1
   should_nudge=0
   if [ "$FF_STATUS" = "updated" ]; then
     if [ "$nudge_requires_instr" != yes ] || [ -n "$FF_INSTR" ]; then

@@ -372,7 +372,8 @@ test_bootstrap_retry_clears_child_obligation() {
   count=$(printf '%s\n' "$out" | grep -c '^BOOTSTRAP_INFO: nudged fm-sm-retry ' || true)
   [ "$count" -eq 1 ] || fail "retried nudge was delivered $count times"
   [ ! -f "$pending" ] || fail "parent retry marker survived successful delivery"
-  [ ! -f "$w/sm-retry/state/.watch-protocol-reread-required" ] \
+  ! fm_update_obligation_pending \
+    "$w/sm-retry/state/.watch-protocol-reread-required" "$w/sm-retry" \
     || fail "child reread obligation survived successful retry delivery"
   pass "T10 bootstrap retry clears the matching child obligation"
 }
