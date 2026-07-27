@@ -270,6 +270,7 @@ SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake_root/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake_root/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake_root/bin/fm-pr-lib.sh"
+  : > "$fake_root/bin/fm-pending-reply-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake_root/bin/fm-gate-refuse-lib.sh"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash

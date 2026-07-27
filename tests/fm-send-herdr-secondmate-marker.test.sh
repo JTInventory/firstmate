@@ -53,9 +53,10 @@ PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
   "$SEND" fm-domain "route through Herdr" >/dev/null 2>&1 \
   || fail "Herdr secondmate send failed"
 
-expected="${FM_FROMFIRST_MARK}route through Herdr"
-[ "$(cat "$log")" = "$expected" ] \
-  || fail "Herdr secondmate send lost or changed the from-firstmate marker"
+case "$(cat "$log")" in
+  "${FM_FROMFIRST_MARK}"corr=[a-f0-9]*" route through Herdr") : ;;
+  *) fail "Herdr secondmate send lost or changed the from-firstmate marker or correlation" ;;
+esac
 pass "fm-send preserves the secondmate marker through the Herdr backend"
 
 recovery_home="$dir/recovery-home"

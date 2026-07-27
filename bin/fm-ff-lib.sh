@@ -27,6 +27,113 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+fm_update_obligation_records_dir() {
+  printf '%s.generations' "$1"
+}
+
+fm_update_obligation_valid_generation() {
+  [ "${#1}" -eq 40 ] || return 1
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+}
+
+fm_update_obligation_write() {
+  local marker=$1 generation=$2 records tmp record
+  fm_update_obligation_valid_generation "$generation" || return 1
+  records=$(fm_update_obligation_records_dir "$marker")
+  record="$records/$generation"
+  mkdir -p "$records" || return 1
+  [ -f "$record" ] && return 0
+  tmp=$(mktemp "$records/.update-obligation.XXXXXX") || return 1
+  printf 'generation=%s\n' "$generation" > "$tmp" \
+    && chmod 600 "$tmp" 2>/dev/null \
+    && { ln "$tmp" "$record" 2>/dev/null || [ -f "$record" ]; } || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+  rm -f "$tmp"
+}
+
+fm_update_obligation_generation() {
+  local marker=$1 dir=$2 records head record generation selected=""
+  records=$(fm_update_obligation_records_dir "$marker")
+  head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$head" ] || return 1
+  [ -d "$records" ] || return 1
+  for record in "$records"/*; do
+    [ -f "$record" ] || continue
+    generation=${record##*/}
+    fm_update_obligation_valid_generation "$generation" || continue
+    git -C "$dir" merge-base --is-ancestor "$generation" "$head" 2>/dev/null || continue
+    if [ -z "$selected" ] \
+      || git -C "$dir" merge-base --is-ancestor "$selected" "$generation" 2>/dev/null; then
+      selected=$generation
+    fi
+  done
+  [ -n "$selected" ] || return 1
+  printf '%s\n' "$selected"
+}
+
+fm_update_obligation_load() {
+  local marker=$1 dir=$2 head generation value records record candidate
+  FF_OBLIGATION_GENERATION=""
+  if [ -f "$marker" ]; then
+    head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
+    [ -n "$head" ] || return 1
+    value=$(sed -n 's/^generation=//p' "$marker" 2>/dev/null || true)
+    if fm_update_obligation_valid_generation "$value" \
+      && git -C "$dir" cat-file -e "$value^{commit}" 2>/dev/null; then
+      generation=$value
+    else
+      generation=$head
+    fi
+    fm_update_obligation_write "$marker" "$generation" || return 1
+    rm -f "$marker" || return 1
+  fi
+  if generation=$(fm_update_obligation_generation "$marker" "$dir"); then
+    FF_OBLIGATION_GENERATION=$generation
+    return 0
+  fi
+  records=$(fm_update_obligation_records_dir "$marker")
+  for record in "$records"/*; do
+    [ -f "$record" ] || continue
+    candidate=${record##*/}
+    fm_update_obligation_valid_generation "$candidate" || continue
+    git -C "$dir" cat-file -e "$candidate^{commit}" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+fm_update_obligation_pending() {
+  local marker=$1 dir=$2
+  [ -f "$marker" ] && return 0
+  fm_update_obligation_generation "$marker" "$dir" >/dev/null
+}
+
+fm_update_obligation_ack() {
+  local marker=$1 generation=$2 dir=$3 records record candidate selected
+  fm_update_obligation_valid_generation "$generation" || return 1
+  if [ -f "$marker" ]; then
+    fm_update_obligation_load "$marker" "$dir" || return 1
+  fi
+  selected=$(fm_update_obligation_generation "$marker" "$dir") || return 1
+  [ "$selected" = "$generation" ] || return 1
+  records=$(fm_update_obligation_records_dir "$marker")
+  record="$records/$generation"
+  [ -f "$record" ] || return 1
+  for record in "$records"/*; do
+    [ -f "$record" ] || continue
+    candidate=${record##*/}
+    fm_update_obligation_valid_generation "$candidate" || continue
+    [ "$candidate" = "$generation" ] && continue
+    if git -C "$dir" merge-base --is-ancestor "$candidate" "$generation" 2>/dev/null; then
+      rm -f "$record" || return 1
+    fi
+  done
+  rm -f "$records/$generation"
+}
+
 default_branch() {
   local dir=$1 ref branch
   ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -277,8 +384,10 @@ FF_STATUS=""
 FF_INSTR=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local obligation_marker=${6:-} obligation_mode=${7:-always}
   FF_STATUS="skipped"
   FF_INSTR=""
+  FF_OBLIGATION_GENERATION=""
 
   if [ ! -d "$dir" ]; then
     echo "$label: skipped: not a directory"
@@ -287,6 +396,12 @@ ff_target() {
   if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "$label: skipped: not a git repo"
     return 0
+  fi
+  if [ -n "$obligation_marker" ] && fm_update_obligation_pending "$obligation_marker" "$dir"; then
+    fm_update_obligation_load "$obligation_marker" "$dir" || {
+      echo "$label: skipped: update obligation is invalid"
+      return 0
+    }
   fi
 
   local default base cur instr local_rev base_rev before after out
@@ -349,12 +464,31 @@ ff_target() {
   fi
 
   instr=$(changed_instr "$dir" "$base")
+  if [ -n "$obligation_marker" ] \
+    && { [ "$obligation_mode" = always ] || [ -n "$instr" ]; }; then
+    if ! fm_update_obligation_write "$obligation_marker" "$base_rev"; then
+      echo "$label: skipped: update obligation could not be persisted"
+      return 0
+    fi
+    FF_OBLIGATION_GENERATION=$base_rev
+  fi
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+    if [ -n "$obligation_marker" ]; then
+      fm_update_obligation_load "$obligation_marker" "$dir" 2>/dev/null || \
+        FF_OBLIGATION_GENERATION=""
+    fi
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
   after=$(git -C "$dir" rev-parse --short HEAD)
+  if [ -n "$obligation_marker" ] \
+    && fm_update_obligation_pending "$obligation_marker" "$dir"; then
+    fm_update_obligation_load "$obligation_marker" "$dir" || {
+      echo "$label: skipped: update obligation is invalid"
+      return 0
+    }
+  fi
   FF_STATUS="updated"
   FF_INSTR="$instr"
   if [ -n "$instr" ]; then
@@ -365,22 +499,23 @@ ff_target() {
   return 0
 }
 
-# Sweep accumulators. The caller resets both before a sweep and reads
+# Sweep accumulators. The caller resets them before a sweep and reads
 # FF_NUDGE_WINDOWS after.
 FF_NUDGE_WINDOWS=""
+FF_NUDGE_GENERATIONS=""
 FF_SEEN_HOMES=""
 
 # Validate and fast-forward one secondmate home, accumulating its window into
 # FF_NUDGE_WINDOWS when it should be live-converged. Args:
 #   id home window base_mode nudge_requires_instr
-# A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
-# live window. With nudge_requires_instr=yes the advance must also have changed
-# the instruction surface (FF_INSTR non-empty): an already-current home, or one
-# whose only change was non-instruction tracked files, is left undisturbed. The
-# firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
-# each resolved home is processed at most once.
+# A home is nudged when it advanced or carries a durable reread obligation and
+# has a live window. With nudge_requires_instr=yes a new advance must have
+# changed the instruction surface, while an already-current interrupted update
+# replays its obligation. The firstmate repo itself (FM_ROOT) is never processed
+# as its own secondmate, and each resolved home is processed at most once.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local reread_marker pending_reread should_nudge
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -396,12 +531,34 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
-  if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
-    if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
-      return 0
+  reread_marker="$home_real/state/.watch-protocol-reread-required"
+  if [ -n "$window" ]; then
+    if [ "$nudge_requires_instr" = yes ]; then
+      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" instructions
+    else
+      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" always
+    fi
+  else
+    ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  fi
+  pending_reread=0
+  fm_update_obligation_pending "$reread_marker" "$home_real" && pending_reread=1
+  should_nudge=0
+  if [ "$FF_STATUS" = "updated" ]; then
+    if [ "$nudge_requires_instr" != yes ] || [ -n "$FF_INSTR" ]; then
+      should_nudge=1
+    fi
+  fi
+  [ "$pending_reread" -eq 1 ] && should_nudge=1
+  if [ "$should_nudge" -eq 1 ] && [ -n "$window" ]; then
+    if [ "$(type -t fm_ff_after_instruction_update 2>/dev/null || true)" = function ]; then
+      fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR" || return 1
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
+    if [ -n "$FF_OBLIGATION_GENERATION" ]; then
+      FF_NUDGE_GENERATIONS="${FF_NUDGE_GENERATIONS}${FF_NUDGE_GENERATIONS:+
+}$window|$FF_OBLIGATION_GENERATION"
+    fi
   fi
 }
 
@@ -414,6 +571,6 @@ sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
-    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
+    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" || return 1
   done < <(live_secondmate_meta_records "$state" "$registry")
 }

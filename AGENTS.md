@@ -111,6 +111,8 @@ backups/             root-local preservation files; not a canonical tracked surf
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
+  pending-replies/   parent-owned unresolved marked-secondmate requests; never delete or treat delivery as acknowledgement
+  pending-reply-history/   resolved or explicitly retired marked-secondmate request history, including crash-safe teardown handoffs
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
@@ -121,6 +123,7 @@ backups/             root-local preservation files; not a canonical tracked surf
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .watch-arm.lock .wake-queue.lock watcher singleton, one-arm follower, and queue serialization locks
+  .watch-protocol-required .watch-protocol-reread-required   durable watcher-generation and instruction-reread obligations; clear only through the verified update/acknowledgement path
   .hash-* .count-* .stale-* .stale-since-* .paused-* .paused-rechecked-* .paused-resurfaced-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); fm-guard.sh reads it
@@ -158,6 +161,7 @@ For a mid-session inheritable-config change that should reach live secondmates w
 It is inheritance-only: it uses the same live secondmate discovery, per-home inheritance lock, `propagate_secondmate_inheritance` helper, and `CONFIG_REREAD` delivery path as bootstrap, prints a per-home/per-item summary, and does not fast-forward tracked files.
 The propagation helper itself keeps stdout silent for existing callers, but warns on stderr when an item is skipped because the destination does not allow it or when a copy/remove error occurs.
 The sweep reports the `NUDGE_SECONDMATES:` line below only when a running secondmate actually advanced with an instruction change, so firstmate knows which ones to live-converge.
+It also verifies every live secondmate home's pending-reply-aware watcher generation. A legacy cycle is replaced only through its home-scoped watcher/follower handoff, and any required instruction re-read remains durable until the matching nudge succeeds.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem or capability fact; handle each:
 
@@ -455,6 +459,7 @@ A secondmate is itself a firstmate, so a request reaches it in its own chat, whi
 So `fm-send` to a bare `fm-<id>` whose meta is `kind=secondmate` automatically prepends the terminal-safe U+2063 from-firstmate marker (`bin/fm-marker-lib.sh`) without stripping trailing newlines; the secondmate recognizes it and returns its answer via its status file, or via a doc under its home plus a status pointer for a detailed response, never only in chat.
 For codex secondmates, that marked ordinary-text path also uses the longer pre-Enter settle so the already-typed request is not left unsubmitted by input timing.
 Expect and read that response on the status/doc path the same way you read any other status signal; do not peek the secondmate's chat for the answer.
+The parent owns a durable correlation record for every marked request. It requests one bounded repost after a completed turn without a correlated report, then escalates once if the repost is also missed; `bin/fm-pending-reply-lib.sh` owns that recovery contract.
 A captain typing directly into the secondmate's window is unmarked and stays a conversational captain intervention, so do not relay captain-destined chat through this path; the marker is applied only by `fm-send` to a `kind=secondmate` target.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
 If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.
@@ -595,7 +600,7 @@ A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
 Load `secondmate-provisioning` before retiring it.
-The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work. A successful secondmate teardown does not mark or remind against the main backlog; its queue was already transferred to the secondmate home.
+The safety checks cover both homes: teardown refuses while the secondmate's own `state/*.meta` contains in-flight work or the parent has an unresolved correlated reply. Captain-approved `--force` may retire a reply only after its bounded recovery reached escalation or another terminal recovery state; the crash-safe handoff preserves that history before parent route removal. A successful secondmate teardown does not mark or remind against the main backlog; its queue was already transferred to the secondmate home.
 For a leased home, the same bounded retry applies only to a transient Git `index.lock`/`File exists` error while releasing the lease; any remaining return failure leaves the home and route intact.
 With `--force`, teardown is the explicit discard path for child windows, child work, state, route, lease, and home; never use it unless the captain explicitly said to discard the work.
 
@@ -845,7 +850,7 @@ Adjust the other sections only when the task genuinely deviates from the standar
 
 firstmate is its own repo behind the no-mistakes gate, so improvements to `AGENTS.md`, `bin/`, and skills reach `main` and then wait for each running firstmate to pull them.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
-It performs only fast-forward self-updates of firstmate and registered secondmate homes, re-reads `AGENTS.md` when needed, nudges updated live secondmates, and never touches anything under `projects/`.
+It performs only fast-forward repository updates, verifies or migrates each affected home's watcher protocol, durably requires and acknowledges instruction re-reads and secondmate nudges, and never touches anything under `projects/`.
 
 ### Session stow
 

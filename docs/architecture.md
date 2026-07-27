@@ -147,9 +147,10 @@ The same project may appear in multiple secondmate homes when their scopes diffe
 Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
 `fm-send.sh` accepts a bare target only as a recorded `fm-<id>` from this home; it refuses other bare window names, which avoids ambiguous cross-home sends.
 Bare `fm-send.sh fm-<id>` requests to a live `kind=secondmate` are prefixed with the terminal-safe U+2063 from-firstmate marker from `bin/fm-marker-lib.sh`; the transform is idempotent and preserves trailing newlines, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
+Before delivery, the parent creates a durable expectation and adds a privacy-safe `corr=<id>` token. Only a parent status line, or its document pointer, carrying that token resolves the request; transport success, unrelated status activity, wrong-home output, and secondmate chat do not. After the delivered request has both completed a turn and aged past the configured grace, the parent sends exactly one recovery repost with the same correlation, then escalates once if that recovery turn also completes without a correlated report. Unresolved records never silently expire; `bin/fm-pending-reply-lib.sh` owns the exact state machine and retention contract.
 Explicit `session:window` sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
 After seeding a secondmate, `fm-backlog-handoff.sh` moves each already-judged in-scope queued item block, including its indented context, from the main backlog into that secondmate home so the domain queue starts in the right place.
-Idle secondmate panes are healthy; teardown is explicit, emits no main-backlog completion reminder, and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
+Idle secondmate panes are healthy; teardown is explicit, emits no main-backlog completion reminder, and refuses while the secondmate home has in-flight work or its parent has an unresolved correlated reply. Captain-approved `--force` can retire a reply only after recovery has reached escalation or another terminal recovery state, and preserves the terminal history through a crash-safe handoff before deleting the route.
 Historical PR metadata on the secondmate's parent record, such as a merged or closed seed PR, does not turn a live secondmate into ordinary PR-worker cleanup.
 The backlog audit follows the same model: a `kind=secondmate` meta record registered in `data/secondmates.md` or the main backlog's `## Secondmate Backlogs` section is expected persistent inventory outside main `## In flight`, while unregistered secondmate meta is still reported as drift.
 
@@ -161,6 +162,7 @@ Bootstrap separately propagates the primary's declared inheritable local materia
 That propagation is primary-authoritative, re-runs even when tracked files were already current, mirrors absence when the primary clears the value, and deliberately never copies `config/secondmate-harness` or `config/secondmate-profile.json`.
 Dirty, diverged, unsafe, or in-flight homes are reported and left unchanged by the tracked-file sync.
 Only a running secondmate home that actually advanced and changed `AGENTS.md`, `bin/`, or `.agents/skills/` is listed for a re-read nudge.
+Independently of whether tracked files advanced, bootstrap verifies every live home's pending-reply-aware watcher generation and replaces a legacy cycle only through its home-scoped, identity-verified follower handoff.
 `fm-config-push.sh` is the focused mid-session version of that same inheritance path: it discovers the same live secondmate homes, calls the same propagation helper, reports per-home/per-item results without running the tracked-file fast-forward, and sends `CONFIG_REREAD` pointers for changed inherited config.
 `fm-spawn.sh --secondmate` performs the same guarded local fast-forward before launch or recovery respawn; skipped syncs warn and the secondmate launches unchanged.
 Secondmate spawn also propagates the same inheritable config before launch.
@@ -235,8 +237,9 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then verifies each affected home's pending-reply-aware watcher protocol, replays durable instruction re-read and secondmate-nudge obligations until explicitly acknowledged, and never touches project clones.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+An old watcher is stopped only through its home-scoped, identity-verified follower handoff. The installed updater is re-run before acknowledging a firstmate re-read, so old in-memory update rules cannot certify the new watcher generation.
 The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
@@ -247,5 +250,5 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 
 ## Development notes
 
-The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, a race-proof singleton lock with reused-PID identity recovery, duplicate self-eviction, drain-time liveness assertion that requires both a live matching lock and fresh beacon, a self-verifying detached-watcher follower arm with one follower per home, and a home-scoped tmux session runner that immediately re-arms after wake output for harnesses without durable background tasks.
+The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, parent-owned pending-reply reconciliation, a race-proof singleton lock with reused-PID identity recovery, duplicate self-eviction, drain-time liveness assertion that requires both a live matching lock and fresh beacon, a self-verifying detached-watcher follower arm with one follower per home, protocol-fenced watcher migration, and a home-scoped tmux session runner that immediately re-arms after wake output for harnesses without durable background tasks.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.

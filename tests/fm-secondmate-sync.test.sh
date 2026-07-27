@@ -306,12 +306,12 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   printf 'sm-nonlive\n' > "$w/sm-nonlive/.fm-secondmate-home"
 
   fakebin=$(make_fake_toolchain "$w")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  nudge_line=$(printf '%s\n' "$out" | grep '^NUDGE_SECONDMATES:' || true)
-  [ -n "$nudge_line" ] || fail "no NUDGE_SECONDMATES line emitted (got: $out)"
-  assert_contains "$nudge_line" "firstmate:fm-sm-instr" "instruction-changed running secondmate is nudged"
+  nudge_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged ' || true)
+  [ -n "$nudge_line" ] || fail "no successful bootstrap nudge line emitted (got: $out)"
+  assert_contains "$nudge_line" "fm-sm-instr" "instruction-changed running secondmate is nudged"
   assert_not_contains "$nudge_line" "sm-readme" "readme-only advance is not nudged"
   assert_not_contains "$nudge_line" "sm-current" "already-current secondmate is not nudged"
 
@@ -348,7 +348,37 @@ test_bootstrap_sweep_surfaces_skipped_home() {
   pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
 }
 
-# --- T10: spawning a secondmate fast-forwards its worktree before launch ------
+test_bootstrap_retry_clears_child_obligation() {
+  local w commit fakebin out count pending
+  w=$(new_world boot-retry)
+  commit=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-retry "$commit"
+  mkdir -p "$w/sm-retry/state" "$w/home/state/.secondmate-nudge-pending"
+  printf 'generation=%s\n' "$commit" > "$w/sm-retry/state/.watch-protocol-reread-required"
+  pending="$w/home/state/.secondmate-nudge-pending/sm-retry.pending"
+  {
+    printf 'id=sm-retry\n'
+    printf 'selector=fm-sm-retry\n'
+    printf 'home=%s/sm-retry\n' "$w"
+    printf 'commit=%s\n' "$commit"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+  } > "$pending"
+
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  count=$(printf '%s\n' "$out" | grep -c '^BOOTSTRAP_INFO: nudged fm-sm-retry ' || true)
+  [ "$count" -eq 1 ] || fail "retried nudge was delivered $count times"
+  [ ! -f "$pending" ] || fail "parent retry marker survived successful delivery"
+  ! fm_update_obligation_pending \
+    "$w/sm-retry/state/.watch-protocol-reread-required" "$w/sm-retry" \
+    || fail "child reread obligation survived successful retry delivery"
+  pass "T10 bootstrap retry clears the matching child obligation"
+}
+
+# --- T11: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
   local w c1 c2 fakebin
   w=$(new_world spawn-ff)
@@ -370,7 +400,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
 
-  PATH="$fakebin:$BASE_PATH" TMUX='' \
+  env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
@@ -404,7 +434,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
 
-  PATH="$fakebin:$BASE_PATH" TMUX='' \
+  env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
@@ -426,7 +456,9 @@ test_ff_diverged
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
+test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_sweep_surfaces_skipped_home
+test_bootstrap_retry_clears_child_obligation
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 

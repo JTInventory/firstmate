@@ -785,6 +785,369 @@ SH
   pass "forced and recursive secondmate teardown propagate child close failures"
 }
 
+test_secondmate_teardown_refuses_open_pending_reply() {
+  local case_dir rc home corr
+  case_dir=$(make_case secondmate-open-reply)
+  home="$case_dir/home"
+  corr=0123456789abcdef
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$case_dir/state/pending-replies"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$case_dir/state/pending-replies/$corr" \
+    "corr_id=$corr" \
+    "task_id=task-x1" \
+    "phase=awaiting_report"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "secondmate-open-reply: teardown must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "secondmate-open-reply: parent metadata must survive refusal"
+  [ -d "$home" ] || fail "secondmate-open-reply: secondmate home was removed"
+  grep -Fq "open pending reply" "$case_dir/stderr" \
+    || fail "secondmate-open-reply: refusal did not identify the open reply"
+  pass "secondmate teardown preserves routing while a reply remains open"
+}
+
+test_forced_secondmate_teardown_handoffs_escalated_reply() {
+  local case_dir rc home corr history
+  case_dir=$(make_case secondmate-escalated-reply)
+  home="$case_dir/home"
+  corr=1123456789abcdef
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$case_dir/state/pending-replies"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$case_dir/state/pending-replies/$corr" \
+    "corr_id=$corr" \
+    "task_id=task-x1" \
+    "phase=escalated"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "secondmate-escalated-reply: forced teardown should succeed"
+  history="$case_dir/state/pending-reply-history/$corr"
+  assert_present "$history" \
+    "secondmate-escalated-reply: forced teardown must retain reply history"
+  [ "$(sed -n 's/^phase=//p' "$history")" = retired ] \
+    || fail "secondmate-escalated-reply: history phase must be retired"
+  [ "$(sed -n 's/^retired_from=//p' "$history")" = escalated ] \
+    || fail "secondmate-escalated-reply: source phase was not retained"
+  [ "$(sed -n 's/^retired_via=//p' "$history")" = forced-teardown ] \
+    || fail "secondmate-escalated-reply: forced handoff outcome was not retained"
+  [ ! -e "$case_dir/state/pending-replies/$corr" ] \
+    || fail "secondmate-escalated-reply: retired reply remained in the active scan"
+  [ ! -e "$home" ] || fail "secondmate-escalated-reply: secondmate home was not removed"
+  pass "forced teardown durably hands off an escalated reply"
+}
+
+test_forced_secondmate_teardown_failure_keeps_active_reply() {
+  local case_dir rc home corr active history
+  case_dir=$(make_case secondmate-staged-close-failure)
+  home="$case_dir/home"
+  corr=1223456789abcdef
+  active="$case_dir/state/pending-replies/$corr"
+  history="$case_dir/state/pending-reply-history/$corr"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$case_dir/state/pending-replies"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$active" \
+    "corr_id=$corr" \
+    "task_id=task-x1" \
+    "parent_status=$case_dir/state/task-x1.status" \
+    "delivered_epoch=1" \
+    "recovery_delivery_outcome=unknown" \
+    "phase=recovery_unknown"
+
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "kill-window -t fm-task-x1") exit 1 ;;
+  "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
+    printf '%s\n' '@2|fm-task-x1'
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "secondmate-staged-close-failure: teardown must fail closed"
+  assert_present "$active" \
+    "secondmate-staged-close-failure: active reply must survive endpoint failure"
+  [ "$(sed -n 's/^phase=//p' "$active")" = escalated ] \
+    || fail "secondmate-staged-close-failure: staged reply must remain active"
+  [ "$(sed -n 's/^retirement_staged_from=//p' "$active")" = recovery_unknown ] \
+    || fail "secondmate-staged-close-failure: original recovery phase was not staged"
+  [ ! -e "$history" ] \
+    || fail "secondmate-staged-close-failure: failed teardown must not publish retired history"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "secondmate-staged-close-failure: task metadata must survive endpoint failure"
+  [ -d "$home" ] || fail "secondmate-staged-close-failure: home was removed"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/retry-stdout" 2> "$case_dir/retry-stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "secondmate-staged-close-failure: retry should succeed"
+  assert_present "$history" \
+    "secondmate-staged-close-failure: retry must publish retained history"
+  [ "$(sed -n 's/^retired_from=//p' "$history")" = recovery_unknown ] \
+    || fail "secondmate-staged-close-failure: retry overwrote the original recovery phase"
+  pass "failed forced teardown retries with its original staged phase"
+}
+
+write_nested_secondmate_reply_fixture() {
+  local case_dir=$1 phase=$2 corr=$3 home nested
+  home="$case_dir/home"
+  nested="$case_dir/nested-home"
+  mkdir -p "$home/state/pending-replies" "$home/data" "$home/config" "$home/projects" \
+    "$nested/state" "$nested/data" "$nested/config" "$nested/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' nested-x1 > "$nested/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$home/state/nested-x1.meta" \
+    "window=fm-nested-x1" \
+    "worktree=$nested" \
+    "project=$case_dir/project" \
+    "home=$nested" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$home/state/pending-replies/$corr" \
+    "corr_id=$corr" \
+    "task_id=nested-x1" \
+    "parent_status=$home/state/nested-x1.status" \
+    "delivered_epoch=1" \
+    "recovery_delivery_outcome=unknown" \
+    "phase=$phase"
+}
+
+test_nested_secondmate_teardown_refuses_unescalated_reply() {
+  local case_dir rc corr home nested
+  case_dir=$(make_case nested-open-reply)
+  corr=2123456789abcdef
+  home="$case_dir/home"
+  nested="$case_dir/nested-home"
+  write_nested_secondmate_reply_fixture "$case_dir" awaiting_report "$corr"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nested-open-reply: forced teardown must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "nested-open-reply: parent metadata must survive refusal"
+  assert_present "$home/state/nested-x1.meta" \
+    "nested-open-reply: nested metadata must survive refusal"
+  assert_present "$home/state/pending-replies/$corr" \
+    "nested-open-reply: active reply must survive refusal"
+  [ -d "$home" ] && [ -d "$nested" ] \
+    || fail "nested-open-reply: a secondmate home was removed"
+  grep -Fq "child secondmate nested-x1 has a pending reply" "$case_dir/stderr" \
+    || fail "nested-open-reply: refusal did not identify the nested reply"
+  pass "recursive teardown preserves an un-escalated nested reply"
+}
+
+test_nested_secondmate_teardown_handoffs_escalated_reply() {
+  local case_dir rc corr history
+  case_dir=$(make_case nested-escalated-reply)
+  corr=3123456789abcdef
+  write_nested_secondmate_reply_fixture "$case_dir" recovery_unknown "$corr"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nested-escalated-reply: forced teardown should succeed"
+  history="$case_dir/state/pending-reply-history/$corr"
+  assert_present "$history" \
+    "nested-escalated-reply: nested reply history must survive parent-home removal"
+  [ "$(sed -n 's/^phase=//p' "$history")" = retired ] \
+    || fail "nested-escalated-reply: nested history phase must be retired"
+  [ "$(sed -n 's/^retired_from=//p' "$history")" = recovery_unknown ] \
+    || fail "nested-escalated-reply: nested source phase was not retained"
+  [ -n "$(sed -n 's/^escalated_epoch=//p' "$history")" ] \
+    || fail "nested-escalated-reply: recovery uncertainty was not durably escalated"
+  [ "$(sed -n 's/^recovery_delivery_outcome=//p' "$history")" = unknown ] \
+    || fail "nested-escalated-reply: escalation outcome was not retained"
+  [ ! -e "$case_dir/home" ] && [ ! -e "$case_dir/nested-home" ] \
+    || fail "nested-escalated-reply: retired homes were not removed"
+  pass "recursive teardown hands off nested reply history to durable parent state"
+}
+
+test_nested_secondmate_late_report_handoffs_resolved_history() {
+  local case_dir rc corr history
+  case_dir=$(make_case nested-late-resolved-reply)
+  corr=3173456789abcdef
+  write_nested_secondmate_reply_fixture "$case_dir" recovery_unknown "$corr"
+  printf 'done [corr=%s]: late report\n' "$corr" \
+    > "$case_dir/home/state/nested-x1.status"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nested-late-resolved-reply: forced teardown should succeed"
+  history="$case_dir/state/pending-reply-history/$corr"
+  assert_present "$history" \
+    "nested-late-resolved-reply: resolved history must migrate to retained state"
+  [ "$(sed -n 's/^phase=//p' "$history")" = resolved ] \
+    || fail "nested-late-resolved-reply: late report must remain resolved"
+  [ "$(sed -n 's/^resolved_via=//p' "$history")" = status ] \
+    || fail "nested-late-resolved-reply: resolution evidence was not retained"
+  [ ! -e "$case_dir/home" ] && [ ! -e "$case_dir/nested-home" ] \
+    || fail "nested-late-resolved-reply: retired homes were not removed"
+  pass "late nested reports migrate resolved history before teardown"
+}
+
+test_nested_secondmate_teardown_handoffs_archived_resolution() {
+  local case_dir rc corr source_history history
+  case_dir=$(make_case nested-archived-resolved-reply)
+  corr=3193456789abcdef
+  write_nested_secondmate_reply_fixture "$case_dir" resolved "$corr"
+  source_history="$case_dir/home/state/pending-reply-history/$corr"
+  mkdir -p "$(dirname "$source_history")"
+  mv "$case_dir/home/state/pending-replies/$corr" "$source_history"
+  printf '%s\n' "resolved_epoch=2" "resolved_via=status" >> "$source_history"
+
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "kill-window -t fm-nested-x1") exit 1 ;;
+  "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
+    printf '%s\n' '@3|fm-nested-x1'
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nested-archived-resolved-reply: first endpoint close should fail"
+  history="$case_dir/state/pending-reply-history/$corr"
+  assert_present "$history" \
+    "nested-archived-resolved-reply: failed close must retain migrated history"
+  if ! compgen -G "$case_dir/state/pending-reply-history/.handoff-*" >/dev/null; then
+    fail "nested-archived-resolved-reply: failed close lost its handoff receipt"
+  fi
+
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/retry-stdout" 2> "$case_dir/retry-stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nested-archived-resolved-reply: forced teardown should succeed"
+  assert_present "$history" \
+    "nested-archived-resolved-reply: archived history must migrate before home deletion"
+  [ "$(sed -n 's/^phase=//p' "$history")" = resolved ] \
+    || fail "nested-archived-resolved-reply: resolved phase was not retained"
+  if compgen -G "$case_dir/state/pending-reply-history/.handoff-*" >/dev/null; then
+    fail "nested-archived-resolved-reply: resolved handoff receipt remained"
+  fi
+  [ ! -e "$case_dir/home" ] && [ ! -e "$case_dir/nested-home" ] \
+    || fail "nested-archived-resolved-reply: retired homes were not removed"
+  pass "recursive teardown migrates already archived nested history"
+}
+
+test_nested_secondmate_teardown_failure_keeps_active_reply() {
+  local case_dir rc corr home active history
+  case_dir=$(make_case nested-staged-close-failure)
+  corr=3223456789abcdef
+  home="$case_dir/home"
+  active="$home/state/pending-replies/$corr"
+  history="$case_dir/state/pending-reply-history/$corr"
+  write_nested_secondmate_reply_fixture "$case_dir" escalated "$corr"
+
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "kill-window -t fm-nested-x1") exit 1 ;;
+  "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
+    printf '%s\n' '@3|fm-nested-x1'
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nested-staged-close-failure: teardown must fail closed"
+  assert_present "$active" \
+    "nested-staged-close-failure: nested active reply must survive endpoint failure"
+  [ "$(sed -n 's/^phase=//p' "$active")" = escalated ] \
+    || fail "nested-staged-close-failure: nested reply must remain active"
+  [ ! -e "$history" ] \
+    || fail "nested-staged-close-failure: failed teardown must not publish retired history"
+  assert_present "$home/state/nested-x1.meta" \
+    "nested-staged-close-failure: nested metadata must survive endpoint failure"
+  if [ ! -d "$home" ] || [ ! -d "$case_dir/nested-home" ]; then
+    fail "nested-staged-close-failure: a secondmate home was removed"
+  fi
+  pass "failed nested teardown keeps the staged reply active"
+}
+
 test_herdr_teardown_helper_locks_and_closes_focus_safe() {
   local dir function_source close_log
   dir="$TMP_ROOT/herdr-focus-safe-helper"
@@ -846,5 +1209,13 @@ test_gh_error_and_content_absent_refuses
 test_teardown_retries_transient_index_lock
 test_forced_secondmate_teardown_retries_child_index_lock
 test_forced_secondmate_teardown_propagates_child_close_failure
+test_secondmate_teardown_refuses_open_pending_reply
+test_forced_secondmate_teardown_handoffs_escalated_reply
+test_forced_secondmate_teardown_failure_keeps_active_reply
+test_nested_secondmate_teardown_refuses_unescalated_reply
+test_nested_secondmate_teardown_handoffs_escalated_reply
+test_nested_secondmate_late_report_handoffs_resolved_history
+test_nested_secondmate_teardown_handoffs_archived_resolution
+test_nested_secondmate_teardown_failure_keeps_active_reply
 test_herdr_teardown_helper_locks_and_closes_focus_safe
 test_projection_journal_retires_before_worktree_return
