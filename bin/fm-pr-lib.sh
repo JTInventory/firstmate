@@ -105,7 +105,9 @@ FM_PR_REPLACE_REG_HASH=
 FM_PR_REPLACE_REG_IDENTITY=
 FM_PR_REPLACE_RECEIPT_HASH=
 FM_PR_REPLACE_RECEIPT_IDENTITY=
+# shellcheck disable=SC2034 # Read by fm-pr-check.sh after sourcing this library.
 FM_PR_POLL_REPLACEMENT_ACTIVE=0
+# shellcheck disable=SC2034 # Read by fm-pr-check.sh after sourcing this library.
 FM_PR_POLL_REPLACEMENT_COMPLETE=0
 
 fm_task_id_path_safe() {
@@ -878,7 +880,9 @@ fm_pr_poll_replacement_recover_one() {
   if fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
     if grep -qxF "pr_head=$expected_head" "$state/$id.meta"; then
       fm_pr_poll_replacement_finish "$state" "$id" "$template" "$expected_head" || return 1
+      # shellcheck disable=SC2034 # Read by fm-pr-check.sh after this helper returns.
       FM_PR_POLL_REPLACEMENT_ACTIVE=0
+      # shellcheck disable=SC2034 # Read by fm-pr-check.sh after this helper returns.
       FM_PR_POLL_REPLACEMENT_COMPLETE=1
       return 0
     fi
