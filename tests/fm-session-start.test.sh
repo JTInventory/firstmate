@@ -20,6 +20,10 @@
 #     does not reimplement their logic
 set -u
 
+# This suite supplies harness identity per case. Ambient Codex identity must not
+# turn direct lock cases into same-thread acquisitions.
+unset CODEX_THREAD_ID 2>/dev/null || true
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
@@ -406,13 +410,12 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), GROK_AGENT (grok).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), CODEX_THREAD_ID
+# (codex), and GROK_AGENT (grok). Without this, a local harness marker can leak
+# into cases that pin a different fake harness.
 run_session_start() {
   local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  env -u CLAUDECODE -u PI_CODING_AGENT -u CODEX_THREAD_ID -u GROK_AGENT \
     FM_BACKEND="${FM_BACKEND:-}" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START"
 }

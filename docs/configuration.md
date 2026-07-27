@@ -303,6 +303,12 @@ Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection
 
 Runtime tuning via environment variables (defaults shown):
 
+Codex primaries use the tracked `SessionStart` and `SessionEnd` hooks to claim
+and release only their own home's session lock. Structured Codex owners retain
+the stable `CODEX_THREAD_ID` across PID-isolated tool calls. Numeric lock files
+remain supported for other harnesses and older homes, and `GROK_AGENT=1` takes
+precedence over an inherited Codex marker.
+
 ```sh
 FM_HOME=                 # optional operational home; unset means this repo root
 FM_ROOT_OVERRIDE=        # override firstmate repo root and tangle-guard target; also legacy whole-root override when FM_HOME is unset
