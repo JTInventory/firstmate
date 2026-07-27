@@ -82,7 +82,7 @@ fm_update_obligation_load() {
     [ -n "$head" ] || return 1
     value=$(sed -n 's/^generation=//p' "$marker" 2>/dev/null || true)
     if fm_update_obligation_valid_generation "$value" \
-      && git -C "$dir" merge-base --is-ancestor "$value" "$head" 2>/dev/null; then
+      && git -C "$dir" cat-file -e "$value^{commit}" 2>/dev/null; then
       generation=$value
     else
       generation=$head

@@ -545,6 +545,31 @@ test_skipped_update_reports_existing_generation() {
   pass "T17 skipped updates retain acknowledgement generations"
 }
 
+test_future_legacy_generation_survives_concurrent_ack() {
+  local w marker generation_a generation_c
+  w=$(new_world t18)
+  marker="$w/home/state/.watch-protocol-reread-required"
+  generation_a=$(git -C "$w/main" rev-parse HEAD)
+  bump_origin "$w" readme
+  bump_origin "$w" readme
+  generation_c=$(git -C "$w/seed" rev-parse HEAD)
+  git -C "$w/main" fetch -q origin main
+
+  fm_update_obligation_write "$marker" "$generation_a"
+  printf 'generation=%s\n' "$generation_c" > "$marker"
+  fm_update_obligation_ack "$marker" "$generation_a" "$w/main" \
+    || fail "current acknowledgement rejected a prepared legacy generation"
+  ! fm_update_obligation_pending "$marker" "$w/main" \
+    || fail "future legacy generation became active before fast-forward"
+
+  git -C "$w/main" merge -q --ff-only origin/main
+  [ "$(fm_update_obligation_generation "$marker" "$w/main")" = "$generation_c" ] \
+    || fail "future legacy generation was lost during concurrent acknowledgement"
+  fm_update_obligation_ack "$marker" "$generation_c" "$w/main" \
+    || fail "preserved future legacy generation could not be acknowledged"
+  pass "T18 future legacy generations survive concurrent acknowledgements"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -560,5 +585,6 @@ test_acknowledgements_are_generation_bound
 test_herdr_target_acknowledges_exact_live_meta
 test_immutable_generations_preserve_prepared_and_newer_markers
 test_skipped_update_reports_existing_generation
+test_future_legacy_generation_survives_concurrent_ack
 
 echo "# all fm-update tests passed"
