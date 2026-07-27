@@ -114,6 +114,10 @@ if [ "${1:-}" = "--key" ]; then
 else
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+    if ! fm_watcher_protocol_gate "$STATE" "$FM_HOME" "$SCRIPT_DIR/fm-watch.sh"; then
+      echo "error: pending-reply watcher protocol is not ready for $TARGET_TASK_ID" >&2
+      exit 1
+    fi
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).

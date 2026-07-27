@@ -174,14 +174,43 @@ fm_pending_reply_txn_owner_write() {  # <owner-path> <pid> <identity> <token> <c
   fi
 }
 
+fm_pending_reply_protocol_scope() {  # <state-dir> <corr_id> <home-var> <watch-var>
+  local state=$1 corr=$2 home_var=$3 watch_var=$4 rec home state_identity home_state_identity
+  local lock_home lock_watch
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  home=
+  [ -f "$rec" ] && home=$(fm_pending_reply_get "$rec" parent_home)
+  state_identity=$(fm_pending_reply_source_identity "$state") || return 1
+  if [ -n "$home" ]; then
+    home_state_identity=$(fm_pending_reply_source_identity "$home/state") || home_state_identity=
+    [ "$home_state_identity" = "$state_identity" ] || home=
+  fi
+  if [ -z "$home" ] && [ -n "${FM_HOME:-}" ]; then
+    home_state_identity=$(fm_pending_reply_source_identity "$FM_HOME/state") || home_state_identity=
+    [ "$home_state_identity" = "$state_identity" ] && home=$FM_HOME
+  fi
+  if [ -z "$home" ] && [ "$(basename "$state_identity")" = state ]; then
+    home=$(dirname "$state_identity")
+  fi
+  [ -n "$home" ] || return 1
+  home=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  lock_home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+  lock_watch=$(cat "$state/.watch.lock/watcher-path" 2>/dev/null || true)
+  if [ "$lock_home" != "$home" ] || [ -z "$lock_watch" ]; then
+    lock_watch="$home/bin/fm-watch.sh"
+  fi
+  printf -v "$home_var" '%s' "$home"
+  printf -v "$watch_var" '%s' "$lock_watch"
+}
+
 fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
   local state=$1 corr=$2 result_var=$3 lock owner pid identity lock_token phase ticket
   local existing_pid existing_identity existing_token actual attempt=0 generation
   local incomplete_signature='' incomplete_seen=0 current_signature
   local winner winner_ticket winner_token live_owner live_choosing max_ticket
-  local legacy_present
-  fm_watcher_protocol_gate "$state" "${FM_HOME:-$(dirname "$state")}" \
-    "$_FM_PENDING_REPLY_LIB_DIR/fm-watch.sh" || return 1
+  local legacy_present protocol_home protocol_watch
+  fm_pending_reply_protocol_scope "$state" "$corr" protocol_home protocol_watch || return 1
+  fm_watcher_protocol_gate "$state" "$protocol_home" "$protocol_watch" || return 1
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
   mkdir -p "$(dirname "$lock")" || return 1
   pid=${BASHPID:-$$}

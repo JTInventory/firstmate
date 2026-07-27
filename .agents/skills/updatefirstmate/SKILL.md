@@ -34,14 +34,14 @@ This touches only the firstmate repo and its own worktrees, never anything under
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
 3. **Restart this home's watcher when required.**
-   The updater performs and verifies any required home-scoped watcher restart before it prints its summary. `restart-firstmate-watcher: yes` records that a restart was completed. A failure exits non-zero and leaves a durable protocol fence that blocks pending-reply transactions until a later verified retry succeeds.
+   The updater verifies the home-scoped watcher and its harness-tracked follower before it prints its summary. If it finds a legacy watcher, it stops that home-scoped cycle and exits non-zero with a durable protocol fence. Let the existing follower wake the harness, re-arm the watcher through the harness's tracked background mechanism, then run `bin/fm-update.sh` again. `restart-firstmate-watcher: yes` is printed only after that tracked replacement is verified.
 
 4. **Nudge each updated live secondmate.**
    For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:
    ```sh
    bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
    ```
-   The updater has already restarted and verified each watcher listed on `restart-secondmate-watchers:`. Updated homes without a running watcher need no restart because no legacy process remains; their next watcher starts from the updated code. The restart does not stop a secondmate's agent pane or project work.
+   The updater has already verified each watcher and follower listed on `restart-secondmate-watchers:`. If it stopped a legacy secondmate watcher, that secondmate must complete its normal harness-tracked re-arm before the updater retry can succeed. Updated homes without a running watcher need no restart because no legacy process remains; their next watcher starts from the updated code. The restart does not stop a secondmate's agent pane or project work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 
 5. **Report to the captain in plain outcomes.**

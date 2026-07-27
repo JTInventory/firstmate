@@ -34,6 +34,7 @@ TMP_ROOT=$(fm_test_tmproot fm-pending-reply)
 
 export FM_PENDING_REPLY_GRACE_SECS=0
 export FM_SEND_SETTLE=0
+unset NO_MISTAKES_GATE
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -790,6 +791,28 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   pass "fm-send marked secondmate path creates pending and embeds corr"
 }
 
+test_fm_send_refuses_marked_delivery_behind_protocol_fence() {
+  local dir fb log home peer rc pending_count
+  dir="$TMP_ROOT/send-fenced"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_parent send-fenced)
+  fm_write_secondmate_meta "$home/state/hibit.meta" "$home/sm" "sess:fm-hibit"
+  sleep 300 &
+  peer=$!
+  mkdir "$home/state/.watch.lock"
+  printf '%s\n' "$peer" > "$home/state/.watch.lock/pid"
+  printf '%s\n' pending-reply-ticket-v1 > "$home/state/.watch-protocol-required"
+  rc=0
+  run_send "$fb" "$home" "$log" "fm-hibit" "audit behind fence" || rc=$?
+  [ "$rc" -ne 0 ] || fail "marked send bypassed the watcher protocol fence"
+  pending_count=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$pending_count" = 0 ] || fail "fenced send created a pending expectation"
+  [ ! -s "$log" ] || fail "fenced send reached the transport"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "marked sends fail closed behind watcher protocol fence"
+}
+
 test_document_pointer_resolves() {
   local home state corr
   home=$(setup_parent doc-pointer)
@@ -1321,6 +1344,7 @@ test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
+test_fm_send_refuses_marked_delivery_behind_protocol_fence
 test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction

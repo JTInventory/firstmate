@@ -105,6 +105,17 @@ healthy_watcher() {
   return 0
 }
 
+legacy_watcher() {
+  local pid age
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  watch_lock_matches_pid "$pid" || return 1
+  [ "$(cat "$WATCH_LOCK/pending-reply-protocol" 2>/dev/null || true)" != "$FM_WATCHER_PROTOCOL_VERSION" ] \
+    || return 1
+  age=$(fm_path_age "$BEAT")
+  [ "$age" -lt "$GRACE" ]
+}
+
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
@@ -212,6 +223,37 @@ finish_cycle() {
   exit 0
 }
 
+stop_recorded_watcher() {
+  local lock_pid lock_start i
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  lock_start=$(cat "$WATCH_LOCK/pid-start" 2>/dev/null || true)
+  if fm_pid_alive "$lock_pid"; then
+    if watch_lock_matches_pid "$lock_pid"; then
+      if [ -z "$lock_start" ]; then
+        echo "watcher: FAILED - watcher identity is not safely pinned for restart"
+        return 1
+      fi
+      if ! fm_detach_kill "$lock_pid" "$lock_start"; then
+        if fm_pid_alive "$lock_pid" && ! fm_pid_is_zombie "$lock_pid"; then
+          echo "watcher: FAILED - watcher identity is not safely pinned for restart"
+          return 1
+        fi
+      fi
+      i=0
+      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      if fm_pid_alive "$lock_pid" && ! fm_pid_is_zombie "$lock_pid"; then
+        echo "watcher: FAILED - watcher did not stop for restart"
+        return 1
+      fi
+    else
+      clear_stale_recorded_watcher_lock
+    fi
+  fi
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -220,44 +262,46 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart|--restart-verify]" >&2; exit 2 ;;
 esac
 
-if [ "$mode" = restart ] || [ "$mode" = restart_verify ]; then
+if [ "$mode" = arm ] && legacy_watcher; then
+  if [ -e "$STATE/.afk" ]; then
+    echo "watcher: FAILED - AFK daemon owns watcher lifecycle"
+    exit 1
+  fi
+  mode=restart
+fi
+
+if [ "$mode" = restart_verify ]; then
+  fm_watcher_protocol_mark_required "$STATE" || {
+    echo "watcher: FAILED - protocol fence could not be persisted"
+    exit 1
+  }
+  if healthy_watcher \
+    && fm_watcher_protocol_follower_proves_current "$STATE" "$FM_HOME" "$ARM_PATH" \
+    && fm_watcher_protocol_gate "$STATE" "$FM_HOME" "$WATCH"; then
+    report_healthy
+    exit 0
+  fi
+  if [ -e "$STATE/.afk" ]; then
+    echo "watcher: FAILED - AFK daemon owns watcher lifecycle"
+    exit 1
+  fi
+  if ! fm_watcher_protocol_follower_proves_current "$STATE" "$FM_HOME" "$ARM_PATH"; then
+    echo "watcher: FAILED - no verified harness follower for protocol handoff"
+    exit 1
+  fi
+  stop_recorded_watcher || exit 1
+  echo "watcher: FAILED - legacy cycle stopped; harness follower must re-arm"
+  exit 1
+fi
+
+if [ "$mode" = restart ]; then
   if claim_arm_follower; then
     FOLLOWER_CLAIMED=1
   elif [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
     echo "watcher: FAILED - follower ownership is unverified"
     exit 1
   fi
-  # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
-  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-  lock_start=$(cat "$WATCH_LOCK/pid-start" 2>/dev/null || true)
-  if fm_pid_alive "$lock_pid"; then
-    if watch_lock_matches_pid "$lock_pid"; then
-      if [ -z "$lock_start" ]; then
-        echo "watcher: FAILED - watcher identity is not safely pinned for restart"
-        exit 1
-      fi
-      if ! fm_detach_kill "$lock_pid" "$lock_start"; then
-        if fm_pid_alive "$lock_pid" && ! fm_pid_is_zombie "$lock_pid"; then
-          echo "watcher: FAILED - watcher identity is not safely pinned for restart"
-          exit 1
-        fi
-      fi
-      # Wait for it to actually exit before relaunching, so the fresh watcher
-      # either takes a released lock or reclaims a stale dead-pid/reused-pid lock
-      # instead of seeing the dying one as a live holder and no-opping.
-      i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
-      done
-      if fm_pid_alive "$lock_pid" && ! fm_pid_is_zombie "$lock_pid"; then
-        echo "watcher: FAILED - watcher did not stop for restart"
-        exit 1
-      fi
-    else
-      clear_stale_recorded_watcher_lock
-    fi
-  fi
+  stop_recorded_watcher || exit 1
   if [ "$FOLLOWER_CLAIMED" -eq 0 ]; then
     if ! claim_arm_follower_after_handoff; then
       if [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
@@ -280,6 +324,10 @@ if [ "$mode" = arm ]; then
   if healthy_watcher; then
     if claim_arm_follower; then
       FOLLOWER_CLAIMED=1
+      fm_watcher_protocol_gate "$STATE" "$FM_HOME" "$WATCH" || {
+        echo "watcher: FAILED - watcher protocol is not ready"
+        exit 1
+      }
       report_attached
       attach_and_wait "$HEALTHY_PID"
     fi
@@ -356,11 +404,11 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
-      if [ "$mode" = restart_verify ]; then
-        report_healthy
-        exit 0
-      fi
       if [ "$FOLLOWER_CLAIMED" -eq 1 ]; then
+        fm_watcher_protocol_gate "$STATE" "$FM_HOME" "$WATCH" || {
+          echo "watcher: FAILED - watcher protocol is not ready"
+          exit 1
+        }
         echo "watcher: started pid=$child (beacon fresh)"
         attach_and_wait "$child"
       fi
@@ -368,7 +416,11 @@ while :; do
       exit 0
     fi
     # Another watcher won the singleton; this detached process stood down.
-    if [ "$mode" = arm ]; then
+    if [ "$FOLLOWER_CLAIMED" -eq 1 ]; then
+      fm_watcher_protocol_gate "$STATE" "$FM_HOME" "$WATCH" || {
+        echo "watcher: FAILED - watcher protocol is not ready"
+        exit 1
+      }
       report_attached
       # The detached loser can only have written the watcher's benign singleton
       # status. Do not replay that startup race as a false wake when the peer's
