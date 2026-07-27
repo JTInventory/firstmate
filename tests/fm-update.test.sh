@@ -82,7 +82,12 @@ new_protocol_migration_world() {
   if [ -n "${FM_TEST_PREDECESSOR_BIN:-}" ]; then
     cp -R "$FM_TEST_PREDECESSOR_BIN" "$w/seed/bin"
   else
-    git -C "$ROOT" archive 384ed2b bin | tar -x -C "$w/seed"
+    cp -R "$ROOT/bin" "$w/seed/bin"
+    sed "s/^FM_WATCHER_PROTOCOL_VERSION=.*/FM_WATCHER_PROTOCOL_VERSION='pending-reply-ticket-v2'/" \
+      "$w/seed/bin/fm-watcher-protocol-lib.sh" \
+      > "$w/seed/bin/fm-watcher-protocol-lib.sh.tmp"
+    mv "$w/seed/bin/fm-watcher-protocol-lib.sh.tmp" \
+      "$w/seed/bin/fm-watcher-protocol-lib.sh"
   fi
   printf 'v1\n' > "$w/seed/AGENTS.md"
   printf 'state/\ndata/\nconfig/\nprojects/\n' > "$w/seed/.gitignore"
@@ -421,7 +426,9 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
     || fail "migration fixture did not attach a v1 follower"
 
   rc=0
+  # A v2 updater completed the install before the v3 updater learned to re-exec.
   out=$(PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_UPDATE_REEXECED=1 \
     FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "predecessor updater did not install the new updater"
   assert_contains "$out" "firstmate: updated " "predecessor updater installed v3"
