@@ -125,6 +125,7 @@ test_hooks_work_when_jq_fails() {
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 127' > "$fakebin/jq"
   chmod +x "$fakebin/jq"
+  ln -s "$(command -v node)" "$fakebin/node"
   printf '{"hook_event_name":"SessionStart","session_id":"thread-no-jq"}\n' \
     | FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq PATH="$fakebin:$BASE_PATH" bash "$HOOK"
   [ -f "$home/state/.lock" ] || fail "SessionStart did not acquire without jq"
