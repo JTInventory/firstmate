@@ -76,11 +76,18 @@ fm_update_obligation_generation() {
 }
 
 fm_update_obligation_load() {
-  local marker=$1 dir=$2 head generation
+  local marker=$1 dir=$2 head generation value
   if [ -f "$marker" ]; then
     head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
     [ -n "$head" ] || return 1
-    fm_update_obligation_write "$marker" "$head" || return 1
+    value=$(sed -n 's/^generation=//p' "$marker" 2>/dev/null || true)
+    if fm_update_obligation_valid_generation "$value" \
+      && git -C "$dir" merge-base --is-ancestor "$value" "$head" 2>/dev/null; then
+      generation=$value
+    else
+      generation=$head
+    fi
+    fm_update_obligation_write "$marker" "$generation" || return 1
     rm -f "$marker" || return 1
   fi
   generation=$(fm_update_obligation_generation "$marker" "$dir") || return 1
@@ -94,13 +101,13 @@ fm_update_obligation_pending() {
 }
 
 fm_update_obligation_ack() {
-  local marker=$1 generation=$2 dir=$3 records head record candidate
+  local marker=$1 generation=$2 dir=$3 records record candidate selected
   fm_update_obligation_valid_generation "$generation" || return 1
-  head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
-  [ "$head" = "$generation" ] || return 1
   if [ -f "$marker" ]; then
     fm_update_obligation_load "$marker" "$dir" || return 1
   fi
+  selected=$(fm_update_obligation_generation "$marker" "$dir") || return 1
+  [ "$selected" = "$generation" ] || return 1
   records=$(fm_update_obligation_records_dir "$marker")
   record="$records/$generation"
   [ -f "$record" ] || return 1
@@ -108,11 +115,12 @@ fm_update_obligation_ack() {
     [ -f "$record" ] || continue
     candidate=${record##*/}
     fm_update_obligation_valid_generation "$candidate" || continue
+    [ "$candidate" = "$generation" ] && continue
     if git -C "$dir" merge-base --is-ancestor "$candidate" "$generation" 2>/dev/null; then
       rm -f "$record" || return 1
     fi
   done
-  return 0
+  rm -f "$records/$generation"
 }
 
 default_branch() {

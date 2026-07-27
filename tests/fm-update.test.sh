@@ -484,12 +484,14 @@ test_herdr_target_acknowledges_exact_live_meta() {
 }
 
 test_immutable_generations_preserve_prepared_and_newer_markers() {
-  local w marker generation_a generation_b rc
+  local w marker records generation_a generation_b generation_c fail_target failed rc
   w=$(new_world t16)
   marker="$w/home/state/.watch-protocol-reread-required"
   generation_a=$(git -C "$w/main" rev-parse HEAD)
   bump_origin "$w" readme
   generation_b=$(git -C "$w/seed" rev-parse HEAD)
+  bump_origin "$w" readme
+  generation_c=$(git -C "$w/seed" rev-parse HEAD)
 
   fm_update_obligation_write "$marker" "$generation_a"
   fm_update_obligation_write "$marker" "$generation_b"
@@ -499,15 +501,32 @@ test_immutable_generations_preserve_prepared_and_newer_markers() {
   git -C "$w/main" fetch -q origin main
   git -C "$w/main" merge -q --ff-only origin/main
   [ "$(fm_update_obligation_generation "$marker" "$w/main")" = "$generation_b" ] \
-    || fail "newer immutable generation was not selected after fast-forward"
+    || fail "ancestor obligation was not selected after a later fast-forward"
   rc=0
   fm_update_obligation_ack "$marker" "$generation_a" "$w/main" || rc=$?
   [ "$rc" -ne 0 ] || fail "older generation acknowledged a newer checkout"
+
+  records=$(fm_update_obligation_records_dir "$marker")
+  fail_target="$records/$generation_b"
+  failed="$w/ack-failed"
+  rm() {
+    if [ "${1:-}" = -f ] && [ "${2:-}" = "$fail_target" ] && [ ! -f "$failed" ]; then
+      touch "$failed"
+      return 1
+    fi
+    command rm "$@"
+  }
+  rc=0
+  fm_update_obligation_ack "$marker" "$generation_b" "$w/main" || rc=$?
+  unset -f rm
+  [ "$rc" -ne 0 ] || fail "interrupted acknowledgement unexpectedly succeeded"
+  [ "$(fm_update_obligation_generation "$marker" "$w/main")" = "$generation_b" ] \
+    || fail "interrupted acknowledgement lost its retry generation"
   fm_update_obligation_ack "$marker" "$generation_b" "$w/main" \
-    || fail "current generation acknowledgement failed"
+    || fail "ancestor generation acknowledgement retry failed at $generation_c"
   ! fm_update_obligation_pending "$marker" "$w/main" \
     || fail "current acknowledgement left superseded generations"
-  pass "T16 immutable generations survive preparation and supersede safely"
+  pass "T16 ancestor obligations remain acknowledgeable and retries are durable"
 }
 
 test_skipped_update_reports_existing_generation() {
