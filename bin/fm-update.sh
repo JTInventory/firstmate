@@ -55,10 +55,16 @@ fi
 
 reread_firstmate="no"
 restart_firstmate_watcher="no"
+reread_marker=$(fm_watcher_protocol_reread_marker "$STATE")
+[ -f "$reread_marker" ] && reread_firstmate="yes"
 ff_target "$FM_ROOT" "firstmate" origin no no
 if [ "$FF_STATUS" = "updated" ]; then
   if [ -n "$FF_INSTR" ]; then
     reread_firstmate="yes"
+    fm_watcher_protocol_mark_reread_required "$STATE" || {
+      echo "firstmate: skipped: reread obligation could not be persisted" >&2
+      exit 1
+    }
   fi
 fi
 if ! fm_watcher_protocol_restart_if_required "$FM_HOME" "$STATE" "$FM_ROOT"; then
@@ -75,6 +81,7 @@ fi
 # same condition it has always used.
 
 FF_NUDGE_WINDOWS=""
+FF_NUDGE_MARKERS=""
 FF_SEEN_HOMES=""
 restart_secondmate_watchers=""
 
@@ -111,6 +118,19 @@ fi
 
 # --- caller action summary -------------------------------------------------
 
+if [ "$reread_firstmate" = yes ]; then
+  rm -f "$reread_marker" || {
+    echo "firstmate: skipped: reread obligation could not be committed" >&2
+    exit 1
+  }
+fi
+while IFS= read -r nudge_marker; do
+  [ -n "$nudge_marker" ] || continue
+  rm -f "$nudge_marker" || {
+    echo "firstmate: skipped: secondmate nudge obligation could not be committed" >&2
+    exit 1
+  }
+done <<< "$FF_NUDGE_MARKERS"
 echo "reread-firstmate: $reread_firstmate"
 echo "restart-firstmate-watcher: $restart_firstmate_watcher"
 echo "restart-secondmate-watchers:${restart_secondmate_watchers:- none}"

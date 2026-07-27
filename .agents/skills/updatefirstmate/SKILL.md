@@ -34,7 +34,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
 3. **Restart this home's watcher when required.**
-   The updater verifies the home-scoped watcher and its harness-tracked follower before it prints its summary. If it finds a legacy watcher, it stops that home-scoped cycle and exits non-zero with a durable protocol fence. Let the existing follower wake the harness, re-arm the watcher through the harness's tracked background mechanism, then run `bin/fm-update.sh` again. `restart-firstmate-watcher: yes` is printed only after that tracked replacement is verified.
+   The updater verifies the home-scoped watcher and its harness-tracked follower before it prints its summary. If it finds a legacy watcher, it stops that home-scoped cycle and exits non-zero with durable protocol and reread obligations. Let the existing follower wake the harness, re-arm the watcher through the harness's tracked background mechanism, then run `bin/fm-update.sh` again. The retry replays the required AGENTS.md reread and any secondmate nudges even when every checkout is already current. `restart-firstmate-watcher: yes` is printed only after that tracked replacement is verified.
 
 4. **Nudge each updated live secondmate.**
    For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:

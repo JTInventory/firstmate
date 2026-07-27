@@ -151,7 +151,7 @@ test_guard_warnings() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
-  printf '%s\n' pending-reply-ticket-v1 > "$state/.watch.lock/pending-reply-protocol"
+  printf '%s\n' pending-reply-ticket-v2 > "$state/.watch.lock/pending-reply-protocol"
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
@@ -1598,7 +1598,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   printf '%s\n' "$start" > "$state/.watch.lock/pid-start"
-  printf '%s\n' pending-reply-ticket-v1 > "$state/.watch.lock/pending-reply-protocol"
+  printf '%s\n' pending-reply-ticket-v2 > "$state/.watch.lock/pending-reply-protocol"
   printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
   chmod 600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"

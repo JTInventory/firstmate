@@ -213,6 +213,7 @@ secondmate_sync() {
     return 0
   fi
   FF_NUDGE_WINDOWS=""
+  FF_NUDGE_MARKERS=""
   FF_SEEN_HOMES=""
   SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"

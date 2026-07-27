@@ -365,22 +365,23 @@ ff_target() {
   return 0
 }
 
-# Sweep accumulators. The caller resets both before a sweep and reads
-# FF_NUDGE_WINDOWS after.
+# Sweep accumulators. The caller resets them before a sweep and reads
+# FF_NUDGE_WINDOWS and FF_NUDGE_MARKERS after.
 FF_NUDGE_WINDOWS=""
+FF_NUDGE_MARKERS=""
 FF_SEEN_HOMES=""
 
 # Validate and fast-forward one secondmate home, accumulating its window into
 # FF_NUDGE_WINDOWS when it should be live-converged. Args:
 #   id home window base_mode nudge_requires_instr
-# A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
-# live window. With nudge_requires_instr=yes the advance must also have changed
-# the instruction surface (FF_INSTR non-empty): an already-current home, or one
-# whose only change was non-instruction tracked files, is left undisturbed. The
-# firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
-# each resolved home is processed at most once.
+# A home is nudged when it advanced or carries a durable reread obligation and
+# has a live window. With nudge_requires_instr=yes a new advance must have
+# changed the instruction surface, while an already-current interrupted update
+# replays its obligation. The firstmate repo itself (FM_ROOT) is never processed
+# as its own secondmate, and each resolved home is processed at most once.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local reread_marker pending_reread should_nudge
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -397,12 +398,31 @@ process_secondmate() {
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
   ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
-  if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
-    if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
-      return 0
+  reread_marker="$home_real/state/.watch-protocol-reread-required"
+  pending_reread=0
+  [ -f "$reread_marker" ] && pending_reread=1
+  should_nudge=0
+  if [ "$FF_STATUS" = "updated" ]; then
+    if [ "$nudge_requires_instr" != yes ] || [ -n "$FF_INSTR" ]; then
+      should_nudge=1
+    fi
+  fi
+  [ "$pending_reread" -eq 1 ] && should_nudge=1
+  if [ "$should_nudge" -eq 1 ] && [ -n "$window" ]; then
+    if [ "$pending_reread" -eq 0 ]; then
+      mkdir -p "$home_real/state" || return 1
+      printf '%s\n' pending > "$reread_marker" || return 1
     fi
     if [ "$(type -t fm_ff_after_instruction_update 2>/dev/null || true)" = function ]; then
       fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR" || return 1
+      rm -f "$reread_marker" || return 1
+    else
+      if [ -n "$FF_NUDGE_MARKERS" ]; then
+        FF_NUDGE_MARKERS="$FF_NUDGE_MARKERS
+$reread_marker"
+      else
+        FF_NUDGE_MARKERS=$reread_marker
+      fi
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
   fi

@@ -106,14 +106,12 @@ healthy_watcher() {
 }
 
 legacy_watcher() {
-  local pid age
+  local pid
   pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   watch_lock_matches_pid "$pid" || return 1
   [ "$(cat "$WATCH_LOCK/pending-reply-protocol" 2>/dev/null || true)" != "$FM_WATCHER_PROTOCOL_VERSION" ] \
     || return 1
-  age=$(fm_path_age "$BEAT")
-  [ "$age" -lt "$GRACE" ]
 }
 
 report_attached() {
@@ -267,6 +265,10 @@ if [ "$mode" = arm ] && legacy_watcher; then
     echo "watcher: FAILED - AFK daemon owns watcher lifecycle"
     exit 1
   fi
+  fm_watcher_protocol_mark_reread_required "$STATE" || {
+    echo "watcher: FAILED - reread obligation could not be persisted"
+    exit 1
+  }
   mode=restart
 fi
 
@@ -289,6 +291,10 @@ if [ "$mode" = restart_verify ]; then
     echo "watcher: FAILED - no verified harness follower for protocol handoff"
     exit 1
   fi
+  fm_watcher_protocol_mark_reread_required "$STATE" || {
+    echo "watcher: FAILED - reread obligation could not be persisted"
+    exit 1
+  }
   stop_recorded_watcher || exit 1
   echo "watcher: FAILED - legacy cycle stopped; harness follower must re-arm"
   exit 1

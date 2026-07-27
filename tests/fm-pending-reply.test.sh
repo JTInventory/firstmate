@@ -801,7 +801,7 @@ test_fm_send_refuses_marked_delivery_behind_protocol_fence() {
   peer=$!
   mkdir "$home/state/.watch.lock"
   printf '%s\n' "$peer" > "$home/state/.watch.lock/pid"
-  printf '%s\n' pending-reply-ticket-v1 > "$home/state/.watch-protocol-required"
+  printf '%s\n' pending-reply-ticket-v2 > "$home/state/.watch-protocol-required"
   rc=0
   run_send "$fb" "$home" "$log" "fm-hibit" "audit behind fence" || rc=$?
   [ "$rc" -ne 0 ] || fail "marked send bypassed the watcher protocol fence"

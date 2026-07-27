@@ -295,6 +295,28 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+test_replays_interrupted_reread_and_nudge_obligations() {
+  local w out
+  w=$(new_world t12)
+  add_sm "$w" sm1
+  printf '%s\n' state/ >> "$(git -C "$w/sm1" rev-parse --git-path info/exclude)"
+  mkdir -p "$w/sm1/state"
+  printf '%s\n' pending-reply-ticket-v2 > "$w/home/state/.watch-protocol-reread-required"
+  printf '%s\n' pending-reply-ticket-v2 > "$w/sm1/state/.watch-protocol-reread-required"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" "retry keeps current firstmate"
+  assert_contains "$out" "secondmate sm1: already current" "retry keeps current secondmate"
+  assert_contains "$out" "reread-firstmate: yes" "retry replays firstmate reread"
+  assert_contains "$out" "nudge-secondmates: main:fm-sm1" "retry replays secondmate nudge"
+  [ ! -f "$w/home/state/.watch-protocol-reread-required" ] \
+    || fail "firstmate reread obligation remained after replay"
+  [ ! -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+    || fail "secondmate nudge obligation remained after replay"
+  pass "T12 interrupted update obligations replay on retry"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -304,5 +326,6 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_replays_interrupted_reread_and_nudge_obligations
 
 echo "# all fm-update tests passed"
