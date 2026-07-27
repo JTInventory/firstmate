@@ -23,6 +23,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 UPDATE="$ROOT/bin/fm-update.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -478,6 +480,76 @@ test_herdr_target_acknowledges_exact_live_meta() {
   pass "T15 Herdr acknowledgements resolve exact live metadata"
 }
 
+test_atomic_generation_claims_preserve_newer_markers() {
+  local w marker signal release generation_a generation_b generation_c rc
+  w="$TMP_ROOT/t16"
+  mkdir -p "$w"
+  marker="$w/obligation"
+  signal="$w/claimed"
+  release="$w/release"
+  generation_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  generation_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  generation_c=cccccccccccccccccccccccccccccccccccccccc
+
+  fm_update_obligation_write "$marker" "$generation_a"
+  cat() {
+    case "${1:-}" in
+      "$w"/.update-obligation-claim.*)
+        touch "$signal"
+        while [ ! -f "$release" ]; do sleep 0.01; done
+        ;;
+    esac
+    command cat "$@"
+  }
+  fm_update_obligation_ack "$marker" "$generation_a" &
+  rc=$!
+  while [ ! -f "$signal" ]; do sleep 0.01; done
+  fm_update_obligation_write "$marker" "$generation_b"
+  touch "$release"
+  wait "$rc" || fail "matching acknowledgement claim failed"
+  unset -f cat
+  [ "$(cat "$marker")" = "generation=$generation_b" ] \
+    || fail "acknowledgement claim deleted a newer generation"
+
+  rm -f "$signal" "$release"
+  cat() {
+    case "${1:-}" in
+      "$w"/.update-obligation-rollback.*)
+        touch "$signal"
+        while [ ! -f "$release" ]; do sleep 0.01; done
+        ;;
+    esac
+    command cat "$@"
+  }
+  fm_update_obligation_rollback "$marker" "$generation_b" \
+    "generation=$generation_a" 1 &
+  rc=$!
+  while [ ! -f "$signal" ]; do sleep 0.01; done
+  fm_update_obligation_write "$marker" "$generation_c"
+  touch "$release"
+  wait "$rc" || fail "generation rollback claim failed"
+  unset -f cat
+  [ "$(cat "$marker")" = "generation=$generation_c" ] \
+    || fail "rollback claim overwrote a newer generation"
+  pass "T16 generation claims preserve concurrent marker updates"
+}
+
+test_skipped_update_reports_existing_generation() {
+  local w generation out
+  w=$(new_world t17)
+  generation=$(git -C "$w/main" rev-parse HEAD)
+  printf 'generation=%s\n' "$generation" > "$w/home/state/.watch-protocol-reread-required"
+  printf 'local edit\n' >> "$w/main/README.md"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: dirty working tree" "dirty update remains skipped"
+  assert_contains "$out" "reread-firstmate: yes" "skipped update replays pending reread"
+  assert_contains "$out" "reread-firstmate-generation: $generation" \
+    "skipped update reports the existing generation"
+  pass "T17 skipped updates retain acknowledgement generations"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -491,5 +563,7 @@ test_replays_interrupted_reread_and_nudge_obligations
 test_first_protocol_upgrade_requires_installed_updater_pass
 test_acknowledgements_are_generation_bound
 test_herdr_target_acknowledges_exact_live_meta
+test_atomic_generation_claims_preserve_newer_markers
+test_skipped_update_reports_existing_generation
 
 echo "# all fm-update tests passed"
