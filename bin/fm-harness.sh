@@ -27,6 +27,9 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # Codex exposes a stable per-session marker to tool processes. Grok must stay
+  # ahead of this check because its child environment may inherit that marker.
+  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
