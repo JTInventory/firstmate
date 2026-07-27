@@ -76,7 +76,8 @@ fm_update_obligation_generation() {
 }
 
 fm_update_obligation_load() {
-  local marker=$1 dir=$2 head generation value
+  local marker=$1 dir=$2 head generation value records record candidate
+  FF_OBLIGATION_GENERATION=""
   if [ -f "$marker" ]; then
     head=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
     [ -n "$head" ] || return 1
@@ -90,8 +91,18 @@ fm_update_obligation_load() {
     fm_update_obligation_write "$marker" "$generation" || return 1
     rm -f "$marker" || return 1
   fi
-  generation=$(fm_update_obligation_generation "$marker" "$dir") || return 1
-  FF_OBLIGATION_GENERATION=$generation
+  if generation=$(fm_update_obligation_generation "$marker" "$dir"); then
+    FF_OBLIGATION_GENERATION=$generation
+    return 0
+  fi
+  records=$(fm_update_obligation_records_dir "$marker")
+  for record in "$records"/*; do
+    [ -f "$record" ] || continue
+    candidate=${record##*/}
+    fm_update_obligation_valid_generation "$candidate" || continue
+    git -C "$dir" cat-file -e "$candidate^{commit}" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 fm_update_obligation_pending() {

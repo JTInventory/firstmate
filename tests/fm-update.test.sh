@@ -570,6 +570,24 @@ test_future_legacy_generation_survives_concurrent_ack() {
   pass "T18 future legacy generations survive concurrent acknowledgements"
 }
 
+test_future_only_legacy_generation_updates_on_first_retry() {
+  local w marker generation out
+  w=$(new_world t19)
+  marker="$w/home/state/.watch-protocol-reread-required"
+  bump_origin "$w" readme
+  generation=$(git -C "$w/seed" rev-parse HEAD)
+  git -C "$w/main" fetch -q origin main
+  printf 'generation=%s\n' "$generation" > "$marker"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " \
+    "future-only legacy obligation does not block its first retry"
+  assert_contains "$out" "reread-firstmate-generation: $generation" \
+    "future-only legacy obligation activates after fast-forward"
+  pass "T19 future-only legacy generations recover on the first retry"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -586,5 +604,6 @@ test_herdr_target_acknowledges_exact_live_meta
 test_immutable_generations_preserve_prepared_and_newer_markers
 test_skipped_update_reports_existing_generation
 test_future_legacy_generation_survives_concurrent_ack
+test_future_only_legacy_generation_updates_on_first_retry
 
 echo "# all fm-update tests passed"
