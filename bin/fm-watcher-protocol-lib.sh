@@ -136,6 +136,7 @@ fm_watcher_protocol_restart_if_required() {
   x_mode="$home/config/x-mode.env"
   if [ -f "$x_mode" ]; then
     out=$(
+      # shellcheck source=/dev/null
       . "$x_mode" || exit 1
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$state" \
         "$arm" --restart-verify 2>&1
@@ -155,6 +156,8 @@ fm_watcher_protocol_restart_if_required() {
       return 1
     }
   [ ! -f "$(fm_watcher_protocol_marker "$state")" ] || return 1
+  # Read by callers after this function returns.
+  # shellcheck disable=SC2034
   FM_WATCHER_PROTOCOL_RESTARTED=1
   printf '%s\n' "$out"
 }

@@ -217,7 +217,7 @@ phase_teardown() {
   done
   [ -n "${corr:-}" ] || fail "correlated secondmate request was not recorded"
   "$ROOT/bin/fm-secondmate-report.sh" \
-    "$HOME_DIR/state/design.status" done "$corr" "route complete" \
+    "$HOME_DIR/state/design.status" "done" "$corr" "route complete" \
     || fail "secondmate report failed before teardown"
   # shellcheck source=bin/fm-pending-reply-lib.sh
   . "$ROOT/bin/fm-pending-reply-lib.sh"

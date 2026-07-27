@@ -12,7 +12,7 @@ TMP_ROOT=$(fm_test_tmproot fm-watcher-protocol-tests)
 trap fm_test_watch_cleanup_exit EXIT
 
 test_legacy_watcher_creates_durable_fence() {
-  local dir state peer token
+  local dir state peer
   dir=$(make_case legacy-fence)
   state="$dir/state"
   sleep 300 &
@@ -146,7 +146,7 @@ test_plain_arm_replaces_live_legacy_primary() {
 }
 
 test_nested_gate_uses_child_owner_scope() {
-  local parent child state fakebin arm_out arm_pid watcher corr token
+  local parent child state fakebin arm_out arm_pid watcher corr
   parent=$(make_case nested-parent)
   child=$(make_case nested-child)
   state="$child/state"
