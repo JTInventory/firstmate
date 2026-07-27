@@ -65,6 +65,7 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  : > "$fake/bin/fm-pending-reply-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
@@ -171,6 +172,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  : > "$fake/bin/fm-pending-reply-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash

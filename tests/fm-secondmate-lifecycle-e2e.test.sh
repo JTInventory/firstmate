@@ -210,7 +210,19 @@ phase_recovery() {
 }
 
 phase_teardown() {
-  local teardown_out
+  local teardown_out pending_reply corr
+  for pending_reply in "$HOME_DIR/state/pending-replies"/*; do
+    [ -f "$pending_reply" ] || continue
+    corr=${pending_reply##*/}
+  done
+  [ -n "${corr:-}" ] || fail "correlated secondmate request was not recorded"
+  "$ROOT/bin/fm-secondmate-report.sh" \
+    "$HOME_DIR/state/design.status" done "$corr" "route complete" \
+    || fail "secondmate report failed before teardown"
+  # shellcheck source=bin/fm-pending-reply-lib.sh
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  fm_pending_reply_try_resolve "$HOME_DIR/state" "$corr" \
+    || fail "correlated secondmate report was not resolved before teardown"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
