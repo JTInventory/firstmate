@@ -77,19 +77,21 @@ new_protocol_migration_world() {
   git init -q --bare "$w/origin.git"
   git -C "$w/origin.git" symbolic-ref HEAD refs/heads/main
   git clone -q "$w/origin.git" "$w/seed" 2>/dev/null
+  if [ -n "${FM_TEST_PREDECESSOR_BIN:-}" ]; then
+    cp -R "$FM_TEST_PREDECESSOR_BIN" "$w/seed/bin"
+  else
+    git -C "$ROOT" archive 384ed2b bin | tar -x -C "$w/seed"
+  fi
   printf 'v1\n' > "$w/seed/AGENTS.md"
   printf 'state/\ndata/\nconfig/\nprojects/\n' > "$w/seed/.gitignore"
-  cp -R "$ROOT/bin" "$w/seed/bin"
-  sed -i "s/pending-reply-ticket-v2/pending-reply-ticket-v1/" \
-    "$w/seed/bin/fm-watcher-protocol-lib.sh"
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm protocol-v1
   git -C "$w/seed" push -q origin main
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
-  cp "$ROOT/bin/fm-watcher-protocol-lib.sh" "$w/seed/bin/fm-watcher-protocol-lib.sh"
-  git -C "$w/seed" add bin/fm-watcher-protocol-lib.sh
-  git -C "$w/seed" commit -qm protocol-v2
+  cp -R "$ROOT/bin/." "$w/seed/bin/"
+  git -C "$w/seed" add bin
+  git -C "$w/seed" commit -qm protocol-v3
   git -C "$w/seed" push -q origin main
   printf '%s\n' "$w"
 }
@@ -129,14 +131,17 @@ run_update() {
 }
 
 ack_firstmate_reread() {
-  local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" --ack-reread-firstmate >/dev/null
+  local w=$1 generation
+  generation=$(sed -n 's/^generation=//p' "$w/home/state/.watch-protocol-reread-required")
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-reread-firstmate "$generation" >/dev/null
 }
 
 ack_secondmate_nudge() {
-  local w=$1 target=$2
+  local w=$1 target=$2 generation
+  generation=$(sed -n 's/^generation=//p' "$w/sm1/state/.watch-protocol-reread-required")
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
-    "$UPDATE" --ack-secondmate-nudge "$target" >/dev/null
+    "$UPDATE" --ack-secondmate-nudge "$target" "$generation" >/dev/null
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -377,7 +382,7 @@ test_replays_interrupted_reread_and_nudge_obligations() {
   pass "T12 interrupted update obligations persist until acknowledged"
 }
 
-test_first_protocol_upgrade_reexecs_installed_updater() {
+test_first_protocol_upgrade_requires_installed_updater_pass() {
   local w fakebin watcher arm out rc
   w=$(new_protocol_migration_world t13)
   fakebin="$w/fakebin"
@@ -392,12 +397,12 @@ test_first_protocol_upgrade_reexecs_installed_updater() {
   UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $watcher"
   for _ in $(seq 1 60); do
     [ "$(cat "$w/home/state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
-      && [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v1 ] \
+      && [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v2 ] \
       && break
     sleep 0.1
   done
-  [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v1 ] \
-    || fail "migration fixture did not start a v1 watcher"
+  [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v2 ] \
+    || fail "migration fixture did not start the predecessor watcher"
 
   PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
@@ -414,15 +419,63 @@ test_first_protocol_upgrade_reexecs_installed_updater() {
   rc=0
   out=$(PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "v1 updater process accepted the v1 watcher after installing v2"
-  assert_contains "$out" "firstmate: updated " "behind updater installed v2"
+  [ "$rc" -eq 0 ] || fail "predecessor updater did not install the new updater"
+  assert_contains "$out" "firstmate: updated " "predecessor updater installed v3"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" >"$w/second-pass.out" 2>&1 || rc=$?
+  out=$(cat "$w/second-pass.out")
+  [ "$rc" -ne 0 ] || fail "installed updater accepted the predecessor watcher"
   assert_contains "$out" "watcher protocol restart could not be verified" \
-    "installed updater re-executed before watcher validation"
-  [ "$(cat "$w/home/state/.watch-protocol-required" 2>/dev/null || true)" = pending-reply-ticket-v2 ] \
-    || fail "first protocol upgrade did not publish the v2 fence"
+    "installed updater enforces the required second pass"
+  [ "$(cat "$w/home/state/.watch-protocol-required" 2>/dev/null || true)" = pending-reply-ticket-v3 ] \
+    || fail "first protocol upgrade did not publish the v3 fence"
   wait "$watcher" 2>/dev/null || true
   wait "$arm" 2>/dev/null || true
-  pass "T13 first protocol upgrade re-execs before watcher validation"
+  pass "T13 real predecessor requires the installed updater pass"
+}
+
+test_acknowledgements_are_generation_bound() {
+  local w old_generation new_generation out rc
+  w=$(new_world t14)
+  old_generation=$(git -C "$w/main" rev-parse HEAD)
+  printf 'generation=%s\n' "$old_generation" > "$w/home/state/.watch-protocol-reread-required"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+  new_generation=$(sed -n 's/^reread-firstmate-generation: //p' <<< "$out")
+  [ -n "$new_generation" ] && [ "$new_generation" != "$old_generation" ] \
+    || fail "new update generation was not reported"
+
+  rc=0
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-reread-firstmate "$old_generation" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale acknowledgement cleared a newer obligation"
+  [ "$(cat "$w/home/state/.watch-protocol-reread-required")" = "generation=$new_generation" ] \
+    || fail "newer reread generation was not preserved"
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-reread-firstmate "$new_generation" >/dev/null
+  pass "T14 stale acknowledgements cannot clear newer generations"
+}
+
+test_herdr_target_acknowledges_exact_live_meta() {
+  local w out generation
+  w=$(new_world t15)
+  add_sm "$w" sm1
+  sed -i 's/^window=.*/window=default:w1:p2/' "$w/home/state/sm1.meta"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+  assert_contains "$out" "nudge-secondmates: default:w1:p2" "Herdr target is surfaced unchanged"
+  generation=$(sed -n 's/^nudge-secondmate-generation: default:w1:p2|//p' <<< "$out")
+  [ -n "$generation" ] || fail "Herdr target generation was not reported"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-secondmate-nudge default:w1:p2 "$generation" >/dev/null
+  [ ! -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+    || fail "Herdr target acknowledgement did not clear its obligation"
+  pass "T15 Herdr acknowledgements resolve exact live metadata"
 }
 
 test_updates_main_and_secondmate
@@ -435,6 +488,8 @@ test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_replays_interrupted_reread_and_nudge_obligations
-test_first_protocol_upgrade_reexecs_installed_updater
+test_first_protocol_upgrade_requires_installed_updater_pass
+test_acknowledgements_are_generation_bound
+test_herdr_target_acknowledges_exact_live_meta
 
 echo "# all fm-update tests passed"

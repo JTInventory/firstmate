@@ -348,7 +348,36 @@ test_bootstrap_sweep_surfaces_skipped_home() {
   pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
 }
 
-# --- T10: spawning a secondmate fast-forwards its worktree before launch ------
+test_bootstrap_retry_clears_child_obligation() {
+  local w commit fakebin out count pending
+  w=$(new_world boot-retry)
+  commit=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-retry "$commit"
+  mkdir -p "$w/sm-retry/state" "$w/home/state/.secondmate-nudge-pending"
+  printf 'generation=%s\n' "$commit" > "$w/sm-retry/state/.watch-protocol-reread-required"
+  pending="$w/home/state/.secondmate-nudge-pending/sm-retry.pending"
+  {
+    printf 'id=sm-retry\n'
+    printf 'selector=fm-sm-retry\n'
+    printf 'home=%s/sm-retry\n' "$w"
+    printf 'commit=%s\n' "$commit"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+  } > "$pending"
+
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  count=$(printf '%s\n' "$out" | grep -c '^BOOTSTRAP_INFO: nudged fm-sm-retry ' || true)
+  [ "$count" -eq 1 ] || fail "retried nudge was delivered $count times"
+  [ ! -f "$pending" ] || fail "parent retry marker survived successful delivery"
+  [ ! -f "$w/sm-retry/state/.watch-protocol-reread-required" ] \
+    || fail "child reread obligation survived successful retry delivery"
+  pass "T10 bootstrap retry clears the matching child obligation"
+}
+
+# --- T11: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
   local w c1 c2 fakebin
   w=$(new_world spawn-ff)
@@ -428,6 +457,7 @@ test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_sweep_surfaces_skipped_home
+test_bootstrap_retry_clears_child_obligation
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 

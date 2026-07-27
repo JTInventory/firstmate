@@ -27,6 +27,29 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+fm_update_obligation_write_value() {
+  local marker=$1 value=$2 parent tmp
+  parent=${marker%/*}
+  mkdir -p "$parent" || return 1
+  tmp=$(mktemp "$parent/.update-obligation.XXXXXX") || return 1
+  printf '%s\n' "$value" > "$tmp" \
+    && chmod 600 "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$marker" || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+}
+
+fm_update_obligation_write() {
+  fm_update_obligation_write_value "$1" "generation=$2"
+}
+
+fm_update_obligation_ack() {
+  local marker=$1 generation=$2
+  [ "$(cat "$marker" 2>/dev/null || true)" = "generation=$generation" ] || return 1
+  rm -f "$marker"
+}
+
 default_branch() {
   local dir=$1 ref branch
   ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -277,9 +300,11 @@ FF_STATUS=""
 FF_INSTR=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
-  local obligation_marker=${6:-} obligation_mode=${7:-always} obligation_created=0
+  local obligation_marker=${6:-} obligation_mode=${7:-always}
+  local obligation_existed=0 obligation_previous=""
   FF_STATUS="skipped"
   FF_INSTR=""
+  FF_OBLIGATION_GENERATION=""
 
   if [ ! -d "$dir" ]; then
     echo "$label: skipped: not a directory"
@@ -340,6 +365,13 @@ ff_target() {
     return 0
   }
   if [ "$local_rev" = "$base_rev" ]; then
+    if [ -n "$obligation_marker" ] && [ -f "$obligation_marker" ]; then
+      fm_update_obligation_write "$obligation_marker" "$local_rev" || {
+        echo "$label: skipped: update obligation could not be persisted"
+        return 0
+      }
+      FF_OBLIGATION_GENERATION=$local_rev
+    fi
     FF_STATUS="current"
     echo "$label: already current"
     return 0
@@ -352,30 +384,25 @@ ff_target() {
   instr=$(changed_instr "$dir" "$base")
   if [ -n "$obligation_marker" ] \
     && { [ "$obligation_mode" = always ] || [ -n "$instr" ]; }; then
-    local obligation_parent obligation_tmp
-    obligation_parent=${obligation_marker%/*}
-    mkdir -p "$obligation_parent" || {
+    if [ -f "$obligation_marker" ]; then
+      obligation_existed=1
+      obligation_previous=$(cat "$obligation_marker" 2>/dev/null || true)
+    fi
+    if ! fm_update_obligation_write "$obligation_marker" "$base_rev"; then
       echo "$label: skipped: update obligation could not be persisted"
       return 0
-    }
-    if [ ! -f "$obligation_marker" ]; then
-      obligation_tmp=$(mktemp "$obligation_parent/.update-obligation.XXXXXX") || {
-        echo "$label: skipped: update obligation could not be persisted"
-        return 0
-      }
-      if ! printf '%s\n' "${FM_WATCHER_PROTOCOL_VERSION:-pending}" > "$obligation_tmp" \
-        || ! chmod 600 "$obligation_tmp" 2>/dev/null \
-        || ! mv -f "$obligation_tmp" "$obligation_marker"; then
-        rm -f "$obligation_tmp" 2>/dev/null || true
-        echo "$label: skipped: update obligation could not be persisted"
-        return 0
-      fi
-      obligation_created=1
     fi
+    FF_OBLIGATION_GENERATION=$base_rev
   fi
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
-    [ "$obligation_created" -eq 0 ] || rm -f "$obligation_marker"
+    if [ -n "$FF_OBLIGATION_GENERATION" ]; then
+      if [ "$obligation_existed" -eq 1 ]; then
+        fm_update_obligation_write_value "$obligation_marker" "$obligation_previous" || true
+      elif [ "$(cat "$obligation_marker" 2>/dev/null || true)" = "generation=$FF_OBLIGATION_GENERATION" ]; then
+        rm -f "$obligation_marker"
+      fi
+    fi
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
@@ -393,6 +420,7 @@ ff_target() {
 # Sweep accumulators. The caller resets them before a sweep and reads
 # FF_NUDGE_WINDOWS after.
 FF_NUDGE_WINDOWS=""
+FF_NUDGE_GENERATIONS=""
 FF_SEEN_HOMES=""
 
 # Validate and fast-forward one secondmate home, accumulating its window into
@@ -445,6 +473,10 @@ process_secondmate() {
       fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR" || return 1
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
+    if [ -n "$FF_OBLIGATION_GENERATION" ]; then
+      FF_NUDGE_GENERATIONS="${FF_NUDGE_GENERATIONS}${FF_NUDGE_GENERATIONS:+
+}$window|$FF_OBLIGATION_GENERATION"
+    fi
   fi
 }
 

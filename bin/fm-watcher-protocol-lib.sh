@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-FM_WATCHER_PROTOCOL_VERSION='pending-reply-ticket-v2'
+FM_WATCHER_PROTOCOL_VERSION='pending-reply-ticket-v3'
 _FM_WATCHER_PROTOCOL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" \
   || _FM_WATCHER_PROTOCOL_LIB_DIR="."
 # shellcheck source=bin/fm-wake-lib.sh

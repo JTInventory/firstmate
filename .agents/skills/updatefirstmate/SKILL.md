@@ -24,17 +24,20 @@ This touches only the firstmate repo and its own worktrees, never anything under
    It fast-forwards this firstmate repo's default branch from origin, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
+   - `reread-firstmate-generation: <commit>|none`
    - `restart-firstmate-watcher: yes|no`
    - `restart-secondmate-watchers: <window-targets...>|none`
    - `nudge-secondmates: <window-targets...>|none`
+   - one `nudge-secondmate-generation: <window-target>|<commit>` line per nudge
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (AGENTS.md, bin/, or skills) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a symlink to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
    After the read succeeds, acknowledge it:
    ```sh
-   bin/fm-update.sh --ack-reread-firstmate
+   bin/fm-update.sh --ack-reread-firstmate <commit-from-reread-firstmate-generation>
    ```
+   When the first run updated firstmate, run `bin/fm-update.sh` once more from the installed checkout before acknowledging. This second invocation is required so an updater that began on the previous protocol cannot validate a watcher with its old in-memory rules.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
 3. **Restart this home's watcher when required.**
@@ -44,7 +47,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:
    ```sh
    bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
-   bin/fm-update.sh --ack-secondmate-nudge <window-target>
+   bin/fm-update.sh --ack-secondmate-nudge <window-target> <commit-from-the-matching-generation-line>
    ```
    Run the acknowledgement only after `fm-send.sh` confirms delivery. A failed or interrupted send leaves the durable nudge obligation for the next updater retry.
    The updater has already verified each watcher and follower listed on `restart-secondmate-watchers:`. If it stopped a legacy secondmate watcher, that secondmate must complete its normal harness-tracked re-arm before the updater retry can succeed. Updated homes without a running watcher need no restart because no legacy process remains; their next watcher starts from the updated code. The restart does not stop a secondmate's agent pane or project work.

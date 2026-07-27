@@ -28,7 +28,7 @@
 #   - restart-secondmate-watchers: <window-targets...>|none
 #   - nudge-secondmates: <window-targets...>|none   (updated live secondmates to nudge)
 #
-# Usage: fm-update.sh [--help|--ack-reread-firstmate|--ack-secondmate-nudge <target>]
+# Usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +44,7 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 usage() {
-  echo "usage: fm-update.sh [--help|--ack-reread-firstmate|--ack-secondmate-nudge <target>]" >&2
+  echo "usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -53,41 +53,44 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 
 ack_secondmate_nudge() {
-  local target=$1 selector id record_id candidate home window meta marker
-  selector=${target##*:}
-  case "$selector" in
-    fm-?*) id=${selector#fm-} ;;
-    *) echo "secondmate nudge acknowledgement: invalid target: $target" >&2; return 1 ;;
-  esac
+  local target=$1 generation=$2 id="" record_id candidate home window meta marker matches=0
   home=""
   while IFS='|' read -r record_id candidate window meta; do
-    if [ "$record_id" = "$id" ]; then
+    if [ "$window" = "$target" ]; then
+      matches=$((matches + 1))
+      id=$record_id
       home=$candidate
-      break
     fi
   done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
-  if [ -z "$home" ]; then
-    home=$(secondmate_registry_field "$SECONDMATES_MD" "$id" home 2>/dev/null || true)
-  fi
+  [ "$matches" -eq 1 ] || {
+    echo "secondmate nudge acknowledgement: target is not uniquely live: $target" >&2
+    return 1
+  }
   validate_secondmate_home "$id" "$home" || {
     echo "secondmate nudge acknowledgement: unsafe home for $target: $VALIDATION_ERROR" >&2
     return 1
   }
   marker="$VALIDATED_HOME/state/.watch-protocol-reread-required"
-  rm -f "$marker" || return 1
+  fm_update_obligation_ack "$marker" "$generation" || {
+    echo "secondmate nudge acknowledgement: generation mismatch for $target" >&2
+    return 1
+  }
   echo "acknowledged-secondmate-nudge: $target"
 }
 
 case "${1:-}" in
   --ack-reread-firstmate)
-    [ $# -eq 1 ] || { usage; exit 1; }
-    rm -f "$(fm_watcher_protocol_reread_marker "$STATE")" || exit 1
+    [ $# -eq 2 ] || { usage; exit 1; }
+    fm_update_obligation_ack "$(fm_watcher_protocol_reread_marker "$STATE")" "$2" || {
+      echo "firstmate reread acknowledgement: generation mismatch" >&2
+      exit 1
+    }
     echo "acknowledged-reread-firstmate: yes"
     exit 0
     ;;
   --ack-secondmate-nudge)
-    [ $# -eq 2 ] || { usage; exit 1; }
-    ack_secondmate_nudge "$2"
+    [ $# -eq 3 ] || { usage; exit 1; }
+    ack_secondmate_nudge "$2" "$3"
     exit $?
     ;;
   '')
@@ -101,10 +104,12 @@ esac
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
+reread_firstmate_generation=""
 restart_firstmate_watcher="no"
 reread_marker=$(fm_watcher_protocol_reread_marker "$STATE")
 [ -f "$reread_marker" ] && reread_firstmate="yes"
 ff_target "$FM_ROOT" "firstmate" origin no no "$reread_marker" instructions
+reread_firstmate_generation=$FF_OBLIGATION_GENERATION
 if [ "$FF_STATUS" = "updated" ]; then
   installed_update="$FM_ROOT/bin/fm-update.sh"
   script_root=$(cd "$SCRIPT_DIR/.." && pwd -P)
@@ -134,6 +139,7 @@ fi
 # same condition it has always used.
 
 FF_NUDGE_WINDOWS=""
+FF_NUDGE_GENERATIONS=""
 FF_SEEN_HOMES=""
 restart_secondmate_watchers=""
 
@@ -171,6 +177,11 @@ fi
 # --- caller action summary -------------------------------------------------
 
 echo "reread-firstmate: $reread_firstmate"
+echo "reread-firstmate-generation: ${reread_firstmate_generation:-none}"
 echo "restart-firstmate-watcher: $restart_firstmate_watcher"
 echo "restart-secondmate-watchers:${restart_secondmate_watchers:- none}"
 echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+while IFS='|' read -r target generation; do
+  [ -n "$target" ] || continue
+  echo "nudge-secondmate-generation: $target|$generation"
+done <<< "$FF_NUDGE_GENERATIONS"
