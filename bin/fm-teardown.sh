@@ -126,6 +126,63 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 TASK_TMP_CLEANUP=$(validated_task_tmp_cleanup_path "$TASK_TMP") || exit 1
 
+validate_direct_pr_state_cleanup() {
+  local artifact mode
+  for artifact in "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ -L "$artifact" ] || [ ! -f "$artifact" ] || [ ! -O "$artifact" ]; then
+      echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
+      return 1
+    fi
+    if [ "$artifact" = "$STATE/$ID.direct-pr-lease" ]; then
+      mode=$(fm_pr_file_mode "$artifact") || return 1
+      if [ "$mode" != 600 ]; then
+        echo "REFUSED: unsafe direct-PR task state $artifact; preserving task state." >&2
+        return 1
+      fi
+    fi
+  done
+}
+
+DIRECT_PR_REF_GIT_DIR=
+validate_direct_pr_ref_cleanup() {
+  local candidate prefix ref refs
+  [ "$MODE" = direct-PR ] || return 0
+  for candidate in "$WT" "$PROJ"; do
+    [ -d "$candidate" ] || continue
+    git -C "$candidate" rev-parse --git-dir >/dev/null 2>&1 || continue
+    DIRECT_PR_REF_GIT_DIR=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir) || return 1
+    break
+  done
+  [ -n "$DIRECT_PR_REF_GIT_DIR" ] || return 0
+  prefix="refs/firstmate/direct-pr/$ID"
+  refs=$(git --git-dir="$DIRECT_PR_REF_GIT_DIR" for-each-ref --format='%(refname)' "$prefix/") || return 1
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    case "$ref" in
+      "$prefix/base"|"$prefix/feature") ;;
+      *)
+        echo "REFUSED: ambiguous direct-PR private ref namespace $prefix; preserving task state." >&2
+        return 1
+        ;;
+    esac
+  done <<EOF
+$refs
+EOF
+}
+
+cleanup_direct_pr_refs() {
+  local prefix refs
+  [ -n "$DIRECT_PR_REF_GIT_DIR" ] || return 0
+  prefix="refs/firstmate/direct-pr/$ID"
+  {
+    printf 'delete %s\n' "$prefix/base"
+    printf 'delete %s\n' "$prefix/feature"
+  } | git --git-dir="$DIRECT_PR_REF_GIT_DIR" update-ref --stdin || return 1
+  refs=$(git --git-dir="$DIRECT_PR_REF_GIT_DIR" for-each-ref --format='%(refname)' "$prefix/") || return 1
+  [ -z "$refs" ]
+}
+
 TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
 TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-1}
 case "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS" in
@@ -241,6 +298,7 @@ validate_pr_poll_cleanup() {
   fi
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-replacement" \
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
@@ -253,6 +311,7 @@ validate_pr_poll_cleanup() {
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-replacement" \
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
@@ -268,6 +327,15 @@ validate_pr_poll_cleanup() {
       echo "REFUSED: invalid PR-poll retirement receipt; preserving task state." >&2
       return 1
     }
+  fi
+  if [ -e "$state_dir/$id.pr-poll-replacement" ] \
+    || [ -L "$state_dir/$id.pr-poll-replacement" ]; then
+    fm_pr_poll_replacement_parse "$state_dir/$id.pr-poll-replacement" \
+      && fm_pr_poll_replacement_receipt_valid "$state_dir" "$id" \
+        "$FM_PR_REPLACE_EXPECTED_HEAD" || {
+          echo "REFUSED: invalid PR-poll replacement receipt; preserving task state." >&2
+          return 1
+        }
   fi
   [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
   if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
@@ -295,6 +363,7 @@ remove_pr_poll_artifacts() {
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-poll-replacement" \
     "$state_dir/$id.check-trust" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
@@ -905,6 +974,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+validate_direct_pr_state_cleanup || exit 1
+validate_direct_pr_ref_cleanup || exit 1
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
@@ -1000,8 +1071,13 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+cleanup_direct_pr_refs || {
+  echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
+  exit 1
+}
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

@@ -65,7 +65,16 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *" state,baseRefName,headRefName,headRefOid,headRepository,url "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_BASE:-main}" \
+      "${FM_TEST_GH_BRANCH:-fm/${FM_TEST_TASK_ID:-task-a}}" \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+      "${FM_TEST_GH_REPO:-o/r}" "${FM_TEST_GH_URL:-https://github.com/o/r/pull/37}"
+    ;;
   *" headRefName "*) printf '%s\n' "fm/${FM_TEST_TASK_ID:-task-a}" ;;
+  *" baseRefName "*) printf '%s\n' "${FM_TEST_GH_BASE:-main}" ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -239,7 +248,11 @@ assert_private_symlink_unchanged() {
 run_check_entry() {
   local dir=$1 id
   shift
-  id=${1:-task-a}
+  if [ "${1:-}" = --expected-head ]; then
+    id=${11:-task-a}
+  else
+    id=${1:-task-a}
+  fi
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_TASK_ID="$id" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
@@ -659,6 +672,181 @@ run_watcher_bounded() {
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+test_expected_head_guard_and_prior_generation_replacement() {
+  local dir state prior current third before rc
+  dir=$(make_case expected-head-guard)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  prior=1111111111111111111111111111111111111111
+  current=2222222222222222222222222222222222222222
+  third=3333333333333333333333333333333333333333
+  FM_TEST_GH_HEAD=$prior run_check_entry "$dir" task-a https://github.com/o/r/pull/37 \
+    >/dev/null 2>/dev/null || fail "could not seed prior PR generation"
+  before=$(state_snapshot "$state")
+  set +e
+  FM_TEST_GH_HEAD=invalid run_check_entry "$dir" \
+    --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+    --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 \
+    >"$dir/lookup.out" 2>"$dir/lookup.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "expected-head guard accepted an unavailable PR head"
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "expected-head lookup failure changed state"
+
+  # A complete, canonical generation is still foreign unless its recorded
+  # head is the exact prior generation named by the guarded request.
+  sed -i "s/^pr_head=$prior$/pr_head=$third/" "$state/task-a.meta"
+  before=$(state_snapshot "$state")
+  set +e
+  FM_TEST_GH_HEAD=$current run_check_entry "$dir" \
+    --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+    --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 \
+    >"$dir/wrong-prior.out" 2>"$dir/wrong-prior.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "guarded replacement accepted a wrong prior generation"
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "wrong prior generation changed state"
+  sed -i "s/^pr_head=$third$/pr_head=$prior/" "$state/task-a.meta"
+
+  for mismatch in closed merged base branch repo url lookup; do
+    before=$(state_snapshot "$state")
+    set +e
+    case "$mismatch" in
+      closed) FM_TEST_GH_STATE=CLOSED run_check_entry "$dir" \
+        --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+        --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 ;;
+      merged) FM_TEST_GH_STATE=MERGED run_check_entry "$dir" \
+        --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+        --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 ;;
+      base) FM_TEST_GH_BASE=trunk run_check_entry "$dir" \
+        --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+        --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 ;;
+      branch) FM_TEST_GH_BRANCH=fm/other run_check_entry "$dir" \
+        --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+        --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 ;;
+      repo) FM_TEST_GH_REPO=other/r run_check_entry "$dir" \
+        --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+        --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 ;;
+      url) FM_TEST_GH_URL=https://github.com/o/r/pull/38 run_check_entry "$dir" \
+        --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+        --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 ;;
+      lookup) FM_TEST_GH_FAIL=1 run_check_entry "$dir" \
+        --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+        --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 ;;
+    esac >"$dir/identity-$mismatch.out" 2>"$dir/identity-$mismatch.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "guarded PR accepted $mismatch identity state"
+    [ "$(state_snapshot "$state")" = "$before" ] || fail "$mismatch identity refusal changed state"
+  done
+
+  FM_TEST_GH_HEAD=$current run_check_entry "$dir" \
+    --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+    --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 \
+    >/dev/null 2>/dev/null || fail "guarded prior-generation replacement failed"
+  grep -qxF "pr_head=$current" "$state/task-a.meta" || fail "replacement did not bind the expected head"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "replacement artifacts were not canonical"
+  before=$(state_snapshot "$state")
+  FM_TEST_GH_HEAD=$current run_check_entry "$dir" \
+    --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+    --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 \
+    >/dev/null 2>/dev/null || fail "exact guarded generation was not idempotent"
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "exact guarded generation was republished"
+
+  printf 'tamper\n' >> "$state/task-a.pr-poll"
+  before=$(state_snapshot "$state")
+  set +e
+  FM_TEST_GH_HEAD=$current run_check_entry "$dir" \
+    --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+    --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 \
+    >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "guarded replacement accepted foreign or partial artifacts"
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "refused artifact reconciliation changed state"
+  pass "expected-head guard replaces only an exact prior artifact generation"
+}
+
+test_guarded_replacement_receipt_crash_recovery() {
+  local boundary dir state prior current
+  prior=4444444444444444444444444444444444444444
+  current=5555555555555555555555555555555555555555
+  for boundary in old data registration check; do
+    dir=$(make_case "replacement-crash-$boundary")
+    state="$dir/home/state"
+    write_task_meta "$dir"
+    FM_TEST_GH_HEAD=$prior run_check_entry "$dir" task-a https://github.com/o/r/pull/37 \
+      >/dev/null 2>/dev/null || fail "$boundary could not seed prior generation"
+    FM_PR_POLL_TEMPLATE=$POLL
+    fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+      || fail "$boundary could not capture prior generation"
+    fm_pr_poll_replacement_publish "$state" task-a "$prior" "$current" \
+      || fail "$boundary could not publish replacement receipt"
+
+    if [ "$boundary" != old ]; then
+      fm_pr_poll_replacement_recover_one "$state" task-a "$POLL" "$current" \
+        || fail "$boundary could not retire the old generation"
+      assert_poll_absent "$state" task-a
+      fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/37 \
+        github.com o/r 37 "$POLL" || fail "$boundary could not stage the new generation"
+      mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST" \
+        || fail "$boundary could not publish staged data"
+      FM_PR_POLL_DATA_TMP=
+      if [ "$boundary" = registration ] || [ "$boundary" = check ]; then
+        mv -f -- "$FM_PR_POLL_REG_TMP" "$FM_PR_POLL_REG_DEST" \
+          || fail "$boundary could not publish staged registration"
+        FM_PR_POLL_REG_TMP=
+      fi
+      if [ "$boundary" = check ]; then
+        mv -f -- "$FM_PR_POLL_CHECK_TMP" "$FM_PR_POLL_CHECK_DEST" \
+          || fail "$boundary could not publish staged check"
+        FM_PR_POLL_CHECK_TMP=
+      fi
+      fm_pr_poll_cleanup
+    fi
+
+    FM_TEST_GH_HEAD=$current run_check_entry "$dir" \
+      --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+      --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 \
+      >/dev/null 2>/dev/null || fail "$boundary replacement crash did not recover"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$boundary recovery did not publish a canonical generation"
+    grep -qxF "pr_head=$current" "$state/task-a.meta" \
+      || fail "$boundary recovery did not bind the new head"
+    [ ! -e "$state/task-a.pr-poll-replacement" ] \
+      || fail "$boundary recovery retained its replacement receipt"
+  done
+  pass "guarded replacement receipts recover every artifact publication boundary"
+}
+
+test_guarded_check_recovers_retirement_before_classification() {
+  local dir state prior current rc
+  dir=$(make_case guarded-retirement-first)
+  state="$dir/home/state"
+  prior=6666666666666666666666666666666666666666
+  current=7777777777777777777777777777777777777777
+  write_task_meta "$dir"
+  FM_TEST_GH_HEAD=$prior run_check_entry "$dir" task-a https://github.com/o/r/pull/37 \
+    >/dev/null 2>/dev/null || fail "could not seed guarded retirement generation"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "could not capture guarded retirement generation"
+  fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged \
+    || fail "could not publish guarded retirement receipt"
+  rm -f "$state/task-a.check.sh"
+  set +e
+  FM_TEST_GH_HEAD=$current run_check_entry "$dir" \
+    --expected-head "$current" --prior-head "$prior" --expected-repo o/r \
+    --expected-base main --expected-branch fm/task-a task-a https://github.com/o/r/pull/37 \
+    >/dev/null 2>"$dir/guarded-retirement.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "guarded retirement unexpectedly armed a replacement"
+  assert_poll_absent "$state" task-a
+  [ ! -e "$state/task-a.pr-poll-retirement" ] \
+    || fail "guarded check did not recover retirement before classification"
+  pass "guarded checks recover exact retirement generations before classification"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -3383,6 +3571,9 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_parser_matrix
+test_expected_head_guard_and_prior_generation_replacement
+test_guarded_replacement_receipt_crash_recovery
+test_guarded_check_recovers_retirement_before_classification
 test_legacy_custom_check_registration_boundaries
 test_gitlab_merge_watch
 test_merged_poll_retires_once
