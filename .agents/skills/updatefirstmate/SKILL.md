@@ -34,14 +34,14 @@ This touches only the firstmate repo and its own worktrees, never anything under
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
 3. **Restart this home's watcher when required.**
-   When `restart-firstmate-watcher: yes`, run `bin/fm-watch-arm.sh --restart` as its own harness-tracked background task before any `fm-send` or other pending-reply action. Wait for its verified watcher status line before continuing. This drains the old watcher process before the updated pending-reply lock protocol can run.
+   The updater performs and verifies any required home-scoped watcher restart before it prints its summary. `restart-firstmate-watcher: yes` records that a restart was completed. A failure exits non-zero and leaves a durable protocol fence that blocks pending-reply transactions until a later verified retry succeeds.
 
 4. **Nudge each updated live secondmate.**
    For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:
    ```sh
-   bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md, then run bin/fm-watch-arm.sh --restart as its own tracked background task before any further work.'
+   bin/fm-send.sh <window-target> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
    ```
-   The targets on `restart-secondmate-watchers:` are the same updated live secondmates. Their home-scoped watcher restart is mandatory before they resume pending-reply work; it does not stop their agent pane or project work.
+   The updater has already restarted and verified each watcher listed on `restart-secondmate-watchers:`. Updated homes without a running watcher need no restart because no legacy process remains; their next watcher starts from the updated code. The restart does not stop a secondmate's agent pane or project work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 
 5. **Report to the captain in plain outcomes.**

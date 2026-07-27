@@ -38,6 +38,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-watcher-protocol-lib.sh
+. "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -55,10 +57,16 @@ reread_firstmate="no"
 restart_firstmate_watcher="no"
 ff_target "$FM_ROOT" "firstmate" origin no no
 if [ "$FF_STATUS" = "updated" ]; then
-  restart_firstmate_watcher="yes"
   if [ -n "$FF_INSTR" ]; then
     reread_firstmate="yes"
   fi
+fi
+if ! fm_watcher_protocol_restart_if_required "$FM_HOME" "$STATE" "$FM_ROOT"; then
+  echo "firstmate: skipped: watcher protocol restart could not be verified" >&2
+  exit 1
+fi
+if [ "$FM_WATCHER_PROTOCOL_RESTARTED" -eq 1 ]; then
+  restart_firstmate_watcher="yes"
 fi
 
 # --- secondmates -----------------------------------------------------------
@@ -68,10 +76,24 @@ fi
 
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
+restart_secondmate_watchers=""
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
 # authoritative home= path.
 sweep_live_secondmate_metas "$STATE" origin no
+
+while IFS='|' read -r id home window _meta; do
+  [ -n "$window" ] || continue
+  validate_secondmate_home "$id" "$home" || continue
+  home="$VALIDATED_HOME"
+  if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
+    echo "secondmate $id: skipped: watcher protocol restart could not be verified" >&2
+    exit 1
+  fi
+  if [ "$FM_WATCHER_PROTOCOL_RESTARTED" -eq 1 ]; then
+    restart_secondmate_watchers="$restart_secondmate_watchers $window"
+  fi
+done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
 
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
@@ -91,5 +113,5 @@ fi
 
 echo "reread-firstmate: $reread_firstmate"
 echo "restart-firstmate-watcher: $restart_firstmate_watcher"
-echo "restart-secondmate-watchers:${FF_NUDGE_WINDOWS:- none}"
+echo "restart-secondmate-watchers:${restart_secondmate_watchers:- none}"
 echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"

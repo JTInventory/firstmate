@@ -100,6 +100,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-watcher-protocol-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -261,6 +263,13 @@ secondmate_sync() {
 
   fm_ff_after_instruction_update() {
     local id=$1 home=$2 _window=$3 instr=$4
+    if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: watcher protocol restart could not be verified"
+      return 1
+    fi
+    if [ "$FM_WATCHER_PROTOCOL_RESTARTED" -eq 1 ]; then
+      echo "BOOTSTRAP_INFO: restarted and verified fm-$id watcher"
+    fi
     secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
   }
 
@@ -323,7 +332,9 @@ secondmate_sync() {
   local tmp line
   secondmate_retry_pending_nudges
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-sync.XXXXXX" 2>/dev/null) || return 0
-  sweep_live_secondmate_metas "$STATE" "$primary_head" yes "$DATA/secondmates.md" >"$tmp"
+  local sync_status=0
+  sweep_live_secondmate_metas "$STATE" "$primary_head" yes "$DATA/secondmates.md" >"$tmp" \
+    || sync_status=$?
   while IFS= read -r line; do
     case "$line" in
       secondmate\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
@@ -333,6 +344,19 @@ secondmate_sync() {
   done < "$tmp"
   rm -f "$tmp"
   unset -f fm_ff_after_instruction_update
+  [ "$sync_status" -eq 0 ] || return "$sync_status"
+  while IFS='|' read -r id home window _meta; do
+    [ -n "$window" ] || continue
+    validate_secondmate_home "$id" "$home" || continue
+    home="$VALIDATED_HOME"
+    if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: watcher protocol restart could not be verified"
+      return 1
+    fi
+    if [ "$FM_WATCHER_PROTOCOL_RESTARTED" -eq 1 ]; then
+      echo "BOOTSTRAP_INFO: restarted and verified fm-$id watcher"
+    fi
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into every VALIDATED live secondmate home swept above.
   # FF_SEEN_HOMES is exactly that set, and fm-config-inherit-lib.sh owns the
@@ -869,7 +893,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
-  secondmate_sync
+  secondmate_sync || exit 1
   x_mode_setup
   fleet_sync
 fi

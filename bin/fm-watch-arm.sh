@@ -46,6 +46,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-detach-lib.sh
 . "$SCRIPT_DIR/fm-detach-lib.sh"
+# shellcheck source=bin/fm-watcher-protocol-lib.sh
+. "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 ARM_PATH="$SCRIPT_DIR/fm-watch-arm.sh"
@@ -96,6 +98,7 @@ healthy_watcher() {
   pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   watch_lock_matches_pid "$pid" || return 1
+  [ "$(cat "$WATCH_LOCK/pending-reply-protocol" 2>/dev/null || true)" = "$FM_WATCHER_PROTOCOL_VERSION" ] || return 1
   age=$(fm_path_age "$BEAT")
   [ "$age" -lt "$GRACE" ] || return 1
   HEALTHY_PID=$pid
@@ -213,10 +216,11 @@ mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
-  *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
+  --restart-verify) mode=restart_verify ;;
+  *) echo "usage: $(basename "$0") [--restart|--restart-verify]" >&2; exit 2 ;;
 esac
 
-if [ "$mode" = restart ]; then
+if [ "$mode" = restart ] || [ "$mode" = restart_verify ]; then
   if claim_arm_follower; then
     FOLLOWER_CLAIMED=1
   elif [ "$ARM_FOLLOWER_UNVERIFIED" -eq 1 ]; then
@@ -352,6 +356,10 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
+      if [ "$mode" = restart_verify ]; then
+        report_healthy
+        exit 0
+      fi
       if [ "$FOLLOWER_CLAIMED" -eq 1 ]; then
         echo "watcher: started pid=$child (beacon fresh)"
         attach_and_wait "$child"

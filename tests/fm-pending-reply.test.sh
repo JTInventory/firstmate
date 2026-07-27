@@ -1175,7 +1175,7 @@ test_staging_reconciles_already_archived_nested_resolution() {
 }
 
 test_wrong_home_scan_preserves_staged_transaction() {
-  local home state retained sm_home corr rec source token detector
+  local home state retained sm_home corr rec source token detector lock generation owners i
   home=$(setup_parent wrong-home-stage-lock)
   state="$home/state"
   retained="$TMP_ROOT/wrong-home-stage-retained/state"
@@ -1191,7 +1191,18 @@ test_wrong_home_scan_preserves_staged_transaction() {
     || fail "wrong-home-stage-lock: could not hold transaction lock"
   fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" &
   detector=$!
-  sleep 0.1
+  lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
+  i=0
+  while [ "$i" -lt 100 ]; do
+    owners=0
+    for generation in "$lock"/owner-*; do
+      [ -f "$generation" ] && owners=$((owners + 1))
+    done
+    [ "$owners" -ge 2 ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$owners" -ge 2 ] || fail "wrong-home-stage-lock: detector did not queue"
   fm_pending_reply_set_retirement_stage \
     "$rec" 123 "$retained" escalated "$source" \
     || fail "wrong-home-stage-lock: staging setup failed"

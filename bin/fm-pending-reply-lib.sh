@@ -75,6 +75,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-watcher-protocol-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-watcher-protocol-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='(^|[^[:alnum:]_])corr=([A-Fa-f0-9]{16})($|[^[:alnum:]_])'
@@ -178,6 +180,8 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
   local incomplete_signature='' incomplete_seen=0 current_signature
   local winner winner_ticket winner_token live_owner live_choosing max_ticket
   local legacy_present
+  fm_watcher_protocol_gate "$state" "${FM_HOME:-$(dirname "$state")}" \
+    "$_FM_PENDING_REPLY_LIB_DIR/fm-watch.sh" || return 1
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
   mkdir -p "$(dirname "$lock")" || return 1
   pid=${BASHPID:-$$}

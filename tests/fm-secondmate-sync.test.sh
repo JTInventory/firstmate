@@ -309,9 +309,9 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  nudge_line=$(printf '%s\n' "$out" | grep '^NUDGE_SECONDMATES:' || true)
-  [ -n "$nudge_line" ] || fail "no NUDGE_SECONDMATES line emitted (got: $out)"
-  assert_contains "$nudge_line" "firstmate:fm-sm-instr" "instruction-changed running secondmate is nudged"
+  nudge_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged ' || true)
+  [ -n "$nudge_line" ] || fail "no successful bootstrap nudge line emitted (got: $out)"
+  assert_contains "$nudge_line" "fm-sm-instr" "instruction-changed running secondmate is nudged"
   assert_not_contains "$nudge_line" "sm-readme" "readme-only advance is not nudged"
   assert_not_contains "$nudge_line" "sm-current" "already-current secondmate is not nudged"
 
@@ -426,6 +426,7 @@ test_ff_diverged
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
+test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch

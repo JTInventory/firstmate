@@ -401,6 +401,9 @@ process_secondmate() {
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0
     fi
+    if [ "$(type -t fm_ff_after_instruction_update 2>/dev/null || true)" = function ]; then
+      fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR" || return 1
+    fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
   fi
 }
@@ -414,6 +417,6 @@ sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
-    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
+    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" || return 1
   done < <(live_secondmate_meta_records "$state" "$registry")
 }

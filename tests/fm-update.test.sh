@@ -107,8 +107,8 @@ test_updates_main_and_secondmate() {
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
   assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
-  assert_contains "$out" "restart-firstmate-watcher: yes" "updated firstmate requires watcher restart"
-  assert_contains "$out" "restart-secondmate-watchers: main:fm-sm1" "updated live secondmate requires watcher restart"
+  assert_contains "$out" "restart-firstmate-watcher: no" "updated firstmate without a watcher needs no restart"
+  assert_contains "$out" "restart-secondmate-watchers: none" "updated secondmate without a watcher needs no restart"
   assert_contains "$out" "nudge-secondmates: main:fm-sm1" "updated secondmate is nudged"
 
   # Fast-forward landed: HEAD == origin/main on both targets.
