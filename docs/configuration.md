@@ -299,15 +299,24 @@ CLI and index metering do not depend on Codex session logs that get wiped for di
 
 Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection runs so wrapper lines can tag the task.
 
+## Codex session lock lifecycle
+
+Codex primaries use the tracked `SessionStart` hook to claim their home's
+session lock before the first model turn. The structured owner combines the
+stable `CODEX_THREAD_ID` with a verified harness PID when one is visible.
+Later PID-isolated calls from the same thread preserve that owner; a different
+thread remains excluded.
+
+The tracked `SessionEnd` hook releases only a regular, non-symlink lock in the
+same home whose structured thread marker exactly matches the ending session.
+It leaves numeric legacy locks and malformed, unreadable, differently owned,
+or concurrently busy locks untouched. Numeric lock files remain supported for
+other harnesses and older homes. `GROK_AGENT=1` takes precedence over an
+inherited `CODEX_THREAD_ID`, so a Grok primary is never treated as Codex.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
-
-Codex primaries use the tracked `SessionStart` and `SessionEnd` hooks to claim
-and release only their own home's session lock. Structured Codex owners retain
-the stable `CODEX_THREAD_ID` across PID-isolated tool calls. Numeric lock files
-remain supported for other harnesses and older homes, and `GROK_AGENT=1` takes
-precedence over an inherited Codex marker.
 
 ```sh
 FM_HOME=                 # optional operational home; unset means this repo root

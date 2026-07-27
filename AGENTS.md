@@ -144,7 +144,9 @@ Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 
 Run `bin/fm-session-start.sh` once at every session start.
-It acquires the session lock, performs locked stale Herdr projection cleanup, runs `bin/fm-bootstrap.sh`, drains the wake queue, and prints the recovery digest in that order.
+It verifies or acquires the session lock, performs locked stale Herdr projection cleanup, runs `bin/fm-bootstrap.sh`, drains the wake queue, and prints the recovery digest in that order.
+For Codex, the tracked `SessionStart` hook may already have claimed the lock for this thread before the script runs; `bin/fm-session-start.sh` reuses that owner.
+The matching lifecycle and compatibility rules are owned by `docs/configuration.md` under "Codex session lock lifecycle."
 Do not run `bin/fm-lock.sh` and `bin/fm-bootstrap.sh` separately as the normal startup path.
 Before checking the toolchain, bootstrap adds existing `$HOME/.nvm/versions/node/*/bin` and `$HOME/.local/bin` directories to `PATH` without moving them ahead of an explicit caller path.
 The same shared normalization runs before tool lookup in spawn, teardown, and the read-only supervision model, so clean non-interactive shells can find HOME-installed Axi tools consistently.
@@ -303,7 +305,7 @@ Load `harness-adapters` before any spawn, recovery, trust-dialog handling, harne
 You may have been restarted mid-flight.
 Reconcile reality with your records before doing anything else:
 
-1. Use the lock result printed by `bin/fm-session-start.sh`; it records the harness process PID, which is session-stable.
+1. Use the lock result printed by `bin/fm-session-start.sh`; it records the verified per-home session owner.
    If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
 2. Keep the wake records drained and printed by `bin/fm-session-start.sh` as the first work queue for this recovery turn.
 3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
