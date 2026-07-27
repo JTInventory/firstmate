@@ -213,7 +213,6 @@ secondmate_sync() {
     return 0
   fi
   FF_NUDGE_WINDOWS=""
-  FF_NUDGE_MARKERS=""
   FF_SEEN_HOMES=""
   SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
@@ -256,6 +255,7 @@ secondmate_sync() {
     fi
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
+      rm -f "$home/state/.watch-protocol-reread-required"
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"

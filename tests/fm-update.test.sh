@@ -28,6 +28,17 @@ UPDATE="$ROOT/bin/fm-update.sh"
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-update-tests)
+UPDATE_TEST_PIDS=""
+
+cleanup_update_tests() {
+  local pid
+  for pid in $UPDATE_TEST_PIDS; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap cleanup_update_tests EXIT
 
 # Build a fresh world: a bare origin seeded with one commit, a firstmate repo
 # clone checked out on main, and a home dir with state/ and data/. Echoes the
@@ -55,6 +66,31 @@ new_world() {
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
 
+  printf '%s\n' "$w"
+}
+
+new_protocol_migration_world() {
+  local name=$1 w
+  w="$TMP_ROOT/$name"
+  mkdir -p "$w/home/state" "$w/home/data"
+  touch "$w/home/state/.last-watcher-beat"
+  git init -q --bare "$w/origin.git"
+  git -C "$w/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$w/origin.git" "$w/seed" 2>/dev/null
+  printf 'v1\n' > "$w/seed/AGENTS.md"
+  printf 'state/\ndata/\nconfig/\nprojects/\n' > "$w/seed/.gitignore"
+  cp -R "$ROOT/bin" "$w/seed/bin"
+  sed -i "s/pending-reply-ticket-v2/pending-reply-ticket-v1/" \
+    "$w/seed/bin/fm-watcher-protocol-lib.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm protocol-v1
+  git -C "$w/seed" push -q origin main
+  git clone -q "$w/origin.git" "$w/main"
+  git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  cp "$ROOT/bin/fm-watcher-protocol-lib.sh" "$w/seed/bin/fm-watcher-protocol-lib.sh"
+  git -C "$w/seed" add bin/fm-watcher-protocol-lib.sh
+  git -C "$w/seed" commit -qm protocol-v2
+  git -C "$w/seed" push -q origin main
   printf '%s\n' "$w"
 }
 
@@ -92,6 +128,17 @@ run_update() {
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
+ack_firstmate_reread() {
+  local w=$1
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" --ack-reread-firstmate >/dev/null
+}
+
+ack_secondmate_nudge() {
+  local w=$1 target=$2
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-secondmate-nudge "$target" >/dev/null
+}
+
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
 # Combines the former T1 (fast-forward + reread + nudge signalling) and T2
 # (the advance is a single-parent fast-forward, never a merge commit) into one
@@ -110,6 +157,10 @@ test_updates_main_and_secondmate() {
   assert_contains "$out" "restart-firstmate-watcher: no" "updated firstmate without a watcher needs no restart"
   assert_contains "$out" "restart-secondmate-watchers: none" "updated secondmate without a watcher needs no restart"
   assert_contains "$out" "nudge-secondmates: main:fm-sm1" "updated secondmate is nudged"
+  [ -f "$w/home/state/.watch-protocol-reread-required" ] \
+    || fail "firstmate reread obligation was not retained for acknowledgement"
+  [ -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+    || fail "secondmate nudge obligation was not retained for acknowledgement"
 
   # Fast-forward landed: HEAD == origin/main on both targets.
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
@@ -190,6 +241,8 @@ test_idempotent_already_current() {
   add_sm "$w" sm1
   bump_origin "$w" instr
   run_update "$w" >/dev/null   # first run advances both
+  ack_firstmate_reread "$w"
+  ack_secondmate_nudge "$w" main:fm-sm1
 
   out=$(run_update "$w")       # second run: nothing to do
 
@@ -310,11 +363,66 @@ test_replays_interrupted_reread_and_nudge_obligations() {
   assert_contains "$out" "secondmate sm1: already current" "retry keeps current secondmate"
   assert_contains "$out" "reread-firstmate: yes" "retry replays firstmate reread"
   assert_contains "$out" "nudge-secondmates: main:fm-sm1" "retry replays secondmate nudge"
+  [ -f "$w/home/state/.watch-protocol-reread-required" ] \
+    || fail "firstmate reread obligation cleared before acknowledgement"
+  [ -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+    || fail "secondmate nudge obligation cleared before acknowledgement"
+
+  ack_firstmate_reread "$w"
+  ack_secondmate_nudge "$w" main:fm-sm1
   [ ! -f "$w/home/state/.watch-protocol-reread-required" ] \
-    || fail "firstmate reread obligation remained after replay"
+    || fail "firstmate reread acknowledgement did not clear obligation"
   [ ! -f "$w/sm1/state/.watch-protocol-reread-required" ] \
-    || fail "secondmate nudge obligation remained after replay"
-  pass "T12 interrupted update obligations replay on retry"
+    || fail "secondmate nudge acknowledgement did not clear obligation"
+  pass "T12 interrupted update obligations persist until acknowledged"
+}
+
+test_first_protocol_upgrade_reexecs_installed_updater() {
+  local w fakebin watcher arm out rc
+  w=$(new_protocol_migration_world t13)
+  fakebin="$w/fakebin"
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch.sh" >/dev/null 2>&1 &
+  watcher=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $watcher"
+  for _ in $(seq 1 60); do
+    [ "$(cat "$w/home/state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
+      && [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v1 ] \
+      && break
+    sleep 0.1
+  done
+  [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v1 ] \
+    || fail "migration fixture did not start a v1 watcher"
+
+  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch-arm.sh" >"$w/arm.out" &
+  arm=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $arm"
+  for _ in $(seq 1 60); do
+    [ "$(cat "$w/home/state/.watch-arm.lock/pid" 2>/dev/null || true)" = "$arm" ] && break
+    sleep 0.1
+  done
+  [ "$(cat "$w/home/state/.watch-arm.lock/pid" 2>/dev/null || true)" = "$arm" ] \
+    || fail "migration fixture did not attach a v1 follower"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "v1 updater process accepted the v1 watcher after installing v2"
+  assert_contains "$out" "firstmate: updated " "behind updater installed v2"
+  assert_contains "$out" "watcher protocol restart could not be verified" \
+    "installed updater re-executed before watcher validation"
+  [ "$(cat "$w/home/state/.watch-protocol-required" 2>/dev/null || true)" = pending-reply-ticket-v2 ] \
+    || fail "first protocol upgrade did not publish the v2 fence"
+  wait "$watcher" 2>/dev/null || true
+  wait "$arm" 2>/dev/null || true
+  pass "T13 first protocol upgrade re-execs before watcher validation"
 }
 
 test_updates_main_and_secondmate
@@ -327,5 +435,6 @@ test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_replays_interrupted_reread_and_nudge_obligations
+test_first_protocol_upgrade_reexecs_installed_updater
 
 echo "# all fm-update tests passed"

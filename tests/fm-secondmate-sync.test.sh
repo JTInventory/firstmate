@@ -306,8 +306,8 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   printf 'sm-nonlive\n' > "$w/sm-nonlive/.fm-secondmate-home"
 
   fakebin=$(make_fake_toolchain "$w")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
   nudge_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged ' || true)
   [ -n "$nudge_line" ] || fail "no successful bootstrap nudge line emitted (got: $out)"
@@ -370,7 +370,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
 
-  PATH="$fakebin:$BASE_PATH" TMUX='' \
+  env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
@@ -404,7 +404,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
 
-  PATH="$fakebin:$BASE_PATH" TMUX='' \
+  env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \

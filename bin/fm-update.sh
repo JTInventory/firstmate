@@ -28,7 +28,7 @@
 #   - restart-secondmate-watchers: <window-targets...>|none
 #   - nudge-secondmates: <window-targets...>|none   (updated live secondmates to nudge)
 #
-# Usage: fm-update.sh [--help]
+# Usage: fm-update.sh [--help|--ack-reread-firstmate|--ack-secondmate-nudge <target>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,13 +43,60 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
-usage() { echo "usage: fm-update.sh [--help]" >&2; }
+usage() {
+  echo "usage: fm-update.sh [--help|--ack-reread-firstmate|--ack-secondmate-nudge <target>]" >&2
+}
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
-[ $# -eq 0 ] || { usage; exit 1; }
+
+ack_secondmate_nudge() {
+  local target=$1 selector id record_id candidate home window meta marker
+  selector=${target##*:}
+  case "$selector" in
+    fm-?*) id=${selector#fm-} ;;
+    *) echo "secondmate nudge acknowledgement: invalid target: $target" >&2; return 1 ;;
+  esac
+  home=""
+  while IFS='|' read -r record_id candidate window meta; do
+    if [ "$record_id" = "$id" ]; then
+      home=$candidate
+      break
+    fi
+  done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
+  if [ -z "$home" ]; then
+    home=$(secondmate_registry_field "$SECONDMATES_MD" "$id" home 2>/dev/null || true)
+  fi
+  validate_secondmate_home "$id" "$home" || {
+    echo "secondmate nudge acknowledgement: unsafe home for $target: $VALIDATION_ERROR" >&2
+    return 1
+  }
+  marker="$VALIDATED_HOME/state/.watch-protocol-reread-required"
+  rm -f "$marker" || return 1
+  echo "acknowledged-secondmate-nudge: $target"
+}
+
+case "${1:-}" in
+  --ack-reread-firstmate)
+    [ $# -eq 1 ] || { usage; exit 1; }
+    rm -f "$(fm_watcher_protocol_reread_marker "$STATE")" || exit 1
+    echo "acknowledged-reread-firstmate: yes"
+    exit 0
+    ;;
+  --ack-secondmate-nudge)
+    [ $# -eq 2 ] || { usage; exit 1; }
+    ack_secondmate_nudge "$2"
+    exit $?
+    ;;
+  '')
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
 
 # --- main firstmate repo ---------------------------------------------------
 
@@ -57,16 +104,22 @@ reread_firstmate="no"
 restart_firstmate_watcher="no"
 reread_marker=$(fm_watcher_protocol_reread_marker "$STATE")
 [ -f "$reread_marker" ] && reread_firstmate="yes"
-ff_target "$FM_ROOT" "firstmate" origin no no
+ff_target "$FM_ROOT" "firstmate" origin no no "$reread_marker" instructions
 if [ "$FF_STATUS" = "updated" ]; then
-  if [ -n "$FF_INSTR" ]; then
-    reread_firstmate="yes"
-    fm_watcher_protocol_mark_reread_required "$STATE" || {
-      echo "firstmate: skipped: reread obligation could not be persisted" >&2
-      exit 1
-    }
+  installed_update="$FM_ROOT/bin/fm-update.sh"
+  script_root=$(cd "$SCRIPT_DIR/.." && pwd -P)
+  root_real=$(cd "$FM_ROOT" && pwd -P)
+  if [ "${FM_UPDATE_REEXECED:-0}" != 1 ] \
+    && [ "$script_root" = "$root_real" ] \
+    && [ -x "$installed_update" ]; then
+    export FM_UPDATE_REEXECED=1
+    export FM_HOME
+    export FM_ROOT_OVERRIDE="$FM_ROOT"
+    export FM_STATE_OVERRIDE="$STATE"
+    exec "$installed_update"
   fi
 fi
+[ -f "$reread_marker" ] && reread_firstmate="yes"
 if ! fm_watcher_protocol_restart_if_required "$FM_HOME" "$STATE" "$FM_ROOT"; then
   echo "firstmate: skipped: watcher protocol restart could not be verified" >&2
   exit 1
@@ -81,7 +134,6 @@ fi
 # same condition it has always used.
 
 FF_NUDGE_WINDOWS=""
-FF_NUDGE_MARKERS=""
 FF_SEEN_HOMES=""
 restart_secondmate_watchers=""
 
@@ -118,19 +170,6 @@ fi
 
 # --- caller action summary -------------------------------------------------
 
-if [ "$reread_firstmate" = yes ]; then
-  rm -f "$reread_marker" || {
-    echo "firstmate: skipped: reread obligation could not be committed" >&2
-    exit 1
-  }
-fi
-while IFS= read -r nudge_marker; do
-  [ -n "$nudge_marker" ] || continue
-  rm -f "$nudge_marker" || {
-    echo "firstmate: skipped: secondmate nudge obligation could not be committed" >&2
-    exit 1
-  }
-done <<< "$FF_NUDGE_MARKERS"
 echo "reread-firstmate: $reread_firstmate"
 echo "restart-firstmate-watcher: $restart_firstmate_watcher"
 echo "restart-secondmate-watchers:${restart_secondmate_watchers:- none}"

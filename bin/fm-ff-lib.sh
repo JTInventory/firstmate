@@ -277,6 +277,7 @@ FF_STATUS=""
 FF_INSTR=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local obligation_marker=${6:-} obligation_mode=${7:-always} obligation_created=0
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -349,8 +350,32 @@ ff_target() {
   fi
 
   instr=$(changed_instr "$dir" "$base")
+  if [ -n "$obligation_marker" ] \
+    && { [ "$obligation_mode" = always ] || [ -n "$instr" ]; }; then
+    local obligation_parent obligation_tmp
+    obligation_parent=${obligation_marker%/*}
+    mkdir -p "$obligation_parent" || {
+      echo "$label: skipped: update obligation could not be persisted"
+      return 0
+    }
+    if [ ! -f "$obligation_marker" ]; then
+      obligation_tmp=$(mktemp "$obligation_parent/.update-obligation.XXXXXX") || {
+        echo "$label: skipped: update obligation could not be persisted"
+        return 0
+      }
+      if ! printf '%s\n' "${FM_WATCHER_PROTOCOL_VERSION:-pending}" > "$obligation_tmp" \
+        || ! chmod 600 "$obligation_tmp" 2>/dev/null \
+        || ! mv -f "$obligation_tmp" "$obligation_marker"; then
+        rm -f "$obligation_tmp" 2>/dev/null || true
+        echo "$label: skipped: update obligation could not be persisted"
+        return 0
+      fi
+      obligation_created=1
+    fi
+  fi
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+    [ "$obligation_created" -eq 0 ] || rm -f "$obligation_marker"
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
@@ -366,9 +391,8 @@ ff_target() {
 }
 
 # Sweep accumulators. The caller resets them before a sweep and reads
-# FF_NUDGE_WINDOWS and FF_NUDGE_MARKERS after.
+# FF_NUDGE_WINDOWS after.
 FF_NUDGE_WINDOWS=""
-FF_NUDGE_MARKERS=""
 FF_SEEN_HOMES=""
 
 # Validate and fast-forward one secondmate home, accumulating its window into
@@ -397,8 +421,16 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
   reread_marker="$home_real/state/.watch-protocol-reread-required"
+  if [ -n "$window" ]; then
+    if [ "$nudge_requires_instr" = yes ]; then
+      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" instructions
+    else
+      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" always
+    fi
+  else
+    ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  fi
   pending_reread=0
   [ -f "$reread_marker" ] && pending_reread=1
   should_nudge=0
@@ -409,20 +441,8 @@ process_secondmate() {
   fi
   [ "$pending_reread" -eq 1 ] && should_nudge=1
   if [ "$should_nudge" -eq 1 ] && [ -n "$window" ]; then
-    if [ "$pending_reread" -eq 0 ]; then
-      mkdir -p "$home_real/state" || return 1
-      printf '%s\n' pending > "$reread_marker" || return 1
-    fi
     if [ "$(type -t fm_ff_after_instruction_update 2>/dev/null || true)" = function ]; then
       fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR" || return 1
-      rm -f "$reread_marker" || return 1
-    else
-      if [ -n "$FF_NUDGE_MARKERS" ]; then
-        FF_NUDGE_MARKERS="$FF_NUDGE_MARKERS
-$reread_marker"
-      else
-        FF_NUDGE_MARKERS=$reread_marker
-      fi
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
   fi
