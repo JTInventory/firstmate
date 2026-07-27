@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 The repository-root `/config/`, `/reports/`, and `/backups/` directories are gitignored local fleet material.
 The ignore rules are root-anchored, so same-named directories nested under tracked shared surfaces such as `docs/examples/` and `tests/` remain trackable.
 Keep reusable configuration examples under [`docs/examples/`](examples/) and copy them into the local `config/` directory when needed.
-Parent-owned secondmate reply expectations are private runtime state under `state/pending-replies/`; `bin/fm-pending-reply-lib.sh` owns their exact schema, recovery, escalation, and retention rules.
+Parent-owned secondmate reply expectations are private runtime state under `state/pending-replies/`; resolved and explicitly retired records move to `state/pending-reply-history/`. Do not edit either directory by hand: `bin/fm-pending-reply-lib.sh` owns their exact schema, recovery, escalation, teardown handoff, and retention rules.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
