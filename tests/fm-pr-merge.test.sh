@@ -63,6 +63,11 @@ if [ "$1" = push ]; then
   if [ -n "${FAKE_PUSH_SIGNAL:-}" ]; then
     kill "-$FAKE_PUSH_SIGNAL" "$$"
   fi
+  if [ "${FAKE_PUSH_BLOCK:-0}" -eq 1 ]; then
+    printf '%s\n' "$$" > "$FAKE_PUSH_PID_FILE"
+    trap 'printf "TERM\n" > "$FAKE_PUSH_SIGNAL_FILE"; exit 143' TERM
+    while :; do sleep 0.05; done
+  fi
   exit "${FAKE_PUSH_FAIL:-0}"
 fi
 exec "$REAL_GIT" "$@"
@@ -107,7 +112,9 @@ run_merge() {
     FM_CAPTAIN_APPROVED_PR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     FM_CAPTAIN_APPROVED_PRESENTATION_NONCE=11111111111111111111111111111111 \
     FAKE_PUT_FAIL="${FAKE_PUT_FAIL:-0}" FAKE_PUSH_FAIL="${FAKE_PUSH_FAIL:-0}" \
-    FAKE_PUSH_SIGNAL="${FAKE_PUSH_SIGNAL:-}" FAKE_TIMEOUT_FAIL="${FAKE_TIMEOUT_FAIL:-0}" \
+    FAKE_PUSH_SIGNAL="${FAKE_PUSH_SIGNAL:-}" FAKE_PUSH_BLOCK="${FAKE_PUSH_BLOCK:-0}" \
+    FAKE_PUSH_PID_FILE="${FAKE_PUSH_PID_FILE:-}" FAKE_PUSH_SIGNAL_FILE="${FAKE_PUSH_SIGNAL_FILE:-}" \
+    FAKE_TIMEOUT_FAIL="${FAKE_TIMEOUT_FAIL:-0}" \
     BASH_ENV="${BASH_ENV:-}" REAL_GIT="$REAL_GIT" GH_LOG="$dir/gh.log" \
     "$dir/bin/fm-pr-merge.sh" "$@"
 }
@@ -224,6 +231,48 @@ SH
   pass 'Perl timeout reports signaled Git failure'
 }
 
+test_perl_timeout_forwards_parent_termination() {
+  local dir git_pid perl_pid merge_pid rc attempt=0
+  dir=$(make_case perl-parent-signal)
+  cat > "$dir/hide-timeout.sh" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in timeout|gtimeout) return 1 ;; esac
+  fi
+  builtin command "$@"
+}
+SH
+  BASH_ENV="$dir/hide-timeout.sh" FAKE_PUSH_BLOCK=1 \
+    FAKE_PUSH_PID_FILE="$dir/git.pid" FAKE_PUSH_SIGNAL_FILE="$dir/git.signal" \
+    FM_CAPTAIN_APPROVED_MERGE=1 \
+    run_merge "$dir" task-x1 https://github.com/JTInventory/firstmate/pull/47 -- --delete-branch \
+    >"$dir/stdout" 2>"$dir/stderr" &
+  merge_pid=$!
+  while [ ! -s "$dir/git.pid" ] && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  [ -s "$dir/git.pid" ] || {
+    kill "$merge_pid" 2>/dev/null || true
+    wait "$merge_pid" 2>/dev/null || true
+    fail 'Perl fallback did not start its Git child'
+  }
+  git_pid=$(cat "$dir/git.pid")
+  perl_pid=$(ps -o ppid= -p "$git_pid" | tr -d '[:space:]')
+  [ -n "$perl_pid" ] || fail 'Perl fallback parent was not discoverable'
+  kill -TERM "$perl_pid"
+  set +e
+  wait "$merge_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail 'interrupted Perl-fallback deletion changed merge success'
+  grep -qxF 'TERM' "$dir/git.signal" || fail 'Perl fallback did not forward parent termination'
+  ! kill -0 "$git_pid" 2>/dev/null || fail 'Perl fallback left its Git child running'
+  grep -q 'leased remote branch deletion failed' "$dir/stderr" \
+    || fail 'interrupted Perl fallback did not report deletion failure'
+  pass 'Perl timeout forwards parent termination and reaps Git'
+}
+
 test_deferred_merge_option_is_explicitly_refused() {
   local dir rc; dir=$(make_case auto)
   set +e
@@ -246,4 +295,5 @@ test_compatible_merge_options_are_translated
 test_branch_ref_is_decoded_and_deleted_with_lease
 test_branch_delete_timeout_is_warning_only
 test_perl_timeout_reports_signaled_git_failure
+test_perl_timeout_forwards_parent_termination
 test_deferred_merge_option_is_explicitly_refused
