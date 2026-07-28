@@ -699,6 +699,76 @@ SH
   pass "T22 update ignores legacy lifecycle work in another canonical home"
 }
 
+test_update_quiescence_catches_late_legacy_lifecycle_start() {
+  local w out before holder launcher
+  w=$(new_world t23)
+  bump_origin "$w" readme
+  before=$(git -C "$w/main" rev-parse HEAD)
+  mkdir -p "$w/legacy-late"
+  cat > "$w/legacy-late/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_LEGACY_READY"
+while [ ! -e "$FM_TEST_LEGACY_RELEASE" ]; do sleep 0.02; done
+SH
+  chmod +x "$w/legacy-late/fm-spawn.sh"
+  (
+    while [ ! -e "$w/home/state/.locks/spawn-admission.lock" ]; do sleep 0.01; done
+    sleep 0.05
+    FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" \
+      FM_TEST_LEGACY_READY="$w/legacy-late.ready" \
+      FM_TEST_LEGACY_RELEASE="$w/legacy-late.release" \
+      "$w/legacy-late/fm-spawn.sh"
+  ) &
+  launcher=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $launcher"
+  out=$(FM_LEGACY_LIFECYCLE_QUIESCENCE_PASSES=3 \
+    FM_LEGACY_LIFECYCLE_QUIESCENCE_WAIT=0.2 run_update "$w")
+  for _ in $(seq 1 50); do
+    [ -e "$w/legacy-late.ready" ] && break
+    sleep 0.02
+  done
+  [ -e "$w/legacy-late.ready" ] || fail "late legacy lifecycle process did not start"
+  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+    "update crossed a legacy lifecycle process that started after admission"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "update advanced after the late legacy lifecycle start"
+  touch "$w/legacy-late.release"
+  wait "$launcher" 2>/dev/null || true
+  pass "T23 update requires a stable empty legacy lifecycle interval"
+}
+
+test_lifecycle_identity_uses_command_position_and_fail_closed_scope() {
+  local w out holder rc
+  w=$(new_world t24)
+  bump_origin "$w" readme
+  mkdir -p "$w/legacy-argument"
+  : > "$w/legacy-argument/fm-teardown.sh"
+  bash -c 'while :; do sleep 1; done' "$w/legacy-argument/fm-teardown.sh" &
+  holder=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
+  out=$(run_update "$w")
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "firstmate: updated " \
+    "an arbitrary lifecycle-script argument was treated as active lifecycle work"
+
+  rc=0
+  (
+    FM_STATE_OVERRIDE="$w/helper-state"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    ps() {
+      case "$*" in
+        *"eww -p 999"*) return 1 ;;
+        *) command ps "$@" ;;
+      esac
+    }
+    fm_spawn_legacy_process_matches_scope \
+      999 "$w/legacy-argument/fm-teardown.sh" "$w/home" "$w/home/state"
+  ) || rc=$?
+  [ "$rc" -eq 2 ] || fail "unreadable lifecycle scope did not return unknown"
+  pass "T24 lifecycle identity is positional and unreadable scope fails closed"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -719,5 +789,7 @@ test_future_only_legacy_generation_updates_on_first_retry
 test_update_refuses_workers_before_state_resolution
 test_update_waits_for_legacy_admission_and_task_locks
 test_update_ignores_legacy_lifecycle_process_for_another_home
+test_update_quiescence_catches_late_legacy_lifecycle_start
+test_lifecycle_identity_uses_command_position_and_fail_closed_scope
 
 echo "# all fm-update tests passed"

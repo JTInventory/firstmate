@@ -279,7 +279,44 @@ test_bootstrap_discovers_home_nvm_tasks_axi() {
   pass "bootstrap discovers HOME NVM tasks-axi in a clean non-interactive PATH"
 }
 
+test_bootstrap_refuses_worker_mutation_before_home_resolution() {
+  local case_dir fakebin owner foreign out rc
+  case_dir="$TMP_ROOT/worker-scope"
+  owner="$case_dir/owner"
+  foreign="$case_dir/foreign"
+  mkdir -p "$owner" "$foreign/config"
+  printf '%s\n' manual > "$foreign/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=worker FM_AGENT_OWNER_HOME="$owner" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "crewmate bootstrap mutation was allowed"
+  printf '%s\n' "$out" | grep -F 'bootstrap refused' >/dev/null \
+    || fail "crewmate bootstrap refusal lost its operation"
+  [ ! -e "$foreign/state" ] || fail "crewmate bootstrap resolved foreign operational state"
+
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$owner" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "foreign-home secondmate bootstrap mutation was allowed"
+  printf '%s\n' "$out" | grep -F 'bootstrap refused' >/dev/null \
+    || fail "secondmate bootstrap refusal lost its operation"
+  [ ! -e "$foreign/state" ] || fail "secondmate bootstrap resolved foreign operational state"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=worker FM_AGENT_OWNER_HOME="$owner" \
+    "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
+    || fail "documented detect-only bootstrap was refused for a worker"
+  [ ! -e "$foreign/state" ] || fail "detect-only bootstrap created operational state"
+  pass "bootstrap refuses worker mutation while preserving detect-only inspection"
+}
+
 test_bootstrap_reporting
 test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
 test_bootstrap_discovers_home_nvm_tasks_axi
+test_bootstrap_refuses_worker_mutation_before_home_resolution

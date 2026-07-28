@@ -103,6 +103,7 @@ FORCE=${2:-}
 FORCE_RETIRE_STAGED=0
 FORCE_RETIRE_SOURCE=
 TEARDOWN_LOCKS=()
+TEARDOWN_LOCK_DIRS_CREATED=()
 
 teardown_task_lock_acquire() {
   local state_dir=$1 id=$2 lock held
@@ -118,7 +119,7 @@ teardown_task_lock_acquire() {
 }
 
 teardown_admission_lock_acquire() {
-  local state_dir=$1 target_home=$2 lock held already acquired=0
+  local state_dir=$1 target_home=$2 lock held lock_dir already acquired=0
   while IFS= read -r lock; do
     [ -n "$lock" ] || continue
     already=0
@@ -126,7 +127,11 @@ teardown_admission_lock_acquire() {
       [ "$held" != "$lock" ] || already=1
     done
     [ "$already" = 1 ] && continue
-    mkdir -p "$(dirname "$lock")" || return 1
+    lock_dir=$(dirname "$lock")
+    if [ ! -d "$lock_dir" ]; then
+      mkdir -p "$lock_dir" || return 1
+      TEARDOWN_LOCK_DIRS_CREATED+=("$lock_dir")
+    fi
     if ! fm_lock_try_acquire "$lock"; then
       echo "REFUSED: spawn is already publishing work in $state_dir" >&2
       return 1
@@ -139,7 +144,7 @@ teardown_admission_lock_acquire() {
     echo "REFUSED: an older spawn or teardown is still changing $state_dir" >&2
     return 1
   fi
-  if fm_spawn_legacy_lifecycle_process_busy "$target_home" "$state_dir" "$$"; then
+  if ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir" "$$"; then
     echo "REFUSED: an older spawn or teardown is still starting in $target_home" >&2
     return 1
   fi
@@ -149,6 +154,9 @@ teardown_locks_release() {
   local status=$? i
   for ((i=${#TEARDOWN_LOCKS[@]} - 1; i >= 0; i--)); do
     fm_lock_release "${TEARDOWN_LOCKS[$i]}" || true
+  done
+  for ((i=${#TEARDOWN_LOCK_DIRS_CREATED[@]} - 1; i >= 0; i--)); do
+    rmdir "${TEARDOWN_LOCK_DIRS_CREATED[$i]}" 2>/dev/null || true
   done
   return "$status"
 }

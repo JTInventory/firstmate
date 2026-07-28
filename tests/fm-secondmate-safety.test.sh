@@ -49,6 +49,31 @@ SH
   printf '%s\n' "$!"
 }
 
+snapshot_tree_identity() {
+  local root=$1 path rel
+  [ -e "$root" ] || {
+    printf 'missing\t%s\n' "$root"
+    return
+  }
+  (
+    cd "$root" || exit 1
+    find . -print | LC_ALL=C sort | while IFS= read -r rel; do
+      path=${rel#./}
+      [ -n "$path" ] || path=.
+      if [ -L "$path" ]; then
+        printf 'link\t%s\t%s\n' "$rel" "$(readlink "$path")"
+      elif [ -d "$path" ]; then
+        printf 'dir\t%s\n' "$rel"
+      elif [ -f "$path" ]; then
+        printf 'file\t%s\t' "$rel"
+        cksum "$path"
+      else
+        printf 'other\t%s\n' "$rel"
+      fi
+    done
+  )
+}
+
 
 test_fm_home_parameterization() {
   local brief fakebin home_one home_two out repo wt
@@ -1206,6 +1231,57 @@ test_secondmate_teardown_blocks_prelock_legacy_spawn() {
   pass "secondmate teardown blocks a scoped legacy spawn before task locking"
 }
 
+test_secondmate_teardown_quiescence_catches_late_legacy_spawn() {
+  local home subhome fakebin log fmroot ready release holder err rc teardown_pid
+  home="$TMP_ROOT/legacy-late-home"
+  subhome="$TMP_ROOT/legacy-late-subhome"
+  fmroot="$TMP_ROOT/legacy-late-fmroot"
+  ready="$TMP_ROOT/legacy-late.ready"
+  release="$TMP_ROOT/legacy-late.release"
+  err="$TMP_ROOT/legacy-late.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/legacy-late-fake")
+  log="$TMP_ROOT/legacy-late-fake/tmux.log"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_LEGACY_LIFECYCLE_QUIESCENCE_PASSES=3 \
+    FM_LEGACY_LIFECYCLE_QUIESCENCE_WAIT=0.2 \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/legacy-late-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
+  teardown_pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$home/state/.locks/spawn-admission.lock" ] && break
+    sleep 0.01
+  done
+  [ -e "$home/state/.locks/spawn-admission.lock" ] \
+    || fail "teardown did not establish admission before late-process test"
+  sleep 0.05
+  holder=$(start_legacy_lifecycle_process "$home" "$home/state" "$ready" "$release")
+  for _ in $(seq 1 50); do
+    [ -e "$ready" ] && break
+    sleep 0.02
+  done
+  [ -e "$ready" ] || fail "late legacy spawn did not start"
+  rc=0
+  wait "$teardown_pid" || rc=$?
+  touch "$release"
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "teardown crossed a legacy spawn that started after admission"
+  grep -F 'older spawn or teardown is still starting' "$err" >/dev/null \
+    || fail "late legacy spawn refusal lost its reason"
+  [ ! -s "$log" ] || fail "late legacy spawn refusal closed an endpoint"
+  [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
+    || fail "late legacy spawn refusal mutated lifecycle state"
+  pass "secondmate teardown requires a stable empty legacy lifecycle interval"
+}
+
 test_secondmate_teardown_blocks_child_publication_during_census() {
   local home subhome childhome fakebin log fmroot ready release err spawn_err teardown_pid rc
   home="$TMP_ROOT/teardown-admission-home"
@@ -1646,7 +1722,8 @@ test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
 }
 
 test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
-  local home subhome nested grandproj grandwt fmroot fakebin log err rc before after
+  local home subhome nested grandproj grandwt fmroot fakebin log err rc
+  local home_before home_after sub_before sub_after nested_before nested_after
   local grand_stamp
   home="$TMP_ROOT/no-treehouse-recursive-home"
   subhome="$TMP_ROOT/no-treehouse-recursive-subhome"
@@ -1677,8 +1754,9 @@ test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$grandwt" grand "$nested" ) \
     || fail "recursive missing-treehouse fixture could not be stamped"
-  before=$(cksum "$home/state/domain.meta" "$subhome/state/child.meta" \
-    "$nested/state/grand.meta" "$home/data/secondmates.md")
+  home_before=$(snapshot_tree_identity "$home")
+  sub_before=$(snapshot_tree_identity "$subhome")
+  nested_before=$(snapshot_tree_identity "$nested")
   fakebin=$(make_fake_tmux "$TMP_ROOT/no-treehouse-recursive-fake")
   log="$TMP_ROOT/no-treehouse-recursive-fake/tmux.log"
   rm -f "$fakebin/treehouse"
@@ -1689,9 +1767,12 @@ test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "recursive teardown crossed missing Treehouse capability"
-  after=$(cksum "$home/state/domain.meta" "$subhome/state/child.meta" \
-    "$nested/state/grand.meta" "$home/data/secondmates.md")
-  [ "$after" = "$before" ] || fail "recursive preflight changed lifecycle records"
+  home_after=$(snapshot_tree_identity "$home")
+  sub_after=$(snapshot_tree_identity "$subhome")
+  nested_after=$(snapshot_tree_identity "$nested")
+  [ "$home_after" = "$home_before" ] || fail "recursive preflight changed the parent home tree"
+  [ "$sub_after" = "$sub_before" ] || fail "recursive preflight changed the child home tree"
+  [ "$nested_after" = "$nested_before" ] || fail "recursive preflight changed the nested home tree"
   [ ! -s "$log" ] || fail "recursive preflight closed an endpoint"
   [ -d "$subhome" ] && [ -d "$nested" ] && [ -d "$grandwt" ] \
     || fail "recursive preflight removed a home or worktree"
@@ -2360,6 +2441,7 @@ test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_serializes_against_spawn
 test_secondmate_teardown_blocks_prelock_legacy_spawn
+test_secondmate_teardown_quiescence_catches_late_legacy_spawn
 test_secondmate_teardown_blocks_child_publication_during_census
 test_secondmate_teardown_refuses_home_referenced_by_another_task
 test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent

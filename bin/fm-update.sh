@@ -66,7 +66,7 @@ fm_ff_target_lock_acquire() {
     fm_ff_target_lock_release
     return 1
   fi
-  if fm_spawn_legacy_lifecycle_process_busy "$target_home" "$state_dir"; then
+  if ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir"; then
     fm_ff_target_lock_release
     return 1
   fi

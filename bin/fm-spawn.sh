@@ -473,7 +473,7 @@ if fm_spawn_legacy_task_lock_busy "$STATE"; then
   echo "error: an older spawn or teardown is still changing this firstmate home" >&2
   exit 1
 fi
-if fm_spawn_legacy_lifecycle_process_busy "$FM_HOME" "$STATE" "$$"; then
+if ! fm_spawn_legacy_lifecycle_quiescent "$FM_HOME" "$STATE" "$$"; then
   echo "error: an older spawn or teardown is still starting in this firstmate home" >&2
   exit 1
 fi

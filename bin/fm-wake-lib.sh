@@ -52,28 +52,166 @@ fm_lifecycle_canonical_path() {
   printf '%s/%s\n' "${parent%/}" "$base"
 }
 
+fm_lifecycle_script_from_argv() {
+  local command=${1:-} base arg
+  FM_LIFECYCLE_SCRIPT=
+  [ -n "$command" ] || return 1
+  base=${command##*/}
+  case "$base" in
+    fm-spawn.sh|fm-teardown.sh)
+      FM_LIFECYCLE_SCRIPT=$command
+      return 0
+      ;;
+    env)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --) shift; break ;;
+          -*|*=*) shift ;;
+          *) break ;;
+        esac
+      done
+      [ "$#" -gt 0 ] || return 1
+      fm_lifecycle_script_from_argv "$@"
+      return
+      ;;
+    bash|sh|dash|zsh|ksh)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --) shift; break ;;
+          -c|--command|-*c*) return 1 ;;
+          -O|+O) shift; [ "$#" -gt 0 ] && shift ;;
+          -*) shift ;;
+          *) break ;;
+        esac
+      done
+      arg=${1:-}
+      case "${arg##*/}" in
+        fm-spawn.sh|fm-teardown.sh)
+          FM_LIFECYCLE_SCRIPT=$arg
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+fm_lifecycle_process_script() {
+  local pid=$1 command command_line arg base
+  local -a argv=()
+  if [ -e "/proc/$pid/cmdline" ]; then
+    if ! { exec 9< "/proc/$pid/cmdline"; } 2>/dev/null; then
+      return 2
+    fi
+    IFS= read -r -d '' command <&9 || {
+      exec 9<&-
+      return 2
+    }
+    base=${command##*/}
+    if [ "$base" = env ]; then
+      command=
+      while IFS= read -r -d '' arg <&9; do
+        case "$arg" in
+          --) continue ;;
+          -*|*=*) continue ;;
+          *) command=$arg; break ;;
+        esac
+      done
+      [ -n "$command" ] || {
+        exec 9<&-
+        return 1
+      }
+      base=${command##*/}
+    fi
+    case "$base" in
+      fm-spawn.sh|fm-teardown.sh)
+        FM_LIFECYCLE_SCRIPT=$command
+        exec 9<&-
+        return 0
+        ;;
+      bash|sh|dash|zsh|ksh)
+        while IFS= read -r -d '' arg <&9; do
+          case "$arg" in
+            --) continue ;;
+            -c|--command|-*c*)
+              exec 9<&-
+              return 1
+              ;;
+            -O|+O)
+              IFS= read -r -d '' _ <&9 || true
+              ;;
+            -*) ;;
+            *)
+              case "${arg##*/}" in
+                fm-spawn.sh|fm-teardown.sh)
+                  FM_LIFECYCLE_SCRIPT=$arg
+                  exec 9<&-
+                  return 0
+                  ;;
+              esac
+              exec 9<&-
+              return 1
+              ;;
+          esac
+        done
+        ;;
+    esac
+    exec 9<&-
+    return 1
+  else
+    command_line=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || return 2
+    [ -n "$command_line" ] || return 2
+    set -f
+    # shellcheck disable=SC2206
+    argv=($command_line)
+    set +f
+  fi
+  fm_lifecycle_script_from_argv "${argv[@]}" || return 1
+}
+
+fm_lifecycle_process_environment() {
+  local pid=$1
+  FM_LIFECYCLE_ENVIRONMENT=
+  FM_LIFECYCLE_ENVIRONMENT_SOURCE=
+  if [ -e "/proc/$pid/environ" ]; then
+    if FM_LIFECYCLE_ENVIRONMENT=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null); then
+      FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
+      return 0
+    fi
+    FM_LIFECYCLE_ENVIRONMENT=
+  fi
+  FM_LIFECYCLE_ENVIRONMENT=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) \
+    || return 2
+  [ -n "$FM_LIFECYCLE_ENVIRONMENT" ] || return 2
+  FM_LIFECYCLE_ENVIRONMENT_SOURCE=ps
+}
+
 fm_spawn_legacy_process_matches_scope() {
   local pid=$1 script=$2 target_home=$3 target_state=$4
-  local line lifecycle_home= home= root= state= process_home process_state environment=
-  if [ -r "/proc/$pid/environ" ]; then
+  local line lifecycle_home= lifecycle_state= home= root= state=
+  local process_home process_state environment
+  fm_lifecycle_process_environment "$pid" || return 2
+  environment=$FM_LIFECYCLE_ENVIRONMENT
+  if [ "$FM_LIFECYCLE_ENVIRONMENT_SOURCE" = proc ]; then
     while IFS= read -r line; do
       case "$line" in
         FM_LIFECYCLE_HOME=*) lifecycle_home=${line#FM_LIFECYCLE_HOME=} ;;
-        FM_LIFECYCLE_STATE=*) state=${line#FM_LIFECYCLE_STATE=} ;;
+        FM_LIFECYCLE_STATE=*) lifecycle_state=${line#FM_LIFECYCLE_STATE=} ;;
         FM_HOME=*) home=${line#FM_HOME=} ;;
         FM_ROOT_OVERRIDE=*) root=${line#FM_ROOT_OVERRIDE=} ;;
-        FM_STATE_OVERRIDE=*) [ -n "$state" ] || state=${line#FM_STATE_OVERRIDE=} ;;
+        FM_STATE_OVERRIDE=*) state=${line#FM_STATE_OVERRIDE=} ;;
       esac
-    done < <(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null)
+    done <<< "$environment"
   else
-    environment=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null || true)
     for line in $environment; do
       case "$line" in
         FM_LIFECYCLE_HOME=*) lifecycle_home=${line#FM_LIFECYCLE_HOME=} ;;
-        FM_LIFECYCLE_STATE=*) state=${line#FM_LIFECYCLE_STATE=} ;;
+        FM_LIFECYCLE_STATE=*) lifecycle_state=${line#FM_LIFECYCLE_STATE=} ;;
         FM_HOME=*) home=${line#FM_HOME=} ;;
         FM_ROOT_OVERRIDE=*) root=${line#FM_ROOT_OVERRIDE=} ;;
-        FM_STATE_OVERRIDE=*) [ -n "$state" ] || state=${line#FM_STATE_OVERRIDE=} ;;
+        FM_STATE_OVERRIDE=*) state=${line#FM_STATE_OVERRIDE=} ;;
       esac
     done
   fi
@@ -87,47 +225,64 @@ fm_spawn_legacy_process_matches_scope() {
     process_home=${script%/*}
     process_home=${process_home%/*}
   fi
+  process_home=$(fm_lifecycle_canonical_path "$process_home") || return 2
+  [ "$process_home" = "$target_home" ] || return 1
+  [ -z "$lifecycle_state" ] || state=$lifecycle_state
   [ -n "$state" ] || state="$process_home/state"
-  process_home=$(fm_lifecycle_canonical_path "$process_home") || return 1
-  process_state=$(fm_lifecycle_canonical_path "$state") || return 1
-  [ "$process_home" = "$target_home" ] && [ "$process_state" = "$target_state" ]
+  process_state=$(fm_lifecycle_canonical_path "$state") || return 2
+  [ "$process_state" = "$target_state" ]
 }
 
 fm_spawn_legacy_lifecycle_process_busy() {
-  local target_home=$1 target_state=$2 exclude_pid=${3:-} entry pid arg script process_home
+  local target_home=$1 target_state=$2 exclude_pid=${3:-} entry pid script rc
   target_home=$(fm_lifecycle_canonical_path "$target_home") || return 0
   target_state=$(fm_lifecycle_canonical_path "$target_state") || return 0
   if [ -d /proc ]; then
     for entry in /proc/[0-9]*; do
-      [ -r "$entry/cmdline" ] || continue
       pid=${entry#/proc/}
       [ "$pid" != "$exclude_pid" ] || continue
-      script=
-      while IFS= read -r arg; do
-        case "$arg" in
-          */fm-spawn.sh|*/fm-teardown.sh) script=$arg; break ;;
-        esac
-      done < <(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null)
-      [ -n "$script" ] || continue
-      fm_spawn_legacy_process_matches_scope \
-        "$pid" "$script" "$target_home" "$target_state" && return 0
+      if fm_lifecycle_process_script "$pid"; then rc=0; else rc=$?; fi
+      [ "$rc" -ne 2 ] || continue
+      [ "$rc" -eq 0 ] || continue
+      script=$FM_LIFECYCLE_SCRIPT
+      if fm_spawn_legacy_process_matches_scope \
+        "$pid" "$script" "$target_home" "$target_state"; then rc=0; else rc=$?; fi
+      [ "$rc" -eq 1 ] || return 0
     done
     return 1
   fi
-  while read -r pid arg; do
+  while read -r pid _; do
     [ "$pid" != "$exclude_pid" ] || continue
-    script=
-    for arg in $arg; do
-      case "$arg" in
-        */fm-spawn.sh|*/fm-teardown.sh) script=$arg; break ;;
-      esac
-    done
-    [ -n "$script" ] || continue
-    process_home=${script%/*}
-    process_home=${process_home%/*}
-    process_home=$(fm_lifecycle_canonical_path "$process_home") || continue
-    [ "$process_home" = "$target_home" ] && return 0
-  done < <(LC_ALL=C ps -A -o pid= -o command= 2>/dev/null)
+    if fm_lifecycle_process_script "$pid"; then rc=0; else rc=$?; fi
+    [ "$rc" -ne 2 ] || continue
+    [ "$rc" -eq 0 ] || continue
+    script=$FM_LIFECYCLE_SCRIPT
+    if fm_spawn_legacy_process_matches_scope \
+      "$pid" "$script" "$target_home" "$target_state"; then rc=0; else rc=$?; fi
+    [ "$rc" -eq 1 ] || return 0
+  done < <(LC_ALL=C ps -A -o pid= -o args= 2>/dev/null)
+  return 1
+}
+
+fm_spawn_legacy_lifecycle_quiescent() {
+  local target_home=$1 target_state=$2 exclude_pid=${3:-}
+  local passes=${FM_LEGACY_LIFECYCLE_QUIESCENCE_PASSES:-3}
+  local wait=${FM_LEGACY_LIFECYCLE_QUIESCENCE_WAIT:-0.1} pass
+  case "$passes" in
+    ''|*[!0-9]*|0|1) passes=3 ;;
+  esac
+  if ! [[ "$wait" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] \
+     || [[ "$wait" =~ ^0*([.]0*)?$ ]]; then
+    wait=0.1
+  fi
+  pass=1
+  while [ "$pass" -le "$passes" ]; do
+    fm_spawn_legacy_lifecycle_process_busy "$target_home" "$target_state" "$exclude_pid" \
+      && return 1
+    [ "$pass" -eq "$passes" ] && return 0
+    sleep "$wait" || return 1
+    pass=$((pass + 1))
+  done
   return 1
 }
 
