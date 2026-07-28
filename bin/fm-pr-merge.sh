@@ -31,6 +31,10 @@ commit_title=
 commit_message=
 delete_branch=0
 match_head=
+merge_sha_file=''
+merge_method_file=''
+merge_title_file=''
+merge_message_file=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --squash|-s) method=squash ;;
@@ -164,9 +168,9 @@ grep -qxF "pr=$URL" "$META" || { echo 'error: PR validation did not preserve ide
 CURRENT_PR=$(gh-axi api GET "/repos/$OWNER/$REPO/pulls/$NUMBER" \
   --jq '{head_b64: (.head.sha | @base64), base_ref_b64: (.base.ref | @base64), base_b64: (.base.sha | @base64), head_repo_b64: (.head.repo.full_name | @base64), head_ref_b64: (.head.ref | @base64)}' \
   2>/dev/null || true)
-if fm_pr_toon_base64_field_parse "$CURRENT_PR" head_b64; then CURRENT_HEAD=$FM_PR_TOON_VALUE; else CURRENT_HEAD=; fi
-if fm_pr_toon_base64_field_parse "$CURRENT_PR" base_ref_b64; then CURRENT_BASE_REF=$FM_PR_TOON_VALUE; else CURRENT_BASE_REF=; fi
-if fm_pr_toon_base64_field_parse "$CURRENT_PR" base_b64; then CURRENT_BASE=$FM_PR_TOON_VALUE; else CURRENT_BASE=; fi
+if ! CURRENT_HEAD=$(fm_pr_toon_base64_field_parse "$CURRENT_PR" head_b64); then CURRENT_HEAD=; fi
+if ! CURRENT_BASE_REF=$(fm_pr_toon_base64_field_parse "$CURRENT_PR" base_ref_b64); then CURRENT_BASE_REF=; fi
+if ! CURRENT_BASE=$(fm_pr_toon_base64_field_parse "$CURRENT_PR" base_b64); then CURRENT_BASE=; fi
 if ! fm_pr_head_valid "$CURRENT_HEAD" || [ "$CURRENT_HEAD" != "$PRESENTED_HEAD" ] \
   || [ "$CURRENT_BASE_REF" != "$PRESENTED_BASE_REF" ] \
   || ! fm_pr_head_valid "$CURRENT_BASE" || [ "$CURRENT_BASE" != "$PRESENTED_BASE" ]; then
@@ -196,14 +200,12 @@ if [ -n "$commit_message" ]; then
   merge_fields+=(--field "commit_message=@$merge_message_file")
 fi
 if [ "$delete_branch" -eq 1 ]; then
-  fm_pr_toon_base64_field_parse "$CURRENT_PR" head_repo_b64 || {
+  HEAD_REPO=$(fm_pr_toon_base64_field_parse "$CURRENT_PR" head_repo_b64) || {
     echo 'error: could not verify the PR head repository for branch deletion' >&2; exit 1;
   }
-  HEAD_REPO=$FM_PR_TOON_VALUE
-  fm_pr_toon_base64_field_parse "$CURRENT_PR" head_ref_b64 || {
+  HEAD_REF=$(fm_pr_toon_base64_field_parse "$CURRENT_PR" head_ref_b64) || {
     echo 'error: could not verify the PR head branch for deletion' >&2; exit 1;
   }
-  HEAD_REF=$FM_PR_TOON_VALUE
   fm_pr_url_parse "https://github.com/$HEAD_REPO/pull/1" \
     && [ "$FM_PR_PROVIDER" = github ] \
     && git check-ref-format "refs/heads/$HEAD_REF" >/dev/null 2>&1 || {

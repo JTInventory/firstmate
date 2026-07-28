@@ -114,7 +114,6 @@ FM_PR_PRESENTATION_HEAD=
 FM_PR_PRESENTATION_BASE_REF=
 FM_PR_PRESENTATION_BASE=
 FM_PR_PRESENTATION_NONCE=
-FM_PR_TOON_VALUE=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -241,7 +240,6 @@ fm_pr_head_valid() {
 
 fm_pr_toon_base64_field_parse() {
   local data=$1 key=$2 line encoded decoded count=0
-  FM_PR_TOON_VALUE=
   case "$key" in
     ''|*[!A-Za-z0-9_]*) return 1 ;;
   esac
@@ -264,7 +262,7 @@ fm_pr_toon_base64_field_parse() {
     return 1
   fi
   [ -n "$decoded" ] || return 1
-  FM_PR_TOON_VALUE=$decoded
+  printf '%s\n' "$decoded"
 }
 
 fm_pr_presentation_nonce_valid() {
@@ -301,7 +299,7 @@ fm_pr_presentation_lock_acquire() {
 }
 
 fm_pr_url_encode_ref_path() {
-  local input=$1 output= char value encoded i
+  local input=$1 output='' char value encoded i
   local LC_ALL=C
   for ((i = 0; i < ${#input}; i++)); do
     char=${input:i:1}

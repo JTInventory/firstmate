@@ -62,18 +62,18 @@ done < "$META"
 PRESENTED_PR=$(gh-axi api GET "/repos/$OWNER/$REPO/pulls/$NUMBER" \
   --jq '{head_b64: (.head.sha | @base64), base_ref_b64: (.base.ref | @base64), base_b64: (.base.sha | @base64)}' \
   2>/dev/null || true)
-if fm_pr_toon_base64_field_parse "$PRESENTED_PR" head_b64; then
-  PRESENTED_HEAD=$FM_PR_TOON_VALUE
+if PRESENTED_HEAD=$(fm_pr_toon_base64_field_parse "$PRESENTED_PR" head_b64); then
+  :
 else
   PRESENTED_HEAD=
 fi
-if fm_pr_toon_base64_field_parse "$PRESENTED_PR" base_b64; then
-  PRESENTED_BASE=$FM_PR_TOON_VALUE
+if PRESENTED_BASE=$(fm_pr_toon_base64_field_parse "$PRESENTED_PR" base_b64); then
+  :
 else
   PRESENTED_BASE=
 fi
-if fm_pr_toon_base64_field_parse "$PRESENTED_PR" base_ref_b64; then
-  PRESENTED_BASE_REF=$FM_PR_TOON_VALUE
+if PRESENTED_BASE_REF=$(fm_pr_toon_base64_field_parse "$PRESENTED_PR" base_ref_b64); then
+  :
 else
   PRESENTED_BASE_REF=
 fi
