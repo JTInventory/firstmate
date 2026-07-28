@@ -43,6 +43,7 @@ This is a directory that turns any agent into your firstmate, and you the captai
 - **A visible crew** - every crewmate works in its own tmux window or experimental Herdr tab you can watch or type into; Herdr is available by opt-in configuration.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver authorized changes; scout tasks leave standalone investigation reports when the intake contract warrants separate research.
+- **Reusable idea evaluation** - `/evaluate-idea-fit` routes a link, repository, integration, or ripple through a report-only scout before any implementation decision.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, kept on the primary firstmate version by guarded local fast-forwards.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you, with bounded reviews for declared external waits.
@@ -152,6 +153,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine wakes in bash, re-surfaces declared external waits for review on a bounded cadence, and escalates captain-relevant events as one batched digest |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates with fast-forward-only pulls, verified watcher migration, acknowledged instruction re-reads, and durable secondmate nudges |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
+| `/evaluate-idea-fit` | Compare an external idea with the current structure and return an Adopt, Trial, Borrow, or Reject scout report; Codex uses `$evaluate-idea-fit`, while OpenCode and Pi remain Tier B natural-language fallbacks |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 

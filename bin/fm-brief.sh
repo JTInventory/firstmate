@@ -7,6 +7,7 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--display-title <title>] [--scout]
+#        fm-brief.sh <task-id> <repo-name> --scope-contract <scope.tsv>
 #        fm-brief.sh <task-id> [--display-title <title>] --secondmate <project>...
 #   --display-title sanitizes and persists a deterministic 1-28 character
 #   presentation phrase at data/<task-id>/display-title for fm-spawn.sh.
@@ -45,6 +46,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 DISPLAY_TITLE=
 DISPLAY_TITLE_SET=0
+SCOPE_CONTRACT=
+SCOPE_CONTRACT_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -52,8 +55,10 @@ for a in "$@"; do
     case "$a" in
       --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
     esac
-    DISPLAY_TITLE=$a
-    DISPLAY_TITLE_SET=1
+    case "$want_value" in
+      display-title) DISPLAY_TITLE=$a; DISPLAY_TITLE_SET=1 ;;
+      scope-contract) SCOPE_CONTRACT=$a; SCOPE_CONTRACT_SET=1 ;;
+    esac
     want_value=
     continue
   fi
@@ -62,11 +67,19 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --display-title) want_value=display-title ;;
     --display-title=*) DISPLAY_TITLE=${a#--display-title=}; DISPLAY_TITLE_SET=1 ;;
+    --scope-contract) want_value=scope-contract ;;
+    --scope-contract=*) SCOPE_CONTRACT=${a#--scope-contract=}; SCOPE_CONTRACT_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
-[ -z "$want_value" ] || { echo "error: --display-title requires a value" >&2; exit 1; }
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 ID=${POS[0]}
+
+if [ "$SCOPE_CONTRACT_SET" -eq 1 ]; then
+  [ -n "$SCOPE_CONTRACT" ] || { echo "error: --scope-contract requires a value" >&2; exit 1; }
+  [ "$KIND" = ship ] || { echo "error: --scope-contract is available only for ship tasks" >&2; exit 1; }
+  "$SCRIPT_DIR/fm-scope-contract.sh" validate-spec "$SCOPE_CONTRACT" || exit 1
+fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -357,4 +370,8 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
+if [ "$SCOPE_CONTRACT_SET" -eq 1 ]; then
+  "$SCRIPT_DIR/fm-scope-contract.sh" append-brief "$SCOPE_CONTRACT" "$BRIEF" "$MODE" || exit 1
+  printf '%s\n' firstmate-scope-contract-v1 > "$DATA/$ID/scope-contract-enabled"
+fi
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

@@ -879,6 +879,21 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+SCOPE_MARKER="$DATA/$ID/scope-contract-enabled"
+SCOPE_MARKER_PRESENT=0
+if [ -e "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ]; then
+  SCOPE_MARKER_PRESENT=1
+  if ! "$FM_ROOT/bin/fm-scope-contract.sh" validate-marker "$SCOPE_MARKER" >/dev/null 2>&1; then
+    echo "error: invalid scope-contract marker at $SCOPE_MARKER" >&2
+    exit 1
+  fi
+fi
+if [ "$SCOPE_MARKER_PRESENT" -eq 1 ]; then
+  "$FM_ROOT/bin/fm-scope-contract.sh" validate-brief "$BRIEF" || {
+    echo "error: invalid scope contract in $BRIEF" >&2
+    exit 1
+  }
+fi
 
 if [ -z "$ARG3" ]; then
   if [ "$KIND" = secondmate ]; then

@@ -15,12 +15,61 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Preserve the fork's task/worktree/PR branch identity contract.
 # shellcheck source=bin/fm-task-identity-lib.sh
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
+
+fm_scope_ledger_audit() (
+  if [ "$PROVIDER" != github ]; then
+    printf 'scope-ledger\tunknown\treason=provider-unsupported\n'
+    return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'scope-ledger\tunknown\treason=gh-unavailable\n'
+    return 0
+  fi
+  SCOPE_BODY=$(mktemp "${TMPDIR:-/tmp}/fm-pr-body.XXXXXX") || {
+    printf 'scope-ledger\tunknown\treason=temp-unavailable\n'
+    return 0
+  }
+  trap 'rm -f -- "$SCOPE_BODY"' EXIT HUP INT TERM
+  SCOPE_TIMEOUT=${FM_SCOPE_LEDGER_TIMEOUT_SECONDS:-3}
+  case "$SCOPE_TIMEOUT" in *[!0-9]*|'') SCOPE_TIMEOUT=3 ;; esac
+  [ "$SCOPE_TIMEOUT" -gt 0 ] || SCOPE_TIMEOUT=3
+  if command -v timeout >/dev/null 2>&1; then
+    SCOPE_TIMEOUT_RUN=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    SCOPE_TIMEOUT_RUN=gtimeout
+  elif command -v perl >/dev/null 2>&1; then
+    SCOPE_TIMEOUT_RUN=perl
+  else
+    printf 'scope-ledger\tunknown\treason=timeout-unavailable\n'
+    return 0
+  fi
+  if [ "$SCOPE_TIMEOUT_RUN" = perl ]; then
+    if (cd "${WT:-$FM_ROOT}" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$SCOPE_TIMEOUT" gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
+      SCOPE_FETCHED=1
+    else
+      SCOPE_FETCHED=0
+    fi
+  else
+    if (cd "${WT:-$FM_ROOT}" && "$SCOPE_TIMEOUT_RUN" "$SCOPE_TIMEOUT" gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
+      SCOPE_FETCHED=1
+    else
+      SCOPE_FETCHED=0
+    fi
+  fi
+  if [ "$SCOPE_FETCHED" -eq 1 ]; then
+    "$SCRIPT_DIR/fm-scope-contract.sh" audit-body "$SCOPE_BRIEF" "$SCOPE_BODY" \
+      || printf 'scope-ledger\tunknown\treason=local-contract-invalid\n'
+  else
+    printf 'scope-ledger\tunknown\treason=body-unavailable\n'
+  fi
+)
 
 EXPECTED_HEAD=
 PRIOR_HEAD=
@@ -97,6 +146,18 @@ if [ "$PROVIDER" = github ] && [ -z "$EXPECTED_HEAD" ]; then
 fi
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+TASK_MODE=$(fm_meta_value "$META" mode)
+SCOPE_BRIEF="$DATA/$ID/brief.md"
+SCOPE_MARKER="$DATA/$ID/scope-contract-enabled"
+SCOPE_LEDGER_STATE=disabled
+if [ "$TASK_MODE" != local-only ] && { [ -e "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ]; }; then
+  if "$SCRIPT_DIR/fm-scope-contract.sh" validate-marker "$SCOPE_MARKER" >/dev/null 2>&1; then
+    SCOPE_LEDGER_STATE=enabled
+  else
+    SCOPE_LEDGER_STATE=invalid
+    printf 'scope-ledger\tunknown\treason=marker-invalid\n'
+  fi
+fi
 PR_HEAD=
 GUARDED_REPLACEMENT_NEEDED=0
 GUARDED_REPLACEMENT_ACTIVE=0
@@ -131,6 +192,7 @@ if [ -n "$EXPECTED_HEAD" ]; then
     exit 1
   }
   if [ "$FM_PR_POLL_REPLACEMENT_COMPLETE" -eq 1 ]; then
+    [ "$SCOPE_LEDGER_STATE" != enabled ] || fm_scope_ledger_audit
     printf 'armed: state/%s.check.sh\n' "$ID"
     exit 0
   fi
@@ -164,6 +226,7 @@ if [ -n "$EXPECTED_HEAD" ]; then
       exit 1
     }
     if [ "$recorded_head" = "$EXPECTED_HEAD" ]; then
+      [ "$SCOPE_LEDGER_STATE" != enabled ] || fm_scope_ledger_audit
       printf 'armed: state/%s.check.sh\n' "$ID"
       exit 0
     fi
@@ -265,4 +328,5 @@ if [ "$GUARDED_REPLACEMENT_ACTIVE" -eq 1 ]; then
     exit 1
   }
 fi
+[ "$SCOPE_LEDGER_STATE" != enabled ] || fm_scope_ledger_audit
 printf 'armed: state/%s.check.sh\n' "$ID"
