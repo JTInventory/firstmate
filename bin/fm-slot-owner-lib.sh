@@ -142,7 +142,7 @@ fm_slot_stamp_clear_exact() {  # <worktree> <task-id> <home>
   [ -f "$path" ] && [ ! -L "$path" ] || return 0
   stamp_task=$(sed -n 's/^task=//p' "$path" 2>/dev/null | head -1)
   stamp_home=$(sed -n 's/^home=//p' "$path" 2>/dev/null | head -1)
-  [ "$stamp_task" = "$id" ] && [ "$stamp_home" = "$home" ] || return 0
+  [ "$stamp_task" = "$id" ] && fm_slot_same_path "$stamp_home" "$home" || return 0
   rm -f "$path"
 }
 

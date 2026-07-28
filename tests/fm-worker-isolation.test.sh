@@ -568,6 +568,22 @@ test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
   pass "slot ownership claims never replace another owner or stamp a plain checkout"
 }
 
+test_exact_stamp_clear_accepts_canonical_home_alias() {
+  local rec alias stamp
+  rec=$(make_slot_world slot-canonical-clear)
+  read_slot_world "$rec"
+  alias="$WORLD/home-alias"
+  ln -s "$WORLD/home" "$alias"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e1-alias "$WORLD/home" \
+    && fm_slot_stamp_clear_exact "$WT_DIR" task-e1-alias "$alias" ) \
+    || fail "exact stamp clear rejected a canonical owner-home alias"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = none ] || fail "canonical owner-home alias stranded an exact stamp"
+  pass "exact ownership cleanup compares canonical home identity"
+}
+
 test_clean_ownership_disposes() {
   local rec verdict
   rec=$(make_slot_world slot-clean)
@@ -874,6 +890,62 @@ SH
   pass "ownership evidence survives until pooled return succeeds"
 }
 
+test_ordinary_teardown_acquires_admission_before_task_lock() {
+  local rec fakebin ready holder out status stamp
+  rec=$(make_slot_world slot-lock-order)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  fm_fake_exit0 "$fakebin" tmux gh-axi gh treehouse
+  ready="$WORLD/locks.ready"
+  fm_write_meta "$WORLD/home/state/task-e13.meta" \
+    "window=firstmate:fm-task-e13" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e13 "$WORLD/home" ) \
+    || fail "lock-order fixture could not be stamped"
+  (
+    exec env FM_STATE_OVERRIDE="$WORLD/home/state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      admission=$(fm_spawn_admission_lock_path "$STATE")
+      mkdir -p "$(dirname "$admission")"
+      fm_lock_try_acquire "$admission" || exit 1
+      fm_lock_try_acquire "$STATE/.spawn-task-e13.lock" || exit 1
+      : > "$2"
+      cleanup() {
+        trap - EXIT TERM INT
+        fm_lock_release "$STATE/.spawn-task-e13.lock"
+        fm_lock_release "$admission"
+        exit 0
+      }
+      trap cleanup EXIT TERM INT
+      while :; do sleep 1; done
+    ' _ "$ROOT" "$ready"
+  ) >/dev/null 2>&1 &
+  holder=$!
+  for _ in $(seq 1 50); do
+    [ -e "$ready" ] && break
+    sleep 0.02
+  done
+  [ -e "$ready" ] || fail "lock-order holder did not start"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-e13 --force 2>&1)
+  status=$?
+  set -e
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ] || fail "ordinary teardown crossed active spawn admission"$'\n'"$out"
+  assert_contains "$out" "spawn is already publishing work in $WORLD/home/state" \
+    "ordinary teardown checked its task lock before home admission"
+  assert_present "$WORLD/home/state/task-e13.meta" "admission refusal removed task metadata"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = task-e13 ] || fail "admission refusal cleared ownership evidence"
+  pass "ordinary teardown acquires home admission before its task lock"
+}
+
 # --- F. restore-time re-assertion -------------------------------------------
 
 make_sweep_home() {
@@ -1126,6 +1198,7 @@ test_a_lost_window_name_never_answers_with_firstmates_own_pane
 test_one_proc_walk_answers_every_task_in_a_sweep
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
+test_exact_stamp_clear_accepts_canonical_home_alias
 test_clean_ownership_disposes
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
@@ -1137,6 +1210,7 @@ test_same_task_stamp_in_another_home_survives_relinquish
 test_teardown_retires_a_contested_lease_even_with_force
 test_retained_stamp_survives_failed_metadata_retirement
 test_stamp_survives_failed_pool_return
+test_ordinary_teardown_acquires_admission_before_task_lock
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence

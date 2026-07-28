@@ -116,11 +116,11 @@ teardown_task_lock_acquire() {
 
 teardown_admission_lock_acquire() {
   local state_dir=$1 lock held
-  lock="$state_dir/.spawn-admission.lock"
+  lock=$(fm_spawn_admission_lock_path "$state_dir") || return 1
   for held in "${TEARDOWN_LOCKS[@]}"; do
     [ "$held" != "$lock" ] || return 0
   done
-  mkdir -p "$state_dir" || return 1
+  mkdir -p "$(dirname "$lock")" || return 1
   if ! fm_lock_try_acquire "$lock"; then
     echo "REFUSED: spawn is already publishing work in $state_dir" >&2
     return 1
@@ -137,6 +137,7 @@ teardown_locks_release() {
 }
 
 trap teardown_locks_release EXIT
+teardown_admission_lock_acquire "$STATE" || exit 1
 teardown_task_lock_acquire "$STATE" "$ID" || exit 1
 
 META="$STATE/$ID.meta"
@@ -960,14 +961,14 @@ cleanup_firstmate_home_children() {
       if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "$home" \
         crewmate "child worktree" retire; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        command -v treehouse >/dev/null 2>&1 || {
+          echo "REFUSED: treehouse command not found; preserving child worktree $child_wt and its metadata" >&2
+          return 1
+        }
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-        if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-          teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
-            || return 1
-          fm_slot_stamp_clear_exact "$child_wt" "$child_id" "$home" || return 1
-        else
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return 1
-        fi
+        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
+          || return 1
+        fm_slot_stamp_clear_exact "$child_wt" "$child_id" "$home" || return 1
       else
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
@@ -1153,6 +1154,10 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   TOP_SLOT_RETAIN_VERDICT=
   if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
     crewmate "worktree" retire; then
+    command -v treehouse >/dev/null 2>&1 || {
+      echo "REFUSED: treehouse command not found; preserving worktree $WT and its metadata" >&2
+      exit 1
+    }
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then

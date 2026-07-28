@@ -12,6 +12,10 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 FM_LOCK_LEGACY_IDENTITY_MAX_AGE="${FM_LOCK_LEGACY_IDENTITY_MAX_AGE:-300}"
 mkdir -p "$STATE"
 
+fm_spawn_admission_lock_path() {
+  printf '%s/.locks/spawn-admission.lock\n' "$1"
+}
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }

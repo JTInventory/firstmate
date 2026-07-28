@@ -14,11 +14,6 @@ TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 
 hold_test_task_lock() {
   local state=$1 id=$2 ready=$3
-  hold_test_lock "$state" "$state/.spawn-$id.lock" "$ready"
-}
-
-hold_test_lock() {
-  local state=$1 lock=$2 ready=$3
   (
     exec env FM_STATE_OVERRIDE="$state" bash -c '
       . "$1/bin/fm-wake-lib.sh"
@@ -32,7 +27,7 @@ hold_test_lock() {
       }
       trap cleanup EXIT TERM INT
       while :; do sleep 1; done
-    ' _ "$ROOT" "$lock" "$ready"
+    ' _ "$ROOT" "$state/.spawn-$id.lock" "$ready"
   ) >/dev/null 2>&1 &
   printf '%s\n' "$!"
 }
@@ -1010,23 +1005,23 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp() {
   local home subhome fakebin log out rc
   home="$TMP_ROOT/plain-clone-spawn-home"
   subhome="$TMP_ROOT/plain-clone-spawn-subhome"
-  mkdir -p "$home/data/domain" "$home/state" "$home/config" "$home/projects"
-  printf 'brief\n' > "$home/data/domain/brief.md"
+  mkdir -p "$home/data/admission" "$home/state" "$home/config" "$home/projects"
+  printf 'brief\n' > "$home/data/admission/brief.md"
   make_firstmate_git_root "$subhome"
   mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'admission\n' > "$subhome/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-spawn-fake")
   log="$TMP_ROOT/plain-clone-spawn-fake/tmux.log"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
     TMUX="fake,1,0" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/plain-clone-spawn-fake/pane.txt" \
-    "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate 2>&1)
+    "$ROOT/bin/fm-spawn.sh" admission "$subhome" codex --secondmate 2>&1)
   rc=$?
   [ "$rc" -eq 0 ] || fail "plain-clone secondmate spawn failed"$'\n'"$out"
-  [ -f "$home/state/domain.meta" ] || fail "plain-clone secondmate spawn did not publish metadata"
-  [ ! -e "$home/state/.spawn-domain.lock" ] \
-    || fail "successful plain-clone spawn left its task lock held"
+  [ -f "$home/state/admission.meta" ] || fail "plain-clone secondmate spawn did not publish metadata"
   [ ! -e "$home/state/.spawn-admission.lock" ] \
+    || fail "successful plain-clone spawn left its task lock held"
+  [ ! -e "$home/state/.locks/spawn-admission.lock" ] \
     || fail "successful plain-clone spawn left its admission lock held"
   if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$subhome" task >/dev/null 2>&1 ); then
@@ -1153,45 +1148,81 @@ test_secondmate_teardown_serializes_against_spawn() {
 }
 
 test_secondmate_teardown_blocks_child_publication_during_census() {
-  local home subhome fakebin log fmroot ready holder err rc
+  local home subhome childhome fakebin log fmroot ready release err spawn_err teardown_pid rc
   home="$TMP_ROOT/teardown-admission-home"
   subhome="$TMP_ROOT/teardown-admission-subhome"
+  childhome="$TMP_ROOT/teardown-admission-childhome"
   fmroot="$TMP_ROOT/teardown-admission-fmroot"
   ready="$TMP_ROOT/teardown-admission.ready"
+  release="$TMP_ROOT/teardown-admission.release"
   err="$TMP_ROOT/teardown-admission.err"
+  spawn_err="$TMP_ROOT/teardown-admission-spawn.err"
   make_firstmate_git_root "$fmroot"
   git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  make_firstmate_git_root "$childhome"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/data/newchild" \
+    "$subhome/config" "$subhome/projects" "$childhome/data" "$childhome/state" \
+    "$childhome/config" "$childhome/projects"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'newchild\n' > "$childhome/.fm-secondmate-home"
+  printf 'brief\n' > "$subhome/data/newchild/brief.md"
   fm_write_meta "$home/state/domain.meta" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
     "home=$subhome" "projects=alpha"
+  fm_write_meta "$subhome/state/blocker.meta" \
+    "window=firstmate:fm-blocker" "worktree=" "project=" \
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=unknown"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-admission-fake")
   log="$TMP_ROOT/teardown-admission-fake/tmux.log"
-  holder=$(hold_test_lock "$subhome/state" "$subhome/state/.spawn-admission.lock" "$ready")
-  for _ in $(seq 1 50); do
+  cat > "$fakebin/basename" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "${FM_TEST_BLOCK_META:-}" ]; then
+  : > "$FM_TEST_ADMISSION_READY"
+  while [ ! -e "$FM_TEST_ADMISSION_RELEASE" ]; do sleep 0.02; done
+fi
+exec /usr/bin/basename "$@"
+SH
+  chmod +x "$fakebin/basename"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-admission-fake/pane.txt" \
+    FM_TEST_BLOCK_META="$subhome/state/blocker.meta" FM_TEST_ADMISSION_READY="$ready" \
+    FM_TEST_ADMISSION_RELEASE="$release" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
+  teardown_pid=$!
+  for _ in $(seq 1 250); do
     [ -e "$ready" ] && break
     sleep 0.02
   done
-  [ -e "$ready" ] || fail "admission-lock holder did not start"
+  [ -e "$ready" ] || {
+    kill "$teardown_pid" 2>/dev/null || true
+    fail "teardown did not reach its locked child census"
+  }
   set +e
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+  PATH="$fakebin:$PATH" FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-admission-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+    "$ROOT/bin/fm-spawn.sh" newchild "$childhome" codex --secondmate \
+    >/dev/null 2>"$spawn_err"
   rc=$?
   set -e
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
-  [ "$rc" -ne 0 ] || fail "teardown raced through active child publication"
-  grep -F "spawn is already publishing work in $subhome/state" "$err" >/dev/null \
-    || fail "teardown admission-lock refusal lost its reason"
-  grep -F 'kill-window' "$log" >/dev/null \
-    && fail "teardown closed the endpoint while child publication held admission"
-  [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
-    || fail "teardown mutated secondmate state during child publication"
-  pass "secondmate teardown holds a home-wide admission boundary across child census"
+  [ "$rc" -ne 0 ] || fail "real child spawn published while teardown held admission"
+  [ ! -e "$subhome/state/newchild.meta" ] || fail "blocked real child spawn published metadata"
+  grep -F 'teardown is already retiring this firstmate home' "$spawn_err" >/dev/null \
+    || fail "real child spawn did not report the admission boundary"
+  : > "$release"
+  set +e
+  wait "$teardown_pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown fixture did not stop at the unsupported child"
+  PATH="$fakebin:$PATH" FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-admission-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" newchild "$childhome" codex --secondmate \
+    >/dev/null 2>"$spawn_err" \
+    || fail "real child spawn did not publish after teardown released admission"$'\n'"$(cat "$spawn_err")"
+  [ -e "$subhome/state/newchild.meta" ] || fail "real child spawn omitted metadata after admission release"
+  pass "real child publication waits for the teardown census boundary to release"
 }
 
 # A leased secondmate home sits in the same reusable pool as a task worktree, so
@@ -1508,6 +1539,47 @@ EOF
   grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
   grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
   pass "secondmate force teardown discards child work"
+}
+
+test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
+  local home subhome childproj childwt fakebin log err rc stamp
+  home="$TMP_ROOT/no-treehouse-home"
+  subhome="$TMP_ROOT/no-treehouse-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/no-treehouse-child-worktree"
+  err="$TMP_ROOT/no-treehouse.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" no-treehouse-child
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$childwt" "project=$childproj" \
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$childwt" child "$subhome" ) \
+    || fail "no-treehouse child fixture could not be stamped"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/no-treehouse-fake")
+  log="$TMP_ROOT/no-treehouse-fake/tmux.log"
+  rm -f "$fakebin/treehouse"
+  set +e
+  PATH="$fakebin:/usr/bin:/bin" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/no-treehouse-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "force teardown raw-deleted a linked child without treehouse"
+  grep -F 'treehouse command not found; preserving child worktree' "$err" >/dev/null \
+    || fail "missing-treehouse refusal lost its reason"
+  [ -d "$childwt" ] || fail "missing treehouse removed the linked child worktree"
+  [ -e "$subhome/state/child.meta" ] || fail "missing treehouse removed child metadata"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$childwt" task || printf 'none' )
+  [ "$stamp" = child ] || fail "missing treehouse cleared linked-child ownership evidence"
+  pass "force teardown preserves linked child ownership when treehouse is unavailable"
 }
 
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
@@ -2171,6 +2243,7 @@ test_secondmate_force_teardown_preflights_nested_home_ownership
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_preserves_linked_child_without_treehouse
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home

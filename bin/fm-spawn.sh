@@ -461,7 +461,8 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   }
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
-SPAWN_ADMISSION_LOCK="$STATE/.spawn-admission.lock"
+SPAWN_ADMISSION_LOCK=$(fm_spawn_admission_lock_path "$STATE")
+mkdir -p "$(dirname "$SPAWN_ADMISSION_LOCK")" || exit 1
 if ! fm_lock_try_acquire "$SPAWN_ADMISSION_LOCK"; then
   echo "error: teardown is already retiring this firstmate home" >&2
   exit 1
