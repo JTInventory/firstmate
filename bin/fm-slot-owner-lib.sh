@@ -212,19 +212,18 @@ fm_slot_live_occupant_tasks() {
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
-    env=$(fm_agent_environ "$pid") || continue
-    task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
-    home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
-    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
-    [ -n "$task" ] || continue
-    cwd=$(fm_agent_proc_cwd "$pid") || {
-      [ -d "$entry" ] || continue
-      grep -Eq '^State:[[:space:]]*Z' "$entry/status" 2>/dev/null && continue
-      grep -Eq '^Kthread:[[:space:]]*1$' "$entry/status" 2>/dev/null && continue
-      return 2
-    }
-    cwd=$(fm_agent_canonical_dir "$cwd") || return 2
+    cwd=$(fm_agent_proc_cwd "$pid") || continue
+    cwd=$(fm_agent_canonical_dir "$cwd") || continue
     fm_agent_path_within "$wt_real" "$cwd" || continue
+    if env=$(fm_agent_environ "$pid"); then
+      task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+      home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+      role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+    else
+      task=
+      home=
+      role=
+    fi
     if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
        && fm_slot_same_path "$home" "$self_home"; then
       continue

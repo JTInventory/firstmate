@@ -42,11 +42,9 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
-#          An ISOLATION line means a task's live agent process is provably not
-#          in its recorded worktree - a restore that collapsed the worktree onto
-#          the primary checkout, or an agent declared for another home. It is
-#          read-only, runs in detect-only mode too, and reports only from an
-#          authoritative process reading, never from a pane path.
+#          An ISOLATION line means a task's process isolation is violated or
+#          cannot be authoritatively proven. It is read-only, runs in
+#          detect-only mode too, and never promotes a pane path to proof.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -287,8 +285,19 @@ secondmate_sync() {
     mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
   }
 
+  secondmate_locked_identity_matches() {
+    local id=$1 expected=$2 meta meta_home
+    meta="$STATE/$id.meta"
+    [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 1
+    meta_home=$(fm_meta_get "$meta" home)
+    [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+    validate_secondmate_home "$id" "$meta_home" \
+      && [ "$VALIDATED_HOME" = "$expected" ]
+  }
+
   secondmate_send_nudge() {
     local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    secondmate_locked_identity_matches "$id" "$home" || return 1
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
@@ -298,8 +307,11 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       return 0
     fi
+    secondmate_locked_identity_matches "$id" "$home" || return 1
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      secondmate_locked_identity_matches "$id" "$home" || return 1
       rm -f "$marker"
+      secondmate_locked_identity_matches "$id" "$home" || return 1
       fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" "$commit" "$home" || true
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
@@ -307,8 +319,9 @@ secondmate_sync() {
     fi
   }
 
-  fm_ff_after_instruction_update() {
-    local id=$1 home=$2 _window=$3 instr=$4
+  fm_ff_after_target_update() {
+    local id=$1 home=$2 _window=$3
+    secondmate_locked_identity_matches "$id" "$home" || return 1
     if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: watcher protocol restart could not be verified"
       return 1
@@ -316,7 +329,29 @@ secondmate_sync() {
     if [ "$FM_WATCHER_PROTOCOL_RESTARTED" -eq 1 ]; then
       echo "BOOTSTRAP_INFO: restarted and verified fm-$id watcher"
     fi
+  }
+
+  fm_ff_after_instruction_update() {
+    local id=$1 home=$2 _window=$3 instr=$4
+    secondmate_locked_identity_matches "$id" "$home" || return 1
     secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
+  }
+
+  secondmate_retry_pending_nudge_locked() {
+    local id=$1 home=$2 marker=$3 selector=$4 commit=$5 out
+    secondmate_locked_identity_matches "$id" "$home" || return 1
+    [ "$(git -C "$home" rev-parse HEAD 2>/dev/null || true)" = "$commit" ] || return 1
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      secondmate_locked_identity_matches "$id" "$home" || return 1
+      rm -f "$marker"
+      secondmate_locked_identity_matches "$id" "$home" || return 1
+      fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" \
+        "$commit" "$home" || true
+      echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+    else
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+    fi
   }
 
   secondmate_retry_pending_nudges() {
@@ -366,14 +401,9 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
-      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-        rm -f "$marker"
-        fm_update_obligation_ack "$home_real/state/.watch-protocol-reread-required" \
-          "$commit" "$home_real" || true
-        echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
-      else
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
-      fi
+      fm_ff_locked_secondmate_action "$id" "$home_real" "secondmate $id" \
+        secondmate_retry_pending_nudge_locked "$marker" "$selector" "$commit" \
+        || echo "NUDGE_SECONDMATES: secondmate $id: send failed: lifecycle identity changed or lock is busy"
     done
   }
 
@@ -391,24 +421,13 @@ secondmate_sync() {
     esac
   done < "$tmp"
   rm -f "$tmp"
-  unset -f fm_ff_after_instruction_update
   if [ "$sync_status" -ne 0 ]; then
     fm_ff_target_lock_release
-    unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release
+    unset -f fm_ff_after_instruction_update fm_ff_after_target_update \
+      fm_ff_target_lock_acquire fm_ff_target_lock_release
     return "$sync_status"
   fi
-  while IFS='|' read -r id home window _meta; do
-    [ -n "$window" ] || continue
-    validate_secondmate_home "$id" "$home" || continue
-    home="$VALIDATED_HOME"
-    if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: watcher protocol restart could not be verified"
-      return 1
-    fi
-    if [ "$FM_WATCHER_PROTOCOL_RESTARTED" -eq 1 ]; then
-      echo "BOOTSTRAP_INFO: restarted and verified fm-$id watcher"
-    fi
-  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  unset -f fm_ff_after_instruction_update fm_ff_after_target_update
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into every VALIDATED live secondmate home swept above.
   # FF_SEEN_HOMES is exactly that set, and fm-config-inherit-lib.sh owns the
@@ -417,55 +436,45 @@ secondmate_sync() {
   # running home, send its literal-content reread instruction pointer so the
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
-  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
-  propagated_homes=""
-  SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
-  while IFS='|' read -r id home _window _meta; do
-    validate_secondmate_home "$id" "$home" || continue
-    home_real="$VALIDATED_HOME"
-    case " $FF_SEEN_HOMES " in
-      *" $home_real "*) ;;
-      *) continue ;;
-    esac
-    case " $propagated_homes " in
-      *" $home_real "*) continue ;;
-    esac
-    propagated_homes="$propagated_homes $home_real"
-    mkdir -p "$home_real/state" || {
-      echo "CONFIG_REREAD: secondmate $id: send failed: could not create state directory"
-      continue
-    }
+  secondmate_propagate_locked() {
+    local id=$1 home_real=$2 reread_skip_pending=$3 home_lock report reread_out
+    secondmate_locked_identity_matches "$id" "$home_real" || return 1
     home_lock=$(fm_config_inherit_lock_path "$home_real") || {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
-      continue
+      return 1
     }
     fm_lock_acquire_wait "$home_lock" || {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
-      continue
+      return 1
     }
-    reread_skip_pending=0
-    case " $SECONDMATE_RESPAWNED_IDS " in
-      *" $id "*) reread_skip_pending=1 ;;
-    esac
+    if ! secondmate_locked_identity_matches "$id" "$home_real"; then
+      fm_lock_release "$home_lock" || true
+      return 1
+    fi
     if [ "$reread_skip_pending" -eq 0 ] \
       && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
       fm_config_reread_retry_pending "$id" "$home_real" || true
       if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
         echo "CONFIG_REREAD: secondmate $id: send failed: retry instruction queue is full"
         fm_lock_release "$home_lock" || true
-        continue
+        return 1
       fi
     fi
     report=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-inherit.XXXXXX" 2>/dev/null) || {
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
       fm_lock_release "$home_lock" || true
-      continue
+      return 1
     }
     if FM_CONFIG_INHERIT_REPORT="$report" \
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
+    fi
+    if ! secondmate_locked_identity_matches "$id" "$home_real"; then
+      rm -f "$report"
+      fm_lock_release "$home_lock" || true
+      return 1
     fi
     if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$STATE" \
@@ -481,6 +490,29 @@ secondmate_sync() {
     fi
     rm -f "$report"
     fm_lock_release "$home_lock" || true
+  }
+
+  local id home home_real propagated_homes reread_skip_pending
+  propagated_homes=""
+  SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
+  while IFS='|' read -r id home _window _meta; do
+    validate_secondmate_home "$id" "$home" || continue
+    home_real="$VALIDATED_HOME"
+    case " $FF_SEEN_HOMES " in
+      *" $home_real "*) ;;
+      *) continue ;;
+    esac
+    case " $propagated_homes " in
+      *" $home_real "*) continue ;;
+    esac
+    propagated_homes="$propagated_homes $home_real"
+    reread_skip_pending=0
+    case " $SECONDMATE_RESPAWNED_IDS " in
+      *" $id "*) reread_skip_pending=1 ;;
+    esac
+    fm_ff_locked_secondmate_action "$id" "$home_real" "secondmate $id" \
+      secondmate_propagate_locked "$reread_skip_pending" \
+      || echo "SECONDMATE_SYNC: secondmate $id: skipped: lifecycle identity changed or lock is busy"
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   fm_ff_target_lock_release
   unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release

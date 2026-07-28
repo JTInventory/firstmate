@@ -114,6 +114,8 @@ A stamp naming a *different* task is always preserved, because it is the evidenc
 A caller that refuses outright preserves the stamp too, because a refused operation mutates nothing: its records all stay, ownership did not change, and stripping the evidence there would set up exactly that same destructive sequence once those records are reconciled away.
 Each call site therefore states which of the two it is, so a new caller cannot silently inherit the wrong behaviour.
 The live-occupant check stays a blocking condition and is never weakened to compensate.
+If authoritative cwd or process-identity capability is unavailable, the slot is retained.
+Once a process is proven inside the slot, unreadable, partial, undeclared, or mixed-version identity is contested ownership rather than absence of an occupant.
 
 #### Reclaiming an already-leaked slot
 
@@ -121,7 +123,7 @@ A slot leaked before that rule existed has no record left to release it: no meta
 Reclaim it by hand, in this order, and stop at the first step that fails.
 
 1. Confirm nothing records the slot: `grep -l "worktree=<slot>" <home>/state/*.meta` across every home, including secondmate homes, must find nothing.
-2. Confirm nothing lives in it: no process under `/proc` declaring `FM_AGENT_TASK` may have that slot as its `cwd`, and `git -C <slot> status` must show no work worth keeping.
+2. Confirm nothing lives in it: no process under `/proc`, declared or undeclared, may have that slot as its `cwd`, and `git -C <slot> status` must show no work worth keeping.
 3. Read the stamp at `$(git -C <slot> rev-parse --absolute-git-dir)/fm-slot-owner` and confirm the task it names is gone from every home's state directory.
 4. Delete that stamp file, then return the slot from its project with `cd <project> && treehouse return --force <slot>`.
 
@@ -131,11 +133,12 @@ It is the captain's authority to discard *this* task's work, never authority to 
 ### Restore-time re-assertion
 
 `bin/fm-isolation-sweep.sh` re-establishes at session start what spawn could only assert at launch.
-It is read-only, always exits 0, and prints one `ISOLATION:` line per task whose live agent is provably not where its record says it is.
+It is read-only, always exits 0, and prints one `ISOLATION:` line per task whose live agent is provably misplaced or whose authoritative process isolation cannot be established.
 `bin/fm-bootstrap.sh` runs it in the same place as the worktree-tangle check and surfaces those lines in the session-start digest; the `bootstrap-diagnostics` skill owns what the agent does about each shape.
 
 It reports only from an authoritative process reading.
-A task with no such reading is silent by default and reported as an unproven `BOOTSTRAP_INFO` fact under `FM_ISOLATION_VERBOSE=1`, because reporting a violation from a pane path is precisely the false positive that corrected the method in the first place.
+A task with no authoritative reading produces an actionable `ISOLATION:` finding in every mode because missing process capability is ownership ambiguity, while `FM_ISOLATION_VERBOSE=1` may add detail.
+Pane paths remain hints and never satisfy or suppress that finding.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.
 A secondmate declares its own home while its record lives in the launching primary's state directory, so comparing every declaration against this home would report every healthy secondmate in the fleet as a foreign worker on every session start.

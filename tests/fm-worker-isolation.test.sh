@@ -829,6 +829,31 @@ test_unavailable_occupant_evidence_retains() {
   pass "unavailable authoritative occupant evidence retains the slot"
 }
 
+test_undeclared_in_slot_process_retains() {
+  local rec verdict pid
+  require_procfs || { pass "skip: this host has no readable procfs for undeclared occupant proof"; return 0; }
+  rec=$(make_slot_world slot-undeclared-occupant)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-undeclared.meta" \
+    "window=firstmate:fm-task-undeclared" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( cd "$WT_DIR" \
+    && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_AGENT_TEST_RUN="$RUN_TAG" sleep 300 ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  BG_PIDS+=("$pid")
+  for _ in $(seq 1 50); do
+    [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || true)" = "$WT_DIR" ] && break
+    sleep 0.02
+  done
+  verdict=$(slot_verdict "$WORLD/home/state" task-undeclared "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: a live agent for task(s) unidentified-process-$pid is running in the slot"*) ;;
+    *) fail "undeclared in-slot process did not retain: $verdict" ;;
+  esac
+  pass "an undeclared mixed-version process proven inside a slot retains it"
+}
+
 test_a_second_recorded_task_retains_the_slot() {
   local rec verdict
   rec=$(make_slot_world slot-shared)
@@ -1124,6 +1149,50 @@ SH
   assert_present "$WT_DIR/.opencode/plugins/fm-turn-end.js" "failed pool return removed the OpenCode hook"
   assert_present "$WT_DIR/.fm-grok-turnend" "failed pool return removed the Grok hook"
   pass "ownership evidence survives until pooled return succeeds"
+}
+
+test_successful_pool_return_never_mutates_reused_slot() {
+  local rec fakebin out status stamp
+  rec=$(make_slot_world slot-post-return-reuse)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+target=${@: -1}
+git -C "$FM_REUSE_PROJECT" worktree remove --force "$target"
+git -C "$FM_REUSE_PROJECT" worktree add --quiet -b replacement-owner "$target"
+mkdir -p "$target/.claude" "$target/.opencode/plugins"
+printf 'replacement\n' > "$target/.claude/settings.local.json"
+printf 'replacement\n' > "$target/.opencode/plugins/fm-turn-end.js"
+printf 'replacement\n' > "$target/.fm-grok-turnend"
+git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
+printf 'task=replacement\nhome=%s\n' "$FM_REUSE_HOME" > "$git_dir/fm-slot-owner"
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" tmux gh-axi gh
+  fm_write_meta "$WORLD/home/state/task-reuse.meta" \
+    "window=firstmate:fm-task-reuse" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-reuse "$WORLD/home" )
+  set +e
+  out=$(cd "$WORLD" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" FM_REUSE_PROJECT="$PROJ_DIR" \
+    FM_REUSE_HOME="$WORLD/replacement-home" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-reuse --force 2>&1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "teardown failed after the pool reused its returned slot"$'\n'"$out"
+  [ "$(git -C "$WT_DIR" rev-parse --abbrev-ref HEAD)" = replacement-owner ] \
+    || fail "teardown changed the replacement owner's branch after return"
+  assert_present "$WT_DIR/.claude/settings.local.json" "teardown removed the replacement Claude hook"
+  assert_present "$WT_DIR/.opencode/plugins/fm-turn-end.js" "teardown removed the replacement OpenCode hook"
+  assert_present "$WT_DIR/.fm-grok-turnend" "teardown removed the replacement Grok hook"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf none )
+  [ "$stamp" = replacement ] || fail "teardown cleared replacement ownership after return: $stamp"
+  pass "successful pool return never mutates a slot after reuse"
 }
 
 test_ordinary_teardown_acquires_admission_before_task_lock() {
@@ -1512,6 +1581,7 @@ test_exact_stamp_clear_accepts_canonical_home_alias
 test_clean_ownership_disposes
 test_malformed_or_partial_stamp_retains
 test_unavailable_occupant_evidence_retains
+test_undeclared_in_slot_process_retains
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot
@@ -1522,6 +1592,7 @@ test_same_task_stamp_in_another_home_survives_relinquish
 test_teardown_retires_a_contested_lease_even_with_force
 test_retained_stamp_survives_failed_metadata_retirement
 test_stamp_survives_failed_pool_return
+test_successful_pool_return_never_mutates_reused_slot
 test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout

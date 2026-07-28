@@ -505,6 +505,26 @@ FF_NUDGE_WINDOWS=""
 FF_NUDGE_GENERATIONS=""
 FF_SEEN_HOMES=""
 
+fm_ff_locked_secondmate_action() {
+  local id=$1 home=$2 label=$3 callback=$4 expected rc=0
+  shift 4
+  if [ "$(type -t fm_ff_target_lock_acquire 2>/dev/null || true)" != function ] \
+    || [ "$(type -t fm_ff_target_lock_release 2>/dev/null || true)" != function ]; then
+    return 1
+  fi
+  validate_secondmate_home "$id" "$home" || return 1
+  expected="$VALIDATED_HOME"
+  fm_ff_target_lock_acquire "$expected/state" "$label" "$expected" || return 1
+  if ! validate_secondmate_home "$id" "$expected" \
+    || [ "$VALIDATED_HOME" != "$expected" ]; then
+    fm_ff_target_lock_release
+    return 1
+  fi
+  "$callback" "$id" "$expected" "$@" || rc=$?
+  fm_ff_target_lock_release
+  return "$rc"
+}
+
 # Validate and fast-forward one secondmate home, accumulating its window into
 # FF_NUDGE_WINDOWS when it should be live-converged. Args:
 #   id home window base_mode nudge_requires_instr
@@ -544,6 +564,11 @@ process_secondmate() {
     return 0
   fi
   target_locked=1
+  if ! validate_secondmate_home "$id" "$home_real" \
+    || [ "$VALIDATED_HOME" != "$home_real" ]; then
+    fm_ff_target_lock_release
+    return 1
+  fi
   if [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ]; then
       ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" instructions || ff_rc=$?
@@ -559,6 +584,14 @@ process_secondmate() {
   fi
   pending_reread=0
   fm_update_obligation_pending "$reread_marker" "$home_real" && pending_reread=1
+  if [ "$(type -t fm_ff_after_target_update 2>/dev/null || true)" = function ]; then
+    if ! validate_secondmate_home "$id" "$home_real" \
+      || [ "$VALIDATED_HOME" != "$home_real" ] \
+      || ! fm_ff_after_target_update "$id" "$home_real" "$window"; then
+      fm_ff_target_lock_release
+      return 1
+    fi
+  fi
   should_nudge=0
   if [ "$FF_STATUS" = "updated" ]; then
     if [ "$nudge_requires_instr" != yes ] || [ -n "$FF_INSTR" ]; then
@@ -568,7 +601,9 @@ process_secondmate() {
   [ "$pending_reread" -eq 1 ] && should_nudge=1
   if [ "$should_nudge" -eq 1 ] && [ -n "$window" ]; then
     if [ "$(type -t fm_ff_after_instruction_update 2>/dev/null || true)" = function ]; then
-      if ! fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"; then
+      if ! validate_secondmate_home "$id" "$home_real" \
+        || [ "$VALIDATED_HOME" != "$home_real" ] \
+        || ! fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"; then
         fm_ff_target_lock_release
         return 1
       fi

@@ -925,7 +925,6 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
         echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
         return 1
       }
-      fm_slot_stamp_clear_exact "$abs_home_path" "${expected_id:-$ID}" "$home_scope" || return 1
       ;;
     unregistered)
       plain_legacy_firstmate_clone "$abs_home_path" || {
@@ -1065,8 +1064,6 @@ cleanup_firstmate_home_children() {
         }
         teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
           || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-        fm_slot_stamp_clear_exact "$child_wt" "$child_id" "$home" || return 1
       else
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
@@ -1286,16 +1283,6 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
       exit 1
     }
-    if [ -d "$WT" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      if [ "$branch" != "HEAD" ]; then
-        if git -C "$WT" checkout --detach -q 2>/dev/null; then
-          git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-        fi
-      fi
-      rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-    fi
-    fm_slot_stamp_clear_exact "$WT" "$ID" "$FM_HOME" || exit 1
   else
     TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
   fi

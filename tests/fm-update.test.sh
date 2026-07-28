@@ -1042,6 +1042,9 @@ test_secondmate_lock_covers_recovery_callback() {
       FF_OBLIGATION_GENERATION=generation
     }
     fm_update_obligation_pending() { return 1; }
+    fm_ff_after_target_update() {
+      [ "$lock_held" -eq 1 ]
+    }
     fm_ff_after_instruction_update() {
       [ "$lock_held" -eq 1 ]
     }
@@ -1050,6 +1053,55 @@ test_secondmate_lock_covers_recovery_callback() {
   ) || rc=$?
   [ "$rc" -eq 0 ] || fail "secondmate lifecycle lock did not cover the recovery callback"
   pass "T28 secondmate lifecycle lock covers fast-forward and recovery callbacks"
+}
+
+test_locked_secondmate_action_revalidates_after_acquire() {
+  local w callback_file rc
+  w=$(new_world t29)
+  mkdir -p "$w/sm1/state"
+  printf 'sm1\n' > "$w/sm1/.fm-secondmate-home"
+  callback_file="$w/callback-ran"
+  rc=0
+  (
+    . "$ROOT/bin/fm-ff-lib.sh"
+    validate_secondmate_home() {
+      [ "$(cat "$2/.fm-secondmate-home" 2>/dev/null || true)" = "$1" ] || return 1
+      VALIDATED_HOME=$(cd "$2" && pwd -P)
+    }
+    fm_ff_target_lock_acquire() {
+      printf 'replacement\n' > "$w/sm1/.fm-secondmate-home"
+    }
+    fm_ff_target_lock_release() { :; }
+    callback() { : > "$callback_file"; }
+    fm_ff_locked_secondmate_action sm1 "$w/sm1" "secondmate sm1" callback
+  ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "locked secondmate action accepted identity reuse during acquisition"
+  [ ! -e "$callback_file" ] || fail "locked secondmate action mutated a reused home"
+  pass "T29 locked secondmate actions revalidate identity after acquisition"
+}
+
+test_secondmate_acknowledgement_respects_lifecycle_lock() {
+  local w generation lock rc=0 held_locks=()
+  w=$(new_world t30)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  mkdir -p "$w/sm1/state"
+  printf 'generation=%s\n' "$generation" > "$w/sm1/state/.watch-protocol-reread-required"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  while IFS= read -r lock; do
+    mkdir -p "$(dirname "$lock")"
+    fm_lock_try_acquire "$lock" || fail "could not hold update acknowledgement fixture lock"
+    held_locks+=("$lock")
+  done < <(fm_spawn_admission_lock_paths "$w/sm1/state")
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-secondmate-nudge main:fm-sm1 "$generation" >/dev/null 2>&1 || rc=$?
+  for lock in "${held_locks[@]}"; do
+    fm_lock_release "$lock"
+  done
+  [ "$rc" -ne 0 ] || fail "secondmate acknowledgement crossed an active lifecycle lock"
+  [ -f "$w/sm1/state/.watch-protocol-reread-required" ] \
+    || fail "secondmate acknowledgement cleared a locked home's obligation"
+  pass "T30 secondmate acknowledgement stays behind the lifecycle lock"
 }
 
 test_updates_main_and_secondmate
@@ -1078,5 +1130,7 @@ test_lifecycle_quiescence_clamps_timing_overrides
 test_secondmate_fast_forward_requires_lock_capability
 test_fallback_argv_provider_fails_closed_without_boundaries
 test_secondmate_lock_covers_recovery_callback
+test_locked_secondmate_action_revalidates_after_acquire
+test_secondmate_acknowledgement_respects_lifecycle_lock
 
 echo "# all fm-update tests passed"

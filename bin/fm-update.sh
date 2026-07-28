@@ -91,8 +91,31 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
+update_live_secondmate_identity_matches() {
+  local id=$1 expected=$2 target=${3:-} record_id candidate window _meta matches=0
+  while IFS='|' read -r record_id candidate window _meta; do
+    [ "$record_id" = "$id" ] || continue
+    [ -z "$target" ] || [ "$window" = "$target" ] || continue
+    validate_secondmate_home "$record_id" "$candidate" || continue
+    [ "$VALIDATED_HOME" = "$expected" ] || continue
+    matches=$((matches + 1))
+  done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
+  [ "$matches" -eq 1 ]
+}
+
+ack_secondmate_nudge_locked() {
+  local id=$1 home=$2 target=$3 generation=$4 marker
+  update_live_secondmate_identity_matches "$id" "$home" "$target" || return 1
+  marker="$home/state/.watch-protocol-reread-required"
+  fm_update_obligation_ack "$marker" "$generation" "$home" || {
+    echo "secondmate nudge acknowledgement: generation mismatch for $target" >&2
+    return 1
+  }
+  echo "acknowledged-secondmate-nudge: $target"
+}
+
 ack_secondmate_nudge() {
-  local target=$1 generation=$2 id="" record_id candidate home window meta marker matches=0
+  local target=$1 generation=$2 id="" record_id candidate home window meta matches=0
   home=""
   while IFS='|' read -r record_id candidate window meta; do
     if [ "$window" = "$target" ]; then
@@ -109,12 +132,11 @@ ack_secondmate_nudge() {
     echo "secondmate nudge acknowledgement: unsafe home for $target: $VALIDATION_ERROR" >&2
     return 1
   }
-  marker="$VALIDATED_HOME/state/.watch-protocol-reread-required"
-  fm_update_obligation_ack "$marker" "$generation" "$VALIDATED_HOME" || {
-    echo "secondmate nudge acknowledgement: generation mismatch for $target" >&2
-    return 1
-  }
-  echo "acknowledged-secondmate-nudge: $target"
+  fm_ff_locked_secondmate_action "$id" "$VALIDATED_HOME" "secondmate $id" \
+    ack_secondmate_nudge_locked "$target" "$generation" || {
+      echo "secondmate nudge acknowledgement: lifecycle identity changed or lock is busy for $target" >&2
+      return 1
+    }
 }
 
 case "${1:-}" in
@@ -189,22 +211,22 @@ FF_NUDGE_GENERATIONS=""
 FF_SEEN_HOMES=""
 restart_secondmate_watchers=""
 
-# Live direct reports first: state/<id>.meta with kind=secondmate carries the
-# authoritative home= path.
-sweep_live_secondmate_metas "$STATE" origin no
-
-while IFS='|' read -r id home window _meta; do
-  [ -n "$window" ] || continue
-  validate_secondmate_home "$id" "$home" || continue
-  home="$VALIDATED_HOME"
+fm_ff_after_target_update() {
+  local id=$1 home=$2 window=$3
+  [ -n "$window" ] || return 0
+  update_live_secondmate_identity_matches "$id" "$home" "$window" || return 1
   if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
     echo "secondmate $id: skipped: watcher protocol restart could not be verified" >&2
-    exit 1
+    return 1
   fi
   if [ "$FM_WATCHER_PROTOCOL_RESTARTED" -eq 1 ]; then
     restart_secondmate_watchers="$restart_secondmate_watchers $window"
   fi
-done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
+}
+
+# Live direct reports first: state/<id>.meta with kind=secondmate carries the
+# authoritative home= path.
+sweep_live_secondmate_metas "$STATE" origin no
 
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
@@ -219,6 +241,7 @@ if [ -f "$SECONDMATES_MD" ]; then
     process_secondmate "$id" "$home" "" origin no
   done < "$SECONDMATES_MD"
 fi
+unset -f fm_ff_after_target_update
 
 # --- caller action summary -------------------------------------------------
 

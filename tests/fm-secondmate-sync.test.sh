@@ -378,6 +378,43 @@ test_bootstrap_retry_clears_child_obligation() {
   pass "T10 bootstrap retry clears the matching child obligation"
 }
 
+test_bootstrap_retry_respects_secondmate_lifecycle_lock() {
+  local w commit fakebin out pending lock held_locks=()
+  w=$(new_world boot-retry-lock)
+  commit=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-retry-lock "$commit"
+  mkdir -p "$w/sm-retry-lock/state" "$w/home/state/.secondmate-nudge-pending"
+  printf 'generation=%s\n' "$commit" > "$w/sm-retry-lock/state/.watch-protocol-reread-required"
+  pending="$w/home/state/.secondmate-nudge-pending/sm-retry-lock.pending"
+  {
+    printf 'id=sm-retry-lock\n'
+    printf 'selector=fm-sm-retry-lock\n'
+    printf 'home=%s/sm-retry-lock\n' "$w"
+    printf 'commit=%s\n' "$commit"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+  } > "$pending"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  while IFS= read -r lock; do
+    mkdir -p "$(dirname "$lock")"
+    fm_lock_try_acquire "$lock" || fail "could not hold bootstrap lifecycle fixture lock"
+    held_locks+=("$lock")
+  done < <(fm_spawn_admission_lock_paths "$w/sm-retry-lock/state")
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  for lock in "${held_locks[@]}"; do
+    fm_lock_release "$lock"
+  done
+  [ -f "$pending" ] || fail "bootstrap removed a retry marker while lifecycle lock was held"
+  fm_update_obligation_pending \
+    "$w/sm-retry-lock/state/.watch-protocol-reread-required" "$w/sm-retry-lock" \
+    || fail "bootstrap acknowledged child reread state while lifecycle lock was held"
+  assert_contains "$out" "lifecycle identity changed or lock is busy" \
+    "bootstrap did not report locked retry recovery"
+  pass "bootstrap retry recovery keeps markers and acknowledgements behind the lifecycle lock"
+}
+
 # --- T11: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
   local w c1 c2 fakebin
@@ -459,6 +496,7 @@ test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_sweep_surfaces_skipped_home
 test_bootstrap_retry_clears_child_obligation
+test_bootstrap_retry_respects_secondmate_lifecycle_lock
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 
