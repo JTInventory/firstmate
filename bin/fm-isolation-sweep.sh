@@ -60,8 +60,19 @@ PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   id=$(basename "$meta" .meta)
+  recorded_count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
   recorded=$(fm_meta_get "$meta" worktree)
-  [ -n "$recorded" ] || continue
+  case "$recorded" in
+    /*) ;;
+    *)
+      echo "ISOLATION: task $id has corrupt scope metadata: worktree must be one non-empty absolute path; preserve its state and reconcile $meta before any mutation"
+      continue
+      ;;
+  esac
+  if [ "$recorded_count" -ne 1 ]; then
+    echo "ISOLATION: task $id has corrupt scope metadata: worktree must appear exactly once; preserve its state and reconcile $meta before any mutation"
+    continue
+  fi
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
 
@@ -70,8 +81,19 @@ for meta in "$STATE"/*.meta; do
   expected_home=$HOME_REAL
   if [ "$kind" = secondmate ]; then
     role=secondmate
+    expected_count=$(grep -c '^home=' "$meta" 2>/dev/null || true)
     expected_declared=$(fm_meta_get "$meta" home)
-    [ -n "$expected_declared" ] || expected_declared=$recorded
+    case "$expected_declared" in
+      /*) ;;
+      *)
+        echo "ISOLATION: task $id has corrupt secondmate scope metadata: home must be one non-empty absolute path; preserve its state and reconcile $meta before any mutation"
+        continue
+        ;;
+    esac
+    if [ "$expected_count" -ne 1 ]; then
+      echo "ISOLATION: task $id has corrupt secondmate scope metadata: home must appear exactly once; preserve its state and reconcile $meta before any mutation"
+      continue
+    fi
     expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
   fi
   recorded_real=$(fm_agent_canonical_dir "$recorded") || recorded_real=$recorded

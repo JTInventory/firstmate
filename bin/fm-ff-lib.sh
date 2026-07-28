@@ -515,7 +515,7 @@ FF_SEEN_HOMES=""
 # as its own secondmate, and each resolved home is processed at most once.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
-  local reread_marker pending_reread should_nudge target_locked=0
+  local reread_marker pending_reread should_nudge target_locked=0 ff_rc=0
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -546,15 +546,16 @@ process_secondmate() {
   target_locked=1
   if [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ]; then
-      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" instructions
+      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" instructions || ff_rc=$?
     else
-      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" always
+      ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" always || ff_rc=$?
     fi
   else
-    ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+    ff_target "$home_real" "secondmate $id" "$base_mode" yes yes || ff_rc=$?
   fi
-  if [ "$target_locked" -eq 1 ]; then
+  if [ "$ff_rc" -ne 0 ]; then
     fm_ff_target_lock_release
+    return "$ff_rc"
   fi
   pending_reread=0
   fm_update_obligation_pending "$reread_marker" "$home_real" && pending_reread=1
@@ -567,13 +568,19 @@ process_secondmate() {
   [ "$pending_reread" -eq 1 ] && should_nudge=1
   if [ "$should_nudge" -eq 1 ] && [ -n "$window" ]; then
     if [ "$(type -t fm_ff_after_instruction_update 2>/dev/null || true)" = function ]; then
-      fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR" || return 1
+      if ! fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"; then
+        fm_ff_target_lock_release
+        return 1
+      fi
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS $window"
     if [ -n "$FF_OBLIGATION_GENERATION" ]; then
       FF_NUDGE_GENERATIONS="${FF_NUDGE_GENERATIONS}${FF_NUDGE_GENERATIONS:+
 }$window|$FF_OBLIGATION_GENERATION"
     fi
+  fi
+  if [ "$target_locked" -eq 1 ]; then
+    fm_ff_target_lock_release
   fi
 }
 

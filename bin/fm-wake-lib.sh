@@ -211,10 +211,8 @@ fm_lifecycle_process_script() {
     provider_rc=$?
   fi
   if [ "$provider_rc" -ne 0 ]; then
-    if [ "$provider_rc" -eq 2 ]; then
-      fm_lifecycle_process_live "$pid" || return 1
-      fm_lifecycle_process_kernel_thread "$pid" && return 1
-    fi
+    fm_lifecycle_process_live "$pid" || return 1
+    fm_lifecycle_process_kernel_thread "$pid" && return 1
     if fm_lifecycle_read_fallback_argv "$pid"; then
       fallback_rc=0
     else
@@ -222,7 +220,6 @@ fm_lifecycle_process_script() {
     fi
     [ "$fallback_rc" -eq 0 ] || {
       [ "$fallback_rc" -eq 1 ] && return 1
-      [ "$provider_rc" -eq 1 ] && return 1
       return 2
     }
   fi
@@ -350,7 +347,7 @@ fm_lifecycle_identity_result_busy() {
 }
 
 fm_spawn_legacy_lifecycle_process_busy() {
-  local target_home=$1 target_state=$2 exclude_pids=${3:-} entry pid script rc
+  local target_home=$1 target_state=$2 exclude_pids=${3:-} entry pid script rc process_list
   target_home=$(fm_lifecycle_canonical_path "$target_home") || return 0
   target_state=$(fm_lifecycle_canonical_path "$target_state") || return 0
   if [ -d /proc ]; then
@@ -367,6 +364,8 @@ fm_spawn_legacy_lifecycle_process_busy() {
     done
     return 1
   fi
+  process_list=$(LC_ALL=C ps -A -o pid= -o args= 2>/dev/null) || return 0
+  [ -n "$process_list" ] || return 0
   while read -r pid _; do
     fm_pid_list_contains "$exclude_pids" "$pid" && continue
     if fm_lifecycle_process_script "$pid"; then rc=0; else rc=$?; fi
@@ -376,7 +375,7 @@ fm_spawn_legacy_lifecycle_process_busy() {
     if fm_spawn_legacy_process_matches_scope \
       "$pid" "$script" "$target_home" "$target_state"; then rc=0; else rc=$?; fi
     [ "$rc" -eq 1 ] || return 0
-  done < <(LC_ALL=C ps -A -o pid= -o args= 2>/dev/null)
+  done <<< "$process_list"
   return 1
 }
 

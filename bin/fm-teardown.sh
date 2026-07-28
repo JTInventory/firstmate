@@ -682,14 +682,17 @@ firstmate_home_treehouse_slot_verdict() {
 }
 
 repository_origin_identity() {
-  local repo=$1 origin
+  local repo=$1 origin repo_real
+  repo_real=$(cd "$repo" && pwd -P) || return 1
   origin=$(git -C "$repo" remote get-url origin 2>/dev/null) || return 1
   case "$origin" in
-    file://*) origin=${origin#file://} ;;
+    file:///*) origin=${origin#file://} ;;
+    file://*) return 1 ;;
+    *://*|*:*) printf '%s\n' "$origin"; return ;;
   esac
   case "$origin" in
     /*) removal_target_abs_path "$origin" ;;
-    *) printf '%s\n' "$origin" ;;
+    *) removal_target_abs_path "$repo_real/$origin" ;;
   esac
 }
 
@@ -967,7 +970,12 @@ validate_firstmate_home_children_removal() {
           slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" "$child_home" \
             secondmate "child firstmate home" refuse || return 1
           ;;
-        unregistered) ;;
+        unregistered)
+          if ! plain_legacy_firstmate_clone "$child_home"; then
+            echo "REFUSED: unregistered child secondmate home is not a proven plain legacy clone: $child_home" >&2
+            return 1
+          fi
+          ;;
         *)
           echo "REFUSED: pooled-slot classification is unknown for child firstmate home $child_home" >&2
           return 1
@@ -1055,9 +1063,9 @@ cleanup_firstmate_home_children() {
           echo "REFUSED: treehouse command not found; preserving child worktree $child_wt and its metadata" >&2
           return 1
         }
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
         teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
           || return 1
+        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
         fm_slot_stamp_clear_exact "$child_wt" "$child_id" "$home" || return 1
       else
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
@@ -1093,7 +1101,12 @@ if [ "$KIND" = secondmate ]; then
       slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
         secondmate "secondmate home" refuse || exit 1
       ;;
-    unregistered) ;;
+    unregistered)
+      if ! plain_legacy_firstmate_clone "$HOME_PATH"; then
+        echo "REFUSED: unregistered secondmate home is not a proven plain legacy clone: $HOME_PATH" >&2
+        exit 1
+      fi
+      ;;
     *)
       echo "REFUSED: pooled-slot classification is unknown for secondmate home $HOME_PATH" >&2
       exit 1

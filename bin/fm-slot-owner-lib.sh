@@ -98,35 +98,34 @@ fm_slot_is_plain_checkout() {
 # fm_slot_stamp_write <worktree> <task-id> <home>: claim current ownership of
 # the slot without replacing another owner's evidence.
 fm_slot_stamp_write() {
-  local wt=$1 id=$2 home=$3 path stamp_task stamp_home
+  local wt=$1 id=$2 home=$3 path
   FM_SLOT_STAMP_CREATED=0
   [ -n "$id" ] && [ -n "$home" ] || return 1
   path=$(fm_slot_stamp_path "$wt") || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -f "$path" ] && [ ! -L "$path" ] || return 1
-    stamp_task=$(sed -n 's/^task=//p' "$path" 2>/dev/null | head -1)
-    stamp_home=$(sed -n 's/^home=//p' "$path" 2>/dev/null | head -1)
-    [ "$stamp_task" = "$id" ] && [ "$stamp_home" = "$home" ]
+    fm_slot_stamp_record "$wt" \
+      && [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+      && [ "$FM_SLOT_STAMP_HOME" = "$home" ]
     return
   fi
   if ( set -C; printf 'task=%s\nhome=%s\n' "$id" "$home" > "$path" ) 2>/dev/null; then
     FM_SLOT_STAMP_CREATED=1
     return 0
   fi
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  stamp_task=$(sed -n 's/^task=//p' "$path" 2>/dev/null | head -1)
-  stamp_home=$(sed -n 's/^home=//p' "$path" 2>/dev/null | head -1)
-  [ "$stamp_task" = "$id" ] && [ "$stamp_home" = "$home" ]
+  fm_slot_stamp_record "$wt" \
+    && [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+    && [ "$FM_SLOT_STAMP_HOME" = "$home" ]
 }
 
 # fm_slot_stamp_field <worktree> <task|home>: the stamped value, or 1.
 fm_slot_stamp_field() {
-  local wt=$1 field=$2 path value
-  path=$(fm_slot_stamp_path "$wt") || return 1
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  value=$(sed -n "s/^$field=//p" "$path" 2>/dev/null | head -1)
-  [ -n "$value" ] || return 1
-  printf '%s' "$value"
+  local wt=$1 field=$2
+  fm_slot_stamp_record "$wt" || return 1
+  case "$field" in
+    task) printf '%s' "$FM_SLOT_STAMP_TASK" ;;
+    home) printf '%s' "$FM_SLOT_STAMP_HOME" ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_slot_stamp_record() {
@@ -155,12 +154,11 @@ fm_slot_stamp_clear() {
 }
 
 fm_slot_stamp_clear_exact() {  # <worktree> <task-id> <home>
-  local wt=$1 id=$2 home=$3 path stamp_task stamp_home
+  local wt=$1 id=$2 home=$3 path
   path=$(fm_slot_stamp_path "$wt") || return 0
-  [ -f "$path" ] && [ ! -L "$path" ] || return 0
-  stamp_task=$(sed -n 's/^task=//p' "$path" 2>/dev/null | head -1)
-  stamp_home=$(sed -n 's/^home=//p' "$path" 2>/dev/null | head -1)
-  [ "$stamp_task" = "$id" ] && fm_slot_same_path "$stamp_home" "$home" || return 0
+  fm_slot_stamp_record "$wt" || return 0
+  [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+    && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 0
   rm -f "$path"
 }
 
@@ -207,25 +205,31 @@ fm_slot_meta_referencing_tasks() {
 # and deduplicated. Requires procfs; a host without it simply contributes no
 # evidence from this source.
 fm_slot_live_occupant_tasks() {
-  local wt=$1 self=$2 self_home=$3 self_role=$4 wt_real entry pid task home role cwd hits
+  local wt=$1 self=$2 self_home=$3 self_role=$4 wt_real entry pid task home role cwd env hits
   wt_real=$(fm_agent_canonical_dir "$wt") || return 1
-  [ -d /proc ] || return 1
+  [ -d /proc ] || return 2
   hits=
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
-    task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK) || continue
+    env=$(fm_agent_environ "$pid") || continue
+    task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+    home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
     [ -n "$task" ] || continue
-    home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME) || home=
-    role=$(fm_agent_proc_env "$pid" FM_AGENT_ROLE) || role=
+    cwd=$(fm_agent_proc_cwd "$pid") || {
+      [ -d "$entry" ] || continue
+      grep -Eq '^State:[[:space:]]*Z' "$entry/status" 2>/dev/null && continue
+      grep -Eq '^Kthread:[[:space:]]*1$' "$entry/status" 2>/dev/null && continue
+      return 2
+    }
+    cwd=$(fm_agent_canonical_dir "$cwd") || return 2
+    fm_agent_path_within "$wt_real" "$cwd" || continue
     if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
        && fm_slot_same_path "$home" "$self_home"; then
       continue
     fi
-    cwd=$(fm_agent_proc_cwd "$pid") || continue
-    cwd=$(fm_agent_canonical_dir "$cwd") || continue
-    fm_agent_path_within "$wt_real" "$cwd" || continue
-    hits="$hits$task"$'\n'
+    hits="$hits${task:-unidentified-process-$pid}"$'\n'
   done
   [ -n "$hits" ] || return 1
   printf '%s' "$hits" | LC_ALL=C sort -u
@@ -272,6 +276,9 @@ fm_slot_disposal_verdict() {
   fi
   if occupants=$(fm_slot_live_occupant_tasks "$wt" "$self" "$worker_home" "$role"); then
     printf 'retain: a live agent for task(s) %s is running in the slot' "$(fm_slot_join_ids "$occupants")"
+    return 0
+  elif [ "$?" -eq 2 ]; then
+    printf 'retain: authoritative live-occupant evidence is unavailable'
     return 0
   fi
   printf 'dispose'

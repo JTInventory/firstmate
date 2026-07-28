@@ -118,25 +118,25 @@ fm_worker_canonical_path() {
 }
 
 fm_worker_secondmate_scope_matches() {
-  local home=$1 state=$2 owner_real home_real state_real
+  local home=$1 state=$2 owner_real home_real state_real marker marker_task
+  [ -n "${FM_AGENT_TASK:-}" ] && [ -n "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   owner_real=$(cd "${FM_AGENT_OWNER_HOME:-}" 2>/dev/null && pwd -P) || return 1
   home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
   state_real=$(fm_worker_canonical_path "$state") || return 1
-  [ "$home_real" = "$owner_real" ] && [ "$state_real" = "$owner_real/state" ]
+  [ "$home_real" = "$owner_real" ] && [ "$state_real" = "$owner_real/state" ] || return 1
+  marker="$owner_real/.fm-secondmate-home"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_task=$(cat "$marker" 2>/dev/null) || return 1
+  [ "$marker_task" = "$FM_AGENT_TASK" ]
 }
 
 fm_worker_secondmate_effective_scope_matches() {
-  local home state var value suffix expected actual owner_real root_override marker marker_task
-  [ -n "${FM_AGENT_TASK:-}" ] && [ -n "${FM_AGENT_OWNER_HOME:-}" ] || return 1
+  local home state var value suffix expected actual owner_real root_override
   home=${FM_HOME:-${FM_ROOT_OVERRIDE:-}}
   [ -n "$home" ] || return 1
   state=${FM_STATE_OVERRIDE:-$home/state}
   fm_worker_secondmate_scope_matches "$home" "$state" || return 1
   owner_real=$(fm_worker_canonical_path "${FM_AGENT_OWNER_HOME:-}") || return 1
-  marker="$owner_real/.fm-secondmate-home"
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  marker_task=$(cat "$marker" 2>/dev/null) || return 1
-  [ "$marker_task" = "$FM_AGENT_TASK" ] || return 1
   root_override=${FM_ROOT_OVERRIDE:-}
   if [ -n "$root_override" ]; then
     actual=$(fm_worker_canonical_path "$root_override") || return 1

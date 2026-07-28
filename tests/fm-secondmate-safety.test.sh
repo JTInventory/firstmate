@@ -1661,9 +1661,134 @@ EOF
   fi
   [ -d "$subhome" ] || fail "unregistered foreign linked worktree was removed"
   [ -e "$home/state/domain.meta" ] || fail "foreign-worktree refusal removed lifecycle metadata"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "foreign-worktree refusal killed an endpoint before ownership proof"
   grep -F 'not a proven plain legacy clone' "$err" >/dev/null \
     || fail "foreign-worktree refusal did not explain ambiguous ownership"
   pass "secondmate teardown retains unregistered foreign linked worktrees"
+}
+
+test_secondmate_teardown_resolves_relative_origin_identity() {
+  local base home fmroot subhome fakebin log err
+  base="$TMP_ROOT/relative-origin-teardown"
+  home="$base/home"
+  fmroot="$base/root/firstmate"
+  subhome="$base/foreign/firstmate"
+  err="$base/teardown.err"
+  mkdir -p "$home/state" "$home/data" "$(dirname "$fmroot")" "$(dirname "$subhome")"
+  make_firstmate_git_root "$fmroot"
+  make_firstmate_git_root "$subhome"
+  git init -q --bare "$base/root/repo.git"
+  git init -q --bare "$base/foreign/repo.git"
+  git -C "$fmroot" remote add origin ../repo.git
+  git -C "$subhome" remote add origin ../repo.git
+  mkdir -p "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$base/fake")
+  log="$base/fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$base/fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown accepted equal relative origins from different repositories"
+  fi
+  [ -d "$subhome" ] || fail "relative-origin ambiguity removed the foreign home"
+  [ -e "$home/state/domain.meta" ] || fail "relative-origin ambiguity removed lifecycle metadata"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "relative-origin ambiguity killed an endpoint before repository proof"
+  grep -F 'not a proven plain legacy clone' "$err" >/dev/null \
+    || fail "relative-origin ambiguity did not explain the ownership refusal"
+  pass "secondmate teardown resolves relative origins in each repository context"
+}
+
+test_secondmate_force_teardown_preflights_unregistered_nested_home() {
+  local home subhome foreign nested fakebin log err
+  home="$TMP_ROOT/unregistered-nested-home"
+  subhome="$TMP_ROOT/unregistered-nested-parent"
+  foreign="$TMP_ROOT/unregistered-nested-foreign"
+  nested="$TMP_ROOT/unregistered-nested-child"
+  err="$TMP_ROOT/unregistered-nested.err"
+  mkdir -p "$home/state" "$home/data"
+  git clone -q "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  make_firstmate_git_root "$foreign"
+  git -C "$foreign" worktree add --quiet --detach "$nested" HEAD
+  mkdir -p "$subhome/state" "$nested/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'child\n' > "$nested/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$nested" "project=$nested" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$nested" "projects=alpha"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-nested-fake")
+  log="$TMP_ROOT/unregistered-nested-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-nested-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown accepted an unregistered foreign nested home"
+  fi
+  [ -d "$subhome" ] && [ -d "$nested" ] \
+    || fail "nested ownership preflight removed a secondmate home"
+  [ -e "$home/state/domain.meta" ] && [ -e "$subhome/state/child.meta" ] \
+    || fail "nested ownership preflight removed lifecycle metadata"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "nested ownership preflight killed an endpoint before proof"
+  grep -F 'unregistered child secondmate home is not a proven plain legacy clone' "$err" >/dev/null \
+    || fail "nested ownership preflight did not explain the refusal"
+  pass "force teardown proves unregistered nested homes before mutation"
+}
+
+test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
+  local home subhome childproj childwt fakebin log err
+  home="$TMP_ROOT/child-hook-return-home"
+  subhome="$TMP_ROOT/child-hook-return-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/child-hook-return-worktree"
+  err="$TMP_ROOT/child-hook-return.err"
+  mkdir -p "$home/state" "$home/data"
+  git clone -q "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" child-hook-return
+  mkdir -p "$childwt/.claude" "$childwt/.opencode/plugins"
+  printf 'hook\n' > "$childwt/.claude/settings.local.json"
+  printf 'hook\n' > "$childwt/.opencode/plugins/fm-turn-end.js"
+  printf 'hook\n' > "$childwt/.fm-grok-turnend"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$childwt" "project=$childproj" \
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/child-hook-return-fake")
+  log="$TMP_ROOT/child-hook-return-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-hook-return-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown succeeded after child worktree return failed"
+  fi
+  [ -e "$childwt/.claude/settings.local.json" ] \
+    && [ -e "$childwt/.opencode/plugins/fm-turn-end.js" ] \
+    && [ -e "$childwt/.fm-grok-turnend" ] \
+    || fail "child hook state was removed before treehouse return succeeded"
+  [ -e "$subhome/state/child.meta" ] && [ -e "$home/state/domain.meta" ] \
+    || fail "child return failure removed lifecycle metadata"
+  grep -F 'child cleanup failed for secondmate domain' "$err" >/dev/null \
+    || fail "child return failure was not reported"
+  pass "child hook and lifecycle state survive failed treehouse return"
 }
 
 test_secondmate_force_teardown_discards_child_work() {
@@ -2492,6 +2617,9 @@ test_secondmate_force_teardown_preflights_nested_home_ownership
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_teardown_retains_unregistered_foreign_worktree
+test_secondmate_teardown_resolves_relative_origin_identity
+test_secondmate_force_teardown_preflights_unregistered_nested_home
+test_secondmate_force_teardown_preserves_child_hooks_on_return_failure
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_preserves_linked_child_without_treehouse
 test_secondmate_force_teardown_recursively_preserves_without_treehouse

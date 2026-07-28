@@ -283,7 +283,20 @@ test_declared_worker_is_never_a_primary_scope_match() {
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] \
     || fail "a declared crewmate matched primary scope inside a genuine primary checkout"
-  pass "a declared crewmate is never a primary-scope match, even in a real primary checkout"
+  out=$( export FM_AGENT_ROLE=quartermaster FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
+    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
+  [ "$out" = not-primary ] || fail "an unknown declared worker role matched primary scope"
+  out=$( export FM_AGENT_ROLE= FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME=
+    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
+  [ "$out" = not-primary ] || fail "a partial undeclared identity matched primary scope"
+  printf 'trusted-task\n' > "$primary_home/.fm-secondmate-home"
+  out=$( export FM_AGENT_ROLE=secondmate FM_AGENT_TASK=other-task FM_AGENT_OWNER_HOME="$primary_home"
+    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
+  [ "$out" = not-primary ] || fail "a secondmate mismatched to its trusted marker matched primary scope"
+  pass "primary scope rejects crewmates, unknown identities, partial identities, and mismatched secondmates"
 }
 
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
@@ -773,7 +786,47 @@ test_malformed_or_partial_stamp_retains() {
     "retain: slot ownership stamp is present but malformed"*) ;;
     *) fail "empty ownership stamp field did not retain: $verdict" ;;
   esac
-  pass "present malformed and partial ownership stamps retain their slots"
+  printf 'task=task-malformed\nhome=%s\ntask=task-malformed\n' "$WORLD/home" > "$stamp_path"
+  if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-malformed "$WORLD/home" ); then
+    fail "duplicate ownership stamp fields were accepted by claim validation"
+  fi
+  if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task >/dev/null ); then
+    fail "duplicate ownership stamp fields were accepted by field validation"
+  fi
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_clear_exact "$WT_DIR" task-malformed "$WORLD/home" ) \
+    || fail "malformed exact clear did not retain safely"
+  [ -e "$stamp_path" ] || fail "malformed exact clear removed ambiguous ownership evidence"
+  printf 'task=task-malformed\nhome=%s\nforeign=value\n' "$WORLD/home" > "$stamp_path"
+  verdict=$(slot_verdict "$WORLD/home/state" task-malformed "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: slot ownership stamp is present but malformed"*) ;;
+    *) fail "extra ownership stamp fields did not retain: $verdict" ;;
+  esac
+  pass "present malformed, duplicate, partial, and extra ownership fields retain their slots"
+}
+
+test_unavailable_occupant_evidence_retains() {
+  local rec verdict
+  rec=$(make_slot_world slot-unknown-occupants)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-unknown.meta" \
+    "window=firstmate:fm-task-unknown" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-unknown "$WORLD/home" )
+  verdict=$(
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_live_occupant_tasks() { return 2; }
+    fm_slot_disposal_verdict "$WORLD/home/state" task-unknown "$WT_DIR" "$WORLD/home" "$WORLD/home" crewmate
+  )
+  case "$verdict" in
+    "retain: authoritative live-occupant evidence is unavailable"*) ;;
+    *) fail "unavailable occupant evidence did not retain: $verdict" ;;
+  esac
+  pass "unavailable authoritative occupant evidence retains the slot"
 }
 
 test_a_second_recorded_task_retains_the_slot() {
@@ -1231,6 +1284,30 @@ test_sweep_never_promotes_a_pane_path_to_evidence() {
   pass "an unprovable task produces an actionable finding without trusting its pane path"
 }
 
+test_sweep_reports_corrupt_scope_metadata() {
+  local world out
+  world=$(make_sweep_home sweep-corrupt-scope)
+  fm_write_meta "$world/home/state/task-corrupt.meta" \
+    "window=firstmate:fm-task-corrupt" "worktree=" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  out=$(run_sweep "$world")
+  assert_contains "$out" "ISOLATION: task task-corrupt has corrupt scope metadata" \
+    "empty worktree metadata was silently skipped"
+  fm_write_meta "$world/home/state/task-corrupt.meta" \
+    "window=firstmate:fm-task-corrupt" "worktree=$world/wt" "worktree=$world/project" \
+    "project=$world/project" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  out=$(run_sweep "$world")
+  assert_contains "$out" "worktree must appear exactly once" \
+    "duplicate worktree metadata was silently accepted"
+  fm_write_meta "$world/home/state/task-corrupt.meta" \
+    "window=firstmate:fm-task-corrupt" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=secondmate" "mode=secondmate" "yolo=off" "home="
+  out=$(run_sweep "$world")
+  assert_contains "$out" "home must be one non-empty absolute path" \
+    "empty secondmate home metadata was silently skipped"
+  pass "the isolation sweep reports corrupt worktree and secondmate-home scope metadata"
+}
+
 test_sweep_reports_an_agent_declared_for_another_home() {
   local world out id
   require_procfs || { pass "skip: this host has no readable procfs for the resume sweep"; return 0; }
@@ -1434,6 +1511,7 @@ test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_exact_stamp_clear_accepts_canonical_home_alias
 test_clean_ownership_disposes
 test_malformed_or_partial_stamp_retains
+test_unavailable_occupant_evidence_retains
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot
@@ -1449,6 +1527,7 @@ test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence
+test_sweep_reports_corrupt_scope_metadata
 test_sweep_reports_an_agent_declared_for_another_home
 test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id
 test_sweep_is_silent_for_a_healthy_secondmate

@@ -881,6 +881,8 @@ FM_ROOT_OVERRIDE=$w/home"
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 1; }
+    fm_lifecycle_process_live() { return 0; }
+    fm_lifecycle_process_kernel_thread() { return 1; }
     fm_lifecycle_read_fallback_argv() {
       FM_LIFECYCLE_ARGV=(bash "$script" "later argument contains -c text")
     }
@@ -892,6 +894,8 @@ FM_ROOT_OVERRIDE=$w/home"
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 1; }
+    fm_lifecycle_process_live() { return 0; }
+    fm_lifecycle_process_kernel_thread() { return 1; }
     fm_lifecycle_read_fallback_argv() {
       FM_LIFECYCLE_ARGV=(editor "$script")
     }
@@ -924,6 +928,16 @@ FM_ROOT_OVERRIDE=$w/home"
     fm_lifecycle_process_script 999
   ) || rc=$?
   [ "$rc" -eq 2 ] || fail "unresolved live process identity did not remain fail-closed"
+  rc=0
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() { return 1; }
+    fm_lifecycle_process_live() { return 0; }
+    fm_lifecycle_process_kernel_thread() { return 1; }
+    fm_lifecycle_read_fallback_argv() { return 2; }
+    fm_lifecycle_process_script 999
+  ) || rc=$?
+  [ "$rc" -eq 2 ] || fail "missing proc argv and unavailable fallback were classified as unrelated"
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_identity_result_busy 2
@@ -1003,6 +1017,41 @@ test_fallback_argv_provider_fails_closed_without_boundaries() {
   pass "T27 fallback argv identity uses boundaries or refuses capability"
 }
 
+test_secondmate_lock_covers_recovery_callback() {
+  local w rc
+  w=$(new_world t28)
+  mkdir -p "$w/sm1/state"
+  printf 'sm1\n' > "$w/sm1/.fm-secondmate-home"
+  rc=0
+  (
+    . "$ROOT/bin/fm-ff-lib.sh"
+    FM_ROOT="$w/main"
+    FM_HOME="$w/home"
+    lock_held=0
+    resolve_path() { cd "$1" && pwd -P; }
+    validate_secondmate_home() {
+      VALIDATED_HOME=$(cd "$2" && pwd -P)
+      return 0
+    }
+    fm_ff_target_lock_acquire() { lock_held=1; }
+    fm_ff_target_lock_release() { lock_held=0; }
+    ff_target() {
+      [ "$lock_held" -eq 1 ] || return 1
+      FF_STATUS=updated
+      FF_INSTR=instructions
+      FF_OBLIGATION_GENERATION=generation
+    }
+    fm_update_obligation_pending() { return 1; }
+    fm_ff_after_instruction_update() {
+      [ "$lock_held" -eq 1 ]
+    }
+    process_secondmate sm1 "$w/sm1" main:fm-sm1 origin no
+    [ "$lock_held" -eq 0 ]
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "secondmate lifecycle lock did not cover the recovery callback"
+  pass "T28 secondmate lifecycle lock covers fast-forward and recovery callbacks"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -1028,5 +1077,6 @@ test_lifecycle_identity_uses_command_position_and_fail_closed_scope
 test_lifecycle_quiescence_clamps_timing_overrides
 test_secondmate_fast_forward_requires_lock_capability
 test_fallback_argv_provider_fails_closed_without_boundaries
+test_secondmate_lock_covers_recovery_callback
 
 echo "# all fm-update tests passed"
