@@ -30,7 +30,17 @@ release_presentation_lock() {
   fm_lock_release "$PRESENTATION_LOCK"
 }
 trap release_presentation_lock EXIT
-fm_lock_acquire_wait "$PRESENTATION_LOCK"
+if fm_pr_presentation_lock_acquire "$PRESENTATION_LOCK"; then
+  :
+else
+  lock_rc=$?
+  if [ "$lock_rc" -eq 2 ]; then
+    echo 'error: unsafe PR presentation lock; refusing presentation' >&2
+  else
+    echo 'error: PR presentation lock remained busy; retry presentation' >&2
+  fi
+  exit 1
+fi
 PRESENTATION_LOCK_HELD=1
 "$CHECK_BIN" "$ID" "$URL"
 META="$STATE/$ID.meta"

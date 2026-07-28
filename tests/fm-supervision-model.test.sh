@@ -381,6 +381,25 @@ test_status_log_cannot_inject_convergence_round() {
   pass 'only exact run-step convergence markers can create decisions'
 }
 
+test_valid_run_step_variants_preserve_convergence_round() {
+  local home fakebin out marker
+  home=$(make_home convergence-run-variants)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" converge-variants 'working: no-mistakes corrections continue' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  for marker in \
+    'state: working · source: run-step · validating (running) · convergence-round=3 · convergence-fingerprint=unavailable' \
+    'state: working · source: run-step · validating (fixing) · status-log superseded by active run · convergence-round=3 · convergence-fingerprint=unavailable'; do
+    out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE="$marker" \
+      FM_SUPERVISION_CONVERGENCE_ROUND_CEILING=3 run_json "$home" "$fakebin") \
+      || fail 'valid run-step convergence variant failed'
+    assert_contains "$out" 'converge-variants:worker_convergence_needs_decision' \
+      'valid run-step convergence telemetry disappeared'
+  done
+  pass 'valid run-step convergence variants preserve telemetry'
+}
+
 test_live_secondmates_ignore_seed_pr_terminal_state() {
   local home fakebin out
   home=$(make_home secondmate-pr-history)
@@ -762,6 +781,7 @@ test_task_classifications_and_route_metadata
 test_convergence_ceiling_emits_one_read_only_decision
 test_unknown_convergence_schema_is_visible_without_decision
 test_status_log_cannot_inject_convergence_round
+test_valid_run_step_variants_preserve_convergence_round
 test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response
 test_paused_status_is_an_external_wait

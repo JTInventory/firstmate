@@ -309,17 +309,14 @@ test_teardown_reconciles_consumed_presentation_receipt() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   receipt="$case_dir/state/task-x1.pr-presentation"
   cat > "$receipt" <<'EOF'
-firstmate-pr-presentation-v2
+firstmate-pr-presentation-v1
 pr=https://github.com/example/repo/pull/7
 presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-presented_pr_base_ref=main
-presented_pr_base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-presentation_nonce=11111111111111111111111111111111
 EOF
   chmod 0600 "$receipt"
   run_teardown "$case_dir" >/dev/null || fail 'teardown refused valid leftover presentation receipt'
   assert_absent "$receipt" 'teardown left a validated presentation receipt orphaned'
-  pass 'teardown reconciles a validated leftover presentation receipt'
+  pass 'teardown reconciles a validated leftover v1 presentation receipt'
 }
 
 test_teardown_refuses_foreign_presentation_receipt() {

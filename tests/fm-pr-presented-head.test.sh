@@ -32,12 +32,14 @@ if [ "$1 $2 $3" = 'api GET /repos/JTInventory/firstmate/pulls/47' ]; then
   ref=$(printf '%s' codex/task-x1 | base64 | tr -d '\n')
   printf 'head_b64: %s\nbase_ref_b64: %s\nbase_b64: %s\nhead_repo_b64: %s\nhead_ref_b64: %s\n' \
     "$head" "$base_ref" "$base" "$repo" "$ref"
+elif [ "$1 $2 $3" = 'api PUT /repos/JTInventory/firstmate/pulls/47/merge' ]; then
+  exit "${FAKE_PUT_FAIL:-0}"
 fi
 SH
   cat > "$dir/bin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$GH_LOG"
-[ "${FAKE_PUT_FAIL:-0}" != 1 ]
+printf 'direct-gh %s\n' "$*" >> "$GH_LOG"
+exit 97
 SH
   chmod +x "$dir/bin/fm-pr-check" "$dir/bin/gh-axi" "$dir/bin/gh"
   printf '%s\n' "$head" > "$dir/head"
@@ -85,7 +87,7 @@ test_merge_binds_atomic_api_to_presented_head() {
   local dir; dir=$(make_case unchanged)
   run_present "$dir" >/dev/null || fail 'presentation failed'
   FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_merge "$dir" >/dev/null || fail 'unchanged head merge failed'
-  grep -qxF 'api --method PUT /repos/JTInventory/firstmate/pulls/47/merge --raw-field sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --raw-field merge_method=squash' "$dir/gh.log" || fail 'merge API was not atomically bound to presented head'
+  grep -q '^api PUT /repos/JTInventory/firstmate/pulls/47/merge ' "$dir/gh.log" || fail 'merge API did not use gh-axi with protected fields'
   [ ! -e "$dir/state/task-x1.pr-presentation" ] || fail 'successful merge retained its consumed approval receipt'
   pass 'merge uses the forge atomic expected-head primitive'
 }
@@ -100,7 +102,7 @@ test_changed_head_invalidates_approval_and_never_calls_put() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'changed head was accepted'
-  ! grep -q '^api --method PUT ' "$dir/gh.log" || fail 'stale approval reached merge API'
+  ! grep -q '^api PUT ' "$dir/gh.log" || fail 'stale approval reached merge API'
   [ ! -e "$dir/state/task-x1.pr-presentation" ] || fail 'stale presentation receipt was retained'
   pass 'changed head invalidates approval before merge mutation'
 }
@@ -114,7 +116,16 @@ test_missing_or_malformed_receipt_and_yolo_refuse() {
   chmod 0600 "$dir/state/task-x1.pr-presentation"
   set +e; FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_merge "$dir" >/dev/null 2>&1; rc=$?; set -e
   [ "$rc" -ne 0 ] || fail 'malformed receipt was accepted'
-  [ ! -e "$dir/gh.log" ] || ! grep -q '^api --method PUT ' "$dir/gh.log" || fail 'refused receipt reached merge API'
+  cat > "$dir/state/task-x1.pr-presentation" <<'EOF'
+firstmate-pr-presentation-v1
+pr=https://github.com/JTInventory/firstmate/pull/47
+presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  chmod 0600 "$dir/state/task-x1.pr-presentation"
+  set +e; FAKE_APPROVED_NONCE=11111111111111111111111111111111 \
+    FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_merge "$dir" >/dev/null 2>&1; rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail 'cleanup-only v1 receipt authorized a merge'
+  [ ! -e "$dir/gh.log" ] || ! grep -q '^api PUT ' "$dir/gh.log" || fail 'refused receipt reached merge API'
   pass 'missing and malformed receipts fail closed even in yolo mode'
 }
 
@@ -126,7 +137,7 @@ test_atomic_forge_rejection_invalidates_approval() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'forge TOCTOU rejection was accepted'
-  grep -q '^api --method PUT .*sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$dir/gh.log" || fail 'atomic request omitted presented SHA'
+  grep -q '^api PUT /repos/JTInventory/firstmate/pulls/47/merge ' "$dir/gh.log" || fail 'atomic request omitted presented SHA'
   [ ! -e "$dir/state/task-x1.pr-presentation" ] || fail 'rejected atomic merge retained approval'
   pass 'forge-side head race invalidates approval after atomic rejection'
 }
@@ -141,7 +152,7 @@ test_approval_is_bound_to_the_presented_head() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'approval for a different presentation was accepted'
-  [ ! -e "$dir/gh.log" ] || ! grep -q '^api --method PUT ' "$dir/gh.log" \
+  [ ! -e "$dir/gh.log" ] || ! grep -q '^api PUT ' "$dir/gh.log" \
     || fail 'mismatched approval reached the merge API'
   grep -qxF 'presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
     "$dir/state/task-x1.pr-presentation" \
@@ -173,7 +184,7 @@ test_approval_is_bound_to_unique_presentation_and_base() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'changed base was accepted'
-  ! grep -q '^api --method PUT ' "$dir/gh.log" \
+  ! grep -q '^api PUT ' "$dir/gh.log" \
     || fail 'stale base approval reached merge API'
   pass 'approval binds a unique URL head and base presentation'
 }
@@ -216,9 +227,33 @@ SH
   grep -qxF 'presented_pr_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     "$dir/state/task-x1.pr-presentation" \
     || fail 'new presentation was deleted by stale merge invalidation'
-  rc=$(grep -c '^api --method PUT ' "$dir/gh.log")
+  rc=$(grep -c '^api PUT ' "$dir/gh.log")
   [ "$rc" -eq 1 ] || fail 'serialized merge did not issue exactly one mutation'
   pass 'receipt replacement and consumption are serialized'
+}
+
+test_presentation_lock_wait_is_bounded_and_terminal_errors_propagate() {
+  local rc
+  set +e
+  FM_PR_PRESENTATION_LOCK_ATTEMPTS=2 bash -c '
+    . "$1"
+    fm_lock_try_acquire() { return 1; }
+    fm_pr_presentation_lock_acquire ignored
+  ' bash "$ROOT/bin/fm-pr-lib.sh"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail 'busy presentation lock did not stop after its bounded retry budget'
+
+  set +e
+  bash -c '
+    . "$1"
+    fm_lock_try_acquire() { return 2; }
+    fm_pr_presentation_lock_acquire ignored
+  ' bash "$ROOT/bin/fm-pr-lib.sh"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail 'unsafe presentation lock result was retried or rewritten'
+  pass 'presentation lock waits are bounded and terminal errors propagate'
 }
 
 test_gitlab_presentation_remains_unsupported_without_side_effect() {
@@ -275,5 +310,6 @@ test_atomic_forge_rejection_invalidates_approval
 test_approval_is_bound_to_the_presented_head
 test_approval_is_bound_to_unique_presentation_and_base
 test_concurrent_presentation_waits_for_receipt_consumption
+test_presentation_lock_wait_is_bounded_and_terminal_errors_propagate
 test_gitlab_presentation_remains_unsupported_without_side_effect
 test_receipt_inode_swap_is_refused

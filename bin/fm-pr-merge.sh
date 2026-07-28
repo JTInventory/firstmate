@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Captain-gated merge bound to one exact URL, head, base, and presentation nonce.
+# Captain-gated merge bound to one presented URL, head, base snapshot, and nonce.
 # Usage: FM_CAPTAIN_APPROVED_MERGE=1 FM_CAPTAIN_APPROVED_PR_HEAD=<sha> FM_CAPTAIN_APPROVED_PRESENTATION_NONCE=<nonce> fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge args>]
 set -eu
 
@@ -88,13 +88,41 @@ fm_pr_presentation_nonce_valid "$APPROVED_NONCE" || {
 
 PRESENTATION_LOCK="$STATE/.$ID.pr-presentation.lock"
 PRESENTATION_LOCK_HELD=0
+MERGE_FIELD_FILES=()
 release_presentation_lock() {
   [ "$PRESENTATION_LOCK_HELD" -eq 1 ] || return 0
   PRESENTATION_LOCK_HELD=0
   fm_lock_release "$PRESENTATION_LOCK"
 }
-trap release_presentation_lock EXIT
-fm_lock_acquire_wait "$PRESENTATION_LOCK"
+cleanup_pr_merge() {
+  local field_file
+  for field_file in "${MERGE_FIELD_FILES[@]}"; do
+    rm -f -- "$field_file"
+  done
+  release_presentation_lock
+}
+make_merge_field_file() {
+  local result_var=$1 value=$2 path state_device
+  path=$(mktemp "$STATE/.fm-pr-merge-field.XXXXXX") || return 1
+  MERGE_FIELD_FILES+=("$path")
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  printf '%s' "$value" > "$path" \
+    && chmod 0600 "$path" \
+    && fm_pr_private_file_valid "$path" 600 "$state_device" || return 1
+  printf -v "$result_var" '%s' "$path"
+}
+trap cleanup_pr_merge EXIT
+if fm_pr_presentation_lock_acquire "$PRESENTATION_LOCK"; then
+  :
+else
+  lock_rc=$?
+  if [ "$lock_rc" -eq 2 ]; then
+    echo 'error: unsafe PR presentation lock; refusing merge' >&2
+  else
+    echo 'error: PR presentation lock remained busy; retry merge' >&2
+  fi
+  exit 1
+fi
 PRESENTATION_LOCK_HELD=1
 
 fm_pr_presentation_parse "$RECEIPT" \
@@ -125,9 +153,26 @@ if ! fm_pr_head_valid "$CURRENT_HEAD" || [ "$CURRENT_HEAD" != "$PRESENTED_HEAD" 
   exit 1
 fi
 
-merge_fields=(--raw-field "sha=$PRESENTED_HEAD" --raw-field "merge_method=$method")
-[ -z "$commit_title" ] || merge_fields+=(--raw-field "commit_title=$commit_title")
-[ -z "$commit_message" ] || merge_fields+=(--raw-field "commit_message=$commit_message")
+make_merge_field_file merge_sha_file "$PRESENTED_HEAD" \
+  && make_merge_field_file merge_method_file "$method" || {
+    echo 'error: could not protect merge request fields' >&2
+    exit 1
+  }
+merge_fields=(--field "sha=@$merge_sha_file" --field "merge_method=@$merge_method_file")
+if [ -n "$commit_title" ]; then
+  make_merge_field_file merge_title_file "$commit_title" || {
+    echo 'error: could not protect merge title' >&2
+    exit 1
+  }
+  merge_fields+=(--field "commit_title=@$merge_title_file")
+fi
+if [ -n "$commit_message" ]; then
+  make_merge_field_file merge_message_file "$commit_message" || {
+    echo 'error: could not protect merge message' >&2
+    exit 1
+  }
+  merge_fields+=(--field "commit_message=@$merge_message_file")
+fi
 if [ "$delete_branch" -eq 1 ]; then
   fm_pr_toon_base64_field_parse "$CURRENT_PR" head_repo_b64 || {
     echo 'error: could not verify the PR head repository for branch deletion' >&2; exit 1;
@@ -143,13 +188,10 @@ if [ "$delete_branch" -eq 1 ]; then
       echo 'error: unsafe PR head repository or branch; refusing requested branch deletion' >&2
       exit 1
     }
-  ENCODED_HEAD_REF=$(fm_pr_url_encode_ref_path "$HEAD_REF") || {
-    echo 'error: could not encode the PR head branch for deletion' >&2
-    exit 1
-  }
+  HEAD_PUSH_URL="https://github.com/$HEAD_REPO.git"
 fi
 
-if ! gh api --method PUT "/repos/$OWNER/$REPO/pulls/$NUMBER/merge" "${merge_fields[@]}"; then
+if ! gh-axi api PUT "/repos/$OWNER/$REPO/pulls/$NUMBER/merge" "${merge_fields[@]}"; then
   fm_pr_presentation_invalidate "$STATE" "$ID" || true
   echo 'error: atomic merge failed; presentation was invalidated' >&2
   exit 1
@@ -158,6 +200,7 @@ if ! fm_pr_presentation_invalidate "$STATE" "$ID"; then
   echo 'warning: merge succeeded but the consumed presentation receipt could not be removed; teardown must reconcile it' >&2
 fi
 if [ "$delete_branch" -eq 1 ] \
-  && ! gh-axi api DELETE "/repos/$HEAD_REPO/git/refs/heads/$ENCODED_HEAD_REF"; then
-  echo 'warning: merge succeeded but the requested remote branch deletion failed' >&2
+  && ! git push --force-with-lease="refs/heads/$HEAD_REF:$PRESENTED_HEAD" \
+    "$HEAD_PUSH_URL" ":refs/heads/$HEAD_REF"; then
+  echo 'warning: merge succeeded but the leased remote branch deletion failed' >&2
 fi

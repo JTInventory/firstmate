@@ -280,6 +280,26 @@ fm_pr_presentation_nonce_new() {
   printf '%s\n' "$nonce"
 }
 
+fm_pr_presentation_lock_acquire() {
+  local lockdir=$1 attempts=${FM_PR_PRESENTATION_LOCK_ATTEMPTS:-300} attempt=0 rc
+  case "$attempts" in
+    ''|*[!0-9]*) attempts=300 ;;
+  esac
+  [ "$attempts" -ge 1 ] && [ "$attempts" -le 600 ] || attempts=300
+  while [ "$attempt" -lt "$attempts" ]; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 1 ] || return "$rc"
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$attempts" ] || break
+    sleep 0.1
+  done
+  return 1
+}
+
 fm_pr_url_encode_ref_path() {
   local input=$1 output= char value encoded i
   local LC_ALL=C
@@ -462,6 +482,40 @@ fm_pr_presentation_parse() {
   FM_PR_PRESENTATION_BASE_REF=$base_ref
   FM_PR_PRESENTATION_BASE=$base
   FM_PR_PRESENTATION_NONCE=$nonce
+}
+
+fm_pr_presentation_cleanup_parse() {
+  local file=$1 version url head _extra state_device path_identity fd_identity
+  if fm_pr_presentation_parse "$file"; then
+    return 0
+  fi
+  FM_PR_PRESENTATION_URL=
+  FM_PR_PRESENTATION_HEAD=
+  FM_PR_PRESENTATION_BASE_REF=
+  FM_PR_PRESENTATION_BASE=
+  FM_PR_PRESENTATION_NONCE=
+  [ ! -L "$file" ] || return 1
+  state_device=$(fm_pr_file_device "$(dirname "$file")") || return 1
+  exec 8< "$file" || return 1
+  if ! fm_pr_private_fd_valid 8 600 "$state_device" \
+    || [ -L "$file" ] \
+    || ! path_identity=$(fm_pr_file_identity "$file") \
+    || ! fd_identity=$(fm_pr_fd_identity 8) \
+    || [ "$path_identity" != "$fd_identity" ]; then
+    exec 8<&-
+    return 1
+  fi
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r url <&8 || { exec 8<&-; return 1; }
+  IFS= read -r head <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then exec 8<&-; return 1; fi
+  exec 8<&-
+  [ "$version" = firstmate-pr-presentation-v1 ] || return 1
+  case "$url" in pr=*) url=${url#pr=} ;; *) return 1 ;; esac
+  case "$head" in presented_pr_head=*) head=${head#presented_pr_head=} ;; *) return 1 ;; esac
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] && fm_pr_head_valid "$head" || return 1
+  FM_PR_PRESENTATION_URL=$FM_PR_URL
+  FM_PR_PRESENTATION_HEAD=$head
 }
 
 fm_pr_presentation_publish() {

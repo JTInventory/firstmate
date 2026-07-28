@@ -330,7 +330,7 @@ validate_pr_poll_cleanup() {
       echo "REFUSED: task metadata cannot identify its PR-presentation receipt; preserving task state." >&2
       return 1
     }
-    fm_pr_presentation_parse "$presentation" \
+    fm_pr_presentation_cleanup_parse "$presentation" \
       && [ "$FM_PR_PRESENTATION_URL" = "$expected_url" ] || {
         echo "REFUSED: invalid or foreign PR-presentation receipt; preserving task state." >&2
         return 1
