@@ -428,6 +428,38 @@ EOF
   pass "dangling scope markers cannot turn opted-in tasks back into legacy spawns"
 }
 
+test_legacy_scope_fence_text_does_not_opt_in() {
+  local home proj wt fakebin id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case legacy-scope-fence)
+EOF
+  id=legacy-scope-fence-mm3
+  mkdir -p "$home/data/$id"
+  printf '%s\n' 'Legacy prose.' '```firstmate-scope-contract-v1' 'not a contract' > "$home/data/$id/brief.md"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "marker-free legacy fence text should not opt in"
+  assert_grep 'new-window' "$home/tmux.log" "legacy brief did not reach spawn"
+  pass "marker-free legacy fence text remains legacy"
+}
+
+test_scope_marker_with_extra_bytes_fails() {
+  local home proj wt fakebin id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case invalid-scope-marker-bytes)
+EOF
+  id=invalid-scope-marker-mm4
+  mkdir -p "$home/data/$id"
+  printf '%s\n%s\n' firstmate-scope-contract-v1 extra > "$home/data/$id/scope-contract-enabled"
+  printf '%s\n' 'Legacy prose.' > "$home/data/$id/brief.md"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "scope marker with extra bytes should fail"
+  assert_contains "$out" "invalid scope-contract marker" "invalid marker diagnostic absent"
+  assert_no_grep 'new-window' "$home/tmux.log" "invalid marker reached window creation"
+  pass "scope marker validation rejects extra bytes"
+}
+
 test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
@@ -442,3 +474,5 @@ test_rejected_window_name_removes_new_window
 test_window_setup_failures_remove_new_window
 test_opted_in_scope_fence_cannot_disappear_before_spawn
 test_dangling_scope_marker_cannot_restore_legacy_spawn
+test_legacy_scope_fence_text_does_not_opt_in
+test_scope_marker_with_extra_bytes_fails

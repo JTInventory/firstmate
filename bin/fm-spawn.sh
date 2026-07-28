@@ -883,12 +883,12 @@ SCOPE_MARKER="$DATA/$ID/scope-contract-enabled"
 SCOPE_MARKER_PRESENT=0
 if [ -e "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ]; then
   SCOPE_MARKER_PRESENT=1
-  if [ ! -f "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ] || ! grep -qx 'firstmate-scope-contract-v1' "$SCOPE_MARKER"; then
+  if ! "$FM_ROOT/bin/fm-scope-contract.sh" validate-marker "$SCOPE_MARKER" >/dev/null 2>&1; then
     echo "error: invalid scope-contract marker at $SCOPE_MARKER" >&2
     exit 1
   fi
 fi
-if [ "$SCOPE_MARKER_PRESENT" -eq 1 ] || grep -q '^```firstmate-scope-contract-v1$' "$BRIEF"; then
+if [ "$SCOPE_MARKER_PRESENT" -eq 1 ]; then
   "$FM_ROOT/bin/fm-scope-contract.sh" validate-brief "$BRIEF" || {
     echo "error: invalid scope contract in $BRIEF" >&2
     exit 1

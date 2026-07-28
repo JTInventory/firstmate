@@ -37,7 +37,33 @@ fm_scope_ledger_audit() (
     return 0
   }
   trap 'rm -f -- "$SCOPE_BODY"' EXIT HUP INT TERM
-  if (cd "${WT:-$FM_ROOT}" && gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
+  SCOPE_TIMEOUT=${FM_SCOPE_LEDGER_TIMEOUT_SECONDS:-3}
+  case "$SCOPE_TIMEOUT" in *[!0-9]*|'') SCOPE_TIMEOUT=3 ;; esac
+  [ "$SCOPE_TIMEOUT" -gt 0 ] || SCOPE_TIMEOUT=3
+  if command -v timeout >/dev/null 2>&1; then
+    SCOPE_TIMEOUT_RUN=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    SCOPE_TIMEOUT_RUN=gtimeout
+  elif command -v perl >/dev/null 2>&1; then
+    SCOPE_TIMEOUT_RUN=perl
+  else
+    printf 'scope-ledger\tunknown\treason=timeout-unavailable\n'
+    return 0
+  fi
+  if [ "$SCOPE_TIMEOUT_RUN" = perl ]; then
+    if (cd "${WT:-$FM_ROOT}" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$SCOPE_TIMEOUT" gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
+      SCOPE_FETCHED=1
+    else
+      SCOPE_FETCHED=0
+    fi
+  else
+    if (cd "${WT:-$FM_ROOT}" && "$SCOPE_TIMEOUT_RUN" "$SCOPE_TIMEOUT" gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
+      SCOPE_FETCHED=1
+    else
+      SCOPE_FETCHED=0
+    fi
+  fi
+  if [ "$SCOPE_FETCHED" -eq 1 ]; then
     "$SCRIPT_DIR/fm-scope-contract.sh" audit-body "$SCOPE_BRIEF" "$SCOPE_BODY" \
       || printf 'scope-ledger\tunknown\treason=local-contract-invalid\n'
   else
@@ -120,6 +146,18 @@ if [ "$PROVIDER" = github ] && [ -z "$EXPECTED_HEAD" ]; then
 fi
 
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+TASK_MODE=$(fm_meta_value "$META" mode)
+SCOPE_BRIEF="$DATA/$ID/brief.md"
+SCOPE_MARKER="$DATA/$ID/scope-contract-enabled"
+SCOPE_LEDGER_STATE=disabled
+if [ "$TASK_MODE" != local-only ] && { [ -e "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ]; }; then
+  if "$SCRIPT_DIR/fm-scope-contract.sh" validate-marker "$SCOPE_MARKER" >/dev/null 2>&1; then
+    SCOPE_LEDGER_STATE=enabled
+  else
+    SCOPE_LEDGER_STATE=invalid
+    printf 'scope-ledger\tunknown\treason=marker-invalid\n'
+  fi
+fi
 PR_HEAD=
 GUARDED_REPLACEMENT_NEEDED=0
 GUARDED_REPLACEMENT_ACTIVE=0
@@ -154,6 +192,7 @@ if [ -n "$EXPECTED_HEAD" ]; then
     exit 1
   }
   if [ "$FM_PR_POLL_REPLACEMENT_COMPLETE" -eq 1 ]; then
+    [ "$SCOPE_LEDGER_STATE" != enabled ] || fm_scope_ledger_audit
     printf 'armed: state/%s.check.sh\n' "$ID"
     exit 0
   fi
@@ -187,6 +226,7 @@ if [ -n "$EXPECTED_HEAD" ]; then
       exit 1
     }
     if [ "$recorded_head" = "$EXPECTED_HEAD" ]; then
+      [ "$SCOPE_LEDGER_STATE" != enabled ] || fm_scope_ledger_audit
       printf 'armed: state/%s.check.sh\n' "$ID"
       exit 0
     fi
@@ -230,26 +270,6 @@ if [ -z "$PR_HEAD" ] && [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ]
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
-  fi
-fi
-
-# Opt-in PR scope ledgers are shadow-only during the pilot. Fetch the body only
-# after URL, task, worktree, branch, and (when supplied) expected-head identity
-# have been validated above. Treat body bytes exclusively as data, emit visible
-# findings, and never let an incomplete ledger block the canonical PR watch.
-SCOPE_BRIEF="$DATA/$ID/brief.md"
-SCOPE_MARKER="$DATA/$ID/scope-contract-enabled"
-SCOPE_MARKER_PRESENT=0
-if [ -e "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ]; then
-  SCOPE_MARKER_PRESENT=1
-fi
-if [ "$SCOPE_MARKER_PRESENT" -eq 1 ] || { [ -f "$SCOPE_BRIEF" ] && [ ! -L "$SCOPE_BRIEF" ] \
-  && grep -q '^```firstmate-scope-contract-v1$' "$SCOPE_BRIEF"; }; then
-  if [ "$SCOPE_MARKER_PRESENT" -eq 1 ] && { [ ! -f "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ] \
-    || ! grep -qx 'firstmate-scope-contract-v1' "$SCOPE_MARKER"; }; then
-    printf 'scope-ledger\tunknown\treason=marker-invalid\n'
-  else
-    fm_scope_ledger_audit
   fi
 fi
 
@@ -308,4 +328,5 @@ if [ "$GUARDED_REPLACEMENT_ACTIVE" -eq 1 ]; then
     exit 1
   }
 fi
+[ "$SCOPE_LEDGER_STATE" != enabled ] || fm_scope_ledger_audit
 printf 'armed: state/%s.check.sh\n' "$ID"

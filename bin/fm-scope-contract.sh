@@ -92,6 +92,13 @@ validate_brief() {
   validate_spec "$SCOPE_TMP_ONE"
 }
 
+validate_marker() {
+  local marker=$1 actual
+  [ -f "$marker" ] && [ ! -L "$marker" ] || die "scope marker must be a regular file"
+  actual=$(cat -- "$marker"; printf '.')
+  [ "$actual" = "$(printf 'firstmate-scope-contract-v1\n.')" ] || die "scope marker has invalid bytes"
+}
+
 audit_body() {
   local brief=$1 body=$2 count
   [ -f "$body" ] && [ ! -L "$body" ] || die "PR body must be a regular file"
@@ -99,11 +106,33 @@ audit_body() {
   SCOPE_TMP_TWO=$(mktemp "${TMPDIR:-/tmp}/fm-scope-findings.XXXXXX")
   extract_brief_spec "$brief" "$SCOPE_TMP_ONE"
   validate_spec "$SCOPE_TMP_ONE"
-  awk -F '|' '
+  awk '
     NR == FNR { split($0, contract, "\t"); expected[contract[1]]=1; next }
     function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
-    NF >= 4 {
-      id=trim($2); status=trim($3); evidence=trim($4); risk=trim($5)
+    function split_markdown_row(line, fields,    i, char, escaped, count, value) {
+      delete fields
+      count=1
+      value=""
+      for (i=1; i<=length(line); i++) {
+        char=substr(line, i, 1)
+        if (escaped) {
+          value=value char
+          escaped=0
+        } else if (char == "\\") {
+          value=value char
+          escaped=1
+        } else if (char == "|") {
+          fields[count++]=value
+          value=""
+        } else {
+          value=value char
+        }
+      }
+      fields[count]=value
+      return count
+    }
+    split_markdown_row($0, field) >= 5 {
+      id=trim(field[2]); status=trim(field[3]); evidence=trim(field[4]); risk=trim(field[5])
       if (id !~ /^[A-Z][A-Z0-9]*-[0-9]+$/) next
       count[id]++
       if (!(id in expected)) print "scope-ledger-finding\tunknown\t" id
@@ -142,9 +171,13 @@ case "$command" in
     [ "$#" -eq 2 ] || die "usage: $0 validate-brief <brief.md>"
     validate_brief "$2"
     ;;
+  validate-marker)
+    [ "$#" -eq 2 ] || die "usage: $0 validate-marker <marker>"
+    validate_marker "$2"
+    ;;
   audit-body)
     [ "$#" -eq 3 ] || die "usage: $0 audit-body <brief.md> <pr-body.md>"
     audit_body "$2" "$3"
     ;;
-  *) die "use validate-spec, append-brief, validate-brief, or audit-body" ;;
+  *) die "use validate-spec, append-brief, validate-brief, validate-marker, or audit-body" ;;
 esac

@@ -65,7 +65,10 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *" body "*) cat "${FM_TEST_GH_BODY_FILE:?}" ;;
+  *" body "*)
+    [ "${FM_TEST_GH_BODY_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_BODY_SLEEP"
+    cat "${FM_TEST_GH_BODY_FILE:?}"
+    ;;
   *" state,baseRefName,headRefName,headRefOid,headRepository,url "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -3611,6 +3614,8 @@ test_scope_ledger_dangling_marker_stays_visible_and_advisory() {
   write_task_meta "$dir" task-a
   mkdir -p "$dir/home/data/task-a"
   printf '%s\n' 'legacy-looking brief' > "$dir/home/data/task-a/brief.md"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/37 >/dev/null 2>"$dir/initial.err" \
+    || fail "could not arm initial canonical PR watch"
   ln -s "$dir/home/data/task-a/missing-marker-target" "$dir/home/data/task-a/scope-contract-enabled"
 
   set +e
@@ -3621,6 +3626,56 @@ test_scope_ledger_dangling_marker_stays_visible_and_advisory() {
   assert_contains "$out" $'scope-ledger\tunknown\treason=marker-invalid' "dangling marker became a silent legacy bypass"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "dangling marker prevented canonical PR poll publication"
   pass "dangling scope markers remain visible without blocking the canonical PR watch"
+}
+
+test_scope_ledger_skips_local_only_tasks() {
+  local dir state spec brief out rc
+  dir=$(make_case scope-ledger-local-only)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  printf '%s\n' mode=local-only >> "$state/task-a.meta"
+  mkdir -p "$dir/home/data/task-a"
+  spec="$dir/scope.tsv"
+  brief="$dir/home/data/task-a/brief.md"
+  printf 'AC-1\tFeature behavior is proved.\nNG-1\tGlobal enforcement remains disabled.\n' > "$spec"
+  "$ROOT/bin/fm-scope-contract.sh" append-brief "$spec" "$brief" local-only
+  printf '%s\n' firstmate-scope-contract-v1 > "$dir/home/data/task-a/scope-contract-enabled"
+
+  set +e
+  out=$(run_check_entry "$dir" task-a https://github.com/o/r/pull/37 2>"$dir/check.err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "local-only PR check failed: $(cat "$dir/check.err")"
+  assert_not_contains "$out" 'scope-ledger' "local-only task entered PR ledger handling"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "local-only check did not arm canonical poll"
+  pass "local-only tasks never enter PR ledger handling"
+}
+
+test_scope_ledger_body_fetch_is_bounded() {
+  local dir spec brief body start elapsed out rc
+  dir=$(make_case scope-ledger-timeout)
+  write_task_meta "$dir" task-a
+  mkdir -p "$dir/home/data/task-a"
+  spec="$dir/scope.tsv"
+  brief="$dir/home/data/task-a/brief.md"
+  body="$dir/pr-body.md"
+  printf 'AC-1\tFeature behavior is proved.\nNG-1\tGlobal enforcement remains disabled.\n' > "$spec"
+  "$ROOT/bin/fm-scope-contract.sh" append-brief "$spec" "$brief" no-mistakes
+  printf '%s\n' firstmate-scope-contract-v1 > "$dir/home/data/task-a/scope-contract-enabled"
+  printf '| AC-1 | covered | proof | none |\n| NG-1 | out-of-scope | proof | none |\n' > "$body"
+
+  start=$(date +%s)
+  set +e
+  out=$(FM_SCOPE_LEDGER_TIMEOUT_SECONDS=1 FM_TEST_GH_BODY_SLEEP=5 FM_TEST_GH_BODY_FILE="$body" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/37 2>"$dir/check.err")
+  rc=$?
+  set -e
+  elapsed=$(($(date +%s) - start))
+  [ "$rc" -eq 0 ] || fail "timed-out ledger blocked PR check: $(cat "$dir/check.err")"
+  [ "$elapsed" -lt 4 ] || fail "ledger body fetch exceeded its timeout"
+  assert_contains "$out" $'scope-ledger\tunknown\treason=body-unavailable' "timeout diagnostic missing"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" || fail "ledger timeout prevented poll publication"
+  pass "PR ledger body fetch is bounded and failure-neutral"
 }
 
 test_parser_matrix
@@ -3638,3 +3693,5 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_scope_ledger_shadow_does_not_block_pr_watch
 test_scope_ledger_dangling_marker_stays_visible_and_advisory
+test_scope_ledger_skips_local_only_tasks
+test_scope_ledger_body_fetch_is_bounded

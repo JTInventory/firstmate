@@ -108,15 +108,32 @@ EOF
 
   cat > "$body" <<'EOF'
 | ID | Status | Evidence | Residual risk |
-| AC-1 | covered | fixture one | none |
+| AC-1 | covered | fixture one \| fixture two | none |
 | AC-2 | not-applicable | fixture two | documented exception |
 | NG-1 | out-of-scope | non-goal retained | none |
 EOF
   out=$("$SCOPE" audit-body "$brief" "$body") || fail "complete advisory ledger failed"
   assert_contains "$out" $'scope-ledger\tpass\tfindings=0' "complete ledger did not pass"
-  pass "PR ledger audit stays advisory, reports all finding classes, and never executes body text"
+  pass "PR ledger audit handles escaped pipes, reports findings, and never executes body text"
+}
+
+test_scope_marker_requires_exact_bytes() {
+  local dir marker rc
+  dir="$TMP_ROOT/marker"
+  mkdir -p "$dir"
+  marker="$dir/scope-contract-enabled"
+  printf '%s\n' firstmate-scope-contract-v1 > "$marker"
+  "$SCOPE" validate-marker "$marker" || fail "exact scope marker was rejected"
+  printf '%s\n%s\n' firstmate-scope-contract-v1 extra > "$marker"
+  set +e
+  "$SCOPE" validate-marker "$marker" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "scope marker with extra bytes was accepted"
+  pass "scope markers require exact whole-file bytes"
 }
 
 test_scope_contract_renders_by_delivery_mode
 test_invalid_contracts_fail_before_spawn
 test_ledger_audit_is_advisory_and_treats_body_as_data
+test_scope_marker_requires_exact_bytes
