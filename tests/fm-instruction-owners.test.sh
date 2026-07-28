@@ -445,6 +445,8 @@ FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" ordinary-local local-project >/dev
   || fail "ordinary brief scaffold failed"
 assert_grep 'States: working, needs-decision, blocked, done, failed.' "$BRIEF_HOME/data/ordinary-local/brief.md" \
   "generic status contract changed for other modes"
+assert_grep 'A mid-task `working:` line (including setup complete) is nonterminal:' "$BRIEF_HOME/data/ordinary-local/brief.md" \
+  "ordinary ship brief does not protect multi-stage work from setup-complete termination"
 DONE_SIGNAL_COUNT=$(grep -Fc 'append `done: PR {url}`' "$DIRECT_PR_BRIEF")
 [ "$DONE_SIGNAL_COUNT" -eq 1 ] \
   || fail "generated direct-PR brief must emit one completion signal"

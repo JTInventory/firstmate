@@ -734,7 +734,7 @@ This is about firstmate's own session: it includes a no-mistakes pipeline firstm
 Background that work so watcher wakes can interleave with it and the supervision loop stays responsive.
 A crewmate driving its own `no-mistakes` validation does the opposite: it drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
-Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order; valid `paused: <reason>` is an external wait only when no run supersedes it. It treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
+Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-and-current-code-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order; valid `paused: <reason>` is an external wait only when no run supersedes it. It treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
 

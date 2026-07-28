@@ -8,8 +8,9 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch, else the pane
-# busy-signature) and reconciles the possibly-stale log against it.
+# no-mistakes run-step attributed to this crew's branch and current code
+# identity, else the pane busy-signature) and reconciles the possibly-stale log
+# against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -19,7 +20,10 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + window + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch, active or terminal?
+#   2. Matching no-mistakes run for this crew's branch and compatible HEAD,
+#      active or terminal? Equal HEAD matches; local HEAD may also be an ancestor
+#      of the run HEAD when the pipeline added fix commits. Older, rewritten,
+#      diverged, or missing run heads do not match.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. A valid
@@ -345,6 +349,20 @@ nm_run_id_for_branch() {  # <branch> <list-output>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
+# A branch match is not enough when branch names are reused. Accept a run only
+# when its recorded head is the local worktree HEAD, or a descendant of that
+# HEAD produced by pipeline fix commits. Reject missing, rewritten, diverged,
+# or older run heads (including local work advanced past the run tip).
+nm_run_head_matches_worktree() {
+  local run_head local_full run_full
+  run_head=$(strip_quotes "$(nm_field head)")
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
 HAVE_RUN=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
@@ -352,17 +370,18 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch; find this branch's
-      # own most recent run in the list, then inspect it directly.
+      # The active-or-most-recent run is for another branch, or its branch name
+      # matches but its code identity does not. Find this branch's own most
+      # recent run in the list, then inspect and head-bind it directly.
       list_out=$(nm_run axi)
       rid=$(nm_run_id_for_branch "$CREW_BRANCH" "$list_out")
       if [ -n "$rid" ]; then
         RUN_OUT=$(nm_run axi status --run "$rid")
         run_branch=$(strip_quotes "$(nm_field branch)")
-        [ "$run_branch" = "$CREW_BRANCH" ] && HAVE_RUN=1
+        [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree && HAVE_RUN=1
       fi
     fi
   fi

@@ -99,16 +99,16 @@ status_is_terminal_verb() {
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
-  local line=$1
+  local line=$1 verb
   [ -n "$line" ] || return 1
+  status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
+  case "$verb" in
+    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+      return 1
+      ;;
+  esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
-    status_is_paused "$line" && return 1
-    case "$verb" in
-      working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
-        return 1
-        ;;
-    esac
     case "$verb" in
       done|needs-decision|blocked|failed) return 0 ;;
     esac

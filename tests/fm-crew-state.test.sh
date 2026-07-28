@@ -36,6 +36,8 @@ make_repo_on_branch() {  # <dir> <branch>
   git -C "$dir" init -q
   git -C "$dir" commit -q --allow-empty -m init
   git -C "$dir" checkout -q -b "$branch"
+  FM_FAKE_RUN_HEAD=$(git -C "$dir" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
 }
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
@@ -121,7 +123,7 @@ run:
   branch: $1
   status: running
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
   steps[2]{step,status,findings,duration_ms}:
@@ -137,7 +139,7 @@ run:
   branch: $1
   status: fixing
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
 EOF
@@ -150,7 +152,7 @@ run:
   branch: $1
   status: fixing
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
   active_steps[1]{step,status,elapsed,last_event,pid,round}:
@@ -165,7 +167,7 @@ run:
   branch: $1
   status: awaiting_approval
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings[2]{id,severity,file,line,action,description}:
     r1,warning,a.go,,auto-fix,ignored error
@@ -181,7 +183,7 @@ run:
   branch: $1
   status: awaiting_agent
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
 EOF
@@ -194,7 +196,7 @@ run:
   branch: $1
   status: running
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings[1]{id,severity,file,line,action,description}:
     r1,error,b.go,,ask-user,changes product behavior
@@ -209,7 +211,7 @@ run:
   branch: $1
   status: running
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings[1]{id,severity,file,line,action,description}:
     r1,error,b.go,,ask-user,changes product behavior
@@ -229,7 +231,7 @@ run:
   id: "01RUN"
   branch: $1
   status: completed
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "https://github.com/o/r/pull/1"
   findings: none
 outcome: passed
@@ -242,7 +244,7 @@ run:
   id: "01RUN"
   branch: $1
   status: completed
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
 outcome: failed
@@ -256,7 +258,7 @@ run:
   branch: $1
   status: running
   awaiting_agent: parked 2m10s
-  head: "abc1234"
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "https://github.com/o/r/pull/2"
   findings: none
   steps[4]{step,status,findings,duration_ms}:
@@ -810,6 +812,82 @@ test_usage_error() {
   pass "usage error exits 2"
 }
 
+test_historical_same_branch_rewritten_head_not_current() {
+  reset_fakes
+  local d old_head out
+  d=$(new_case rewritten-head)
+  make_repo_on_branch "$d/wt" fm/todo-flag
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q --orphan tmp-rewrite
+  git -C "$d/wt" commit -q --allow-empty -m 'rewritten tip'
+  git -C "$d/wt" branch -q -M fm/todo-flag
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/wishlist.meta" "window=fm:fm-wishlist" "worktree=$d/wt" "kind=ship"
+  printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/wishlist.status"
+  FM_FAKE_RUN_HEAD="$old_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" wishlist)
+  assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
+  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
+  pass "historical same-branch rewritten head is not attributed as current"
+}
+
+test_active_run_descendant_fix_head_remains_current() {
+  reset_fakes
+  local d base_head fix_head out
+  d=$(new_case pipeline-descendant)
+  make_repo_on_branch "$d/wt" fm/feat-pipeline
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  fix_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pipe.meta" "window=fm:fm-pipe" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$fix_head"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-pipeline)"
+  out=$(run_crew_state "$d" pipe)
+  assert_contains "$out" "source: run-step" "descendant pipeline fix head remains run-step"
+  assert_contains "$out" "state: working" "active fixing run remains working"
+  pass "active run with valid descendant fix head remains current"
+}
+
+test_local_advanced_past_run_head_invalidates() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case local-advanced)
+  make_repo_on_branch "$d/wt" fm/feat-adv
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local stage-2 work after prior run'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/adv.meta" "window=fm:fm-adv" "worktree=$d/wt" "kind=ship"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/adv.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-adv)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" adv)
+  assert_not_contains "$out" "source: run-step" "local-advanced tip must not use historical run"
+  assert_contains "$out" "source: status-log" "falls back after local advanced past run"
+  pass "local work advanced past run head invalidates attribution"
+}
+
+test_missing_run_head_falls_back_to_current_state() {
+  reset_fakes
+  local d out
+  d=$(new_case missing-run-head)
+  make_repo_on_branch "$d/wt" fm/feat-no-head
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/no-head.meta" "window=fm:fm-no-head" "worktree=$d/wt" "kind=ship"
+  printf 'working: current stage still in progress\n' > "$d/state/no-head.status"
+  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-no-head | grep -v '^  head:')
+  FM_FAKE_AXI_LIST=""
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" no-head)
+  assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
+  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
+  pass "missing run head falls back instead of matching by branch"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -843,5 +921,9 @@ test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
 test_usage_error
+test_historical_same_branch_rewritten_head_not_current
+test_active_run_descendant_fix_head_remains_current
+test_local_advanced_past_run_head_invalidates
+test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

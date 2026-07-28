@@ -354,6 +354,8 @@ $RULE2
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+   A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
+   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
