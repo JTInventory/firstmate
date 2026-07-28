@@ -372,6 +372,7 @@ FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3          # additional waits before stale-lock proof; invalid values use 3
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1  # seconds between signature-matched retries; invalid values use 1
 FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30        # minimum lock age before removal can be considered
+FM_ISOLATION_VERBOSE=0   # also emit BOOTSTRAP_INFO for non-actionable worker-isolation sweep results
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok

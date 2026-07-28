@@ -76,9 +76,12 @@
 #   bin/fm-cbm-lib.sh). Missing CBM never blocks spawn.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
-#   path is a real git worktree root of the TARGET project (same git common dir,
-#   HEAD present in the target repo) distinct from the primary project checkout.
+#   Ship/scout spawns refuse to launch unless the resolved task path is a real
+#   git worktree root of the TARGET project (same git common dir and HEAD
+#   present), distinct from the project checkout, active home, and Firstmate
+#   root. Every launch carries an explicit worker-home declaration. The settle
+#   poll prefers the live agent process cwd over provider pane-path hints, and
+#   the acquired slot is stamped with its current owner.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -129,6 +132,14 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-task-label-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+# shellcheck source=bin/fm-agent-cwd-lib.sh
+. "$SCRIPT_DIR/fm-agent-cwd-lib.sh"
+# shellcheck source=bin/fm-slot-owner-lib.sh
+. "$SCRIPT_DIR/fm-slot-owner-lib.sh"
+# A task worker never dispatches from an inherited operational home.
+fm_worker_refuse_primary_operation "spawn" || exit 1
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -1077,7 +1088,7 @@ proj_git_common_real() {
 SPAWN_WT_FAIL=
 spawn_worktree_check() {  # <candidate>; sets SPAWN_WT_FAIL (empty = valid)
   local candidate=$1 candidate_real worktree_root worktree_root_real
-  local project_common worktree_common worktree_head
+  local project_common worktree_common worktree_head guarded guarded_real
   SPAWN_WT_FAIL=
   candidate_real=$(real_path_or_raw "$candidate")
   worktree_root=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || true)
@@ -1091,6 +1102,13 @@ spawn_worktree_check() {  # <candidate>; sets SPAWN_WT_FAIL (empty = valid)
     SPAWN_WT_FAIL="resolved path is the primary project checkout itself"
     return 0
   fi
+  for guarded in "$FM_HOME" "$FM_ROOT"; do
+    guarded_real=$(real_path_or_raw "$guarded")
+    if [ "$candidate_real" = "$guarded_real" ]; then
+      SPAWN_WT_FAIL="resolved path is the active operational home or Firstmate root ('$guarded_real')"
+      return 0
+    fi
+  done
   project_common=$(proj_git_common_real)
   if [ -z "$project_common" ]; then
     SPAWN_WT_FAIL="cannot resolve the target project's git common dir from '$PROJ_ABS'"
@@ -1345,15 +1363,26 @@ EOF
     WID="$T"
     ;;
 esac
+spawn_settle_path() {  # <target>
+  local record
+  record=$(fm_agent_cwd_verdict "" "$BACKEND" "$1")
+  if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
+    fm_agent_verdict_field "$record" cwd
+    return 0
+  fi
+  fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true
+}
+
 if [ "$KIND" != secondmate ]; then
   fm_backend_send_text_line "$BACKEND" "$WID" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Prefer the live process cwd through /proc. Provider pane cwd remains a hint
+  # where no process id is available.
   # Accept a pane cwd only once it passes the complete target-repo check. A
   # transient foreign cwd is retained only for the eventual diagnostic.
   WT_CANDIDATE=
   for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
-    p=$(fm_backend_current_path "$BACKEND" "$WID" 2>/dev/null || true)
+    p=$(spawn_settle_path "$WID")
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then
@@ -1511,6 +1540,9 @@ if [ "$KIND" != secondmate ]; then
 fi
 
 mkdir -p "$STATE"
+# Record current ownership in the linked worktree's private git directory.
+# Metadata is historical; teardown uses this stamp as independent evidence.
+fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null || true
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 {
@@ -1567,9 +1599,17 @@ LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
-  sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+  WORKER_HOME=$PROJ_ABS
+  WORKER_ROLE=secondmate
+else
+  WORKER_HOME=$(real_path_or_raw "$FM_HOME")
+  WORKER_ROLE=crewmate
 fi
+WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HOME") || {
+  echo "error: could not build the home declaration for $ID; refusing to launch a task child that would inherit this home" >&2
+  exit 1
+}
+LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

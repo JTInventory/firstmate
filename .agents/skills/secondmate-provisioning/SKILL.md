@@ -145,6 +145,7 @@ When safe, teardown kills the direct tmux window, removes the `data/secondmates.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
 A plain-clone home with no pool slot is simply removed.
 Teardown retries only a transient Git `index.lock`/`File exists` failure from `treehouse return`; if it still fails, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
+Teardown also stops with state intact when another task still holds that pooled slot. `--force` does not waive the ownership gate; reconcile the other holder and retry (see `docs/worker-isolation.md`).
 
 With `--force`, teardown is the explicit discard path.
 It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
