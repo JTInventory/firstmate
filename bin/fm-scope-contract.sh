@@ -170,7 +170,7 @@ audit_body() {
       value=trim(value)
       sub(/^:/, "", value)
       sub(/:$/, "", value)
-      return value ~ /^-+$/
+      return value ~ /^-+$/ && length(value) >= 3
     }
     function is_table_separator(fields,    i) {
       for (i=2; i<=5; i++) if (!is_separator_cell(fields[i])) return 0

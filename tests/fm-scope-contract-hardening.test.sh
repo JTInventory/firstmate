@@ -104,6 +104,20 @@ note | NG-1 | out-of-scope | fake | none |' \
   pass 'only contiguous non-code rows in the documented table shape count'
 }
 
+test_separator_cells_require_three_hyphens() {
+  cat > "$TMP/body.md" <<'EOF'
+## PR scope ledger (advisory)
+| ID | Status | Evidence | Residual risk |
+| - | :- | -: | :-: |
+| AC-1 | covered | fake | none |
+| NG-1 | out-of-scope | fake | none |
+EOF
+  out=$("$SCRIPT" audit-body "$TMP/brief.md" "$TMP/body.md")
+  printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tAC-1' || fail 'short separator satisfied AC-1'
+  printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tNG-1' || fail 'short separator satisfied NG-1'
+  pass 'table separator cells require at least three hyphens'
+}
+
 test_marker_rejects_nul_and_symlink_destination() {
   printf 'firstmate-scope-contract-v1\n\0suffix' > "$TMP/bad-marker"
   ! "$SCRIPT" validate-marker "$TMP/bad-marker" >/dev/null 2>&1 || fail 'NUL marker was accepted'
@@ -120,4 +134,5 @@ test_duplicate_ledger_heading_is_visible
 test_fenced_heading_cannot_authorize_rows
 test_fence_delimiter_length_and_indentation_are_respected
 test_only_contiguous_table_rows_satisfy_the_ledger
+test_separator_cells_require_three_hyphens
 test_marker_rejects_nul_and_symlink_destination
