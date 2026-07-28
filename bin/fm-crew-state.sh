@@ -206,6 +206,31 @@ nm_field() {  # <key>
 nm_findings_count() {
   printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
 }
+nm_convergence_round() {
+  local row value
+  row=$(printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*active_steps\[[0-9]+\]\{[^}]*round[^}]*\}:[[:space:]]*$/ { inside=1; next }
+    inside && /^[^[:space:]]/ { exit }
+    inside && /,[[:space:]]*"?fixing"?[[:space:]]*,/ { print; exit }
+  ')
+  [ -n "$row" ] || return 0
+  value=$(strip_quotes "$(trim "${row##*,}")")
+  case "$value" in
+    'fix '[0-9]*) value=${value#fix }; case "$value" in *[!0-9]*) return 0 ;; esac ;;
+    'round '[0-9]*) value=${value#round }; case "$value" in *[!0-9]*) return 0 ;; esac ;;
+    'auto-fix '[0-9]*'/'[0-9]*) value=${value#auto-fix }; value=${value%%/*}; case "$value" in *[!0-9]*) return 0 ;; esac ;;
+    *) return 0 ;;
+  esac
+  printf '%s' "$value"
+}
+nm_has_active_fixing_step() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*active_steps\[[0-9]+\]\{/ { inside=1; next }
+    inside && /^[^[:space:]]/ { exit }
+    inside && /,[[:space:]]*"?fixing"?[[:space:]]*,/ { found=1; exit }
+    END { exit found ? 0 : 1 }
+  '
+}
 nm_gate_step_row() {
   local row step rest status findings
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,' | head -1)
@@ -439,6 +464,12 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
+
+  if [ "$status" = fixing ] || nm_has_active_fixing_step; then
+    convergence_round=$(nm_convergence_round)
+    [ -n "$convergence_round" ] || convergence_round=unknown
+    RUN_DETAIL="$RUN_DETAIL${SEP}convergence-round=$convergence_round${SEP}convergence-fingerprint=unavailable"
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

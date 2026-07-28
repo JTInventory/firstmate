@@ -29,6 +29,7 @@ test_scope_contract_renders_by_delivery_mode() {
   assert_grep $'AC-1\tThe requested behavior is demonstrated.' "$brief" "acceptance row missing"
   assert_grep '# PR scope ledger (advisory)' "$brief" "PR-mode ledger guidance missing"
   assert_grep '| ID | Status | Evidence | Residual risk |' "$brief" "residual-risk ledger column missing"
+  assert_grep '| --- | --- | --- | --- |' "$brief" "scope-ledger separator guidance missing"
   assert_grep 'This ledger is advisory' "$brief" "shadow-mode warning missing"
   assert_grep 'firstmate-scope-contract-v1' "$dir/home/data/task-a/scope-contract-enabled" "scope opt-in marker missing"
 
@@ -91,7 +92,9 @@ test_ledger_audit_is_advisory_and_treats_body_as_data() {
   "$SCOPE" append-brief "$spec" "$brief" no-mistakes
 
   cat > "$body" <<EOF
+## PR scope ledger (advisory)
 | ID | Status | Evidence | Residual risk |
+| --- | --- | --- | --- |
 | AC-1 | covered | tests pass | none |
 | AC-1 | covered | duplicate | none |
 | AC-2 | violated | | |
@@ -107,7 +110,9 @@ EOF
   assert_absent "$marker" "PR body bytes executed as shell instructions"
 
   cat > "$body" <<'EOF'
+## PR scope ledger (advisory)
 | ID | Status | Evidence | Residual risk |
+| --- | --- | --- | --- |
 | AC-1 | covered | fixture one \| fixture two | none |
 | AC-2 | not-applicable | fixture two | documented exception |
 | NG-1 | out-of-scope | non-goal retained | none |

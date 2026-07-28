@@ -143,6 +143,21 @@ run:
 EOF
 }
 
+run_fixing_round() {  # <branch> <round-field>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fixing
+  awaiting_agent: parked 2m10s
+  head: "abc1234"
+  pr: ""
+  findings: none
+  active_steps[1]{step,status,elapsed,last_event,pid,round}:
+    review,fixing,8m43s,"applying review corrections",3500226,"$2"
+EOF
+}
+
 run_parked() {  # <branch>
   cat <<EOF
 run:
@@ -718,6 +733,32 @@ test_oversized_timeout_uses_default() {
   pass "oversized timeout uses the default"
 }
 
+test_fixing_round_is_observed_without_invented_fingerprint() {
+  reset_fakes
+  local d out; d=$(new_case convergence-round)
+  make_repo_on_branch "$d/wt" fm/feat-convergence-round
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-convergence-round.meta" "window=fm:fm-feat-convergence-round" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_round fm/feat-convergence-round 'fix 3')"
+  out=$(run_crew_state "$d" feat-convergence-round)
+  assert_contains "$out" 'convergence-round=3' 'fixing round was not exposed'
+  assert_contains "$out" 'convergence-fingerprint=unavailable' 'unsupported fingerprint was not explicit'
+  pass 'v1.37 fixing round is exposed without inventing fingerprint support'
+}
+
+test_unknown_fixing_round_stays_visible_unknown() {
+  reset_fakes
+  local d out; d=$(new_case convergence-unknown)
+  make_repo_on_branch "$d/wt" fm/feat-convergence-unknown
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-convergence-unknown.meta" "window=fm:fm-feat-convergence-unknown" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_round fm/feat-convergence-unknown 'schema-vNext')"
+  out=$(run_crew_state "$d" feat-convergence-unknown)
+  assert_contains "$out" 'convergence-round=unknown' 'unknown round was hidden'
+  assert_contains "$out" 'convergence-fingerprint=unavailable' 'unsupported fingerprint was not explicit'
+  pass 'unknown convergence schema remains visible and non-mutating'
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -796,6 +837,8 @@ test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_leading_zero_timeout_is_decimal
 test_oversized_timeout_uses_default
+test_fixing_round_is_observed_without_invented_fingerprint
+test_unknown_fixing_round_stays_visible_unknown
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

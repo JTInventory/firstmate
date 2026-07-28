@@ -595,6 +595,37 @@ fm_supervision_pause_reconcile_seconds() {
   fm_nonnegative_integer_or_default "${FM_SUPERVISION_PAUSE_RECONCILE_SECS:-5}" 5 86400
 }
 
+fm_supervision_convergence_observe_seconds() {
+  fm_nonnegative_integer_or_default "${FM_SUPERVISION_CONVERGENCE_OBSERVE_SECS:-5}" 5 86400
+}
+
+fm_supervision_convergence_round_ceiling() {
+  local value
+  value=$(fm_nonnegative_integer_or_default "${FM_SUPERVISION_CONVERGENCE_ROUND_CEILING:-3}" 3 100)
+  [ "$value" -gt 0 ] || value=3
+  printf '%s' "$value"
+}
+
+fm_supervision_convergence_observation() {  # <id> <remaining seconds>
+  local id=$1 remaining=$2 line payload prefix round
+  [ "$remaining" -gt 0 ] || return 0
+  line=$(FM_CREW_STATE_NM_TIMEOUT="$remaining" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in
+    *$'\n'*) return 0 ;;
+    *' · convergence-round='*' · convergence-fingerprint=unavailable') ;;
+    *) return 0 ;;
+  esac
+  payload=${line%' · convergence-fingerprint=unavailable'}
+  round=${payload##*' · convergence-round='}
+  prefix=${payload%" · convergence-round=$round"}
+  case "$prefix" in
+    'state: working · source: run-step · validating (running)'|'state: working · source: run-step · validating (running) · '* \
+      |'state: working · source: run-step · validating (fixing)'|'state: working · source: run-step · validating (fixing) · '*) ;;
+    *) return 0 ;;
+  esac
+  case "$round" in unknown) printf 'unknown' ;; ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' "$round" ;; esac
+}
+
 fm_supervision_classify_task() {
   local id=$1 kind=$2 mode=$3 yolo=$4 window_live=$5 worktree=$6 last_status=$7 pr_url=$8 pr_state=$9 ci_state=${10} scout_report_exists=${11:-false} paused_is_current=${12:-true}
   local classification=running severity=info owner=worker action="Monitor worker progress." why="Worker has no captain-facing status yet."
@@ -777,7 +808,7 @@ fm_supervision_collect() {
   local task_count=0 checklist_count=0 high_count=0 medium_count=0 github_state=ok watcher_state=skipped watcher_ok=true watcher_detail=
   local referenced_worktrees="|"
   local meta id project project_status_path kind mode yolo harness route_profile route_harness route_model route_effort window backend worktree recorded_branch branch dirty_count last_status classification_status paused_is_current pause_reconcile_remaining pause_reconcile_started pause_reconcile_used pause_reconciliation pause_state pause_source turn_ended pr_url pr_data pr_state ci_state mergeable_state
-  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false tmux_used=false herdr_used=false tmux_detail="tmux not used by active task metadata" herdr_detail="Herdr not used by active task metadata" herdr_session
+  local class_data classification severity owner action why evidence line status_pr pause_reconcile_secs window_live scout_report_exists treehouse_failed=false tmux_used=false herdr_used=false tmux_detail="tmux not used by active task metadata" herdr_detail="Herdr not used by active task metadata" herdr_session convergence_observe_secs convergence_observe_used convergence_remaining convergence_started convergence_round convergence_ceiling
   local -A herdr_sessions=()
 
   [ -d "$FM_SUPERVISION_STATE" ] || state_ok=false
@@ -793,6 +824,9 @@ fm_supervision_collect() {
   if [ -d "$FM_SUPERVISION_STATE" ]; then
     pause_reconcile_secs=$(fm_supervision_pause_reconcile_seconds)
     pause_reconcile_used=0
+    convergence_observe_secs=$(fm_supervision_convergence_observe_seconds)
+    convergence_observe_used=0
+    convergence_ceiling=$(fm_supervision_convergence_round_ceiling)
     for meta in "$FM_SUPERVISION_STATE"/*.meta; do
       [ -e "$meta" ] || continue
       treehouse_failed=false
@@ -836,6 +870,13 @@ fm_supervision_collect() {
           run-step:failed) paused_is_current=false; classification_status="failed: authoritative run failed" ;;
           run-step:parked) paused_is_current=false; classification_status="needs-decision: authoritative run awaits captain decision" ;;
         esac
+      fi
+      convergence_round=
+      if [ "$kind" = ship ] && [ "$mode" = no-mistakes ]; then
+        convergence_remaining=$(( convergence_observe_secs - convergence_observe_used ))
+        convergence_started=$SECONDS
+        convergence_round=$(fm_supervision_convergence_observation "$id" "$convergence_remaining")
+        convergence_observe_used=$(( convergence_observe_used + SECONDS - convergence_started ))
       fi
       turn_ended=false
       [ -e "$FM_SUPERVISION_STATE/$id.turn-ended" ] && turn_ended=true
@@ -883,7 +924,21 @@ fm_supervision_collect() {
         action="Reconcile treehouse state before sending or closing the worker."
         why="treehouse status failed for the project."
       fi
+      if [ "$classification" = running ] && [ "$convergence_round" = unknown ]; then
+        classification=worker_convergence_unknown
+        severity=medium
+        owner=firstmate
+        action="Inspect the no-mistakes status schema; convergence round is unknown."
+        why="The correction loop is active, but v1.37-compatible round evidence could not be parsed; fingerprint support is unavailable."
+      elif [ "$classification" = running ] && [ -n "$convergence_round" ] && [ "$convergence_round" -ge "$convergence_ceiling" ]; then
+        classification=worker_convergence_needs_decision
+        severity=medium
+        owner=captain
+        action="Decide whether to continue the no-mistakes correction loop; Firstmate has not modified the run."
+        why="The observed correction round $convergence_round reached the configured ceiling $convergence_ceiling; fingerprint support is unavailable."
+      fi
       evidence="meta=$(basename "$meta"); status=${last_status:-none}; window_live=$window_live; pr_state=$pr_state; ci_state=$ci_state; mergeable_state=$mergeable_state"
+      [ -z "$convergence_round" ] || evidence="$evidence; convergence_round=$convergence_round; convergence_fingerprint=unavailable"
       line=$(printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
         "$(fm_supervision_field "$id")" "$(fm_supervision_field "$project")" "$(fm_supervision_field "$kind")" \
         "$(fm_supervision_field "$mode")" "$(fm_supervision_field "$yolo")" "$(fm_supervision_field "$harness")" \

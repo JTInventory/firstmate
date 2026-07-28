@@ -13,7 +13,7 @@ Each file also starts with a short header comment.
 | `fm-update.sh`           | Fast-forward-only self-update with durable re-read/nudge obligations and verified watcher migration |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs, with optional AC/NG scope contracts |
-| `fm-scope-contract.sh`   | Validate and render opt-in AC/NG contracts, then audit PR ledgers in advisory mode   |
+| `fm-scope-contract.sh`   | Validate and render opt-in AC/NG contracts, atomically publish their marker, then audit PR ledgers in advisory mode |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
@@ -58,11 +58,12 @@ Each file also starts with a short header comment.
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
-| `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
+| `fm-pr-lib.sh`           | Own canonical task and PR validation, protected presentation receipts, and private atomic PR-poll lifecycle |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check-migrate.sh` | Preserve eligible legacy custom checks by byte binding; quarantine or rebuild older task polls without execution |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
+| `fm-pr-present.sh`       | Freeze the validated GitHub PR URL, head, base, and nonce before captain presentation |
+| `fm-pr-merge.sh`         | Captain-gated GitHub merge bound to one presented URL, head, base snapshot, and nonce |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

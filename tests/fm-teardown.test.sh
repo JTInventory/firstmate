@@ -302,6 +302,45 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
+test_teardown_reconciles_consumed_presentation_receipt() {
+  local case_dir receipt
+  case_dir=$(make_case presentation-receipt)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  receipt="$case_dir/state/task-x1.pr-presentation"
+  cat > "$receipt" <<'EOF'
+firstmate-pr-presentation-v1
+pr=https://github.com/example/repo/pull/7
+presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  chmod 0600 "$receipt"
+  run_teardown "$case_dir" >/dev/null || fail 'teardown refused valid leftover presentation receipt'
+  assert_absent "$receipt" 'teardown left a validated presentation receipt orphaned'
+  pass 'teardown reconciles a validated leftover v1 presentation receipt'
+}
+
+test_teardown_refuses_foreign_presentation_receipt() {
+  local case_dir receipt rc
+  case_dir=$(make_case presentation-foreign)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  receipt="$case_dir/state/task-x1.pr-presentation"
+  cat > "$receipt" <<'EOF'
+firstmate-pr-presentation-v2
+pr=https://github.com/example/repo/pull/8
+presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+presented_pr_base_ref=main
+presented_pr_base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+presentation_nonce=11111111111111111111111111111111
+EOF
+  chmod 0600 "$receipt"
+  set +e; run_teardown "$case_dir" >/dev/null 2>"$case_dir/stderr"; rc=$?; set -e
+  expect_code 1 "$rc" 'foreign presentation receipt must fail closed'
+  assert_present "$receipt" 'foreign presentation receipt was removed'
+  assert_present "$case_dir/state/task-x1.meta" 'foreign presentation receipt allowed task cleanup'
+  pass 'teardown preserves task state on foreign presentation evidence'
+}
+
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   local case_dir out
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -731,6 +770,48 @@ SH
   [ "$(wc -l < "$attempts")" -eq 2 ] || fail "forced-child-index-lock: child treehouse return should be retried"
   [ ! -e "$home" ] || fail "forced-child-index-lock: secondmate home should be removed after child return succeeds"
   pass "forced secondmate teardown retries a transient child worktree index lock"
+}
+
+test_forced_secondmate_teardown_uses_child_receipt_identity() {
+  local case_dir rc home child receipt
+  case_dir=$(make_case forced-child-presentation)
+  home="$case_dir/home"
+  child="$case_dir/wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$home/state/child-x1.meta" \
+    "window=fm-child-x1" \
+    "worktree=$child" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/example/child/pull/9"
+  receipt="$home/state/child-x1.pr-presentation"
+  cat > "$receipt" <<'EOF'
+firstmate-pr-presentation-v2
+pr=https://github.com/example/child/pull/9
+presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+presented_pr_base_ref=main
+presented_pr_base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+presentation_nonce=11111111111111111111111111111111
+EOF
+  chmod 0600 "$receipt"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forced-child-presentation: child receipt should use child metadata"
+  [ ! -e "$home" ] || fail "forced-child-presentation: secondmate home was not removed"
+  pass "forced secondmate teardown validates each child receipt against child metadata"
 }
 
 test_forced_secondmate_teardown_propagates_child_close_failure() {
@@ -1189,6 +1270,8 @@ test_projection_journal_retires_before_worktree_return() {
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_reconciles_consumed_presentation_receipt
+test_teardown_refuses_foreign_presentation_receipt
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_teardown_refuses_unsafe_tasktmp
 test_local_only_truly_unpushed_refuses
@@ -1208,6 +1291,7 @@ test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_teardown_retries_transient_index_lock
 test_forced_secondmate_teardown_retries_child_index_lock
+test_forced_secondmate_teardown_uses_child_receipt_identity
 test_forced_secondmate_teardown_propagates_child_close_failure
 test_secondmate_teardown_refuses_open_pending_reply
 test_forced_secondmate_teardown_handoffs_escalated_reply
