@@ -95,7 +95,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -104,7 +104,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
 }
@@ -361,6 +361,11 @@ fm-config-push.sh|config push|
 fm-home-seed.sh|home seed|domain /tmp/worker-home alpha
 fm-fleet-sync.sh|fleet sync|
 fm-merge-local.sh|local merge|task
+fm-watch-arm.sh|watch arm|--restart
+fm-wake-drain.sh|wake drain|
+fm-promote.sh|promote|task
+fm-backlog-handoff.sh|backlog handoff|domain item
+fm-brief.sh|brief|task alpha
 ROWS
 
   while IFS='|' read -r script operation args; do
@@ -376,6 +381,11 @@ fm-config-push.sh|config push|
 fm-home-seed.sh|home seed|domain /tmp/worker-home alpha
 fm-fleet-sync.sh|fleet sync|
 fm-merge-local.sh|local merge|task
+fm-watch-arm.sh|watch arm|--restart
+fm-wake-drain.sh|wake drain|
+fm-promote.sh|promote|task
+fm-backlog-handoff.sh|backlog handoff|domain item
+fm-brief.sh|brief|task alpha
 ROWS
 
   FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \

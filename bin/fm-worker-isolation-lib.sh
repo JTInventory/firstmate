@@ -42,6 +42,7 @@
 # Every operational-home variable a firstmate script reads. Extend here, not at
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
+FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT"
 
 fm_worker_shell_quote() {  # <text>
   printf "'"
@@ -71,6 +72,9 @@ fm_worker_launch_env_prefix() {
     else
       printf '%s= ' "$var"
     fi
+  done
+  for var in $FM_WORKER_ISOLATION_LIFECYCLE_VARS; do
+    printf '%s= ' "$var"
   done
   printf 'FM_AGENT_ROLE=%s ' "$role"
   printf 'FM_AGENT_TASK=%s ' "$(fm_worker_shell_quote "$id")"

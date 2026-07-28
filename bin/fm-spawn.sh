@@ -476,9 +476,12 @@ fi
 LEGACY_EXCLUDE_PIDS=$$
 if [ "${FM_SPAWN_BATCH_PARENT_PID:-}" = "$PPID" ] \
   && fm_lifecycle_process_script "$PPID"; then
-  BATCH_PARENT_SCRIPT=$(fm_lifecycle_canonical_path "$FM_LIFECYCLE_SCRIPT" 2>/dev/null || true)
+  BATCH_PARENT_SCRIPT=$(fm_lifecycle_process_script_path \
+    "$PPID" "$FM_LIFECYCLE_SCRIPT" 2>/dev/null || true)
   CURRENT_SPAWN_SCRIPT=$(fm_lifecycle_canonical_path "$FM_ROOT/bin/fm-spawn.sh" 2>/dev/null || true)
-  if [ -n "$BATCH_PARENT_SCRIPT" ] && [ "$BATCH_PARENT_SCRIPT" = "$CURRENT_SPAWN_SCRIPT" ]; then
+  if [ -n "$BATCH_PARENT_SCRIPT" ] && [ -n "$CURRENT_SPAWN_SCRIPT" ] \
+    && { [ "$BATCH_PARENT_SCRIPT" = "$CURRENT_SPAWN_SCRIPT" ] \
+      || [ "$BATCH_PARENT_SCRIPT" -ef "$CURRENT_SPAWN_SCRIPT" ]; }; then
     LEGACY_EXCLUDE_PIDS="$LEGACY_EXCLUDE_PIDS $PPID"
   fi
 fi

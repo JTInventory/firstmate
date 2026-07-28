@@ -778,7 +778,10 @@ SH
     [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
     fm_lifecycle_script_from_argv env -u UNUSED bash --norc "$script"
     [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
+    fm_lifecycle_script_from_argv env -a masked bash --norc "$script"
+    [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
     ! fm_lifecycle_script_from_argv bash -c 'exit 0' "$script"
+    ! fm_lifecycle_script_from_argv bash -- -x "$script"
   ) || fail "lifecycle command parser lost shell or env option grammar"
 
   bump_origin "$w" instr
@@ -791,6 +794,16 @@ SH
   wait "$holder" 2>/dev/null || true
   assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
     "shell or env options hid exact lifecycle work from the process bridge"
+
+  FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" \
+    bash -c 'exec -a masked bash --norc "$1"' _ "$script" &
+  holder=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
+  out=$(run_update "$w")
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+    "rewritten argv0 hid exact lifecycle work from executable identity"
 
   (
     . "$ROOT/bin/fm-wake-lib.sh"
@@ -811,6 +824,30 @@ FM_STATE_OVERRIDE=$w/other-home/state"
     }
     fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
   ) || fail "conflicting lifecycle home and state evidence did not fail closed"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_process_environment() {
+      FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
+      FM_LIFECYCLE_ENVIRONMENT="FM_LIFECYCLE_HOME=$w/other-home
+FM_HOME=$w/home
+FM_LIFECYCLE_STATE=$w/other-home/state
+FM_STATE_OVERRIDE=$w/home/state"
+    }
+    fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
+  ) || fail "conflicting same-axis lifecycle markers were allowed to override target evidence"
+
+  rc=0
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_process_environment() {
+      FM_LIFECYCLE_ENVIRONMENT_SOURCE=ps
+      FM_LIFECYCLE_ENVIRONMENT="bash $script FM_HOME=$w/home with space"
+    }
+    fm_spawn_legacy_process_matches_scope \
+      999 "$script" "$w/home with space" "$w/home with space/state"
+  ) || rc=$?
+  [ "$rc" -eq 2 ] || fail "boundary-losing fallback scope was classified as unrelated"
   pass "T24 lifecycle identity is positional and unreadable scope fails closed"
 }
 

@@ -29,6 +29,20 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
+run_spawn_relative() {
+  (
+    cd "$ROOT" || exit 1
+    FM_ROOT_OVERRIDE='' \
+      FM_HOME='' \
+      FM_STATE_OVERRIDE='' \
+      FM_DATA_OVERRIDE='' \
+      FM_PROJECTS_OVERRIDE='' \
+      FM_CONFIG_OVERRIDE="$TEST_CONFIG" \
+      FM_SPAWN_NO_GUARD=1 \
+      bin/fm-spawn.sh "$@" 2>&1
+  )
+}
+
 # Every pair in a batch is dispatched even though the first one fails; the loop
 # must not stop early. This is the load-bearing batch guarantee, kept explicit.
 test_batch_dispatches_every_pair() {
@@ -43,6 +57,20 @@ test_batch_dispatches_every_pair() {
   printf '%s\n' "$out" | grep -F 'an older spawn or teardown is still starting' >/dev/null \
     && fail "batch children mistook their authenticated parent for legacy lifecycle work"
   pass "batch dispatch re-execs and reports every id=repo pair"
+}
+
+test_relative_batch_authenticates_its_exact_parent() {
+  local out status
+  out=$(run_spawn_relative nope-relative-a-z9=projects/none-a nope-relative-b-y8=projects/none-b)
+  status=$?
+  [ "$status" -ne 0 ] || fail "relative batch with missing briefs should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-relative-a-z9 (projects/none-a)' >/dev/null \
+    || fail "relative batch did not dispatch its first pair"
+  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-relative-b-y8 (projects/none-b)' >/dev/null \
+    || fail "relative batch did not dispatch its second pair"
+  printf '%s\n' "$out" | grep -F 'an older spawn or teardown is still starting' >/dev/null \
+    && fail "relative batch children did not authenticate their exact parent"
+  pass "relative batch dispatch authenticates only its exact parent process"
 }
 
 # Boundary cases for batch detection. Each row:
@@ -106,5 +134,6 @@ ROWS
 }
 
 test_batch_dispatches_every_pair
+test_relative_batch_authenticates_its_exact_parent
 test_batch_mode_boundaries
 test_projects_path_scoping
