@@ -380,6 +380,8 @@ FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 
 # read-only supervision view (bin/fm-supervise.sh)
 FM_SUPERVISE_TREEHOUSE_TIMEOUT=5   # seconds allowed per treehouse status read
 FM_SUPERVISE_GH_TIMEOUT=5          # seconds allowed per gh-axi GitHub read
+FM_SUPERVISION_CONVERGENCE_OBSERVE_SECS=5   # total seconds per collection for read-only no-mistakes convergence reads
+FM_SUPERVISION_CONVERGENCE_ROUND_CEILING=3  # correction round that creates a captain decision; invalid or zero values use 3
 # bootstrap, spawn, teardown, and fm-supervise append existing HOME-local NVM and .local/bin entries when absent
 # Optional codebase-memory-mcp (CBM) orientation; also loadable from config/cbm.env
 FM_CBM_ENABLED=auto        # auto | 1 | 0 — auto enables only when the binary is present
