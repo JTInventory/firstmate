@@ -25,7 +25,7 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
 if [ "$1 $2 $3" = 'api GET /repos/JTInventory/firstmate/pulls/47' ]; then
-  printf '%s\n' "$FAKE_FORGE_HEAD"
+  printf 'head: %s\nhead_repo: JTInventory/firstmate\nhead_ref: codex/task-x1\n' "$FAKE_FORGE_HEAD"
 fi
 [ "$1" != api ] || [ "$2" != PUT ] || [ "${FAKE_PUT_FAIL:-0}" != 1 ] || exit 1
 SH
@@ -46,6 +46,7 @@ run_merge() {
   PATH="$dir/bin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_PR_CHECK_BIN="$dir/bin/fm-pr-check" FAKE_HEAD="$FAKE_FORGE_HEAD" \
     FAKE_PUT_FAIL="${FAKE_PUT_FAIL:-0}" GH_LOG="$dir/gh.log" FM_CAPTAIN_APPROVED_MERGE=1 \
+    FM_CAPTAIN_APPROVED_PR_HEAD="${FAKE_APPROVED_HEAD:-$FAKE_FORGE_HEAD}" \
     "$MERGE" task-x1 https://github.com/JTInventory/firstmate/pull/47 "$@"
 }
 
@@ -71,7 +72,9 @@ test_changed_head_invalidates_approval_and_never_calls_put() {
   local dir rc; dir=$(make_case changed)
   run_present "$dir" >/dev/null || fail 'presentation failed'
   set +e
-  FAKE_FORGE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb run_merge "$dir" >/dev/null 2>&1
+  FAKE_APPROVED_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    FAKE_FORGE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    run_merge "$dir" >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'changed head was accepted'
@@ -104,6 +107,59 @@ test_atomic_forge_rejection_invalidates_approval() {
   grep -q '^api PUT .*sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$dir/gh.log" || fail 'atomic request omitted presented SHA'
   [ ! -e "$dir/state/task-x1.pr-presentation" ] || fail 'rejected atomic merge retained approval'
   pass 'forge-side head race invalidates approval after atomic rejection'
+}
+
+test_approval_is_bound_to_the_presented_head() {
+  local dir rc; dir=$(make_case approval-binding)
+  run_present "$dir" >/dev/null || fail 'presentation failed'
+  set +e
+  FAKE_APPROVED_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    FAKE_FORGE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    run_merge "$dir" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'approval for a different presentation was accepted'
+  [ ! -e "$dir/gh.log" ] || ! grep -q '^api PUT ' "$dir/gh.log" \
+    || fail 'mismatched approval reached the merge API'
+  grep -qxF 'presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+    "$dir/state/task-x1.pr-presentation" \
+    || fail 'mismatched approval invalidated the receipt it did not own'
+  pass 'merge approval is bound to the exact presented head'
+}
+
+test_concurrent_presentation_waits_for_receipt_consumption() {
+  local dir merge_pid present_pid rc
+  dir=$(make_case serialization)
+  run_present "$dir" >/dev/null || fail 'presentation failed'
+  cat > "$dir/bin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+if [ "$1 $2 $3" = 'api GET /repos/JTInventory/firstmate/pulls/47' ]; then
+  printf 'head: %s\nhead_repo: JTInventory/firstmate\nhead_ref: codex/task-x1\n' "$FAKE_FORGE_HEAD"
+  : > "$GH_GET_READY"
+  while [ ! -e "$GH_GET_RELEASE" ]; do sleep 0.02; done
+fi
+SH
+  chmod +x "$dir/bin/gh-axi"
+  GH_GET_READY="$dir/get-ready" GH_GET_RELEASE="$dir/get-release" \
+    FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_merge "$dir" >/dev/null &
+  merge_pid=$!
+  while [ ! -e "$dir/get-ready" ]; do sleep 0.02; done
+  printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$dir/head"
+  run_present "$dir" >"$dir/present.out" &
+  present_pid=$!
+  sleep 0.1
+  kill -0 "$present_pid" 2>/dev/null \
+    || fail 'concurrent presentation replaced a receipt while merge owned it'
+  : > "$dir/get-release"
+  wait "$merge_pid" || fail 'serialized merge failed'
+  wait "$present_pid" || fail 'presentation did not continue after merge released receipt'
+  grep -qxF 'presented_pr_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+    "$dir/state/task-x1.pr-presentation" \
+    || fail 'new presentation was deleted by stale merge invalidation'
+  rc=$(grep -c '^api PUT ' "$dir/gh.log")
+  [ "$rc" -eq 1 ] || fail 'serialized merge did not issue exactly one mutation'
+  pass 'receipt replacement and consumption are serialized'
 }
 
 test_gitlab_presentation_remains_unsupported_without_side_effect() {
@@ -151,5 +207,7 @@ test_merge_binds_atomic_api_to_presented_head
 test_changed_head_invalidates_approval_and_never_calls_put
 test_missing_or_malformed_receipt_and_yolo_refuse
 test_atomic_forge_rejection_invalidates_approval
+test_approval_is_bound_to_the_presented_head
+test_concurrent_presentation_waits_for_receipt_consumption
 test_gitlab_presentation_remains_unsupported_without_side_effect
 test_receipt_inode_swap_is_refused

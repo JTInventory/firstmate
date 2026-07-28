@@ -111,6 +111,7 @@ FM_PR_POLL_REPLACEMENT_ACTIVE=0
 FM_PR_POLL_REPLACEMENT_COMPLETE=0
 FM_PR_PRESENTATION_URL=
 FM_PR_PRESENTATION_HEAD=
+FM_PR_TOON_VALUE=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -233,6 +234,23 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+fm_pr_toon_field_parse() {
+  local data=$1 key=$2 line count=0
+  FM_PR_TOON_VALUE=
+  case "$key" in
+    ''|*[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key":\ *)
+        count=$((count + 1))
+        FM_PR_TOON_VALUE=${line#*: }
+        ;;
+    esac
+  done <<< "$data"
+  [ "$count" -eq 1 ] && [ -n "$FM_PR_TOON_VALUE" ]
 }
 
 fm_pr_file_mode() {

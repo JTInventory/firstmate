@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Captain-gated merge bound atomically to the exact head shown to the captain.
-# Usage: FM_CAPTAIN_APPROVED_MERGE=1 fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge method>]
+# Usage: FM_CAPTAIN_APPROVED_MERGE=1 FM_CAPTAIN_APPROVED_PR_HEAD=<sha> fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ID=${1:?usage: fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge method>]}
-RAW_URL=${2:?usage: fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge method>]}
+ID=${1:?usage: fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge args>]}
+RAW_URL=${2:?usage: fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge args>]}
 shift 2
 [ "${1:-}" = -- ] && shift
 [ "${FM_CAPTAIN_APPROVED_MERGE:-}" = 1 ] || {
@@ -17,6 +17,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CHECK_BIN="${FM_PR_CHECK_BIN:-$SCRIPT_DIR/fm-pr-check.sh}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 fm_pr_task_id_valid "$ID" && fm_pr_url_parse "$RAW_URL" && [ "$FM_PR_PROVIDER" = github ] || {
   echo 'error: merge requires a canonical GitHub PR URL' >&2; exit 1;
@@ -26,21 +27,74 @@ META="$STATE/$ID.meta"; RECEIPT="$STATE/$ID.pr-presentation"
 [ -f "$META" ] && [ ! -L "$META" ] || { echo "error: no safe meta for task $ID" >&2; exit 1; }
 
 method=squash
+commit_title=
+commit_message=
+delete_branch=0
+match_head=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --squash) method=squash ;;
-    --merge) method=merge ;;
-    --rebase) method=rebase ;;
+    --squash|-s) method=squash ;;
+    --merge|-m) method=merge ;;
+    --rebase|-r) method=rebase ;;
     --method=squash|--method=merge|--method=rebase) method=${1#--method=} ;;
     --method)
       shift; case "${1:-}" in squash|merge|rebase) method=$1 ;; *) echo 'error: invalid merge method' >&2; exit 1 ;; esac ;;
+    --subject=*) commit_title=${1#--subject=} ;;
+    --subject|-t)
+      shift; [ "$#" -gt 0 ] || { echo 'error: merge subject requires a value' >&2; exit 1; }
+      commit_title=$1
+      ;;
+    --body=*) commit_message=${1#--body=} ;;
+    --body|-b)
+      shift; [ "$#" -gt 0 ] || { echo 'error: merge body requires a value' >&2; exit 1; }
+      commit_message=$1
+      ;;
+    --body-file=*) body_file=${1#--body-file=}; commit_message=$(cat -- "$body_file") ;;
+    --body-file|-F)
+      shift; [ "$#" -gt 0 ] || { echo 'error: merge body file requires a value' >&2; exit 1; }
+      commit_message=$(cat -- "$1")
+      ;;
+    --delete-branch|-d) delete_branch=1 ;;
+    --match-head-commit=*) match_head=${1#--match-head-commit=} ;;
+    --match-head-commit)
+      shift; [ "$#" -gt 0 ] || { echo 'error: matched head requires a SHA' >&2; exit 1; }
+      match_head=$1
+      ;;
+    --auto|--disable-auto|--admin|-A|--author-email|--author-email=*)
+      echo "error: $1 is incompatible with an immediate merge bound to the captain-approved head" >&2
+      exit 1
+      ;;
     *) echo "error: unsupported merge argument: $1" >&2; exit 1 ;;
   esac
   shift
 done
 
+APPROVED_HEAD=${FM_CAPTAIN_APPROVED_PR_HEAD:-}
+fm_pr_head_valid "$APPROVED_HEAD" || {
+  echo 'error: captain approval must include the exact presented head in FM_CAPTAIN_APPROVED_PR_HEAD' >&2
+  exit 1
+}
+[ -z "$match_head" ] || {
+  fm_pr_head_valid "$match_head" && [ "$match_head" = "$APPROVED_HEAD" ] || {
+    echo 'error: matched head does not equal the captain-approved presented head' >&2
+    exit 1
+  }
+}
+
+PRESENTATION_LOCK="$STATE/.$ID.pr-presentation.lock"
+PRESENTATION_LOCK_HELD=0
+release_presentation_lock() {
+  [ "$PRESENTATION_LOCK_HELD" -eq 1 ] || return 0
+  PRESENTATION_LOCK_HELD=0
+  fm_lock_release "$PRESENTATION_LOCK"
+}
+trap release_presentation_lock EXIT
+fm_lock_acquire_wait "$PRESENTATION_LOCK"
+PRESENTATION_LOCK_HELD=1
+
 fm_pr_presentation_parse "$RECEIPT" \
-  && [ "$FM_PR_PRESENTATION_URL" = "$URL" ] || {
+  && [ "$FM_PR_PRESENTATION_URL" = "$URL" ] \
+  && [ "$FM_PR_PRESENTATION_HEAD" = "$APPROVED_HEAD" ] || {
     echo 'error: missing, malformed, or foreign PR presentation receipt; present the PR again' >&2; exit 1;
   }
 PRESENTED_HEAD=$FM_PR_PRESENTATION_HEAD
@@ -49,21 +103,44 @@ PRESENTED_HEAD=$FM_PR_PRESENTATION_HEAD
 "$CHECK_BIN" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo 'error: PR validation did not preserve identity' >&2; exit 1; }
 
-CURRENT_HEAD=$(gh-axi api GET "/repos/$OWNER/$REPO/pulls/$NUMBER" --jq .head.sha 2>/dev/null || true)
+CURRENT_PR=$(gh-axi api GET "/repos/$OWNER/$REPO/pulls/$NUMBER" \
+  --jq '{head: .head.sha, head_repo: .head.repo.full_name, head_ref: .head.ref}' 2>/dev/null || true)
+if fm_pr_toon_field_parse "$CURRENT_PR" head; then CURRENT_HEAD=$FM_PR_TOON_VALUE; else CURRENT_HEAD=; fi
 if ! fm_pr_head_valid "$CURRENT_HEAD" || [ "$CURRENT_HEAD" != "$PRESENTED_HEAD" ]; then
   fm_pr_presentation_invalidate "$STATE" "$ID" || true
   echo 'error: PR head changed or could not be verified; captain approval is stale and presentation was invalidated' >&2
   exit 1
 fi
 
-# GitHub checks the supplied sha atomically at mutation time, closing the gap
-# between the preceding read and merge. Any failure requires re-presentation.
-if ! gh-axi api PUT "/repos/$OWNER/$REPO/pulls/$NUMBER/merge" \
-  --field "sha=$PRESENTED_HEAD" --field "merge_method=$method"; then
+merge_fields=(--field "sha=$PRESENTED_HEAD" --field "merge_method=$method")
+[ -z "$commit_title" ] || merge_fields+=(--field "commit_title=$commit_title")
+[ -z "$commit_message" ] || merge_fields+=(--field "commit_message=$commit_message")
+if [ "$delete_branch" -eq 1 ]; then
+  fm_pr_toon_field_parse "$CURRENT_PR" head_repo || {
+    echo 'error: could not verify the PR head repository for branch deletion' >&2; exit 1;
+  }
+  HEAD_REPO=$FM_PR_TOON_VALUE
+  fm_pr_toon_field_parse "$CURRENT_PR" head_ref || {
+    echo 'error: could not verify the PR head branch for deletion' >&2; exit 1;
+  }
+  HEAD_REF=$FM_PR_TOON_VALUE
+  fm_pr_url_parse "https://github.com/$HEAD_REPO/pull/1" \
+    && [ "$FM_PR_PROVIDER" = github ] \
+    && git check-ref-format "refs/heads/$HEAD_REF" >/dev/null 2>&1 || {
+      echo 'error: unsafe PR head repository or branch; refusing requested branch deletion' >&2
+      exit 1
+    }
+fi
+
+if ! gh-axi api PUT "/repos/$OWNER/$REPO/pulls/$NUMBER/merge" "${merge_fields[@]}"; then
   fm_pr_presentation_invalidate "$STATE" "$ID" || true
   echo 'error: atomic merge failed; presentation was invalidated' >&2
   exit 1
 fi
 if ! fm_pr_presentation_invalidate "$STATE" "$ID"; then
   echo 'warning: merge succeeded but the consumed presentation receipt could not be removed; teardown must reconcile it' >&2
+fi
+if [ "$delete_branch" -eq 1 ] \
+  && ! gh-axi api DELETE "/repos/$HEAD_REPO/git/refs/heads/$HEAD_REF"; then
+  echo 'warning: merge succeeded but the requested remote branch deletion failed' >&2
 fi

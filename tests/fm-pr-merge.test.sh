@@ -13,6 +13,7 @@ make_case() {
   dir="$TMP/$name"; mkdir -p "$dir/bin" "$dir/state"
   ln -s "$SCRIPT" "$dir/bin/fm-pr-merge.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cat > "$dir/bin/fm-pr-check.sh" <<'SH'
 #!/usr/bin/env bash
 meta="$FM_STATE_OVERRIDE/$1.meta"
@@ -25,8 +26,11 @@ SH
   cat > "$dir/bin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
-[ "$1 $2 $3" != 'api GET /repos/JTInventory/firstmate/pulls/47' ] || printf '%s\n' "$FAKE_HEAD"
-[ "$1 $2 $3" != 'api GET /repos/JTInventory/firstmate/pulls/48' ] || printf '%s\n' "$FAKE_HEAD"
+case "$1 $2 $3" in
+  'api GET /repos/JTInventory/firstmate/pulls/47'|'api GET /repos/JTInventory/firstmate/pulls/48')
+    printf 'head: %s\nhead_repo: JTInventory/firstmate\nhead_ref: codex/task-x1\n' "$FAKE_HEAD"
+    ;;
+esac
 SH
   chmod +x "$dir/bin/gh-axi"
   printf 'branch=codex/task-x1\n' > "$dir/state/task-x1.meta"
@@ -43,6 +47,7 @@ run_merge() {
   local dir=$1; shift
   PATH="$dir/bin:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_PR_CHECK_BIN="$dir/bin/fm-pr-check.sh" FAKE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    FM_CAPTAIN_APPROVED_PR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     GH_LOG="$dir/gh.log" "$dir/bin/fm-pr-merge.sh" "$@"
 }
 
@@ -77,6 +82,36 @@ test_repo_override_refuses_and_explicit_method_is_preserved() {
   pass 'repository override refuses and explicit merge method is preserved'
 }
 
+test_compatible_merge_options_are_translated() {
+  local dir; dir=$(make_case options)
+  FM_CAPTAIN_APPROVED_MERGE=1 run_merge "$dir" task-x1 \
+    https://github.com/JTInventory/firstmate/pull/47 -- \
+    --squash --subject 'merge title' --body 'merge body' --delete-branch \
+    || fail 'compatible merge options failed'
+  grep -qxF 'api PUT /repos/JTInventory/firstmate/pulls/47/merge --field sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --field merge_method=squash --field commit_title=merge title --field commit_message=merge body' "$dir/gh.log" \
+    || fail 'subject and body were not translated to the atomic merge API'
+  grep -qxF 'api DELETE /repos/JTInventory/firstmate/git/refs/heads/codex/task-x1' "$dir/gh.log" \
+    || fail 'requested remote branch deletion was not preserved'
+  pass 'compatible merge options are translated to atomic API calls'
+}
+
+test_deferred_merge_option_is_explicitly_refused() {
+  local dir rc; dir=$(make_case auto)
+  set +e
+  FM_CAPTAIN_APPROVED_MERGE=1 run_merge "$dir" task-x1 \
+    https://github.com/JTInventory/firstmate/pull/47 -- --auto \
+    >"$dir/stdout" 2>"$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'deferred auto-merge was accepted'
+  grep -q 'incompatible with an immediate merge bound to the captain-approved head' "$dir/stderr" \
+    || fail 'auto-merge refusal did not explain the atomic approval conflict'
+  [ ! -s "$dir/gh.log" ] || fail 'refused auto-merge reached gh-axi'
+  pass 'deferred merge options are deliberately refused'
+}
+
 test_approved_url_defaults_to_squash
 test_refusals_do_not_record_or_merge
 test_repo_override_refuses_and_explicit_method_is_preserved
+test_compatible_merge_options_are_translated
+test_deferred_merge_option_is_explicitly_refused

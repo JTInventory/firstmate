@@ -96,8 +96,8 @@ Owner: `AGENTS.md` sections 4, 7, and 8; `bin/fm-send.sh`; `bin/fm-marker-lib.sh
 
 A PR-ready task records its PR URL and PR head metadata, then the watcher can poll for merge state.
 Immediately before showing the PR summary to the captain, firstmate runs `bin/fm-pr-present.sh <id> <full GitHub PR URL>` to freeze the exact validated head in a protected receipt that ordinary polls cannot refresh.
-After the captain explicitly approves a PR merge, firstmate runs `FM_CAPTAIN_APPROVED_MERGE=1 bin/fm-pr-merge.sh <id> <full GitHub PR URL>` instead of calling `gh-axi pr merge` directly.
-The wrapper derives the repository and PR number from the qualified GitHub URL, requires the current forge head to equal the presented head, defaults to squash, and supplies that exact SHA to GitHub's atomic merge API. Missing, stale, malformed, or unverifiable presentation evidence fails closed and requires fresh presentation and approval.
+After the captain explicitly approves a PR merge, firstmate runs `FM_CAPTAIN_APPROVED_MERGE=1 FM_CAPTAIN_APPROVED_PR_HEAD=<presented sha> bin/fm-pr-merge.sh <id> <full GitHub PR URL>` instead of calling `gh-axi pr merge` directly.
+The wrapper derives the repository and PR number from the qualified GitHub URL, requires the approved and current forge heads to equal the presented head, defaults to squash, and supplies that exact SHA to GitHub's atomic merge API. Immediate message and remote branch deletion options remain available; deferred auto-merge and bypass options are deliberately unsupported. Missing, stale, malformed, or unverifiable presentation evidence fails closed and requires fresh presentation and approval.
 The supervision model treats GitHub commit status and check-runs together before calling CI green.
 
 Owner: `AGENTS.md` sections 1, 7, and 8; `bin/fm-pr-lib.sh`; `bin/fm-pr-check.sh`; `bin/fm-pr-present.sh`; `bin/fm-pr-merge.sh`; `bin/fm-supervision-model.sh`; `bin/fm-no-mistakes-pr-target-guard.sh`.

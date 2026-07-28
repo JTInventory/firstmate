@@ -10,6 +10,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CHECK_BIN="${FM_PR_CHECK_BIN:-$SCRIPT_DIR/fm-pr-check.sh}"
 
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 [ "$#" -eq 2 ] || { echo 'usage: fm-pr-present.sh <task-id> <full-pr-url>' >&2; exit 2; }
 ID=$1
@@ -18,6 +19,16 @@ fm_pr_task_id_valid "$ID" && fm_pr_url_parse "$RAW_URL" && [ "$FM_PR_PROVIDER" =
   echo 'error: presentation requires a canonical GitHub PR URL' >&2; exit 1;
 }
 URL=$FM_PR_URL
+PRESENTATION_LOCK="$STATE/.$ID.pr-presentation.lock"
+PRESENTATION_LOCK_HELD=0
+release_presentation_lock() {
+  [ "$PRESENTATION_LOCK_HELD" -eq 1 ] || return 0
+  PRESENTATION_LOCK_HELD=0
+  fm_lock_release "$PRESENTATION_LOCK"
+}
+trap release_presentation_lock EXIT
+fm_lock_acquire_wait "$PRESENTATION_LOCK"
+PRESENTATION_LOCK_HELD=1
 "$CHECK_BIN" "$ID" "$URL"
 META="$STATE/$ID.meta"
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
