@@ -207,6 +207,32 @@ fleet_sync() {
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  local -a bootstrap_admission_locks=()
+  fm_ff_target_lock_acquire() {
+    local state_dir=$1 _label=${2:-target} target_home=${3:-} lock
+    bootstrap_admission_locks=()
+    while IFS= read -r lock; do
+      [ -n "$lock" ] || continue
+      mkdir -p "$(dirname "$lock")" || return 1
+      if ! fm_lock_try_acquire "$lock"; then
+        fm_ff_target_lock_release
+        return 1
+      fi
+      bootstrap_admission_locks+=("$lock")
+    done < <(fm_spawn_admission_lock_paths "$state_dir")
+    if fm_spawn_legacy_task_lock_busy "$state_dir" \
+      || ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir"; then
+      fm_ff_target_lock_release
+      return 1
+    fi
+  }
+  fm_ff_target_lock_release() {
+    local i
+    for ((i=${#bootstrap_admission_locks[@]} - 1; i >= 0; i--)); do
+      fm_lock_release "${bootstrap_admission_locks[$i]}" || true
+    done
+    bootstrap_admission_locks=()
+  }
   # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
@@ -366,7 +392,11 @@ secondmate_sync() {
   done < "$tmp"
   rm -f "$tmp"
   unset -f fm_ff_after_instruction_update
-  [ "$sync_status" -eq 0 ] || return "$sync_status"
+  if [ "$sync_status" -ne 0 ]; then
+    fm_ff_target_lock_release
+    unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release
+    return "$sync_status"
+  fi
   while IFS='|' read -r id home window _meta; do
     [ -n "$window" ] || continue
     validate_secondmate_home "$id" "$home" || continue
@@ -452,6 +482,8 @@ secondmate_sync() {
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  fm_ff_target_lock_release
+  unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release
   return 0
 }
 

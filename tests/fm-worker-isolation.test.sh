@@ -300,7 +300,7 @@ test_project_local_startup_adapter_stays_inert_for_a_worker() {
 }
 
 test_worker_cannot_take_the_session_owner_record() {
-  local home before out status
+  local home missing before out status
   home=$(make_primary_home "$TMP_ROOT/lock-home")
   printf '424242\n' > "$home/state/.lock"
   before=$(cat "$home/state/.lock")
@@ -319,6 +319,13 @@ test_worker_cannot_take_the_session_owner_record() {
     "$LOCK" status 2>&1)
   status=$?
   expect_code 0 "$status" "read-only lock status must stay available to a worker"
+  missing="$TMP_ROOT/missing-lock-home"
+  out=$(FM_ROOT_OVERRIDE="$missing" FM_HOME="$missing" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w3 FM_AGENT_OWNER_HOME="$home" \
+    "$LOCK" status 2>&1)
+  status=$?
+  expect_code 0 "$status" "read-only lock status must inspect a missing state path"
+  [ ! -e "$missing" ] || fail "read-only lock status created a missing operational home"
   pass "a declared task worker is refused the session owner record and never rewrites it"
 }
 
@@ -430,6 +437,7 @@ test_secondmate_primary_operations_require_its_declared_home() {
   local home foreign alias out status
   home=$(make_primary_home "$TMP_ROOT/secondmate-owner-home")
   foreign=$(make_primary_home "$TMP_ROOT/secondmate-foreign-home")
+  printf '%s\n' domain > "$home/.fm-secondmate-home"
   alias="$TMP_ROOT/secondmate-owner-alias"
   ln -s "$home" "$alias"
 
@@ -463,6 +471,26 @@ test_secondmate_primary_operations_require_its_declared_home() {
   status=$?
   expect_code 1 "$status" "a secondmate must not tear down another operational home"
   assert_contains "$out" "teardown refused" "the foreign-home teardown refusal lost the operation"
+
+  out=$(FM_HOME="$home" FM_AGENT_ROLE=secondmate FM_AGENT_TASK=other \
+    FM_AGENT_OWNER_HOME="$home" bash -c \
+    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate task must match its trusted home marker"
+
+  out=$(FM_HOME="$home" FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" bash -c \
+    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a partial worker declaration must refuse primary operations"
+
+  out=$(FM_HOME="$home" FM_AGENT_ROLE=quartermaster FM_AGENT_TASK=domain \
+    FM_AGENT_OWNER_HOME="$home" bash -c \
+    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1)
+  status=$?
+  expect_code 1 "$status" "an unknown worker role must refuse primary operations"
   pass "a secondmate can operate only inside its declared canonical home"
 }
 
@@ -728,6 +756,26 @@ test_clean_ownership_disposes() {
   pass "a slot this task alone records and stamps disposes normally"
 }
 
+test_malformed_or_partial_stamp_retains() {
+  local rec verdict stamp_path
+  rec=$(make_slot_world slot-malformed)
+  read_slot_world "$rec"
+  stamp_path=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$WT_DIR" )
+  printf 'task=task-malformed\n' > "$stamp_path"
+  verdict=$(slot_verdict "$WORLD/home/state" task-malformed "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: slot ownership stamp is present but malformed"*) ;;
+    *) fail "partial ownership stamp did not retain: $verdict" ;;
+  esac
+  printf 'task=\nhome=%s\n' "$WORLD/home" > "$stamp_path"
+  verdict=$(slot_verdict "$WORLD/home/state" task-malformed "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: slot ownership stamp is present but malformed"*) ;;
+    *) fail "empty ownership stamp field did not retain: $verdict" ;;
+  esac
+  pass "present malformed and partial ownership stamps retain their slots"
+}
+
 test_a_second_recorded_task_retains_the_slot() {
   local rec verdict
   rec=$(make_slot_world slot-shared)
@@ -983,7 +1031,7 @@ test_retained_stamp_survives_failed_metadata_retirement() {
 }
 
 test_stamp_survives_failed_pool_return() {
-  local rec fakebin out status stamp
+  local rec fakebin out status stamp branch
   rec=$(make_slot_world slot-return-failure)
   read_slot_world "$rec"
   fakebin=$(fm_fakebin "$WORLD/fake")
@@ -999,6 +1047,11 @@ SH
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e12 "$WORLD/home" ) \
     || fail "failed-return fixture could not be stamped"
+  branch=$(git -C "$WT_DIR" rev-parse --abbrev-ref HEAD)
+  mkdir -p "$WT_DIR/.claude" "$WT_DIR/.opencode/plugins"
+  printf '{}\n' > "$WT_DIR/.claude/settings.local.json"
+  printf 'hook\n' > "$WT_DIR/.opencode/plugins/fm-turn-end.js"
+  printf 'hook\n' > "$WT_DIR/.fm-grok-turnend"
 
   set +e
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
@@ -1012,6 +1065,11 @@ SH
   stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = task-e12 ] || fail "failed pool return cleared ownership evidence: $stamp"
+  [ "$(git -C "$WT_DIR" rev-parse --abbrev-ref HEAD)" = "$branch" ] \
+    || fail "failed pool return changed the retry branch identity"
+  assert_present "$WT_DIR/.claude/settings.local.json" "failed pool return removed the Claude hook"
+  assert_present "$WT_DIR/.opencode/plugins/fm-turn-end.js" "failed pool return removed the OpenCode hook"
+  assert_present "$WT_DIR/.fm-grok-turnend" "failed pool return removed the Grok hook"
   pass "ownership evidence survives until pooled return succeeds"
 }
 
@@ -1165,11 +1223,12 @@ test_sweep_never_promotes_a_pane_path_to_evidence() {
     "window=firstmate:fm-task-f3" "worktree=$world/wt" "project=$world/project" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
   out=$(run_sweep "$world")
-  [ -z "$out" ] || fail "the resume sweep reported a violation with no live process to prove it: $out"
+  assert_contains "$out" "ISOLATION: task task-f3 is unproven" \
+    "an unprovable task did not produce an actionable isolation finding"
   out=$(FM_ISOLATION_VERBOSE=1 run_sweep "$world")
-  assert_contains "$out" "BOOTSTRAP_INFO: isolation for task-f3 is unproven" \
-    "an unprovable task was not reported as unproven under verbose facts"
-  pass "an unprovable task is never reported as a violation from a pane path alone"
+  assert_contains "$out" "ISOLATION: task task-f3 is unproven" \
+    "verbose mode hid the required isolation finding"
+  pass "an unprovable task produces an actionable finding without trusting its pane path"
 }
 
 test_sweep_reports_an_agent_declared_for_another_home() {
@@ -1200,9 +1259,10 @@ test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id() {
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$unrelated" "$id" "$world/other-home" secondmate >/dev/null
   out=$(run_sweep "$world")
-  [ -z "$out" ] || fail "the sweep attached an unrelated complete identity to this record: $out"
+  assert_contains "$out" "ISOLATION: task $id is unproven" \
+    "an unrelated complete identity suppressed the task's unproven finding"
   out=$(FM_ISOLATION_VERBOSE=1 run_sweep "$world")
-  assert_contains "$out" "isolation for $id is unproven" \
+  assert_contains "$out" "ISOLATION: task $id is unproven" \
     "an unrelated same-id identity suppressed conservative provider fallback"
   pass "the resume sweep preserves complete identity and ignores unrelated same-id agents"
 }
@@ -1373,6 +1433,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_exact_stamp_clear_accepts_canonical_home_alias
 test_clean_ownership_disposes
+test_malformed_or_partial_stamp_retains
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot

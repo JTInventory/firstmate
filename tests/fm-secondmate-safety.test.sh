@@ -1598,8 +1598,10 @@ test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return() {
   local home subhome subhome_abs fakebin log
   home="$TMP_ROOT/plain-clone-teardown-home"
   subhome="$TMP_ROOT/plain-clone-teardown-subhome"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
-  mark_firstmate_home "$subhome"
+  mkdir -p "$home/state" "$home/data"
+  git clone -q "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
@@ -1626,6 +1628,42 @@ EOF
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta for plain-clone home"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove plain-clone registry route"
   pass "secondmate teardown raw-removes plain-clone homes"
+}
+
+test_secondmate_teardown_retains_unregistered_foreign_worktree() {
+  local home foreign subhome fakebin log err
+  home="$TMP_ROOT/foreign-worktree-teardown-home"
+  foreign="$TMP_ROOT/foreign-worktree-repo"
+  subhome="$TMP_ROOT/foreign-worktree-teardown-subhome"
+  err="$TMP_ROOT/foreign-worktree-teardown.err"
+  make_firstmate_git_root "$foreign"
+  git -C "$foreign" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/foreign-worktree-teardown-fake")
+  log="$TMP_ROOT/foreign-worktree-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/foreign-worktree-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown removed an unregistered foreign linked worktree"
+  fi
+  [ -d "$subhome" ] || fail "unregistered foreign linked worktree was removed"
+  [ -e "$home/state/domain.meta" ] || fail "foreign-worktree refusal removed lifecycle metadata"
+  grep -F 'not a proven plain legacy clone' "$err" >/dev/null \
+    || fail "foreign-worktree refusal did not explain ambiguous ownership"
+  pass "secondmate teardown retains unregistered foreign linked worktrees"
 }
 
 test_secondmate_force_teardown_discards_child_work() {
@@ -2453,6 +2491,7 @@ test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent
 test_secondmate_force_teardown_preflights_nested_home_ownership
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
+test_secondmate_teardown_retains_unregistered_foreign_worktree
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_preserves_linked_child_without_treehouse
 test_secondmate_force_teardown_recursively_preserves_without_treehouse

@@ -681,6 +681,39 @@ firstmate_home_treehouse_slot_verdict() {
   worktree_registration_verdict "$FM_ROOT" "$1"
 }
 
+repository_origin_identity() {
+  local repo=$1 origin
+  origin=$(git -C "$repo" remote get-url origin 2>/dev/null) || return 1
+  case "$origin" in
+    file://*) origin=${origin#file://} ;;
+  esac
+  case "$origin" in
+    /*) removal_target_abs_path "$origin" ;;
+    *) printf '%s\n' "$origin" ;;
+  esac
+}
+
+plain_legacy_firstmate_clone() {
+  local target=$1 target_common root_origin target_origin entry
+  fm_slot_is_plain_checkout "$target" || return 1
+  target_common=$(git -C "$target" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$target_common" in
+    /*) ;;
+    *) target_common="$target/$target_common" ;;
+  esac
+  target_common=$(removal_target_abs_path "$target_common" 2>/dev/null) || return 1
+  root_origin=$(repository_origin_identity "$FM_ROOT") || return 1
+  target_origin=$(repository_origin_identity "$target") || return 1
+  [ "$root_origin" = "$target_origin" ] || return 1
+  [ ! -e "$target_common/$FM_SLOT_OWNER_STAMP_NAME" ] \
+    && [ ! -L "$target_common/$FM_SLOT_OWNER_STAMP_NAME" ] || return 1
+  if [ -d "$target_common/worktrees" ]; then
+    for entry in "$target_common"/worktrees/*; do
+      [ ! -e "$entry" ] && [ ! -L "$entry" ] || return 1
+    done
+  fi
+}
+
 require_treehouse_return_capability() {
   local label=$1 target=$2
   command -v treehouse >/dev/null 2>&1 && return 0
@@ -892,6 +925,10 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       fm_slot_stamp_clear_exact "$abs_home_path" "${expected_id:-$ID}" "$home_scope" || return 1
       ;;
     unregistered)
+      plain_legacy_firstmate_clone "$abs_home_path" || {
+        echo "REFUSED: unregistered $label $abs_home_path is not a proven plain legacy clone without foreign ownership evidence" >&2
+        return 1
+      }
       safe_rm_rf "$abs_home_path" "$label" || return 1
       ;;
     *)
@@ -1224,14 +1261,6 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       echo "REFUSED: treehouse command not found; preserving worktree $WT and its metadata" >&2
       exit 1
     }
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
-    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
     # Kills remaining processes in the worktree (including the agent), resets, returns
     # to pool. treehouse resolves the pool from the working directory, so run it from
     # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -1244,6 +1273,15 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
       exit 1
     }
+    if [ -d "$WT" ]; then
+      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      if [ "$branch" != "HEAD" ]; then
+        if git -C "$WT" checkout --detach -q 2>/dev/null; then
+          git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+        fi
+      fi
+      rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+    fi
     fm_slot_stamp_clear_exact "$WT" "$ID" "$FM_HOME" || exit 1
   else
     TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT

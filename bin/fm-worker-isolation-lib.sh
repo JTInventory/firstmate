@@ -126,12 +126,17 @@ fm_worker_secondmate_scope_matches() {
 }
 
 fm_worker_secondmate_effective_scope_matches() {
-  local home state var value suffix expected actual owner_real root_override
+  local home state var value suffix expected actual owner_real root_override marker marker_task
+  [ -n "${FM_AGENT_TASK:-}" ] && [ -n "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   home=${FM_HOME:-${FM_ROOT_OVERRIDE:-}}
   [ -n "$home" ] || return 1
   state=${FM_STATE_OVERRIDE:-$home/state}
   fm_worker_secondmate_scope_matches "$home" "$state" || return 1
   owner_real=$(fm_worker_canonical_path "${FM_AGENT_OWNER_HOME:-}") || return 1
+  marker="$owner_real/.fm-secondmate-home"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_task=$(cat "$marker" 2>/dev/null) || return 1
+  [ "$marker_task" = "$FM_AGENT_TASK" ] || return 1
   root_override=${FM_ROOT_OVERRIDE:-}
   if [ -n "$root_override" ]; then
     actual=$(fm_worker_canonical_path "$root_override") || return 1
@@ -167,6 +172,16 @@ fm_worker_refuse_primary_operation() {
       echo "error: $operation refused: secondmate '${FM_AGENT_TASK:-unnamed}' is not operating in its declared home ${FM_AGENT_OWNER_HOME:-<missing>}" >&2
       return 1
       ;;
-    *) return 0 ;;
+    "")
+      if [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ]; then
+        return 0
+      fi
+      echo "error: $operation refused: worker identity declaration is incomplete" >&2
+      return 1
+      ;;
+    *)
+      echo "error: $operation refused: unknown worker role '${FM_AGENT_ROLE}'" >&2
+      return 1
+      ;;
   esac
 }

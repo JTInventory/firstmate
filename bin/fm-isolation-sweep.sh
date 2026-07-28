@@ -12,21 +12,20 @@
 #
 # This sweep is READ-ONLY and always exits 0. It prints one actionable
 # `ISOLATION:` line per task whose live agent process is provably not where its
-# record says it is, so bin/fm-bootstrap.sh can surface it in the session-start
+# record says it is or whose isolation cannot be proved from an authoritative
+# process reading, so bin/fm-bootstrap.sh can surface it in the session-start
 # digest exactly like TANGLE.
 #
 # Evidence discipline (bin/fm-agent-cwd-lib.sh owns the method of record): a
 # collapse is reported only from an AUTHORITATIVE /proc reading of the agent
 # process. A provider's pane cwd is never promoted to evidence here, because a
 # pane field naming the wrong process is precisely what produced a false
-# isolation violation on 2026-07-25. A task with no authoritative reading is
-# reported only under FM_ISOLATION_VERBOSE=1, as a BOOTSTRAP_INFO fact.
+# isolation violation on 2026-07-25.
 #
 # docs/worker-isolation.md owns how this mechanism fits with the other three.
 #
 # Usage: fm-isolation-sweep.sh
-#   FM_ISOLATION_VERBOSE=1  also print BOOTSTRAP_INFO facts for tasks whose
-#                           isolation could not be proved either way.
+#   FM_ISOLATION_VERBOSE=1  also print successful BOOTSTRAP_INFO proof facts.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,9 +100,7 @@ EOF
     if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
       pids=$(fm_agent_verdict_field "$record" pid)
     else
-      if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
-        echo "BOOTSTRAP_INFO: isolation for $id is unproven: no live agent process could be identified, and a pane path is only a hint"
-      fi
+      echo "ISOLATION: task $id is unproven: no authoritative live agent process could be identified; treat the task as isolated-unsafe until its worker identity and process cwd are proved"
       continue
     fi
   fi
@@ -112,8 +109,7 @@ EOF
     [ -n "$pid" ] || continue
     cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
     if [ -z "$cwd" ]; then
-      [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ] \
-        && echo "BOOTSTRAP_INFO: isolation for $id is unproven for agent process $pid"
+      echo "ISOLATION: task $id is unproven for agent process $pid: authoritative process cwd is unavailable; stop or re-establish the worker before any mutation"
       continue
     fi
     cwd_real=$(fm_agent_canonical_dir "$cwd") || cwd_real=$cwd

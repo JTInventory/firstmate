@@ -129,6 +129,24 @@ fm_slot_stamp_field() {
   printf '%s' "$value"
 }
 
+fm_slot_stamp_record() {
+  local wt=$1 path task_count home_count line_count
+  FM_SLOT_STAMP_TASK=
+  FM_SLOT_STAMP_HOME=
+  path=$(fm_slot_stamp_path "$wt") || return 2
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 1
+  fi
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 2
+  task_count=$(grep -c '^task=' "$path" 2>/dev/null) || task_count=0
+  home_count=$(grep -c '^home=' "$path" 2>/dev/null) || home_count=0
+  line_count=$(wc -l < "$path" 2>/dev/null) || return 2
+  [ "$task_count" -eq 1 ] && [ "$home_count" -eq 1 ] && [ "$line_count" -eq 2 ] || return 2
+  FM_SLOT_STAMP_TASK=$(sed -n 's/^task=//p' "$path")
+  FM_SLOT_STAMP_HOME=$(sed -n 's/^home=//p' "$path")
+  [ -n "$FM_SLOT_STAMP_TASK" ] && [ -n "$FM_SLOT_STAMP_HOME" ] || return 2
+}
+
 # fm_slot_stamp_clear <worktree>: drop the stamp once the slot is released.
 fm_slot_stamp_clear() {
   local wt=$1 path
@@ -222,7 +240,7 @@ fm_slot_join_ids() {
 # Print exactly `dispose` or `retain: <reason>`.
 fm_slot_disposal_verdict() {
   local state=$1 self=$2 wt=$3 stamp_owner_home=$4 worker_home=$5 role=$6
-  local stamp_task stamp_home refs occupants
+  local stamp_task stamp_home stamp_status refs occupants
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     printf 'dispose'
     return 0
@@ -231,16 +249,25 @@ fm_slot_disposal_verdict() {
     printf '%s%s in this home' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"
     return 0
   fi
-  if stamp_task=$(fm_slot_stamp_field "$wt" task); then
+  if fm_slot_stamp_record "$wt"; then
+    stamp_status=0
+  else
+    stamp_status=$?
+  fi
+  if [ "$stamp_status" -eq 2 ]; then
+    printf 'retain: slot ownership stamp is present but malformed, partial, unreadable, or cannot be classified'
+    return 0
+  fi
+  if [ "$stamp_status" -eq 0 ]; then
+    stamp_task=$FM_SLOT_STAMP_TASK
+    stamp_home=$FM_SLOT_STAMP_HOME
     if [ "$stamp_task" != "$self" ]; then
       printf 'retain: slot ownership stamp names task %s, not %s' "$stamp_task" "$self"
       return 0
     fi
-    if stamp_home=$(fm_slot_stamp_field "$wt" home); then
-      if [ -n "$stamp_owner_home" ] && ! fm_slot_same_path "$stamp_home" "$stamp_owner_home"; then
-        printf 'retain: slot ownership stamp names home %s, not %s' "$stamp_home" "$stamp_owner_home"
-        return 0
-      fi
+    if [ -n "$stamp_owner_home" ] && ! fm_slot_same_path "$stamp_home" "$stamp_owner_home"; then
+      printf 'retain: slot ownership stamp names home %s, not %s' "$stamp_home" "$stamp_owner_home"
+      return 0
     fi
   fi
   if occupants=$(fm_slot_live_occupant_tasks "$wt" "$self" "$worker_home" "$role"); then

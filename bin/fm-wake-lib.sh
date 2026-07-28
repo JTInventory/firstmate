@@ -162,19 +162,23 @@ fm_lifecycle_read_proc_argv() {
 }
 
 fm_lifecycle_read_fallback_argv() {
-  local pid=$1 command
+  local pid=$1 arg saw_executable=0 saw_argv=0
   FM_LIFECYCLE_ARGV=()
-  command=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || return 2
-  command=${command#"${command%%[![:space:]]*}"}
-  command=${command%"${command##*[![:space:]]}"}
-  [ -n "$command" ] || return 2
-  case "${command##*/}" in
-    fm-spawn.sh|fm-teardown.sh)
-      FM_LIFECYCLE_ARGV=("$command")
-      return 0
-      ;;
-  esac
-  return 1
+  command -v sysctl >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 2
+  sysctl -n kern.procargs2 "$pid" >/dev/null 2>&1 || return 2
+  while IFS= read -r -d '' arg; do
+    if [ "$saw_executable" -eq 0 ]; then
+      [ -n "$arg" ] || continue
+      saw_executable=1
+      continue
+    fi
+    if [ "$saw_argv" -eq 0 ]; then
+      [ -n "$arg" ] || continue
+      saw_argv=1
+    fi
+    FM_LIFECYCLE_ARGV+=("$arg")
+  done < <(sysctl -n kern.procargs2 "$pid" 2>/dev/null | dd bs=4 skip=1 2>/dev/null)
+  [ "${#FM_LIFECYCLE_ARGV[@]}" -gt 0 ] || return 2
 }
 
 fm_lifecycle_process_executable() {

@@ -962,6 +962,47 @@ test_lifecycle_quiescence_clamps_timing_overrides() {
   pass "T25 lifecycle quiescence timing stays within safe bounds"
 }
 
+test_secondmate_fast_forward_requires_lock_capability() {
+  local w out rc
+  w=$(new_world t26)
+  add_sm "$w" sm1
+  rc=0
+  out=$(
+    FM_ROOT="$w/main" FM_HOME="$w/home" bash -c '
+      . "$1/bin/fm-ff-lib.sh"
+      unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release
+      process_secondmate sm1 "$2" "" origin no
+    ' _ "$ROOT" "$w/sm1" 2>&1
+  ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate fast-forward proceeded without lifecycle lock capability"
+  assert_contains "$out" "refused: lifecycle lock capability is unavailable" \
+    "missing lifecycle lock capability did not explain the refusal"
+  pass "T26 secondmate fast-forward requires lifecycle lock capability"
+}
+
+test_fallback_argv_provider_fails_closed_without_boundaries() {
+  local rc script
+  script="/tmp/fm-spawn.sh"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    sysctl() {
+      printf '\001\000\000\000/usr/bin/bash\000\000bash\000%s\000later argument\000' "$script"
+    }
+    fm_lifecycle_read_fallback_argv 999
+    [ "${FM_LIFECYCLE_ARGV[0]}" = bash ] \
+      && [ "${FM_LIFECYCLE_ARGV[1]}" = "$script" ] \
+      && [ "${FM_LIFECYCLE_ARGV[2]}" = "later argument" ]
+  ) || fail "kern.procargs2 fallback did not preserve argv boundaries"
+  rc=0
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    sysctl() { return 1; }
+    fm_lifecycle_read_fallback_argv 999
+  ) || rc=$?
+  [ "$rc" -eq 2 ] || fail "fallback argv provider guessed process identity without argument boundaries"
+  pass "T27 fallback argv identity uses boundaries or refuses capability"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -985,5 +1026,7 @@ test_update_ignores_legacy_lifecycle_process_for_another_home
 test_update_quiescence_catches_late_legacy_lifecycle_start
 test_lifecycle_identity_uses_command_position_and_fail_closed_scope
 test_lifecycle_quiescence_clamps_timing_overrides
+test_secondmate_fast_forward_requires_lock_capability
+test_fallback_argv_provider_fails_closed_without_boundaries
 
 echo "# all fm-update tests passed"
