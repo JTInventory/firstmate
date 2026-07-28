@@ -94,7 +94,7 @@ fm_secondmate_delivery_bound_correlation() {
 fm_secondmate_delivery_send_locked() {
   local state=$1 parent_home=$2 id=$3 home=$4 target=$5 endpoint_generation=$6
   local provider_identity=$7 namespace=$8 generation=$9 message=${10}
-  local receipt message_signature transaction_signature corr out rc delivery_state rec marker
+  local receipt message_signature transaction_signature corr out rc delivery_state rec marker binding_status
   fm_secondmate_lifecycle_identity_matches "$state" "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" || return 1
   message_signature=$(printf '%s' "$message" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
@@ -126,8 +126,14 @@ fm_secondmate_delivery_send_locked() {
     fi
     [ "$delivery_state" = prepared ] || return 1
   else
-    corr=$(fm_secondmate_delivery_bound_correlation "$state" "$transaction_signature" 2>/dev/null || true)
-    if [ -z "$corr" ]; then
+    if corr=$(fm_secondmate_delivery_bound_correlation "$state" "$transaction_signature" 2>/dev/null); then
+      :
+    else
+      binding_status=$?
+      [ "$binding_status" -eq 1 ] || {
+        printf 'delivery transaction binding is ambiguous for %s\n' "$target" >&2
+        return 2
+      }
       corr=$(fm_pending_reply_create "$parent_home" "$state" "$id" "$message") || return 1
       rec=$(fm_pending_reply_path "$state" "$corr")
       fm_pending_reply_set "$rec" fm_delivery_transaction "$transaction_signature" || return 1
@@ -139,7 +145,8 @@ fm_secondmate_delivery_send_locked() {
     return $?
   fi
   fm_pending_reply_prepare_delivery "$state" "$corr" || {
-    fm_pending_reply_discard_undelivered "$state" "$corr" || true
+    rm -f "$receipt" || return 2
+    fm_pending_reply_discard_undelivered "$state" "$corr" || return 2
     return 1
   }
   fm_secondmate_delivery_receipt_write "$receipt" "$namespace" "$id" "$home" "$target" \
@@ -160,8 +167,8 @@ fm_secondmate_delivery_send_locked() {
         printf 'delivery is indeterminate for %s\n' "$target" >&2
         return 2
       fi
+      rm -f "$receipt" || return 2
       fm_pending_reply_discard_undelivered "$state" "$corr" || return 2
-      rm -f "$receipt"
       printf '%s\n' "${out%%$'\n'*}" >&2
       return 1
     fi

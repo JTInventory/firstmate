@@ -76,6 +76,7 @@ add_sm_worktree() {
     printf 'home=%s/%s\n' "$w" "$id"
     printf 'task=%s\n' "$id"
     printf 'endpoint_generation=endpoint-%s\n' "$id"
+    printf 'harness=codex\n'
   } > "$w/home/state/$id.meta"
 }
 
@@ -424,6 +425,59 @@ test_bootstrap_retry_respects_secondmate_lifecycle_lock() {
   pass "bootstrap retry recovery keeps markers and acknowledgements behind the lifecycle lock"
 }
 
+test_bootstrap_retry_retains_delivery_until_acknowledged() {
+  local w commit stale fakebin pending receipt out sends obligation
+  w=$(new_world boot-retry-ack-failure)
+  git -C "$w/main" commit --allow-empty -qm second
+  commit=$(head_of "$w/main")
+  stale=$(git -C "$w/main" rev-parse "$commit^")
+  add_sm_worktree "$w" sm-ack "$commit"
+  mkdir -p "$w/sm-ack/state" "$w/home/state/.secondmate-nudge-pending"
+  obligation="$w/sm-ack/state/.watch-protocol-reread-required"
+  fm_update_obligation_write "$obligation" "$stale"
+  pending="$w/home/state/.secondmate-nudge-pending/sm-ack.pending"
+  {
+    printf 'id=sm-ack\n'
+    printf 'selector=fm-sm-ack\n'
+    printf 'home=%s/sm-ack\n' "$w"
+    printf 'window=firstmate:fm-sm-ack\n'
+    printf 'endpoint_generation=endpoint-sm-ack\n'
+    printf 'commit=%s\n' "$commit"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+  } > "$pending"
+  fakebin=$(make_fake_toolchain "$w")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  [ -f "$pending" ] || fail "acknowledgement failure removed the retry marker"
+  receipt="$w/home/state/.secondmate-nudge-delivered/sm-ack/$commit"
+  [ -f "$receipt" ] || fail "acknowledgement failure removed the delivery receipt"
+  fm_update_obligation_pending \
+    "$obligation" "$w/sm-ack" \
+    || fail "acknowledgement failure removed the child obligation"
+  rm -f "$obligation.generations/$stale"
+  fm_update_obligation_write "$obligation" "$commit" \
+    || fail "could not prepare acknowledgement retry"
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" FM_FAKE_TMUX_LOG="$w/tmux.log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  [ ! -e "$pending" ] && [ ! -e "$receipt" ] \
+    || fail "acknowledgement retry did not retire delivery state"
+  fm_update_obligation_pending \
+    "$obligation" "$w/sm-ack" \
+    && fail "acknowledgement retry did not clear the child obligation"
+  sends=$(grep -Fc 'firstmate was updated to the latest' "$w/tmux.log" 2>/dev/null || true)
+  [ "$sends" -eq 1 ] || fail "acknowledgement retry sent the request $sends times"
+  pass "bootstrap acknowledgement failures retry without resending"
+}
+
 test_bootstrap_refuses_ambiguous_lifecycle_metadata() {
   local w c1 before fakebin out
   w=$(new_world boot-ambiguous)
@@ -526,6 +580,7 @@ test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_sweep_surfaces_skipped_home
 test_bootstrap_retry_clears_child_obligation
 test_bootstrap_retry_respects_secondmate_lifecycle_lock
+test_bootstrap_retry_retains_delivery_until_acknowledged
 test_bootstrap_refuses_ambiguous_lifecycle_metadata
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch

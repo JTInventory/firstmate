@@ -1319,6 +1319,81 @@ test_conflicting_herdr_window_refuses_lifecycle_mutation() {
   pass "T37 conflicting Herdr endpoint representations refuse lifecycle mutation"
 }
 
+test_ambiguous_delivery_bindings_refuse_without_send() {
+  local w generation target provider signature corr fakebin rc=0
+  w=$(new_world t38)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  target=main:fm-sm1
+  provider="tmux:$target"
+  mkdir -p "$w/sm1/state"
+  fm_update_obligation_write \
+    "$w/sm1/state/.watch-protocol-reread-required" "$generation"
+  signature=$(printf '%s' \
+    "update-nudge|sm1|$w/sm1|$target|endpoint-sm1|$provider|$generation|$(printf '%s' 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' | cksum | awk '{printf "%s-%s", $1, $2}')" \
+    | cksum | awk '{printf "%s-%s", $1, $2}')
+  for corr in one two; do
+    corr=$(fm_pending_reply_create "$w/home" "$w/home/state" sm1 \
+      'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.')
+    fm_pending_reply_set "$(fm_pending_reply_path "$w/home/state" "$corr")" \
+      fm_delivery_transaction "$signature"
+  done
+  fakebin=$(make_fake_tmux "$w/ambiguous-binding-fake")
+  (cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/ambiguous-binding-fake/tmux.log" \
+    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation" \
+    >/dev/null 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "ambiguous delivery bindings were accepted"
+  [ ! -s "$w/ambiguous-binding-fake/tmux.log" ] \
+    || fail "ambiguous delivery bindings caused a send"
+  fm_update_obligation_pending \
+    "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
+    || fail "ambiguous delivery bindings cleared the obligation"
+  pass "T38 ambiguous delivery bindings refuse without sending"
+}
+
+test_delivery_prepare_failure_rolls_back_receipt_and_binding() {
+  local w generation target fakebin receipt rc=0 bindings
+  w=$(new_world t39)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  target=main:fm-sm1
+  mkdir -p "$w/sm1/state"
+  fm_update_obligation_write \
+    "$w/sm1/state/.watch-protocol-reread-required" "$generation"
+  fakebin=$(make_fake_tmux "$w/prepare-failure-fake")
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ -f "$arg" ] || continue
+  if grep -Eq '^attempted=[0-9]+$' "$arg" 2>/dev/null \
+    && [ ! -e "${FM_FAKE_PREPARE_FAILED:?}" ]; then
+    : > "$FM_FAKE_PREPARE_FAILED"
+    exit 1
+  fi
+done
+exec /bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  (cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/prepare-failure-fake/tmux.log" \
+    FM_FAKE_PREPARE_FAILED="$w/prepare-failure-fake/failed" \
+    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation" \
+    >/dev/null 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "delivery preparation failure unexpectedly succeeded"
+  receipt="$w/home/state/.secondmate-nudge-delivered/sm1/$generation"
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] \
+    || fail "delivery preparation failure left an orphan receipt"
+  bindings=$(grep -l '^fm_delivery_transaction=' \
+    "$w/home/state/pending-replies"/* 2>/dev/null || true)
+  [ -z "$bindings" ] || fail "delivery preparation failure left a bound pending record"
+  [ ! -s "$w/prepare-failure-fake/tmux.log" ] \
+    || fail "delivery preparation failure reached transport"
+  pass "T39 delivery preparation rollback leaves no orphan transaction"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -1354,5 +1429,7 @@ test_duplicate_provider_fields_refuse_lifecycle_mutation
 test_prepared_delivery_transaction_is_never_resent
 test_do_not_resend_delivery_is_acknowledged_once
 test_conflicting_herdr_window_refuses_lifecycle_mutation
+test_ambiguous_delivery_bindings_refuse_without_send
+test_delivery_prepare_failure_rolls_back_receipt_and_binding
 
 echo "# all fm-update tests passed"

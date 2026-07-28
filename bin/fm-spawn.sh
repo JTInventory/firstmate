@@ -460,6 +460,8 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   }
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
+SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+SPAWN_TASK_LOCK_COVERED=0
 if [ -n "${FM_SPAWN_PRELOCK_OWNER_PID:-}" ]; then
   case "$FM_SPAWN_PRELOCK_OWNER_PID" in *[!0-9]*|'') exit 1 ;; esac
   [ "$PPID" = "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 1
@@ -470,6 +472,10 @@ if [ -n "${FM_SPAWN_PRELOCK_OWNER_PID:-}" ]; then
     [ "$(cat "$SPAWN_ADMISSION_LOCK/pid" 2>/dev/null || true)" = \
       "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 1
   done < <(fm_spawn_admission_lock_paths "$STATE")
+  [ "${FM_SPAWN_PRELOCK_TASK_ID:-}" = "$ID" ] || exit 1
+  [ "$(cat "$SPAWN_TASK_LOCK/pid" 2>/dev/null || true)" = \
+    "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 1
+  SPAWN_TASK_LOCK_COVERED=1
 else
   while IFS= read -r SPAWN_ADMISSION_LOCK; do
     [ -n "$SPAWN_ADMISSION_LOCK" ] || continue
@@ -481,7 +487,8 @@ else
     SPAWN_ADMISSION_LOCKS+=("$SPAWN_ADMISSION_LOCK")
   done < <(fm_spawn_admission_lock_paths "$STATE")
 fi
-if fm_spawn_legacy_task_lock_busy "$STATE"; then
+if fm_spawn_legacy_task_lock_busy_except "$STATE" \
+  "$([ "$SPAWN_TASK_LOCK_COVERED" = 1 ] && printf '%s' "$SPAWN_TASK_LOCK")"; then
   echo "error: an older spawn or teardown is still changing this firstmate home" >&2
   exit 1
 fi
@@ -501,8 +508,6 @@ if ! fm_spawn_legacy_lifecycle_quiescent "$FM_HOME" "$STATE" "$LEGACY_EXCLUDE_PI
   echo "error: an older spawn or teardown is still starting in this firstmate home" >&2
   exit 1
 fi
-SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
-SPAWN_TASK_LOCK_COVERED=0
 for SPAWN_ADMISSION_LOCK in "${SPAWN_ADMISSION_LOCKS[@]}"; do
   [ "$SPAWN_ADMISSION_LOCK" != "$SPAWN_TASK_LOCK" ] || SPAWN_TASK_LOCK_COVERED=1
 done

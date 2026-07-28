@@ -274,7 +274,7 @@ treehouse_return_is_index_lock_error() {
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_check=${4:-} state_scope=${5:-}
   local stamp_id=${6:-} stamp_home=${7:-} lease_holder=${8:-}
-  local out attempt=0 retries claim= staged=0 return_status
+  local out attempt=0 retries claim= legacy= stamp_path= staged=0 return_status
   retries=$TREEHOUSE_RETURN_LOCK_RETRIES
   case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
   if [ -n "$post_check" ]; then
@@ -286,6 +286,8 @@ teardown_treehouse_return() {
       "$lease_holder" || return 1
     staged=${FM_SLOT_RETURN_STAGED:-0}
     claim=${FM_SLOT_RETURN_CLAIM:-}
+    legacy=${FM_SLOT_RETURN_LEGACY:-}
+    stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
   fi
   while :; do
     if [ -n "$lease_holder" ]; then
@@ -297,7 +299,7 @@ teardown_treehouse_return() {
     fi
     if [ "$return_status" -eq 0 ]; then
       [ -n "$out" ] && printf '%s\n' "$out"
-      if [ "$staged" -eq 1 ] && ! fm_slot_stamp_finalize_return "$claim"; then
+      if [ "$staged" -eq 1 ] && ! fm_slot_stamp_finalize_return "$claim" "$legacy"; then
         echo "error: returned $label $dir but could not retire its transition claim" >&2
         return 1
       fi
@@ -307,7 +309,7 @@ teardown_treehouse_return() {
     if ! treehouse_return_is_index_lock_error "$out" || [ "$attempt" -ge "$retries" ]; then
       if [ "$staged" -eq 1 ]; then
         fm_slot_stamp_restore_return "$dir" "$stamp_id" "$stamp_home" "$claim" \
-          "$lease_holder" || {
+          "$lease_holder" "$stamp_path" "$legacy" || {
           echo "error: could not restore ownership evidence for $label $dir" >&2
         }
       fi

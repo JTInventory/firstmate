@@ -319,11 +319,12 @@ secondmate_sync() {
       receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
       secondmate_locked_identity_matches "$id" "$home" "$window" \
         "$endpoint_generation" "$provider_identity" || return 1
-      rm -f "$marker"
+      fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" \
+        "$commit" "$home" || return 1
       secondmate_locked_identity_matches "$id" "$home" "$window" \
-        "$endpoint_generation" || return 1
-      fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" "$commit" "$home" || true
+        "$endpoint_generation" "$provider_identity" || return 1
       fm_secondmate_delivery_finish "$receipt" || return 1
+      rm -f "$marker" || return 1
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: delivery is unconfirmed"
@@ -364,13 +365,13 @@ secondmate_sync() {
       "$SECOND_MATE_NUDGE_MESSAGE"; then
       receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
       secondmate_locked_identity_matches "$id" "$home" "$window" \
-        "$endpoint_generation" || return 1
-      rm -f "$marker"
-      secondmate_locked_identity_matches "$id" "$home" "$window" \
-        "$endpoint_generation" || return 1
+        "$endpoint_generation" "$provider_identity" || return 1
       fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" \
-        "$commit" "$home" || true
+        "$commit" "$home" || return 1
+      secondmate_locked_identity_matches "$id" "$home" "$window" \
+        "$endpoint_generation" "$provider_identity" || return 1
       fm_secondmate_delivery_finish "$receipt" || return 1
+      rm -f "$marker" || return 1
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: delivery is unconfirmed"
@@ -589,17 +590,41 @@ secondmate_liveness_sweep() {
   local meta id home window endpoint_generation provider_identity
   local -a liveness_admission_locks=()
   fm_ff_target_lock_acquire() {
-    local state_dir=$1 _label=${2:-target} _target_home=${3:-} lock
+    local state_dir=$1 _label=${2:-target} target_home=${3:-}
+    local lock existing primary_task seen
     liveness_admission_locks=()
-    while IFS= read -r lock; do
-      [ -n "$lock" ] || continue
-      mkdir -p "$(dirname "$lock")" || return 1
-      if ! fm_lock_try_acquire "$lock"; then
-        fm_ff_target_lock_release
-        return 1
-      fi
-      liveness_admission_locks+=("$lock")
-    done < <(fm_spawn_admission_lock_paths "$state_dir")
+    for seen in "$state_dir" "$STATE"; do
+      while IFS= read -r lock; do
+        [ -n "$lock" ] || continue
+        for existing in "${liveness_admission_locks[@]}"; do
+          [ "$existing" != "$lock" ] || continue 2
+        done
+        mkdir -p "$(dirname "$lock")" || {
+          fm_ff_target_lock_release
+          return 1
+        }
+        if ! fm_lock_try_acquire "$lock"; then
+          fm_ff_target_lock_release
+          return 1
+        fi
+        liveness_admission_locks+=("$lock")
+      done < <(fm_spawn_admission_lock_paths "$seen")
+    done
+    primary_task="$STATE/.spawn-${LIVENESS_LOCK_ID:?}.lock"
+    if ! fm_lock_try_acquire "$primary_task"; then
+      fm_ff_target_lock_release
+      return 1
+    fi
+    liveness_admission_locks+=("$primary_task")
+    if fm_spawn_legacy_task_lock_busy_except "$STATE" "$primary_task" \
+      || fm_spawn_legacy_task_lock_busy "$state_dir" \
+      || ! fm_spawn_legacy_lifecycle_quiescent "$FM_HOME" "$STATE" \
+        "${BASHPID:-$$}" \
+      || ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir" \
+        "${BASHPID:-$$}"; then
+      fm_ff_target_lock_release
+      return 1
+    fi
   }
   fm_ff_target_lock_release() {
     local i
@@ -635,6 +660,7 @@ secondmate_liveness_sweep() {
         owner_identity=$(fm_pid_identity "$owner_pid") || return 1
         if out=$(FM_SPAWN_NO_GUARD=1 FM_SPAWN_PRELOCK_OWNER_PID="$owner_pid" \
           FM_SPAWN_PRELOCK_OWNER_IDENTITY="$owner_identity" \
+          FM_SPAWN_PRELOCK_TASK_ID="$id" \
           "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
@@ -665,9 +691,11 @@ secondmate_liveness_sweep() {
       echo "SECONDMATE_LIVENESS: secondmate $id: refused: unsafe lifecycle home"
       continue
     fi
+    LIVENESS_LOCK_ID=$id
     fm_ff_locked_secondmate_action "$id" "$VALIDATED_HOME" "secondmate $id" \
       secondmate_liveness_locked "$window" "$endpoint_generation" "$provider_identity" \
       || echo "SECONDMATE_LIVENESS: secondmate $id: refused: lifecycle identity changed or lock is busy"
+    unset LIVENESS_LOCK_ID
   done
   unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release secondmate_liveness_locked
   return 0

@@ -1185,6 +1185,26 @@ SH
   pass "ownership evidence survives until pooled return succeeds"
 }
 
+test_return_transition_never_uses_a_worktree_path() {
+  local rec collision claim legacy
+  rec=$(make_slot_world slot-return-path-collision)
+  read_slot_world "$rec"
+  collision="$WT_DIR/.fm-slot-return-owner"
+  printf 'tracked user data\n' > "$collision"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-collision "$WORLD/home" \
+    && fm_slot_stamp_stage_return "$WT_DIR" task-collision "$WORLD/home" \
+      "$WORLD/home/state" task-collision \
+    && claim=$FM_SLOT_RETURN_CLAIM \
+    && legacy=$FM_SLOT_RETURN_LEGACY \
+    && [ "$legacy" != "$collision" ] \
+    && fm_slot_stamp_finalize_return "$claim" "$legacy" ) \
+    || fail "return transition could not use collision-free global state"
+  [ "$(cat "$collision")" = "tracked user data" ] \
+    || fail "return transition changed a worktree path"
+  pass "return transitions never repurpose worktree paths"
+}
+
 test_successful_pool_return_never_mutates_reused_slot() {
   local rec fakebin out status stamp
   rec=$(make_slot_world slot-post-return-reuse)
@@ -1239,6 +1259,43 @@ SH
     && fm_slot_stamp_field "$WT_DIR" task || printf none )
   [ "$stamp" = replacement ] || fail "teardown cleared replacement ownership after return: $stamp"
   pass "successful pool return never mutates a slot after reuse"
+}
+
+test_failed_pool_return_never_restores_over_a_reused_slot() {
+  local rec fakebin out status stamp
+  rec=$(make_slot_world slot-failed-return-reuse)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+target=${3:-}
+git -C "$FM_REUSE_PROJECT" worktree remove --force "$target"
+git -C "$FM_REUSE_PROJECT" worktree add --quiet -b failed-return-replacement "$target"
+git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
+printf 'task=replacement\nhome=%s\n' "$FM_REUSE_HOME" > "$git_dir/fm-slot-owner"
+exit 17
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" tmux gh-axi gh
+  fm_write_meta "$WORLD/home/state/task-failed-reuse.meta" \
+    "window=firstmate:fm-task-failed-reuse" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-failed-reuse "$WORLD/home" )
+  set +e
+  out=$(cd "$WORLD" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" FM_REUSE_PROJECT="$PROJ_DIR" \
+    FM_REUSE_HOME="$WORLD/replacement-home" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-failed-reuse --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "failed reused-slot return unexpectedly succeeded"$'\n'"$out"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf none )
+  [ "$stamp" = replacement ] \
+    || fail "failed return restored stale ownership over replacement: $stamp"
+  pass "failed returns never restore ownership over reused slots"
 }
 
 test_foreign_transition_holder_retains_before_mutation() {
@@ -1656,7 +1713,9 @@ test_same_task_stamp_in_another_home_survives_relinquish
 test_teardown_retires_a_contested_lease_even_with_force
 test_retained_stamp_survives_failed_metadata_retirement
 test_stamp_survives_failed_pool_return
+test_return_transition_never_uses_a_worktree_path
 test_successful_pool_return_never_mutates_reused_slot
+test_failed_pool_return_never_restores_over_a_reused_slot
 test_foreign_transition_holder_retains_before_mutation
 test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation

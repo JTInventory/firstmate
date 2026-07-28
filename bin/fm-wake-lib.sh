@@ -21,11 +21,12 @@ fm_spawn_admission_lock_paths() {
   fm_spawn_admission_lock_path "$1"
 }
 
-fm_spawn_legacy_task_lock_busy() {
-  local state=$1 lock
+fm_spawn_legacy_task_lock_busy_except() {
+  local state=$1 excluded=${2:-} lock
   for lock in "$state"/.spawn-*.lock; do
     [ -e "$lock" ] || [ -L "$lock" ] || continue
     [ "$lock" != "$state/.spawn-admission.lock" ] || continue
+    [ -z "$excluded" ] || [ "$lock" != "$excluded" ] || continue
     if fm_lock_try_acquire "$lock"; then
       fm_lock_release "$lock"
       continue
@@ -33,6 +34,10 @@ fm_spawn_legacy_task_lock_busy() {
     return 0
   done
   return 1
+}
+
+fm_spawn_legacy_task_lock_busy() {
+  fm_spawn_legacy_task_lock_busy_except "$1" ""
 }
 
 fm_lifecycle_canonical_path() {

@@ -193,17 +193,16 @@ fm_slot_return_claim_path() {
 }
 
 fm_slot_return_legacy_path() {
-  local wt=$1 wt_real
-  wt_real=$(fm_agent_canonical_dir "$wt") || return 1
-  printf '%s/.fm-slot-return-owner' "$wt_real"
+  local wt=$1 claim
+  claim=$(fm_slot_return_claim_path "$wt") || return 1
+  printf '%s.owner' "$claim"
 }
 
-fm_slot_return_claim_record() {
-  local wt=$1 claim task_count home_count holder_count line_count
+fm_slot_return_claim_record_file() {
+  local claim=$1 task_count home_count holder_count line_count
   FM_SLOT_RETURN_CLAIM_TASK=
   FM_SLOT_RETURN_CLAIM_HOME=
   FM_SLOT_RETURN_CLAIM_HOLDER=
-  claim=$(fm_slot_return_claim_path "$wt") || return 2
   if [ ! -e "$claim" ] && [ ! -L "$claim" ]; then
     return 1
   fi
@@ -222,10 +221,18 @@ fm_slot_return_claim_record() {
     && [ -n "$FM_SLOT_RETURN_CLAIM_HOLDER" ] || return 2
 }
 
+fm_slot_return_claim_record() {
+  local wt=$1 claim
+  claim=$(fm_slot_return_claim_path "$wt") || return 2
+  fm_slot_return_claim_record_file "$claim"
+}
+
 fm_slot_stamp_stage_return() {
   local wt=$1 id=$2 home=$3 _state=$4 lease_holder=$5 path claim legacy tmp link_tmp
   FM_SLOT_RETURN_STAGED=0
   FM_SLOT_RETURN_CLAIM=
+  FM_SLOT_RETURN_STAMP_PATH=
+  FM_SLOT_RETURN_LEGACY=
   [ -n "$lease_holder" ] || return 1
   path=$(fm_slot_stamp_path "$wt") || return 1
   claim=$(fm_slot_return_claim_path "$wt") || return 1
@@ -236,7 +243,7 @@ fm_slot_stamp_stage_return() {
     mkdir "${claim%/*}" || return 1
   fi
   if [ -e "$claim" ] || [ -L "$claim" ]; then
-    fm_slot_return_claim_record "$wt" || return 1
+    fm_slot_return_claim_record_file "$claim" || return 1
     [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$id" ] \
       && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$home" \
       && [ "$FM_SLOT_RETURN_CLAIM_HOLDER" = "$lease_holder" ] || return 1
@@ -257,43 +264,49 @@ fm_slot_stamp_stage_return() {
       printf 'task=%s\nhome=%s\nlease_holder=%s\n' "$id" "$home" "$lease_holder" > "$tmp" \
         && mv "$tmp" "$claim" || { rm -f "$tmp"; return 1; }
     fi
-    tmp=$(mktemp "${legacy}.XXXXXX") || return 1
-    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-    printf 'task=%s\nhome=%s\n' "$id" "$home" > "$tmp" \
-      && mv "$tmp" "$legacy" || { rm -f "$tmp"; return 1; }
+    if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+      fm_slot_owner_record_file "$legacy" || return 1
+      [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+        && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
+    else
+      ( set -C; printf 'task=%s\nhome=%s\n' "$id" "$home" > "$legacy" ) \
+        2>/dev/null || return 1
+      chmod 600 "$legacy" || return 1
+    fi
     link_tmp="${path}.return.$$.$RANDOM"
     ln -s "$legacy" "$link_tmp" || return 1
     mv -f "$link_tmp" "$path" || { rm -f "$link_tmp"; return 1; }
-  elif [ ! -e "$claim" ] && [ ! -L "$claim" ]; then
+  else
+    [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
     return 0
   fi
   FM_SLOT_RETURN_STAGED=1
   FM_SLOT_RETURN_CLAIM=$claim
+  FM_SLOT_RETURN_STAMP_PATH=$path
+  FM_SLOT_RETURN_LEGACY=$legacy
 }
 
 fm_slot_stamp_restore_return() {
-  local wt=$1 id=$2 home=$3 claim=$4 lease_holder=$5 path legacy tmp
+  local wt=$1 id=$2 home=$3 claim=$4 lease_holder=$5
+  local path=${6:-} legacy=${7:-}
   [ -n "$claim" ] || return 0
-  fm_slot_return_claim_record "$wt" || return 1
+  [ -n "$path" ] && [ -n "$legacy" ] || return 1
+  fm_slot_return_claim_record_file "$claim" || return 1
   [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$id" ] \
     && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$home" \
     && [ "$FM_SLOT_RETURN_CLAIM_HOLDER" = "$lease_holder" ] || return 1
-  path=$(fm_slot_stamp_path "$wt") || return 1
-  legacy=$(fm_slot_return_legacy_path "$wt") || return 1
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -L "$path" ] && [ "$(readlink "$path" 2>/dev/null || true)" = "$legacy" ] || return 1
-  fi
-  tmp=$(mktemp "${path}.XXXXXX") || return 1
-  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  printf 'task=%s\nhome=%s\n' "$id" "$home" > "$tmp" \
-    && mv "$tmp" "$path" || { rm -f "$tmp"; return 1; }
-  rm -f "$legacy"
+  fm_slot_owner_record_file "$legacy" || return 1
+  [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+    && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
+  [ "$(fm_slot_stamp_path "$wt" 2>/dev/null || true)" = "$path" ] || return 1
+  [ -L "$path" ] && [ "$(readlink "$path" 2>/dev/null || true)" = "$legacy" ]
 }
 
 fm_slot_stamp_finalize_return() {
-  local claim=$1
+  local claim=$1 legacy=${2:-}
   [ -n "$claim" ] || return 0
-  rm -f "$claim"
+  [ -n "$legacy" ] || legacy="${claim}.owner"
+  rm -f "$legacy" "$claim"
 }
 
 # fm_slot_meta_worktree <meta-file>: the recorded worktree path, or empty.

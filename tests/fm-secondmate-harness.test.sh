@@ -909,13 +909,18 @@ test_bootstrap_liveness_holds_lifecycle_lock_through_kill_and_respawn() {
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
   fakebin=$(make_fake_toolchain "$w")
-  cat > "$w/main/bin/fm-spawn.sh" <<'SH'
+cat > "$w/main/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash
-legacy="$FM_LOCK_WORLD/sm/state/.spawn-admission.lock"
-current="$FM_LOCK_WORLD/sm/state/.locks/spawn-admission.lock"
-[ -L "$legacy" ] && [ -L "$current" ] || exit 51
-[ "$(cat "$legacy/pid")" = "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 52
-[ "$(cat "$current/pid")" = "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 53
+target_legacy="$FM_LOCK_WORLD/sm/state/.spawn-admission.lock"
+target_current="$FM_LOCK_WORLD/sm/state/.locks/spawn-admission.lock"
+primary_legacy="$FM_LOCK_WORLD/home/state/.spawn-admission.lock"
+primary_current="$FM_LOCK_WORLD/home/state/.locks/spawn-admission.lock"
+primary_task="$FM_LOCK_WORLD/home/state/.spawn-sm.lock"
+for lock in "$target_legacy" "$target_current" "$primary_legacy" "$primary_current" "$primary_task"; do
+  [ -L "$lock" ] || exit 51
+  [ "$(cat "$lock/pid")" = "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 52
+done
+[ "$FM_SPAWN_PRELOCK_TASK_ID" = sm ] || exit 53
 printf 'locked\n' > "$FM_LOCK_WORLD/liveness-spawn"
 exit 54
 SH
@@ -931,10 +936,18 @@ case "${1:-}" in
     esac
     ;;
   kill-window)
-    legacy="$FM_LOCK_WORLD/sm/state/.spawn-admission.lock"
-    current="$FM_LOCK_WORLD/sm/state/.locks/spawn-admission.lock"
-    [ -L "$legacy" ] && [ -L "$current" ] || exit 41
-    [ "$(cat "$legacy/pid")" = "$(cat "$current/pid")" ] || exit 42
+    owner=
+    for lock in \
+      "$FM_LOCK_WORLD/sm/state/.spawn-admission.lock" \
+      "$FM_LOCK_WORLD/sm/state/.locks/spawn-admission.lock" \
+      "$FM_LOCK_WORLD/home/state/.spawn-admission.lock" \
+      "$FM_LOCK_WORLD/home/state/.locks/spawn-admission.lock" \
+      "$FM_LOCK_WORLD/home/state/.spawn-sm.lock"; do
+      [ -L "$lock" ] || exit 41
+      pid=$(cat "$lock/pid")
+      [ -z "$owner" ] || [ "$pid" = "$owner" ] || exit 42
+      owner=$pid
+    done
     printf 'locked\n' > "$FM_LOCK_WORLD/liveness-kill"
     ;;
 esac
@@ -952,6 +965,25 @@ SH
   assert_contains "$out" "respawn failed after confirmed agent absence" \
     "liveness did not keep the locked transaction through respawn"
   pass "B17 bootstrap liveness serializes validation, kill, and respawn"
+}
+
+test_bootstrap_liveness_refuses_legacy_lifecycle_activity() {
+  local w head fakebin lock out
+  w=$(new_world bootstrap-legacy-liveness)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  fakebin=$(make_fake_toolchain "$w")
+  lock="$w/sm/state/.spawn-legacy.lock"
+  mkdir -p "$w/sm/state"
+  fm_lock_try_acquire "$lock" || fail "could not hold legacy liveness fixture lock"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  fm_lock_release "$lock"
+  assert_contains "$out" "lifecycle identity changed or lock is busy" \
+    "liveness did not refuse legacy lifecycle activity"
+  [ ! -e "$w/liveness-kill" ] && [ ! -e "$w/liveness-spawn" ] \
+    || fail "liveness crossed legacy lifecycle activity"
+  pass "B18 bootstrap liveness refuses legacy lifecycle activity"
 }
 
 test_harness_resolution
@@ -976,5 +1008,6 @@ test_config_push_exits_nonzero_on_copy_error
 test_config_push_respects_secondmate_lifecycle_lock
 test_bootstrap_liveness_refuses_ambiguous_provider_identity
 test_bootstrap_liveness_holds_lifecycle_lock_through_kill_and_respawn
+test_bootstrap_liveness_refuses_legacy_lifecycle_activity
 
 echo "# all fm-secondmate-harness tests passed"
