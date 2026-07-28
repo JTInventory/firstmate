@@ -60,6 +60,9 @@ SH
 if [ "$1" = push ]; then
   printf 'git-terminal-prompt=%s\n' "${GIT_TERMINAL_PROMPT:-unset}" >> "$GH_LOG"
   printf '%s\n' "$*" >> "$GH_LOG"
+  if [ -n "${FAKE_PUSH_SIGNAL:-}" ]; then
+    kill "-$FAKE_PUSH_SIGNAL" "$$"
+  fi
   exit "${FAKE_PUSH_FAIL:-0}"
 fi
 exec "$REAL_GIT" "$@"
@@ -73,7 +76,8 @@ printf 'timeout %s\n' "$*" >> "$GH_LOG"
     exit 98
   }
 [ "${FAKE_TIMEOUT_FAIL:-0}" -eq 0 ] || exit 124
-shift 2
+[ "$1" = -k ] && [ "$2" = 1 ] && [ "$3" = 30 ] || exit 2
+shift 3
 exec "$@"
 SH
   cat > "$dir/bin/gh" <<'SH'
@@ -103,8 +107,9 @@ run_merge() {
     FM_CAPTAIN_APPROVED_PR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     FM_CAPTAIN_APPROVED_PRESENTATION_NONCE=11111111111111111111111111111111 \
     FAKE_PUT_FAIL="${FAKE_PUT_FAIL:-0}" FAKE_PUSH_FAIL="${FAKE_PUSH_FAIL:-0}" \
-    FAKE_TIMEOUT_FAIL="${FAKE_TIMEOUT_FAIL:-0}" \
-    REAL_GIT="$REAL_GIT" GH_LOG="$dir/gh.log" "$dir/bin/fm-pr-merge.sh" "$@"
+    FAKE_PUSH_SIGNAL="${FAKE_PUSH_SIGNAL:-}" FAKE_TIMEOUT_FAIL="${FAKE_TIMEOUT_FAIL:-0}" \
+    BASH_ENV="${BASH_ENV:-}" REAL_GIT="$REAL_GIT" GH_LOG="$dir/gh.log" \
+    "$dir/bin/fm-pr-merge.sh" "$@"
 }
 
 test_approved_url_defaults_to_squash() {
@@ -149,7 +154,7 @@ test_compatible_merge_options_are_translated() {
     || fail 'compatible merge options failed'
   grep -qxF 'payload commit_title=123' "$dir/gh.log" || fail 'numeric subject was not preserved as a literal string'
   grep -qxF 'payload commit_message=@not-a-file' "$dir/gh.log" || fail 'at-prefixed body was not preserved as a literal string'
-  grep -qxF 'timeout --kill-after=1 30 env GIT_TERMINAL_PROMPT=0 git push --force-with-lease=refs/heads/codex/task-x1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa https://github.com/JTInventory/firstmate.git :refs/heads/codex/task-x1' "$dir/gh.log" \
+  grep -qxF 'timeout -k 1 30 env GIT_TERMINAL_PROMPT=0 git push --force-with-lease=refs/heads/codex/task-x1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa https://github.com/JTInventory/firstmate.git :refs/heads/codex/task-x1' "$dir/gh.log" \
     || fail 'requested remote branch deletion was not bounded and non-interactive'
   grep -qxF 'git-terminal-prompt=0' "$dir/gh.log" \
     || fail 'requested remote branch deletion could prompt for credentials'
@@ -195,6 +200,30 @@ test_branch_delete_timeout_is_warning_only() {
   pass 'branch deletion timeout remains warning-only after merge'
 }
 
+test_perl_timeout_reports_signaled_git_failure() {
+  local dir rc
+  dir=$(make_case perl-signal)
+  cat > "$dir/hide-timeout.sh" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in timeout|gtimeout) return 1 ;; esac
+  fi
+  builtin command "$@"
+}
+SH
+  set +e
+  BASH_ENV="$dir/hide-timeout.sh" FAKE_PUSH_SIGNAL=TERM FM_CAPTAIN_APPROVED_MERGE=1 \
+    run_merge "$dir" task-x1 https://github.com/JTInventory/firstmate/pull/47 -- --delete-branch \
+    >"$dir/stdout" 2>"$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail 'signaled Perl-fallback deletion changed merge success'
+  grep -q 'leased remote branch deletion failed' "$dir/stderr" \
+    || fail 'Perl fallback misreported signaled Git as successful'
+  ! grep -q '^timeout ' "$dir/gh.log" || fail 'Perl fallback test used an external timeout'
+  pass 'Perl timeout reports signaled Git failure'
+}
+
 test_deferred_merge_option_is_explicitly_refused() {
   local dir rc; dir=$(make_case auto)
   set +e
@@ -216,4 +245,5 @@ test_repo_override_refuses_and_explicit_method_is_preserved
 test_compatible_merge_options_are_translated
 test_branch_ref_is_decoded_and_deleted_with_lease
 test_branch_delete_timeout_is_warning_only
+test_perl_timeout_reports_signaled_git_failure
 test_deferred_merge_option_is_explicitly_refused

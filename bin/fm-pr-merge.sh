@@ -123,12 +123,12 @@ run_leased_branch_delete() {
     return 125
   fi
   if [ "$timeout_runner" = perl ]; then
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } my $stop = sub { my ($code) = @_; $SIG{ALRM} = $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit $code }; local $SIG{ALRM} = sub { $stop->(124) }; local $SIG{HUP} = sub { $stop->(129) }; local $SIG{INT} = sub { $stop->(130) }; local $SIG{TERM} = sub { $stop->(143) }; alarm $t; my $waited = waitpid $pid, 0; my $status = $?; alarm 0; exit 125 if $waited < 0; exit(128 + ($status & 127)) if $status & 127; exit($status >> 8)' \
       30 env GIT_TERMINAL_PROMPT=0 git push \
       --force-with-lease="refs/heads/$HEAD_REF:$PRESENTED_HEAD" \
       "$HEAD_PUSH_URL" ":refs/heads/$HEAD_REF"
   else
-    "$timeout_runner" --kill-after=1 30 env GIT_TERMINAL_PROMPT=0 git push \
+    "$timeout_runner" -k 1 30 env GIT_TERMINAL_PROMPT=0 git push \
       --force-with-lease="refs/heads/$HEAD_REF:$PRESENTED_HEAD" \
       "$HEAD_PUSH_URL" ":refs/heads/$HEAD_REF"
   fi
