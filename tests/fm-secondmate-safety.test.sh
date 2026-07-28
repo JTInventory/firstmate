@@ -32,6 +32,23 @@ hold_test_task_lock() {
   printf '%s\n' "$!"
 }
 
+start_legacy_lifecycle_process() {
+  local home=$1 state=$2 ready=$3 release=$4 dir script
+  dir="$TMP_ROOT/legacy-lifecycle-$RANDOM"
+  script="$dir/fm-spawn.sh"
+  mkdir -p "$dir" "$home" "$state"
+  cat > "$script" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_LEGACY_READY"
+while [ ! -e "$FM_TEST_LEGACY_RELEASE" ]; do sleep 0.02; done
+SH
+  chmod +x "$script"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_LEGACY_READY="$ready" FM_TEST_LEGACY_RELEASE="$release" \
+    "$script" >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
 
 test_fm_home_parameterization() {
   local brief fakebin home_one home_two out repo wt
@@ -1147,6 +1164,48 @@ test_secondmate_teardown_serializes_against_spawn() {
   pass "secondmate spawn and teardown serialize on one task identity lock"
 }
 
+test_secondmate_teardown_blocks_prelock_legacy_spawn() {
+  local home subhome fakebin log fmroot ready release holder err rc
+  home="$TMP_ROOT/legacy-prelock-home"
+  subhome="$TMP_ROOT/legacy-prelock-subhome"
+  fmroot="$TMP_ROOT/legacy-prelock-fmroot"
+  ready="$TMP_ROOT/legacy-prelock.ready"
+  release="$TMP_ROOT/legacy-prelock.release"
+  err="$TMP_ROOT/legacy-prelock.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/legacy-prelock-fake")
+  log="$TMP_ROOT/legacy-prelock-fake/tmux.log"
+  holder=$(start_legacy_lifecycle_process "$home" "$home/state" "$ready" "$release")
+  for _ in $(seq 1 50); do
+    [ -e "$ready" ] && break
+    sleep 0.02
+  done
+  [ -e "$ready" ] || fail "legacy pre-lock process did not start"
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/legacy-prelock-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  touch "$release"
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "teardown crossed a legacy spawn before its task lock"
+  grep -F 'older spawn or teardown is still starting' "$err" >/dev/null \
+    || fail "legacy pre-lock refusal lost its reason"
+  [ ! -s "$log" ] || fail "legacy pre-lock refusal closed an endpoint"
+  [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
+    || fail "legacy pre-lock refusal mutated lifecycle state"
+  pass "secondmate teardown blocks a scoped legacy spawn before task locking"
+}
+
 test_secondmate_teardown_blocks_child_publication_during_census() {
   local home subhome childhome fakebin log fmroot ready release err spawn_err teardown_pid rc
   home="$TMP_ROOT/teardown-admission-home"
@@ -1586,6 +1645,67 @@ test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
   pass "force teardown preserves linked child ownership when treehouse is unavailable"
 }
 
+test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
+  local home subhome nested grandproj grandwt fmroot fakebin log err rc before after
+  local grand_stamp
+  home="$TMP_ROOT/no-treehouse-recursive-home"
+  subhome="$TMP_ROOT/no-treehouse-recursive-subhome"
+  nested="$TMP_ROOT/no-treehouse-recursive-nested"
+  grandproj="$nested/projects/alpha"
+  grandwt="$TMP_ROOT/no-treehouse-recursive-grandchild"
+  fmroot="$TMP_ROOT/no-treehouse-recursive-fmroot"
+  err="$TMP_ROOT/no-treehouse-recursive.err"
+  make_firstmate_git_root "$fmroot"
+  make_firstmate_git_root "$subhome"
+  make_firstmate_git_root "$nested"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$nested/state"
+  fm_git_worktree "$grandproj" "$grandwt" no-treehouse-grandchild
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'child\n' > "$nested/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$nested" "project=$nested" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$nested" "projects=alpha"
+  fm_write_meta "$nested/state/grand.meta" \
+    "window=firstmate:fm-grand" "worktree=$grandwt" "project=$grandproj" \
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$grandwt" grand "$nested" ) \
+    || fail "recursive missing-treehouse fixture could not be stamped"
+  before=$(cksum "$home/state/domain.meta" "$subhome/state/child.meta" \
+    "$nested/state/grand.meta" "$home/data/secondmates.md")
+  fakebin=$(make_fake_tmux "$TMP_ROOT/no-treehouse-recursive-fake")
+  log="$TMP_ROOT/no-treehouse-recursive-fake/tmux.log"
+  rm -f "$fakebin/treehouse"
+  set +e
+  PATH="$fakebin:/usr/bin:/bin" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/no-treehouse-recursive-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recursive teardown crossed missing Treehouse capability"
+  after=$(cksum "$home/state/domain.meta" "$subhome/state/child.meta" \
+    "$nested/state/grand.meta" "$home/data/secondmates.md")
+  [ "$after" = "$before" ] || fail "recursive preflight changed lifecycle records"
+  [ ! -s "$log" ] || fail "recursive preflight closed an endpoint"
+  [ -d "$subhome" ] && [ -d "$nested" ] && [ -d "$grandwt" ] \
+    || fail "recursive preflight removed a home or worktree"
+  grand_stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$grandwt" task )
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$subhome" ) 2>/dev/null \
+    && fail "recursive preflight added a stamp to the plain parent home"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$nested" ) 2>/dev/null \
+    && fail "recursive preflight added a stamp to the plain nested home"
+  [ "$grand_stamp" = grand ] \
+    || fail "recursive preflight changed pooled ownership stamps"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
+    || fail "recursive preflight removed the parent route"
+  pass "recursive missing-Treehouse preflight preserves every nested lifecycle surface"
+}
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
   for opdir in data state config projects; do
@@ -1946,12 +2066,9 @@ test_secondmate_force_teardown_refuses_child_repo_descendant() {
   fakeroot="$TMP_ROOT/child-repo-descendant-root"
   childwt="$fakeroot/data"
   err="$TMP_ROOT/child-repo-descendant.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt" "$fakeroot/bin"
-  cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakeroot/bin/fm-guard.sh"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
+  make_firstmate_git_root "$fakeroot"
+  mkdir -p "$childwt"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -1997,6 +2114,7 @@ test_secondmate_force_teardown_refuses_unregistered_child_worktree() {
   childwt="$TMP_ROOT/unregistered-child-worktree"
   err="$TMP_ROOT/unregistered-child.err"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
+  fm_git_init_commit "$childproj"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -2030,7 +2148,8 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after unregistered child refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after unregistered child refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before unregistered child refusal"
-  grep -F 'is not a git worktree for' "$err" >/dev/null || fail "force teardown did not explain unregistered child rejection"
+  grep -F 'unregistered git worktree registration' "$err" >/dev/null \
+    || fail "force teardown did not explain unregistered child rejection"
   pass "force teardown refuses unregistered child worktree paths"
 }
 
@@ -2240,6 +2359,7 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_serializes_against_spawn
+test_secondmate_teardown_blocks_prelock_legacy_spawn
 test_secondmate_teardown_blocks_child_publication_during_census
 test_secondmate_teardown_refuses_home_referenced_by_another_task
 test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent
@@ -2248,6 +2368,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_preserves_linked_child_without_treehouse
+test_secondmate_force_teardown_recursively_preserves_without_treehouse
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home

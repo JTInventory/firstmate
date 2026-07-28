@@ -117,6 +117,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+export FM_LIFECYCLE_HOME="$FM_HOME" FM_LIFECYCLE_STATE="$STATE"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tool-path-lib.sh
 . "$SCRIPT_DIR/fm-tool-path-lib.sh"
@@ -470,6 +471,10 @@ while IFS= read -r SPAWN_ADMISSION_LOCK; do
 done < <(fm_spawn_admission_lock_paths "$STATE")
 if fm_spawn_legacy_task_lock_busy "$STATE"; then
   echo "error: an older spawn or teardown is still changing this firstmate home" >&2
+  exit 1
+fi
+if fm_spawn_legacy_lifecycle_process_busy "$FM_HOME" "$STATE" "$$"; then
+  echo "error: an older spawn or teardown is still starting in this firstmate home" >&2
   exit 1
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"

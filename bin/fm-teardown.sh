@@ -73,6 +73,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+export FM_LIFECYCLE_HOME="$FM_HOME" FM_LIFECYCLE_STATE="$STATE"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tool-path-lib.sh
@@ -117,7 +118,7 @@ teardown_task_lock_acquire() {
 }
 
 teardown_admission_lock_acquire() {
-  local state_dir=$1 lock held already acquired=0
+  local state_dir=$1 target_home=$2 lock held already acquired=0
   while IFS= read -r lock; do
     [ -n "$lock" ] || continue
     already=0
@@ -138,6 +139,10 @@ teardown_admission_lock_acquire() {
     echo "REFUSED: an older spawn or teardown is still changing $state_dir" >&2
     return 1
   fi
+  if fm_spawn_legacy_lifecycle_process_busy "$target_home" "$state_dir" "$$"; then
+    echo "REFUSED: an older spawn or teardown is still starting in $target_home" >&2
+    return 1
+  fi
 }
 
 teardown_locks_release() {
@@ -149,7 +154,7 @@ teardown_locks_release() {
 }
 
 trap teardown_locks_release EXIT
-teardown_admission_lock_acquire "$STATE" || exit 1
+teardown_admission_lock_acquire "$STATE" "$FM_HOME" || exit 1
 teardown_task_lock_acquire "$STATE" "$ID" || exit 1
 
 META="$STATE/$ID.meta"
@@ -641,29 +646,31 @@ removal_target_abs_path() {
   fi
 }
 
-worktree_registered_for_project() {
+worktree_registration_verdict() {
   local project=$1 target=$2 abs_target listed line listed_abs
-  [ -n "$project" ] || return 1
-  [ -d "$project" ] || return 1
-  git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
-  abs_target=$(removal_target_abs_path "$target")
-  listed=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  [ -n "$project" ] || { printf '%s\n' unknown; return; }
+  [ -d "$project" ] || { printf '%s\n' unknown; return; }
+  git -C "$project" rev-parse --git-dir >/dev/null 2>&1 \
+    || { printf '%s\n' unknown; return; }
+  abs_target=$(removal_target_abs_path "$target" 2>/dev/null) \
+    || { printf '%s\n' unknown; return; }
+  listed=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) \
+    || { printf '%s\n' unknown; return; }
   while IFS= read -r line; do
     case "$line" in
       worktree\ *)
         listed_abs=$(removal_target_abs_path "${line#worktree }" 2>/dev/null || true)
-        [ "$listed_abs" = "$abs_target" ] && return 0
+        [ "$listed_abs" = "$abs_target" ] && { printf '%s\n' registered; return; }
         ;;
     esac
   done <<EOF
 $listed
 EOF
-  return 1
+  printf '%s\n' unregistered
 }
 
-firstmate_home_has_treehouse_slot() {
-  local home=$1
-  worktree_registered_for_project "$FM_ROOT" "$home"
+firstmate_home_treehouse_slot_verdict() {
+  worktree_registration_verdict "$FM_ROOT" "$1"
 }
 
 require_treehouse_return_capability() {
@@ -763,25 +770,26 @@ validate_firstmate_operational_dirs_for_removal() {
 }
 
 validate_child_worktree_for_removal() {
-  local target=$1 project=$2 abs_target abs_home abs_root
+  local target=$1 project=$2 label=${3:-child worktree} abs_target abs_home abs_root registration
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
-  abs_target=$(validate_removal_target "$target" "child worktree") || return 1
+  abs_target=$(validate_removal_target "$target" "$label") || return 1
   if abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
     if path_is_ancestor_of "$abs_home" "$abs_target"; then
-      echo "REFUSED: unsafe child worktree removal target $target is inside the active firstmate home" >&2
+      echo "REFUSED: unsafe $label removal target $target is inside the active firstmate home" >&2
       return 1
     fi
   fi
   abs_root=$(cd "$FM_ROOT" && pwd -P)
   if path_is_ancestor_of "$abs_root" "$abs_target"; then
-    echo "REFUSED: unsafe child worktree removal target $target is inside the firstmate repo" >&2
+    echo "REFUSED: unsafe $label removal target $target is inside the firstmate repo" >&2
     return 1
   fi
-  if ! worktree_registered_for_project "$project" "$target"; then
-    echo "REFUSED: unsafe child worktree removal target $target is not a git worktree for ${project:-the recorded project}" >&2
+  registration=$(worktree_registration_verdict "$project" "$target")
+  [ "$registration" = registered ] || {
+    echo "REFUSED: unsafe $label removal target $target has ${registration} git worktree registration for ${project:-the recorded project}" >&2
     return 1
-  fi
+  }
   printf '%s\n' "$abs_target"
 }
 
@@ -855,32 +863,40 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worke
 }
 
 remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scope]
-  local home=$1 label=$2 expected_id=${3:-} state_scope=${4:-$STATE} home_scope=${5:-$FM_HOME} abs_home_path
+  local home=$1 label=$2 expected_id=${3:-} state_scope=${4:-$STATE} home_scope=${5:-$FM_HOME} abs_home_path slot_verdict
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
-  if firstmate_home_has_treehouse_slot "$abs_home_path"; then
-    command -v treehouse >/dev/null 2>&1 || {
-      echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
+  slot_verdict=$(firstmate_home_treehouse_slot_verdict "$abs_home_path")
+  case "$slot_verdict" in
+    registered)
+      command -v treehouse >/dev/null 2>&1 || {
+        echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
+        return 1
+      }
+      slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
+        "$home_scope" "$abs_home_path" secondmate "$label" refuse || return 1
+      teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+        echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+        return 1
+      }
+      fm_slot_stamp_clear_exact "$abs_home_path" "${expected_id:-$ID}" "$home_scope" || return 1
+      ;;
+    unregistered)
+      safe_rm_rf "$abs_home_path" "$label" || return 1
+      ;;
+    *)
+      echo "REFUSED: pooled-slot classification is unknown for $label $abs_home_path" >&2
       return 1
-    }
-    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
-      "$home_scope" "$abs_home_path" secondmate "$label" refuse || return 1
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
-      return 1
-    }
-    fm_slot_stamp_clear_exact "$abs_home_path" "${expected_id:-$ID}" "$home_scope" || return 1
-    return 0
-  fi
-  safe_rm_rf "$abs_home_path" "$label"
+      ;;
+  esac
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home
+  local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home slot_verdict
   sub_state="$home/state"
-  teardown_admission_lock_acquire "$sub_state" || return 1
+  teardown_admission_lock_acquire "$sub_state" "$home" || return 1
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
@@ -899,11 +915,19 @@ validate_firstmate_home_children_removal() {
         return 1
       fi
       validate_firstmate_home_children_removal "$child_home" || return 1
-      if firstmate_home_has_treehouse_slot "$child_home"; then
-        require_treehouse_return_capability "child firstmate home" "$child_home" || return 1
-        slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" "$child_home" \
-          secondmate "child firstmate home" refuse || return 1
-      fi
+      slot_verdict=$(firstmate_home_treehouse_slot_verdict "$child_home")
+      case "$slot_verdict" in
+        registered)
+          require_treehouse_return_capability "child firstmate home" "$child_home" || return 1
+          slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" "$child_home" \
+            secondmate "child firstmate home" refuse || return 1
+          ;;
+        unregistered) ;;
+        *)
+          echo "REFUSED: pooled-slot classification is unknown for child firstmate home $child_home" >&2
+          return 1
+          ;;
+      esac
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -1016,12 +1040,20 @@ remove_secondmate_registry_entry() {
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
-  teardown_admission_lock_acquire "$HOME_PATH/state" || exit 1
-  if firstmate_home_has_treehouse_slot "$HOME_PATH"; then
-    require_treehouse_return_capability "secondmate home" "$HOME_PATH" || exit 1
-    slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
-      secondmate "secondmate home" refuse || exit 1
-  fi
+  teardown_admission_lock_acquire "$HOME_PATH/state" "$HOME_PATH" || exit 1
+  TOP_HOME_SLOT_VERDICT=$(firstmate_home_treehouse_slot_verdict "$HOME_PATH")
+  case "$TOP_HOME_SLOT_VERDICT" in
+    registered)
+      require_treehouse_return_capability "secondmate home" "$HOME_PATH" || exit 1
+      slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
+        secondmate "secondmate home" refuse || exit 1
+      ;;
+    unregistered) ;;
+    *)
+      echo "REFUSED: pooled-slot classification is unknown for secondmate home $HOME_PATH" >&2
+      exit 1
+      ;;
+  esac
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
@@ -1115,8 +1147,8 @@ fi
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 validate_direct_pr_state_cleanup || exit 1
 validate_direct_pr_ref_cleanup || exit 1
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-   && [ -d "$WT" ] && worktree_registered_for_project "$PROJ" "$WT"; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ]; then
+  validate_child_worktree_for_removal "$WT" "$PROJ" "worktree" >/dev/null || exit 1
   require_treehouse_return_capability "worktree" "$WT" || exit 1
 fi
 

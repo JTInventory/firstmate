@@ -33,6 +33,9 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "update" || exit 1
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
@@ -48,7 +51,7 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 FM_UPDATE_ADMISSION_LOCKS=()
 
 fm_ff_target_lock_acquire() {
-  local state_dir=$1 _label=${2:-target} lock
+  local state_dir=$1 _label=${2:-target} target_home=${3:-} lock
   FM_UPDATE_ADMISSION_LOCKS=()
   while IFS= read -r lock; do
     [ -n "$lock" ] || continue
@@ -63,7 +66,7 @@ fm_ff_target_lock_acquire() {
     fm_ff_target_lock_release
     return 1
   fi
-  if fm_spawn_legacy_lifecycle_process_busy; then
+  if fm_spawn_legacy_lifecycle_process_busy "$target_home" "$state_dir"; then
     fm_ff_target_lock_release
     return 1
   fi
@@ -144,7 +147,7 @@ reread_firstmate_generation=""
 restart_firstmate_watcher="no"
 reread_marker=$(fm_watcher_protocol_reread_marker "$STATE")
 fm_update_obligation_pending "$reread_marker" "$FM_ROOT" && reread_firstmate="yes"
-if fm_ff_target_lock_acquire "$STATE" firstmate; then
+if fm_ff_target_lock_acquire "$STATE" firstmate "$FM_HOME"; then
   ff_target "$FM_ROOT" "firstmate" origin no no "$reread_marker" instructions
   fm_ff_target_lock_release
 else

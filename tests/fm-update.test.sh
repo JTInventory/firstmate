@@ -596,9 +596,34 @@ test_future_only_legacy_generation_updates_on_first_retry() {
   pass "T19 future-only legacy generations recover on the first retry"
 }
 
+test_update_refuses_workers_before_state_resolution() {
+  local w owner foreign out rc
+  w=$(new_world t20-worker-guard)
+  owner="$w/owner"
+  foreign="$w/foreign"
+  mkdir -p "$owner" "$foreign"
+
+  rc=0
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$foreign" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=worker FM_AGENT_OWNER_HOME="$owner" \
+    "$UPDATE" --ack-reread-firstmate bogus 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "crewmate update acknowledgement was allowed"
+  assert_contains "$out" "update refused" "crewmate update refusal lost its operation"
+  [ ! -e "$foreign/state" ] || fail "crewmate update resolved foreign operational state"
+
+  rc=0
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$foreign" \
+    FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$owner" \
+    "$UPDATE" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "foreign-home secondmate update was allowed"
+  assert_contains "$out" "update refused" "secondmate update refusal lost its operation"
+  [ ! -e "$foreign/state" ] || fail "secondmate update resolved foreign operational state"
+  pass "T20 update refuses workers before state or acknowledgement mutation"
+}
+
 test_update_waits_for_legacy_admission_and_task_locks() {
   local w out before lock holder
-  w=$(new_world t20)
+  w=$(new_world t21)
   bump_origin "$w" readme
   before=$(git -C "$w/main" rev-parse HEAD)
 
@@ -623,10 +648,16 @@ test_update_waits_for_legacy_admission_and_task_locks() {
     rm -f "$w/lock-ready" "$w/release-lock"
   done
 
-  bash -c 'exec -a /legacy/bin/fm-spawn.sh sleep 300' &
+  mkdir -p "$w/legacy"
+  cat > "$w/legacy/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+while :; do sleep 1; done
+SH
+  chmod +x "$w/legacy/fm-spawn.sh"
+  FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" "$w/legacy/fm-spawn.sh" &
   holder=$!
   UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
-  while ! ps -p "$holder" -o command= 2>/dev/null | grep -F '/legacy/bin/fm-spawn.sh' >/dev/null; do
+  while ! ps -p "$holder" -o command= 2>/dev/null | grep -F "$w/legacy/fm-spawn.sh" >/dev/null; do
     sleep 0.05
   done
   out=$(run_update "$w")
@@ -640,7 +671,32 @@ test_update_waits_for_legacy_admission_and_task_locks() {
   out=$(run_update "$w")
   assert_contains "$out" "firstmate: updated " \
     "update did not advance after mixed-version lifecycle locks released"
-  pass "T20 update bridges legacy admission and task-only lifecycle locks"
+  pass "T21 update bridges legacy admission and task-only lifecycle locks"
+}
+
+test_update_ignores_legacy_lifecycle_process_for_another_home() {
+  local w other out holder
+  w=$(new_world t22)
+  other="$w/other-home"
+  mkdir -p "$other/state" "$w/legacy-other"
+  bump_origin "$w" readme
+  cat > "$w/legacy-other/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+while :; do sleep 1; done
+SH
+  chmod +x "$w/legacy-other/fm-teardown.sh"
+  FM_HOME="$other" FM_STATE_OVERRIDE="$other/state" "$w/legacy-other/fm-teardown.sh" &
+  holder=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
+  while ! ps -p "$holder" -o command= 2>/dev/null | grep -F "$w/legacy-other/fm-teardown.sh" >/dev/null; do
+    sleep 0.05
+  done
+  out=$(run_update "$w")
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "firstmate: updated " \
+    "unrelated-home legacy lifecycle process starved update"
+  pass "T22 update ignores legacy lifecycle work in another canonical home"
 }
 
 test_updates_main_and_secondmate
@@ -660,6 +716,8 @@ test_immutable_generations_preserve_prepared_and_newer_markers
 test_skipped_update_reports_existing_generation
 test_future_legacy_generation_survives_concurrent_ack
 test_future_only_legacy_generation_updates_on_first_retry
+test_update_refuses_workers_before_state_resolution
 test_update_waits_for_legacy_admission_and_task_locks
+test_update_ignores_legacy_lifecycle_process_for_another_home
 
 echo "# all fm-update tests passed"

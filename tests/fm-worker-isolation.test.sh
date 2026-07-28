@@ -986,6 +986,46 @@ test_ordinary_teardown_acquires_admission_before_task_lock() {
   pass "ordinary teardown acquires home admission before its task lock"
 }
 
+test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation() {
+  local rec fakebin out status stamp log
+  rec=$(make_slot_world slot-ambiguous-disposal)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  log="$WORLD/tmux.log"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  mkdir -p "$WORLD/corrupt-project"
+  fm_write_meta "$WORLD/home/state/task-e14.meta" \
+    "window=firstmate:fm-task-e14" "worktree=$WT_DIR" \
+    "project=$WORLD/corrupt-project" "harness=claude" "kind=scout" \
+    "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e14 "$WORLD/home" ) \
+    || fail "ambiguous-disposal fixture could not be stamped"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:/usr/bin:/bin" \
+    "$TEARDOWN" task-e14 --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "ordinary teardown accepted ambiguous disposal classification"
+  assert_contains "$out" "unknown git worktree registration" \
+    "ambiguous disposal refusal lost its classification"
+  [ ! -s "$log" ] || fail "ambiguous disposal preflight closed the endpoint"
+  assert_present "$WORLD/home/state/task-e14.meta" \
+    "ambiguous disposal preflight removed task metadata"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = task-e14 ] || fail "ambiguous disposal preflight changed ownership evidence"
+  pass "ordinary teardown refuses ambiguous disposal before lifecycle mutation"
+}
+
 # --- F. restore-time re-assertion -------------------------------------------
 
 make_sweep_home() {
@@ -1258,6 +1298,7 @@ test_teardown_retires_a_contested_lease_even_with_force
 test_retained_stamp_survives_failed_metadata_retirement
 test_stamp_survives_failed_pool_return
 test_ordinary_teardown_acquires_admission_before_task_lock
+test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence

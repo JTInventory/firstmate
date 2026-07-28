@@ -533,7 +533,7 @@ process_secondmate() {
 
   reread_marker="$home_real/state/.watch-protocol-reread-required"
   if [ "$(type -t fm_ff_target_lock_acquire 2>/dev/null || true)" = function ]; then
-    if ! fm_ff_target_lock_acquire "$home_real/state" "secondmate $id"; then
+    if ! fm_ff_target_lock_acquire "$home_real/state" "secondmate $id" "$home_real"; then
       FF_STATUS="skipped"
       FF_INSTR=""
       echo "secondmate $id: skipped: spawn or teardown is active"
