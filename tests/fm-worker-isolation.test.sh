@@ -539,9 +539,9 @@ $1
 EOF
 }
 
-slot_verdict() {  # <state> <id> <wt> <home> [role]
+slot_verdict() {  # <state> <id> <wt> <stamp-home> [role] [worker-home]
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
-    && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${5:-crewmate}" )
+    && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" "${5:-crewmate}" )
 }
 
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
@@ -687,7 +687,7 @@ test_a_relinquished_slot_is_releasable_by_its_remaining_holder() {
     *) fail "the stamped owner did not retain against the paused task's record: $verdict" ;;
   esac
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
-    && fm_slot_stamp_relinquish "$WT_DIR" owner-e7 "$verdict" )
+    && fm_slot_stamp_relinquish "$WT_DIR" owner-e7 "$WORLD/home" "$verdict" )
   stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = none ] \
@@ -723,7 +723,7 @@ test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
     *) fail "the metadata conflict was not the retain reason under test: $verdict" ;;
   esac
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
-    && fm_slot_stamp_relinquish "$WT_DIR" stale-e8 "$verdict" )
+    && fm_slot_stamp_relinquish "$WT_DIR" stale-e8 "$WORLD/home" "$verdict" )
   stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = reissued-e8 ] \
@@ -736,6 +736,24 @@ test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
     *) fail "a preserved stamp stopped blocking disposal for a stale task: $verdict" ;;
   esac
   pass "a stamp naming another task survives a retain and still blocks that slot's disposal"
+}
+
+test_same_task_stamp_in_another_home_survives_relinquish() {
+  local rec verdict stamp_home
+  rec=$(make_slot_world slot-same-task-foreign-home)
+  read_slot_world "$rec"
+  mkdir -p "$WORLD/foreign-home"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" shared-e10 "$WORLD/foreign-home" ) \
+    || fail "could not stamp the foreign-home same-task fixture"
+  verdict="retain: slot is also recorded by task(s) paused-e10 in this home"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_relinquish "$WT_DIR" shared-e10 "$WORLD/home" "$verdict" )
+  stamp_home=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" home || printf 'none' )
+  [ "$stamp_home" = "$WORLD/foreign-home" ] \
+    || fail "same task id from another home cleared the foreign ownership stamp: $stamp_home"
+  pass "relinquish clears only the exact task and canonical owner-home claim"
 }
 
 test_teardown_retires_a_contested_lease_even_with_force() {
@@ -1047,6 +1065,7 @@ test_a_live_agent_of_another_task_retains_the_slot
 test_same_task_in_another_home_or_role_retains_the_slot
 test_a_relinquished_slot_is_releasable_by_its_remaining_holder
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks
+test_same_task_stamp_in_another_home_survives_relinquish
 test_teardown_retires_a_contested_lease_even_with_force
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker

@@ -81,6 +81,20 @@ fm_slot_stamp_path() {
   printf '%s/%s' "$git_dir" "$FM_SLOT_OWNER_STAMP_NAME"
 }
 
+fm_slot_is_plain_checkout() {
+  local wt=$1 git_dir common_dir
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  git_dir=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  common_dir=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$wt/$common_dir" ;;
+  esac
+  git_dir=$(fm_agent_canonical_dir "$git_dir") || return 1
+  common_dir=$(fm_agent_canonical_dir "$common_dir") || return 1
+  [ "$git_dir" = "$common_dir" ]
+}
+
 # fm_slot_stamp_write <worktree> <task-id> <home>: claim current ownership of
 # the slot without replacing another owner's evidence.
 fm_slot_stamp_write() {
@@ -186,7 +200,8 @@ fm_slot_live_occupant_tasks() {
     [ -n "$task" ] || continue
     home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME) || home=
     role=$(fm_agent_proc_env "$pid" FM_AGENT_ROLE) || role=
-    if [ "$task" = "$self" ] && [ "$home" = "$self_home" ] && [ "$role" = "$self_role" ]; then
+    if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
+       && fm_slot_same_path "$home" "$self_home"; then
       continue
     fi
     cwd=$(fm_agent_proc_cwd "$pid") || continue
@@ -203,10 +218,11 @@ fm_slot_join_ids() {
   printf '%s' "$1" | LC_ALL=C sort -u | tr '\n' ',' | sed 's/,$//'
 }
 
-# fm_slot_disposal_verdict <state-dir> <task-id> <worktree> <home> <role>
+# fm_slot_disposal_verdict <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role>
 # Print exactly `dispose` or `retain: <reason>`.
 fm_slot_disposal_verdict() {
-  local state=$1 self=$2 wt=$3 home=$4 role=$5 stamp_task stamp_home refs occupants
+  local state=$1 self=$2 wt=$3 stamp_owner_home=$4 worker_home=$5 role=$6
+  local stamp_task stamp_home refs occupants
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     printf 'dispose'
     return 0
@@ -221,20 +237,20 @@ fm_slot_disposal_verdict() {
       return 0
     fi
     if stamp_home=$(fm_slot_stamp_field "$wt" home); then
-      if [ -n "$home" ] && ! fm_slot_same_path "$stamp_home" "$home"; then
-        printf 'retain: slot ownership stamp names home %s, not %s' "$stamp_home" "$home"
+      if [ -n "$stamp_owner_home" ] && ! fm_slot_same_path "$stamp_home" "$stamp_owner_home"; then
+        printf 'retain: slot ownership stamp names home %s, not %s' "$stamp_home" "$stamp_owner_home"
         return 0
       fi
     fi
   fi
-  if occupants=$(fm_slot_live_occupant_tasks "$wt" "$self" "$home" "$role"); then
+  if occupants=$(fm_slot_live_occupant_tasks "$wt" "$self" "$worker_home" "$role"); then
     printf 'retain: a live agent for task(s) %s is running in the slot' "$(fm_slot_join_ids "$occupants")"
     return 0
   fi
   printf 'dispose'
 }
 
-# fm_slot_stamp_relinquish <worktree> <task-id> <verdict>
+# fm_slot_stamp_relinquish <worktree> <task-id> <home> <verdict>
 # Give up THIS task's claim on a slot it is retaining, so a retained lease can
 # still be released later by whoever is left holding it.
 #
@@ -267,14 +283,16 @@ fm_slot_disposal_verdict() {
 #
 # Always succeeds: a slot with no stamp, or one stamped for someone else, simply
 # keeps whatever evidence it has.
-fm_slot_stamp_relinquish() {  # <worktree> <task-id> <verdict>
-  local wt=$1 self=$2 verdict=$3 stamp_task
+fm_slot_stamp_relinquish() {  # <worktree> <task-id> <home> <verdict>
+  local wt=$1 self=$2 home=$3 verdict=$4 stamp_task stamp_home
   case "$verdict" in
     "$FM_SLOT_RETAIN_META_PREFIX"*) ;;
     *) return 0 ;;
   esac
   stamp_task=$(fm_slot_stamp_field "$wt" task) || return 0
   [ "$stamp_task" = "$self" ] || return 0
+  stamp_home=$(fm_slot_stamp_field "$wt" home) || return 0
+  fm_slot_same_path "$stamp_home" "$home" || return 0
   fm_slot_stamp_clear "$wt"
   return 0
 }

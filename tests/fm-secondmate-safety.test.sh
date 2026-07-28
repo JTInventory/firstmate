@@ -12,6 +12,26 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 
+hold_test_task_lock() {
+  local state=$1 id=$2 ready=$3
+  (
+    exec env FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      lock=$2
+      fm_lock_try_acquire "$lock" || exit 1
+      : > "$3"
+      cleanup() {
+        trap - EXIT TERM INT
+        fm_lock_release "$lock"
+        exit 0
+      }
+      trap cleanup EXIT TERM INT
+      while :; do sleep 1; done
+    ' _ "$ROOT" "$state/.spawn-$id.lock" "$ready"
+  ) >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
 
 test_fm_home_parameterization() {
   local brief fakebin home_one home_two out repo wt
@@ -981,6 +1001,33 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
   pass "secondmate spawn refuses operational directories outside the subhome"
 }
 
+test_secondmate_spawn_allows_plain_clone_home_without_stamp() {
+  local home subhome fakebin log out rc
+  home="$TMP_ROOT/plain-clone-spawn-home"
+  subhome="$TMP_ROOT/plain-clone-spawn-subhome"
+  mkdir -p "$home/data/domain" "$home/state" "$home/config" "$home/projects"
+  printf 'brief\n' > "$home/data/domain/brief.md"
+  make_firstmate_git_root "$subhome"
+  mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-spawn-fake")
+  log="$TMP_ROOT/plain-clone-spawn-fake/tmux.log"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
+    TMUX="fake,1,0" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/plain-clone-spawn-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "plain-clone secondmate spawn failed"$'\n'"$out"
+  [ -f "$home/state/domain.meta" ] || fail "plain-clone secondmate spawn did not publish metadata"
+  [ ! -e "$home/state/.spawn-domain.lock" ] \
+    || fail "successful plain-clone spawn left its task lock held"
+  if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$subhome" task >/dev/null 2>&1 ); then
+    fail "plain-clone secondmate spawn wrote a pooled-slot stamp"
+  fi
+  pass "plain-clone secondmate homes launch without pooled-slot ownership stamps"
+}
+
 test_fm_send_refuses_bare_window_without_home_meta() {
   # The happy path (a bare fm-<id> resolves the window recorded in THIS home's
   # meta and never a foreign same-named window) is asserted in the lifecycle e2e.
@@ -1006,7 +1053,7 @@ test_fm_send_refuses_bare_window_without_home_meta() {
 }
 
 test_secondmate_teardown_retires_empty_home() {
-  local home subhome subhome_abs fakebin log lease fmroot
+  local home subhome subhome_abs fakebin log lease fmroot agent_pid rc
   home="$TMP_ROOT/teardown-home"
   subhome="$TMP_ROOT/teardown-subhome"
   fmroot="$TMP_ROOT/teardown-fmroot"
@@ -1031,16 +1078,71 @@ EOF
   log="$TMP_ROOT/teardown-fake/tmux.log"
   lease="$TMP_ROOT/teardown-fake/lease"
   printf 'domain\n' > "$lease"
+  ( cd "$subhome" \
+    && FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$subhome_abs" \
+      exec sleep 300 ) >/dev/null 2>&1 &
+  agent_pid=$!
+  for _ in $(seq 1 50); do
+    [ -e "/proc/$agent_pid/cwd" ] && break
+    sleep 0.02
+  done
+  set +e
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
-    || fail "teardown failed for empty secondmate home"
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  kill "$agent_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "teardown treated its live secondmate as a foreign slot occupant"
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not release the secondmate home lease via treehouse return"
   [ ! -e "$lease" ] || fail "teardown left the secondmate home lease held after retirement"
   [ ! -d "$subhome" ] || fail "teardown did not remove the retired secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
   pass "secondmate teardown retires empty homes and releases routing"
+}
+
+test_secondmate_teardown_serializes_against_spawn() {
+  local home subhome fakebin log fmroot ready holder err rc
+  home="$TMP_ROOT/teardown-lock-home"
+  subhome="$TMP_ROOT/teardown-lock-subhome"
+  fmroot="$TMP_ROOT/teardown-lock-fmroot"
+  ready="$TMP_ROOT/teardown-lock.ready"
+  err="$TMP_ROOT/teardown-lock.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-lock-fake")
+  log="$TMP_ROOT/teardown-lock-fake/tmux.log"
+  holder=$(hold_test_task_lock "$home/state" domain "$ready")
+  for _ in $(seq 1 50); do
+    [ -e "$ready" ] && break
+    sleep 0.02
+  done
+  [ -e "$ready" ] || fail "task-lock holder did not start"
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-lock-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "teardown raced through an active spawn task lock"
+  grep -F 'spawn or teardown is already changing task domain' "$err" >/dev/null \
+    || fail "teardown task-lock refusal lost its reason"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "teardown closed the endpoint while spawn held the task lock"
+  [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
+    || fail "teardown mutated secondmate state while spawn held the task lock"
+  pass "secondmate spawn and teardown serialize on one task identity lock"
 }
 
 # A leased secondmate home sits in the same reusable pool as a task worktree, so
@@ -2003,8 +2105,10 @@ test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_symlinked_leaf_files
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
+test_secondmate_spawn_allows_plain_clone_home_without_stamp
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_serializes_against_spawn
 test_secondmate_teardown_refuses_home_referenced_by_another_task
 test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent
 test_secondmate_force_teardown_preflights_nested_home_ownership

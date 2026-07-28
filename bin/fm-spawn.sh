@@ -246,10 +246,10 @@ SPAWN_SLOT_CLAIM_HOME=
 claim_spawn_slot() {
   local home
   home=$(fm_agent_canonical_dir "$FM_HOME" 2>/dev/null || printf '%s' "$FM_HOME")
+  if [ "$KIND" = secondmate ] && fm_slot_is_plain_checkout "$WT"; then
+    return 0
+  fi
   if ! fm_slot_stamp_write "$WT" "$ID" "$home"; then
-    if [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
-      fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 || true
-    fi
     echo "error: could not claim pooled-slot ownership for $WT; refusing to publish task $ID" >&2
     return 1
   fi
@@ -298,7 +298,7 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
   fi
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] \
+  if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] \
      && [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
     fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 || true
   fi
@@ -1671,6 +1671,10 @@ fi
 HERDR_FLAT_ABORT_CLEANUP=0
 fm_backend_send_key "$BACKEND" "$WID" Enter
 
+if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+  SPAWN_TASK_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TASK_LOCK" || exit 1
+fi
 trap - EXIT
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

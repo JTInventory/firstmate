@@ -85,6 +85,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-slot-owner-lib.sh
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
@@ -100,6 +102,28 @@ ID=$1
 FORCE=${2:-}
 FORCE_RETIRE_STAGED=0
 FORCE_RETIRE_SOURCE=
+TEARDOWN_TASK_LOCKS=()
+
+teardown_task_lock_acquire() {
+  local state_dir=$1 id=$2 lock
+  lock="$state_dir/.spawn-$id.lock"
+  if ! fm_lock_try_acquire "$lock"; then
+    echo "REFUSED: spawn or teardown is already changing task $id in $state_dir" >&2
+    return 1
+  fi
+  TEARDOWN_TASK_LOCKS+=("$lock")
+}
+
+teardown_task_locks_release() {
+  local status=$? i
+  for ((i=${#TEARDOWN_TASK_LOCKS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${TEARDOWN_TASK_LOCKS[$i]}" || true
+  done
+  return "$status"
+}
+
+trap teardown_task_locks_release EXIT
+teardown_task_lock_acquire "$STATE" "$ID" || exit 1
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -771,8 +795,8 @@ EOF
 }
 
 TEARDOWN_SLOT_RETAINED=0
-slot_release_allowed() {  # <state-dir> <task-id> <worktree> <home> <role> <label> <retire|refuse>
-  local state=$1 id=$2 wt=$3 home=$4 role=$5 label=$6 disposition=$7 verdict
+slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <label> <retire|refuse>
+  local state=$1 id=$2 wt=$3 stamp_home=$4 worker_home=$5 role=$6 label=$7 disposition=$8 verdict
   case "$disposition" in
     retire|refuse) ;;
     *)
@@ -780,13 +804,13 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <home> <role> <labe
       return 1
       ;;
   esac
-  verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$home" "$role")
+  verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$stamp_home" "$worker_home" "$role")
   [ "$verdict" = dispose ] && return 0
   TEARDOWN_SLOT_RETAINED=1
   echo "teardown: $label $wt lease RETAINED, not returned to the pool: ${verdict#retain: }" >&2
   echo "teardown: the directory is left untouched on disk; --force does not waive this ownership gate." >&2
   if [ "$disposition" = retire ]; then
-    fm_slot_stamp_relinquish "$wt" "$id" "$verdict"
+    fm_slot_stamp_relinquish "$wt" "$id" "$stamp_home" "$verdict"
     echo "teardown: once nothing references the slot, tearing down its remaining holder releases it; docs/worker-isolation.md owns manual reclaim." >&2
   else
     echo "teardown: refusing to continue for $label $wt and leaving every record for $id in place." >&2
@@ -805,7 +829,8 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" "$home_scope" secondmate "$label" refuse || return 1
+    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
+      "$home_scope" "$abs_home_path" secondmate "$label" refuse || return 1
     fm_slot_stamp_clear "$abs_home_path"
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
@@ -823,6 +848,7 @@ validate_firstmate_home_children_removal() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    teardown_task_lock_acquire "$sub_state" "$child_id" || return 1
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_wt=$(meta_value "$child_meta" worktree)
@@ -838,8 +864,8 @@ validate_firstmate_home_children_removal() {
       fi
       validate_firstmate_home_children_removal "$child_home" || return 1
       if firstmate_home_has_treehouse_slot "$child_home"; then
-        slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" secondmate \
-          "child firstmate home" refuse || return 1
+        slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" "$child_home" \
+          secondmate "child firstmate home" refuse || return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
@@ -914,7 +940,8 @@ cleanup_firstmate_home_children() {
         return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" crewmate "child worktree" retire; then
+      if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "$home" \
+        crewmate "child worktree" retire; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
         fm_slot_stamp_clear "$child_wt"
@@ -947,7 +974,8 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if firstmate_home_has_treehouse_slot "$HOME_PATH"; then
-    slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" secondmate "secondmate home" refuse || exit 1
+    slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
+      secondmate "secondmate home" refuse || exit 1
   fi
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
@@ -1100,7 +1128,8 @@ fi
 # Ownership gate first. A retained lease leaves the slot untouched while the
 # rest of teardown retires this task's endpoint and records.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" crewmate "worktree" retire; then
+  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
+    crewmate "worktree" retire; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
