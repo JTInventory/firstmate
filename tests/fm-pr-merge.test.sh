@@ -58,17 +58,30 @@ SH
   cat > "$dir/bin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = push ]; then
+  printf 'git-terminal-prompt=%s\n' "${GIT_TERMINAL_PROMPT:-unset}" >> "$GH_LOG"
   printf '%s\n' "$*" >> "$GH_LOG"
   exit "${FAKE_PUSH_FAIL:-0}"
 fi
 exec "$REAL_GIT" "$@"
+SH
+  cat > "$dir/bin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf 'timeout %s\n' "$*" >> "$GH_LOG"
+[ ! -e "$FM_STATE_OVERRIDE/.task-x1.pr-presentation.lock" ] \
+  && [ ! -L "$FM_STATE_OVERRIDE/.task-x1.pr-presentation.lock" ] || {
+    printf 'timeout-lock-still-held\n' >> "$GH_LOG"
+    exit 98
+  }
+[ "${FAKE_TIMEOUT_FAIL:-0}" -eq 0 ] || exit 124
+shift 2
+exec "$@"
 SH
   cat > "$dir/bin/gh" <<'SH'
 #!/usr/bin/env bash
 printf 'direct-gh %s\n' "$*" >> "$GH_LOG"
 exit 97
 SH
-  chmod +x "$dir/bin/gh-axi" "$dir/bin/git" "$dir/bin/gh"
+  chmod +x "$dir/bin/gh-axi" "$dir/bin/git" "$dir/bin/timeout" "$dir/bin/gh"
   printf 'branch=codex/task-x1\n' > "$dir/state/task-x1.meta"
   cat > "$dir/state/task-x1.pr-presentation" <<'EOF'
 firstmate-pr-presentation-v2
@@ -90,6 +103,7 @@ run_merge() {
     FM_CAPTAIN_APPROVED_PR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     FM_CAPTAIN_APPROVED_PRESENTATION_NONCE=11111111111111111111111111111111 \
     FAKE_PUT_FAIL="${FAKE_PUT_FAIL:-0}" FAKE_PUSH_FAIL="${FAKE_PUSH_FAIL:-0}" \
+    FAKE_TIMEOUT_FAIL="${FAKE_TIMEOUT_FAIL:-0}" \
     REAL_GIT="$REAL_GIT" GH_LOG="$dir/gh.log" "$dir/bin/fm-pr-merge.sh" "$@"
 }
 
@@ -135,6 +149,12 @@ test_compatible_merge_options_are_translated() {
     || fail 'compatible merge options failed'
   grep -qxF 'payload commit_title=123' "$dir/gh.log" || fail 'numeric subject was not preserved as a literal string'
   grep -qxF 'payload commit_message=@not-a-file' "$dir/gh.log" || fail 'at-prefixed body was not preserved as a literal string'
+  grep -qxF 'timeout --kill-after=1 30 env GIT_TERMINAL_PROMPT=0 git push --force-with-lease=refs/heads/codex/task-x1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa https://github.com/JTInventory/firstmate.git :refs/heads/codex/task-x1' "$dir/gh.log" \
+    || fail 'requested remote branch deletion was not bounded and non-interactive'
+  grep -qxF 'git-terminal-prompt=0' "$dir/gh.log" \
+    || fail 'requested remote branch deletion could prompt for credentials'
+  ! grep -q '^timeout-lock-still-held$' "$dir/gh.log" \
+    || fail 'requested remote branch deletion retained the presentation lock'
   grep -qxF 'push --force-with-lease=refs/heads/codex/task-x1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa https://github.com/JTInventory/firstmate.git :refs/heads/codex/task-x1' "$dir/gh.log" \
     || fail 'requested remote branch deletion did not use the presented-head lease'
   ! grep -q '^direct-gh ' "$dir/gh.log" || fail 'merge bypassed gh-axi'
@@ -158,6 +178,23 @@ EOF
   pass 'branch deletion decodes TOON transport and uses an expected-OID lease'
 }
 
+test_branch_delete_timeout_is_warning_only() {
+  local dir rc
+  dir=$(make_case delete-timeout)
+  set +e
+  FAKE_TIMEOUT_FAIL=1 FM_CAPTAIN_APPROVED_MERGE=1 \
+    run_merge "$dir" task-x1 https://github.com/JTInventory/firstmate/pull/47 -- --delete-branch \
+    >"$dir/stdout" 2>"$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail 'post-merge branch deletion timeout changed merge success'
+  grep -q 'leased remote branch deletion failed' "$dir/stderr" \
+    || fail 'post-merge branch deletion timeout was not reported'
+  [ ! -e "$dir/state/task-x1.pr-presentation" ] \
+    || fail 'post-merge branch deletion timeout retained the consumed presentation'
+  pass 'branch deletion timeout remains warning-only after merge'
+}
+
 test_deferred_merge_option_is_explicitly_refused() {
   local dir rc; dir=$(make_case auto)
   set +e
@@ -178,4 +215,5 @@ test_refusals_do_not_record_or_merge
 test_repo_override_refuses_and_explicit_method_is_preserved
 test_compatible_merge_options_are_translated
 test_branch_ref_is_decoded_and_deleted_with_lease
+test_branch_delete_timeout_is_warning_only
 test_deferred_merge_option_is_explicitly_refused

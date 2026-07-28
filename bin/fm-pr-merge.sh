@@ -111,6 +111,28 @@ make_merge_field_file() {
     && fm_pr_private_file_valid "$path" 600 "$state_device" || return 1
   printf -v "$result_var" '%s' "$path"
 }
+run_leased_branch_delete() {
+  local timeout_runner=
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_runner=gtimeout
+  elif command -v perl >/dev/null 2>&1; then
+    timeout_runner=perl
+  else
+    return 125
+  fi
+  if [ "$timeout_runner" = perl ]; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      30 env GIT_TERMINAL_PROMPT=0 git push \
+      --force-with-lease="refs/heads/$HEAD_REF:$PRESENTED_HEAD" \
+      "$HEAD_PUSH_URL" ":refs/heads/$HEAD_REF"
+  else
+    "$timeout_runner" --kill-after=1 30 env GIT_TERMINAL_PROMPT=0 git push \
+      --force-with-lease="refs/heads/$HEAD_REF:$PRESENTED_HEAD" \
+      "$HEAD_PUSH_URL" ":refs/heads/$HEAD_REF"
+  fi
+}
 trap cleanup_pr_merge EXIT
 if fm_pr_presentation_lock_acquire "$PRESENTATION_LOCK"; then
   :
@@ -199,8 +221,7 @@ fi
 if ! fm_pr_presentation_invalidate "$STATE" "$ID"; then
   echo 'warning: merge succeeded but the consumed presentation receipt could not be removed; teardown must reconcile it' >&2
 fi
-if [ "$delete_branch" -eq 1 ] \
-  && ! git push --force-with-lease="refs/heads/$HEAD_REF:$PRESENTED_HEAD" \
-    "$HEAD_PUSH_URL" ":refs/heads/$HEAD_REF"; then
+release_presentation_lock
+if [ "$delete_branch" -eq 1 ] && ! run_leased_branch_delete; then
   echo 'warning: merge succeeded but the leased remote branch deletion failed' >&2
 fi
