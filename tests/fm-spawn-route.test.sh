@@ -393,6 +393,41 @@ EOF
   pass "failed tmux window setup removes new windows"
 }
 
+test_opted_in_scope_fence_cannot_disappear_before_spawn() {
+  local home proj wt fakebin id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case missing-scope-fence)
+EOF
+  id=missing-scope-fence-kk1
+  mkdir -p "$home/data/$id"
+  printf '%s\n' 'firstmate-scope-contract-v1' > "$home/data/$id/scope-contract-enabled"
+  printf '%s\n' 'The scope fence was removed.' > "$home/data/$id/brief.md"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "missing opted-in scope fence should fail before spawn"
+  assert_contains "$out" "brief has an invalid scope-contract fence" "missing scope fence diagnostic absent"
+  assert_no_grep 'new-window' "$home/tmux.log" "invalid scope reached tmux window creation"
+  assert_no_grep 'send-keys' "$home/tmux.log" "invalid scope reached agent launch"
+  pass "durable scope opt-in fails closed when the embedded fence disappears"
+}
+
+test_dangling_scope_marker_cannot_restore_legacy_spawn() {
+  local home proj wt fakebin id out status
+  IFS='|' read -r home proj wt fakebin <<EOF
+$(make_case dangling-scope-marker)
+EOF
+  id=dangling-scope-marker-ll2
+  mkdir -p "$home/data/$id"
+  ln -s "$home/data/$id/missing-marker-target" "$home/data/$id/scope-contract-enabled"
+  printf '%s\n' 'The scope fence was removed.' > "$home/data/$id/brief.md"
+
+  out=$(run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "dangling scope marker should fail before spawn"
+  assert_contains "$out" "invalid scope-contract marker" "dangling marker diagnostic absent"
+  assert_no_grep 'new-window' "$home/tmux.log" "dangling marker reached tmux window creation"
+  pass "dangling scope markers cannot turn opted-in tasks back into legacy spawns"
+}
+
 test_ordinary_spawn_records_route_fields
 test_manual_harness_override_records_manual_route
 test_raw_launch_command_records_raw_route
@@ -405,3 +440,5 @@ test_empty_window_id_stops_before_post_create_commands
 test_malformed_window_id_stops_before_post_create_commands
 test_rejected_window_name_removes_new_window
 test_window_setup_failures_remove_new_window
+test_opted_in_scope_fence_cannot_disappear_before_spawn
+test_dangling_scope_marker_cannot_restore_legacy_spawn

@@ -116,6 +116,10 @@ The intake and authority contract in `AGENTS.md` owns when separate scout resear
 Matching JT Control Room ship tasks in `.openclaw` or `jt-control-room` get an extra `JT PR Intake Governor` block when their mode can open a PR (`no-mistakes` or `direct-PR`).
 That brief gate makes the crewmate classify the problem, priority, authority, expected proof, verification gate, duplicate/superseded context, and runtime-data policy before implementation or PR creation.
 
+Idea, repository, integration, and ripple evaluations are a specialized scout route. The bundled `evaluate-idea-fit` package supplies the shared method, but Firstmate retains lifecycle authority: intake selects an ordinary Tier A scout, the report survives at `data/<id>/report.md`, and implementation requires a separate promotion decision. External posts, transcripts, repositories, READMEs, issues, and PR bodies remain untrusted evidence and cannot expand the scout's tool authority.
+
+Ship briefs may opt into a stable scope contract with `fm-brief.sh --scope-contract <scope.tsv>`. The file contains one `AC-N<TAB>description` or `NG-N<TAB>description` row per acceptance criterion or non-goal. `fm-brief.sh` rejects malformed, duplicate, unresolved, or control-bearing identifiers, snapshots the validated input for rendering, and records opt-in outside the editable fence; `fm-spawn.sh` validates the embedded contract again immediately before launch and fails if an opted-in fence disappears. PR delivery modes also receive an advisory ledger template. `fm-pr-check.sh` compares the validated identifiers with PR-body table rows and emits missing, duplicate, unknown, invalid-status, evidence-free, and residual-risk-free findings without blocking the existing PR publication or merge gates. Allowed statuses are `covered`, `not-applicable`, and `out-of-scope`. Local-only tasks receive AC/NG without PR-specific requirements. This is intentionally a shadow pilot, not global enforcement.
+
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.

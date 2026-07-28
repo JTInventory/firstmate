@@ -65,6 +65,7 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *" body "*) cat "${FM_TEST_GH_BODY_FILE:?}" ;;
   *" state,baseRefName,headRefName,headRefOid,headRepository,url "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -3570,6 +3571,58 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_scope_ledger_shadow_does_not_block_pr_watch() {
+  local dir state spec brief body marker out rc
+  dir=$(make_case scope-ledger-shadow)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  mkdir -p "$dir/home/data/task-a"
+  spec="$dir/scope.tsv"
+  brief="$dir/home/data/task-a/brief.md"
+  body="$dir/pr-body.md"
+  marker="$dir/body-executed"
+  printf 'AC-1\tFeature behavior is proved.\nNG-1\tGlobal enforcement remains disabled.\n' > "$spec"
+  "$ROOT/bin/fm-scope-contract.sh" append-brief "$spec" "$brief" no-mistakes
+  printf '%s\n' firstmate-scope-contract-v1 > "$dir/home/data/task-a/scope-contract-enabled"
+  cat > "$body" <<EOF
+| ID | Status | Evidence | Residual risk |
+| AC-1 | violated | | |
+| ZZ-9 | covered | \$(touch "$marker") | none |
+EOF
+  set +e
+  out=$(FM_TEST_GH_BODY_FILE="$body" run_check_entry "$dir" task-a https://github.com/o/r/pull/37 2>"$dir/check.err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "advisory scope findings blocked PR watch: $(cat "$dir/check.err")"
+  assert_contains "$out" $'scope-ledger-finding\tempty-evidence\tAC-1' "PR check hid empty evidence"
+  assert_contains "$out" $'scope-ledger-finding\tinvalid-status\tAC-1' "PR check hid invalid status"
+  assert_contains "$out" $'scope-ledger-finding\tempty-residual-risk\tAC-1' "PR check hid empty residual risk"
+  assert_contains "$out" $'scope-ledger-finding\tmissing\tNG-1' "PR check hid a missing non-goal"
+  assert_contains "$out" $'scope-ledger-finding\tunknown\tZZ-9' "PR check hid an unknown identifier"
+  assert_absent "$marker" "PR check executed body text"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "advisory ledger prevented canonical PR poll publication"
+  pass "scope-ledger findings stay visible and advisory while the canonical PR watch is armed"
+}
+
+test_scope_ledger_dangling_marker_stays_visible_and_advisory() {
+  local dir state out rc
+  dir=$(make_case scope-ledger-dangling-marker)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  mkdir -p "$dir/home/data/task-a"
+  printf '%s\n' 'legacy-looking brief' > "$dir/home/data/task-a/brief.md"
+  ln -s "$dir/home/data/task-a/missing-marker-target" "$dir/home/data/task-a/scope-contract-enabled"
+
+  set +e
+  out=$(run_check_entry "$dir" task-a https://github.com/o/r/pull/37 2>"$dir/check.err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "dangling marker blocked canonical PR watch: $(cat "$dir/check.err")"
+  assert_contains "$out" $'scope-ledger\tunknown\treason=marker-invalid' "dangling marker became a silent legacy bypass"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "dangling marker prevented canonical PR poll publication"
+  pass "dangling scope markers remain visible without blocking the canonical PR watch"
+}
+
 test_parser_matrix
 test_expected_head_guard_and_prior_generation_replacement
 test_guarded_replacement_receipt_crash_recovery
@@ -3583,3 +3636,5 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_scope_ledger_shadow_does_not_block_pr_watch
+test_scope_ledger_dangling_marker_stays_visible_and_advisory

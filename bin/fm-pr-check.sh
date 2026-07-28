@@ -15,12 +15,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Preserve the fork's task/worktree/PR branch identity contract.
 # shellcheck source=bin/fm-task-identity-lib.sh
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
+
+fm_scope_ledger_audit() (
+  if [ "$PROVIDER" != github ]; then
+    printf 'scope-ledger\tunknown\treason=provider-unsupported\n'
+    return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'scope-ledger\tunknown\treason=gh-unavailable\n'
+    return 0
+  fi
+  SCOPE_BODY=$(mktemp "${TMPDIR:-/tmp}/fm-pr-body.XXXXXX") || {
+    printf 'scope-ledger\tunknown\treason=temp-unavailable\n'
+    return 0
+  }
+  trap 'rm -f -- "$SCOPE_BODY"' EXIT HUP INT TERM
+  if (cd "${WT:-$FM_ROOT}" && gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
+    "$SCRIPT_DIR/fm-scope-contract.sh" audit-body "$SCOPE_BRIEF" "$SCOPE_BODY" \
+      || printf 'scope-ledger\tunknown\treason=local-contract-invalid\n'
+  else
+    printf 'scope-ledger\tunknown\treason=body-unavailable\n'
+  fi
+)
 
 EXPECTED_HEAD=
 PRIOR_HEAD=
@@ -207,6 +230,26 @@ if [ -z "$PR_HEAD" ] && [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ]
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+
+# Opt-in PR scope ledgers are shadow-only during the pilot. Fetch the body only
+# after URL, task, worktree, branch, and (when supplied) expected-head identity
+# have been validated above. Treat body bytes exclusively as data, emit visible
+# findings, and never let an incomplete ledger block the canonical PR watch.
+SCOPE_BRIEF="$DATA/$ID/brief.md"
+SCOPE_MARKER="$DATA/$ID/scope-contract-enabled"
+SCOPE_MARKER_PRESENT=0
+if [ -e "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ]; then
+  SCOPE_MARKER_PRESENT=1
+fi
+if [ "$SCOPE_MARKER_PRESENT" -eq 1 ] || { [ -f "$SCOPE_BRIEF" ] && [ ! -L "$SCOPE_BRIEF" ] \
+  && grep -q '^```firstmate-scope-contract-v1$' "$SCOPE_BRIEF"; }; then
+  if [ "$SCOPE_MARKER_PRESENT" -eq 1 ] && { [ ! -f "$SCOPE_MARKER" ] || [ -L "$SCOPE_MARKER" ] \
+    || ! grep -qx 'firstmate-scope-contract-v1' "$SCOPE_MARKER"; }; then
+    printf 'scope-ledger\tunknown\treason=marker-invalid\n'
+  else
+    fm_scope_ledger_audit
   fi
 fi
 
