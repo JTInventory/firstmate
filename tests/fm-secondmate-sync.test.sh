@@ -466,8 +466,8 @@ SH
   out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
     FM_ROOT_OVERRIDE="$w/main" FM_FAKE_TMUX_LOG="$w/tmux.log" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  [ ! -e "$pending" ] && [ ! -e "$receipt" ] \
-    || fail "acknowledgement retry did not retire delivery state"
+  [ ! -e "$pending" ] && grep -qx 'state=complete' "$receipt" \
+    || fail "acknowledgement retry did not retain terminal delivery state"
   fm_update_obligation_pending "$obligation" "$w/sm-ack" \
     && fail "terminal cleanup recreated an acknowledged child obligation"
   sends=$(grep -Fc 'firstmate was updated to the latest' "$w/tmux.log" 2>/dev/null || true)

@@ -1112,6 +1112,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -1443,6 +1445,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -1455,6 +1459,9 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=ship
+task=paused-domain
+home=$home
+endpoint_generation=endpoint-paused-domain
 mode=no-mistakes
 yolo=off
 EOF
@@ -1523,6 +1530,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -1534,6 +1543,8 @@ worktree=$nested
 project=$nested
 harness=echo
 kind=secondmate
+task=child
+endpoint_generation=endpoint-child
 mode=secondmate
 yolo=off
 home=$nested
@@ -1629,6 +1640,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -1676,6 +1689,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -1712,6 +1727,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -1813,6 +1830,40 @@ test_secondmate_force_teardown_preflights_unregistered_nested_home() {
   pass "force teardown proves unregistered nested homes before mutation"
 }
 
+test_secondmate_force_teardown_refuses_ambiguous_child_metadata() {
+  local home subhome fakebin log err
+  home="$TMP_ROOT/ambiguous-child-home"
+  subhome="$TMP_ROOT/ambiguous-child-subhome"
+  err="$TMP_ROOT/ambiguous-child.err"
+  mkdir -p "$home/state" "$home/data"
+  git clone -q "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$subhome/projects/alpha" \
+    "project=$subhome/projects/alpha" "harness=echo" \
+    "kind=ship" "kind=scout" "mode=no-mistakes" "yolo=off"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' \
+    > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/ambiguous-child-fake")
+  log="$TMP_ROOT/ambiguous-child-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/ambiguous-child-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown accepted ambiguous child metadata"
+  fi
+  grep -F 'exactly one non-empty kind=' "$err" >/dev/null \
+    || fail "ambiguous child metadata refusal lost its reason"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "ambiguous child metadata authorized endpoint mutation"
+  [ -e "$home/state/domain.meta" ] && [ -e "$subhome/state/child.meta" ] \
+    || fail "ambiguous child metadata retired hierarchy evidence"
+  pass "force teardown rejects ambiguous child identity before mutation"
+}
+
 test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   local home subhome childproj childwt fakebin log err
   home="$TMP_ROOT/child-hook-return-home"
@@ -1912,10 +1963,21 @@ test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
   [ -f "$claim" ] || fail "late sibling failure discarded the earlier return claim"
   grep -F 'task=child-a' "$claim" >/dev/null \
     || fail "earlier child return claim lost its owner"
+  find "$home/state/.teardown-transactions/domain/evidence" -type f \
+    -exec grep -l '^task=child-a$' {} + >/dev/null \
+    || fail "late sibling failure lost the durable child metadata snapshot"
   grep -F "treehouse return --force $child_a" "$log" >/dev/null \
     || fail "first child return was not exercised"
   grep -F "treehouse return --force $child_b" "$log" >/dev/null \
     || fail "late sibling return failure was not exercised"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/staged-hierarchy-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_DIR="$lease_dir" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+    || fail "staged hierarchy did not resume after a late return failure"
+  [ ! -e "$home/state/domain.meta" ] && [ ! -e "$claim" ] \
+    && [ ! -e "$home/state/.teardown-transactions/domain" ] \
+    || fail "staged hierarchy retry left retirement evidence wedged"
   pass "nested force teardown retains hierarchy evidence until all returns succeed"
 }
 
@@ -1938,6 +2000,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -1950,6 +2014,9 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
+task=child
+home=$subhome
+endpoint_generation=endpoint-child
 mode=no-mistakes
 yolo=off
 EOF
@@ -2115,6 +2182,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2148,6 +2217,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2247,6 +2318,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2258,6 +2331,8 @@ worktree=$nested
 project=$nested
 harness=echo
 kind=secondmate
+task=nested
+endpoint_generation=endpoint-nested
 mode=secondmate
 yolo=off
 home=$nested
@@ -2297,6 +2372,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2332,6 +2409,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2344,6 +2423,9 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
+task=child
+home=$subhome
+endpoint_generation=endpoint-child
 mode=no-mistakes
 yolo=off
 EOF
@@ -2378,6 +2460,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2390,6 +2474,9 @@ worktree=$TMP_ROOT/unknown-backend-child-worktree
 project=$TMP_ROOT/unknown-backend-child-project
 harness=echo
 kind=ship
+task=child
+home=$subhome
+endpoint_generation=endpoint-child
 mode=no-mistakes
 yolo=off
 backend=unknown
@@ -2426,6 +2513,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2438,6 +2527,9 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
+task=child
+home=$subhome
+endpoint_generation=endpoint-child
 mode=no-mistakes
 yolo=off
 EOF
@@ -2475,6 +2567,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2490,6 +2584,9 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
+task=child
+home=$subhome
+endpoint_generation=endpoint-child
 mode=no-mistakes
 yolo=off
 EOF
@@ -2527,6 +2624,8 @@ worktree=$subhome
 project=$subhome
 harness=echo
 kind=secondmate
+task=domain
+endpoint_generation=endpoint-domain
 mode=secondmate
 yolo=off
 home=$subhome
@@ -2539,6 +2638,9 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
+task=child
+home=$subhome
+endpoint_generation=endpoint-child
 mode=no-mistakes
 yolo=off
 EOF
@@ -2776,6 +2878,7 @@ test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_teardown_retains_unregistered_foreign_worktree
 test_secondmate_teardown_resolves_relative_origin_identity
 test_secondmate_force_teardown_preflights_unregistered_nested_home
+test_secondmate_force_teardown_refuses_ambiguous_child_metadata
 test_secondmate_force_teardown_preserves_child_hooks_on_return_failure
 test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
 test_secondmate_force_teardown_discards_child_work

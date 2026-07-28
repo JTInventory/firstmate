@@ -33,6 +33,9 @@ case "${1:-}" in
         "$FM_FAKE_REPLACE_META_ON_SEND"
     fi
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    if [ "${1:-}" = kill-window ]; then
+      printf '%s\n' "${@: -1}" >> "${FM_FAKE_TMUX_LOG}.closed"
+    fi
     exit 0
     ;;
   new-window)
@@ -54,6 +57,23 @@ case "${1:-}" in
     ;;
   set-window-option)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  show-options)
+    target=
+    while [ $# -gt 0 ]; do
+      if [ "$1" = -t ]; then
+        shift
+        target=${1:-}
+        break
+      fi
+      shift
+    done
+    id=${target##*:fm-}
+    if grep -Fx "$target" "${FM_FAKE_TMUX_LOG}.closed" >/dev/null 2>&1; then
+      exit 0
+    fi
+    printf '%s\n' "${FM_FAKE_ENDPOINT_GENERATION:-endpoint-$id}"
     exit 0
     ;;
   list-windows)

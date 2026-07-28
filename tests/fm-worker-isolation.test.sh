@@ -182,6 +182,15 @@ case "${1:-}" in
     exit 0
     ;;
   set-window-option) exit 0 ;;
+  show-options)
+    target=
+    while [ $# -gt 0 ]; do
+      if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
+      shift
+    done
+    printf 'endpoint-%s\n' "${target##*:fm-}"
+    exit 0
+    ;;
   rename-window) printf '%s\n' "${@: -1}" > "$FAKE_TMUX_STATE"; exit 0 ;;
   send-keys)
     prev=
@@ -1326,6 +1335,28 @@ SH
   pass "failed returns never restore ownership over reused slots"
 }
 
+test_committed_return_claim_reconciles_after_cleanup_crash() {
+  local rec
+  rec=$(make_slot_world committed-return-reconcile)
+  read_slot_world "$rec"
+  (
+    local claim legacy marker
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
+    fm_slot_stamp_stage_return \
+      "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
+    claim=$FM_SLOT_RETURN_CLAIM
+    legacy=$FM_SLOT_RETURN_LEGACY
+    fm_slot_stamp_mark_return_committed "$claim" "$legacy"
+    marker=$(fm_slot_stamp_committed_return_path "$claim")
+    [ -f "$claim" ] && [ -f "$legacy" ] && [ -f "$marker" ]
+    fm_slot_stamp_write "$WT_DIR" new-task "$WORLD/home"
+    [ ! -e "$claim" ] && [ ! -e "$legacy" ] && [ ! -e "$marker" ]
+    [ "$(fm_slot_stamp_field "$WT_DIR" task)" = new-task ]
+  ) || fail "committed return cleanup did not reconcile after a crash"
+  pass "committed return claims reconcile before pooled-slot reuse"
+}
+
 test_foreign_transition_holder_retains_before_mutation() {
   local rec claim verdict
   rec=$(make_slot_world slot-foreign-transition-holder)
@@ -1407,6 +1438,10 @@ test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation() {
   log="$WORLD/tmux.log"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = show-options ]; then
+  printf '%s\n' endpoint-task-e14
+  exit 0
+fi
 printf '%s\n' "\$*" >> "$log"
 exit 0
 SH
@@ -1480,6 +1515,42 @@ SH
     [ ! -s "$log" ] || fail "duplicate $key metadata authorized endpoint mutation"
   done
   pass "teardown resolves every core metadata field before lifecycle mutation"
+}
+
+test_teardown_refuses_stale_endpoint_generation_before_mutation() {
+  local rec fakebin log out status
+  rec=$(make_slot_world teardown-stale-endpoint)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  log="$WORLD/tmux.log"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+case "\${1:-}" in
+  show-options) printf '%s\n' endpoint-recycled ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" gh-axi gh treehouse
+  fm_write_meta "$WORLD/home/state/task-stale.meta" \
+    "window=firstmate:fm-task-stale" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-stale --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "teardown accepted a recycled endpoint generation"
+  assert_contains "$out" "endpoint generation is stale or cannot be verified" \
+    "stale endpoint refusal lost its reason"
+  assert_no_grep 'kill-window' "$log" \
+    "stale endpoint generation authorized endpoint mutation"
+  assert_present "$WORLD/home/state/task-stale.meta" \
+    "stale endpoint generation removed task metadata"
+  pass "teardown binds endpoint mutation to the recorded generation"
 }
 
 test_verification_capture_includes_lifecycle_clears() {
@@ -1575,6 +1646,12 @@ test_sweep_reports_corrupt_scope_metadata() {
   out=$(run_sweep "$world")
   assert_contains "$out" "home must be one non-empty absolute path" \
     "empty secondmate home metadata was silently skipped"
+  fm_write_meta "$world/home/state/task-corrupt.meta" \
+    "window=firstmate:fm-task-corrupt" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "kind=secondmate" "mode=no-mistakes" "yolo=off"
+  out=$(run_sweep "$world")
+  assert_contains "$out" "kind must appear exactly once" \
+    "duplicate kind metadata was silently accepted"
   pass "the isolation sweep reports corrupt worktree and secondmate-home scope metadata"
 }
 
@@ -1798,10 +1875,12 @@ test_stamp_survives_failed_pool_return
 test_return_transition_never_uses_a_worktree_path
 test_successful_pool_return_never_mutates_reused_slot
 test_failed_pool_return_never_restores_over_a_reused_slot
+test_committed_return_claim_reconciles_after_cleanup_crash
 test_foreign_transition_holder_retains_before_mutation
 test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_teardown_refuses_duplicate_core_metadata_before_mutation
+test_teardown_refuses_stale_endpoint_generation_before_mutation
 test_verification_capture_includes_lifecycle_clears
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker

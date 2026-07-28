@@ -1260,6 +1260,13 @@ case "$BACKEND" in
       echo "error: tmux did not retain canonical window name $T" >&2
       exit 1
     fi
+    ENDPOINT_GENERATION="fm-$(date +%s)-$$-$RANDOM"
+    if ! fm_backend_set_task_option \
+      "$BACKEND" "$WID" @firstmate_endpoint_generation "$ENDPOINT_GENERATION"; then
+      cleanup_spawn_window "$WID"
+      echo "error: tmux failed to bind endpoint generation for $T" >&2
+      exit 1
+    fi
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -1445,6 +1452,9 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     WID="$T"
+    ENDPOINT_GENERATION=$(printf '%s' \
+      "$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID" \
+      | cksum | awk '{printf "herdr-%s-%s", $1, $2}') || exit 1
     ;;
 esac
 spawn_settle_path() {  # <target>
@@ -1633,6 +1643,12 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  echo "task=$ID"
+  if [ "$KIND" = secondmate ]; then
+    echo "home=$PROJ_ABS"
+  else
+    echo "home=$(real_path_or_raw "$FM_HOME")"
+  fi
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "route_profile=$ROUTE_PROFILE"
@@ -1656,10 +1672,8 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
   fi
+  echo "endpoint_generation=$ENDPOINT_GENERATION"
   if [ "$KIND" = secondmate ]; then
-    echo "task=$ID"
-    echo "home=$PROJ_ABS"
-    echo "endpoint_generation=${META_TMP##*.}"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }

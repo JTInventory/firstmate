@@ -63,9 +63,30 @@ fm_secondmate_delivery_receipt_read() {
   esac
   [ "${#FM_SECONDMATE_DELIVERY_CORRELATION}" -eq 16 ] || return 1
   case "$FM_SECONDMATE_DELIVERY_STATE" in
-    prepared|confirmed-delivered|do-not-resend) ;;
+    prepared|confirmed-delivered|do-not-resend|finalizing|complete) ;;
     *) return 1 ;;
   esac
+}
+
+fm_secondmate_delivery_receipt_rewrite_state() {
+  local receipt=$1 delivery_state=$2 namespace id home target endpoint_generation
+  local generation provider_identity correlation message_signature
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  namespace=$(sed -n 's/^namespace=//p' "$receipt")
+  id=$(sed -n 's/^id=//p' "$receipt")
+  home=$(sed -n 's/^home=//p' "$receipt")
+  target=$(sed -n 's/^target=//p' "$receipt")
+  endpoint_generation=$(sed -n 's/^endpoint_generation=//p' "$receipt")
+  generation=$(sed -n 's/^generation=//p' "$receipt")
+  provider_identity=$(sed -n 's/^provider_identity=//p' "$receipt")
+  correlation=$(sed -n 's/^correlation=//p' "$receipt")
+  message_signature=$(sed -n 's/^message_signature=//p' "$receipt")
+  fm_secondmate_delivery_receipt_read "$receipt" "$namespace" "$id" "$home" "$target" \
+    "$endpoint_generation" "$generation" "$provider_identity" "$message_signature" \
+    || return 1
+  fm_secondmate_delivery_receipt_write "$receipt" "$namespace" "$id" "$home" "$target" \
+    "$endpoint_generation" "$generation" "$provider_identity" "$correlation" \
+    "$message_signature" "$delivery_state"
 }
 
 fm_secondmate_delivery_confirmed() {
@@ -79,13 +100,16 @@ fm_secondmate_delivery_confirmed() {
 
 fm_secondmate_delivery_bound_correlation() {
   local state=$1 signature=$2 dir rec found=
-  dir=$(fm_pending_reply_dir "$state")
-  [ -d "$dir" ] || return 1
-  for rec in "$dir"/[A-Fa-f0-9]*; do
-    [ -f "$rec" ] || continue
-    [ "$(fm_pending_reply_get "$rec" fm_delivery_transaction)" = "$signature" ] || continue
-    [ -z "$found" ] || return 2
-    found=${rec##*/}
+  for dir in "$(fm_pending_reply_dir "$state")" \
+    "$(fm_pending_reply_history_dir "$state")"; do
+    [ -d "$dir" ] || continue
+    for rec in "$dir"/[A-Fa-f0-9]*; do
+      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+      [ "$(fm_pending_reply_get "$rec" fm_delivery_transaction)" = "$signature" ] \
+        || continue
+      [ -z "$found" ] || return 2
+      found=${rec##*/}
+    done
   done
   [ -n "$found" ] || return 1
   printf '%s' "$found"
@@ -107,6 +131,10 @@ fm_secondmate_delivery_send_locked() {
       "$endpoint_generation" "$generation" "$provider_identity" "$message_signature" || return 1
     corr=$FM_SECONDMATE_DELIVERY_CORRELATION
     delivery_state=$FM_SECONDMATE_DELIVERY_STATE
+    if [ "$delivery_state" = finalizing ] || [ "$delivery_state" = complete ]; then
+      FM_SECONDMATE_DELIVERY_RECEIPT=$receipt
+      return 0
+    fi
     rec=$(fm_pending_reply_path "$state" "$corr")
     [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] \
       && [ "$(fm_pending_reply_get "$rec" fm_delivery_transaction)" = \
@@ -185,19 +213,18 @@ fm_secondmate_delivery_send_locked() {
 }
 
 fm_secondmate_delivery_finish() {
-  local receipt=$1 parent
+  local receipt=$1
   [ -n "$receipt" ] || return 1
   if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
     return 0
   fi
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
-  parent=${receipt%/*}
-  rm -f "$receipt" || return 1
-  rmdir "$parent" 2>/dev/null || true
+  fm_secondmate_delivery_receipt_rewrite_state "$receipt" complete
 }
 
 fm_secondmate_delivery_finalize_update() {
   local receipt=$1 marker=$2 generation=$3 dir=$4 retry_marker=${5:-} selected
+  fm_secondmate_delivery_receipt_rewrite_state "$receipt" finalizing || return 1
   if selected=$(fm_update_obligation_generation "$marker" "$dir" 2>/dev/null); then
     [ "$selected" = "$generation" ] || return 1
     fm_update_obligation_ack "$marker" "$generation" "$dir" || return 1
@@ -213,9 +240,11 @@ fm_secondmate_delivery_finalize_update() {
 
 fm_secondmate_delivery_finalize_marker() {
   local receipt=$1 marker=$2
-  [ -z "$receipt" ] || fm_secondmate_delivery_finish "$receipt" || return 1
+  [ -z "$receipt" ] \
+    || fm_secondmate_delivery_receipt_rewrite_state "$receipt" finalizing || return 1
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
     rm -f "$marker" || return 1
   fi
+  [ -z "$receipt" ] || fm_secondmate_delivery_finish "$receipt"
 }

@@ -107,6 +107,16 @@ TEARDOWN_LOCK_DIRS_CREATED=()
 TEARDOWN_RETURN_CLAIMS=()
 TEARDOWN_RETURN_LEGACIES=()
 TEARDOWN_DEFER_RETURN_FINALIZE=0
+TEARDOWN_PENDING_STATES=()
+TEARDOWN_PENDING_IDS=()
+TEARDOWN_PENDING_SOURCES=()
+TEARDOWN_RELINQUISH_WTS=()
+TEARDOWN_RELINQUISH_IDS=()
+TEARDOWN_RELINQUISH_HOMES=()
+TEARDOWN_RELINQUISH_VERDICTS=()
+TEARDOWN_TXN_DIR="$STATE/.teardown-transactions/$ID"
+PARENT_PENDING_OPEN=0
+TOP_HOME_ALREADY_RETURNED=0
 
 teardown_task_lock_acquire() {
   local state_dir=$1 id=$2 lock held
@@ -197,29 +207,151 @@ WT=$(teardown_meta_value_exact "$META" worktree required) || exit 1
 T=$(teardown_meta_value_exact "$META" window required) || exit 1
 PROJ=$(teardown_meta_value_exact "$META" project required) || exit 1
 KIND=$(teardown_meta_value_exact "$META" kind required) || exit 1
-HOME_PATH=$(teardown_meta_value_exact "$META" home optional) || exit 1
+META_TASK=$(teardown_meta_value_exact "$META" task required) || exit 1
+HOME_PATH=$(teardown_meta_value_exact "$META" home required) || exit 1
 BACKEND=$(teardown_meta_value_exact "$META" backend optional) || exit 1
+ENDPOINT_GENERATION=$(teardown_meta_value_exact "$META" endpoint_generation required) || exit 1
 [ -n "$BACKEND" ] || BACKEND=tmux
 case "$WT" in /*) ;; *) echo "REFUSED: task worktree scope is not absolute: $WT" >&2; exit 1 ;; esac
 case "$PROJ" in /*) ;; *) echo "REFUSED: task project scope is not absolute: $PROJ" >&2; exit 1 ;; esac
 case "$KIND" in ship|scout|secondmate) ;; *) echo "REFUSED: task kind is invalid: $KIND" >&2; exit 1 ;; esac
+[ "$META_TASK" = "$ID" ] || { echo "REFUSED: task metadata identity does not match $ID" >&2; exit 1; }
+case "$ENDPOINT_GENERATION" in
+  *[!A-Za-z0-9._-]*|""|*/*)
+    echo "REFUSED: task endpoint generation is invalid" >&2
+    exit 1
+    ;;
+esac
+case "$HOME_PATH" in
+  /*) ;;
+  *) echo "REFUSED: task home scope is missing or not absolute" >&2; exit 1 ;;
+esac
 if [ "$KIND" = secondmate ]; then
-  case "$HOME_PATH" in
-    /*) ;;
-    *) echo "REFUSED: secondmate home scope is missing or not absolute" >&2; exit 1 ;;
-  esac
-elif [ -n "$HOME_PATH" ]; then
-  case "$HOME_PATH" in /*) ;; *) echo "REFUSED: task home scope is not absolute: $HOME_PATH" >&2; exit 1 ;; esac
+  fm_slot_same_path "$HOME_PATH" "$WT" || {
+    echo "REFUSED: secondmate home and worktree scopes conflict" >&2
+    exit 1
+  }
+else
+  fm_slot_same_path "$HOME_PATH" "$FM_HOME" || {
+    echo "REFUSED: task home scope does not match the active owner home" >&2
+    exit 1
+  }
 fi
 fm_backend_validate "$BACKEND" || exit 1
 if [ "$BACKEND" = herdr ]; then
   HERDR_SCOPE_SESSION=$(teardown_meta_value_exact "$META" herdr_session required) || exit 1
+  HERDR_SCOPE_WORKSPACE=$(teardown_meta_value_exact "$META" herdr_workspace_id required) || exit 1
+  HERDR_SCOPE_TAB=$(teardown_meta_value_exact "$META" herdr_tab_id required) || exit 1
   HERDR_SCOPE_PANE=$(teardown_meta_value_exact "$META" herdr_pane_id required) || exit 1
   [ "$T" = "$HERDR_SCOPE_SESSION:$HERDR_SCOPE_PANE" ] || {
     echo "REFUSED: task endpoint metadata representations conflict" >&2
     exit 1
   }
 fi
+
+teardown_endpoint_transaction_path() {
+  local backend=$1 target=$2 generation=$3 key
+  key=$(printf '%s' "$backend|$target|$generation" \
+    | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  printf '%s/closing-endpoints/%s' "$TEARDOWN_TXN_DIR" "$key"
+}
+
+teardown_endpoint_close_is_staged() {
+  local backend=$1 target=$2 generation=$3 record
+  record=$(teardown_endpoint_transaction_path "$backend" "$target" "$generation") \
+    || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ "$(sed -n '1p' "$record")" = "$backend" ] \
+    && [ "$(sed -n '2p' "$record")" = "$target" ] \
+    && [ "$(sed -n '3p' "$record")" = "$generation" ] \
+    && [ "$(wc -l < "$record" | tr -d ' ')" -eq 3 ]
+}
+
+teardown_stage_endpoint_close() {
+  local backend=$1 target=$2 generation=$3 record dir tmp
+  [ -d "$TEARDOWN_TXN_DIR" ] || return 0
+  record=$(teardown_endpoint_transaction_path "$backend" "$target" "$generation") \
+    || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    teardown_endpoint_close_is_staged "$backend" "$target" "$generation"
+    return
+  fi
+  dir=${record%/*}
+  mkdir -p "$dir" || return 1
+  tmp=$(mktemp "$dir/.endpoint.XXXXXX") || return 1
+  printf '%s\n%s\n%s\n' "$backend" "$target" "$generation" > "$tmp" \
+    && chmod 600 "$tmp" && mv "$tmp" "$record" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
+teardown_home_transaction_path() {
+  local id=$1 home=$2 key
+  key=$(printf '%s' "$id|$home" | cksum | awk '{printf "%s-%s", $1, $2}') \
+    || return 1
+  printf '%s/removing-homes/%s' "$TEARDOWN_TXN_DIR" "$key"
+}
+
+teardown_home_removal_is_staged() {
+  local id=$1 home=$2 record
+  record=$(teardown_home_transaction_path "$id" "$home") || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ "$(sed -n '1p' "$record")" = "$id" ] \
+    && [ "$(sed -n '2p' "$record")" = "$home" ] \
+    && [ "$(wc -l < "$record" | tr -d ' ')" -eq 2 ]
+}
+
+teardown_stage_home_removal() {
+  local id=$1 home=$2 record dir tmp
+  [ -d "$TEARDOWN_TXN_DIR" ] || return 0
+  record=$(teardown_home_transaction_path "$id" "$home") || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    teardown_home_removal_is_staged "$id" "$home"
+    return
+  fi
+  dir=${record%/*}
+  mkdir -p "$dir" || return 1
+  tmp=$(mktemp "$dir/.home.XXXXXX") || return 1
+  printf '%s\n%s\n' "$id" "$home" > "$tmp" \
+    && chmod 600 "$tmp" && mv "$tmp" "$record" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
+teardown_endpoint_generation_matches() {
+  local backend=$1 target=$2 generation=$3 meta=$4 actual session workspace tab pane expected
+  TEARDOWN_ENDPOINT_ALREADY_CLOSED=0
+  case "$backend" in
+    tmux)
+      actual=$(fm_backend_endpoint_generation tmux "$target" 2>/dev/null || true)
+      if [ -n "$actual" ]; then
+        [ "$actual" = "$generation" ]
+      else
+        teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
+          && TEARDOWN_ENDPOINT_ALREADY_CLOSED=1
+      fi
+      ;;
+    herdr)
+      session=$(teardown_meta_value_exact "$meta" herdr_session required) || return 1
+      workspace=$(teardown_meta_value_exact "$meta" herdr_workspace_id required) || return 1
+      tab=$(teardown_meta_value_exact "$meta" herdr_tab_id required) || return 1
+      pane=$(teardown_meta_value_exact "$meta" herdr_pane_id required) || return 1
+      expected=$(printf '%s' "$session|$workspace|$tab|$pane" \
+        | cksum | awk '{printf "herdr-%s-%s", $1, $2}') || return 1
+      [ "$target" = "$session:$pane" ] && [ "$generation" = "$expected" ] || return 1
+      if fm_backend_pane_readable herdr "$target"; then
+        :
+      else
+        teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
+          && TEARDOWN_ENDPOINT_ALREADY_CLOSED=1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 META_IDENTITY=$(cksum "$META") || exit 1
 
 trap teardown_locks_release EXIT
@@ -227,6 +359,10 @@ teardown_admission_lock_acquire "$STATE" "$FM_HOME" || exit 1
 teardown_task_lock_acquire "$STATE" "$ID" || exit 1
 [ "$(cksum "$META" 2>/dev/null || true)" = "$META_IDENTITY" ] || {
   echo "REFUSED: task metadata changed while teardown acquired lifecycle locks" >&2
+  exit 1
+}
+teardown_endpoint_generation_matches "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" || {
+  echo "REFUSED: task endpoint generation is stale or cannot be verified; preserving task state" >&2
   exit 1
 }
 
@@ -326,6 +462,86 @@ treehouse_return_is_index_lock_error() {
   printf '%s\n' "$1" | grep -Fq 'index.lock' && printf '%s\n' "$1" | grep -Fq 'File exists'
 }
 
+teardown_stage_return_claim_record() {
+  local claim=$1 legacy=$2 dir key record tmp
+  case "$claim:$legacy" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  dir="$TEARDOWN_TXN_DIR/return-claims"
+  mkdir -p "$dir" || return 1
+  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  record="$dir/$key"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    [ -f "$record" ] && [ ! -L "$record" ] \
+      && [ "$(sed -n '1p' "$record")" = "$claim" ] \
+      && [ "$(sed -n '2p' "$record")" = "$legacy" ]
+    return
+  fi
+  tmp=$(mktemp "$dir/.claim.XXXXXX") || return 1
+  printf '%s\n%s\n' "$claim" "$legacy" > "$tmp" \
+    && chmod 600 "$tmp" && mv "$tmp" "$record" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
+teardown_unstage_return_claim_record() {
+  local claim=$1 key record
+  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  record="$TEARDOWN_TXN_DIR/return-claims/$key"
+  [ ! -e "$record" ] && [ ! -L "$record" ] || rm -f "$record"
+}
+
+teardown_load_staged_return_claims() {
+  local record claim legacy seen existing
+  [ -d "$TEARDOWN_TXN_DIR/return-claims" ] || return 0
+  for record in "$TEARDOWN_TXN_DIR/return-claims"/*; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    [ "$(wc -l < "$record" | tr -d ' ')" -eq 2 ] || return 1
+    claim=$(sed -n '1p' "$record")
+    legacy=$(sed -n '2p' "$record")
+    case "$claim:$legacy" in /*:/*) ;; *) return 1 ;; esac
+    seen=0
+    for existing in "${TEARDOWN_RETURN_CLAIMS[@]}"; do
+      [ "$existing" != "$claim" ] || seen=1
+    done
+    if [ "$seen" -eq 0 ]; then
+      TEARDOWN_RETURN_CLAIMS+=("$claim")
+      TEARDOWN_RETURN_LEGACIES+=("$legacy")
+    fi
+  done
+}
+
+teardown_return_commit_transaction_path() {
+  local claim=$1 key
+  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  printf '%s/committed-return-claims/%s' "$TEARDOWN_TXN_DIR" "$key"
+}
+
+teardown_return_transaction_is_committed() {
+  local claim=$1 legacy=$2 record
+  record=$(teardown_return_commit_transaction_path "$claim") || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ "$(sed -n '1p' "$record")" = "$claim" ] \
+    && [ "$(sed -n '2p' "$record")" = "$legacy" ] \
+    && [ "$(wc -l < "$record" | tr -d ' ')" -eq 2 ]
+}
+
+teardown_mark_return_transaction_committed() {
+  local claim=$1 legacy=$2 record dir tmp
+  record=$(teardown_return_commit_transaction_path "$claim") || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    teardown_return_transaction_is_committed "$claim" "$legacy"
+    return
+  fi
+  dir=${record%/*}
+  mkdir -p "$dir" || return 1
+  tmp=$(mktemp "$dir/.commit.XXXXXX") || return 1
+  printf '%s\n%s\n' "$claim" "$legacy" > "$tmp" \
+    && chmod 600 "$tmp" && mv "$tmp" "$record" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_check=${4:-} state_scope=${5:-}
   local stamp_id=${6:-} stamp_home=${7:-} lease_holder=${8:-}
@@ -343,6 +559,9 @@ teardown_treehouse_return() {
     claim=${FM_SLOT_RETURN_CLAIM:-}
     legacy=${FM_SLOT_RETURN_LEGACY:-}
     stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
+    if [ "$staged" -eq 1 ] && [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
+      teardown_stage_return_claim_record "$claim" "$legacy" || return 1
+    fi
   fi
   while :; do
     if [ -n "$lease_holder" ]; then
@@ -372,6 +591,8 @@ teardown_treehouse_return() {
           "$lease_holder" "$stamp_path" "$legacy" || {
           echo "error: could not restore ownership evidence for $label $dir" >&2
         }
+        [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -ne 1 ] \
+          || teardown_unstage_return_claim_record "$claim" || true
       fi
       return 1
     fi
@@ -381,11 +602,31 @@ teardown_treehouse_return() {
   done
 }
 
-teardown_finalize_staged_returns() {
+teardown_commit_staged_returns() {
   local i
   for ((i=0; i<${#TEARDOWN_RETURN_CLAIMS[@]}; i++)); do
-    fm_slot_stamp_finalize_return \
-      "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" || return 1
+    if [ -e "${TEARDOWN_RETURN_CLAIMS[$i]}" ] \
+       || [ -L "${TEARDOWN_RETURN_CLAIMS[$i]}" ]; then
+      fm_slot_stamp_mark_return_committed \
+        "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" \
+        || return 1
+      teardown_mark_return_transaction_committed \
+        "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" \
+        || return 1
+    else
+      teardown_return_transaction_is_committed \
+        "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" \
+        || return 1
+    fi
+  done
+}
+
+teardown_reconcile_staged_returns() {
+  local i
+  for ((i=0; i<${#TEARDOWN_RETURN_CLAIMS[@]}; i++)); do
+    fm_slot_stamp_reconcile_committed_return "${TEARDOWN_RETURN_CLAIMS[$i]}" || {
+      echo "warning: committed return evidence remains for later reconciliation" >&2
+    }
   done
   TEARDOWN_RETURN_CLAIMS=()
   TEARDOWN_RETURN_LEGACIES=()
@@ -1038,6 +1279,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  teardown_stage_home_removal "${expected_id:-$ID}" "$abs_home_path" || return 1
   slot_verdict=$(firstmate_home_treehouse_slot_verdict "$abs_home_path")
   case "$slot_verdict" in
     registered)
@@ -1069,6 +1311,64 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
   esac
 }
 
+teardown_stage_evidence_home() {
+  local home=$1 prefix=$2 meta child_id child_kind child_home index=0 dest state_entry
+  [ -d "$home/state" ] || return 0
+  for meta in "$home/state"/*.meta; do
+    [ -e "$meta" ] || continue
+    child_id=$(basename "$meta" .meta)
+    dest="$TEARDOWN_TXN_DIR/evidence/$prefix/$index"
+    mkdir -p "$dest" || return 1
+    printf '%s\n' "$meta" > "$dest/source" || return 1
+    cp -p "$meta" "$dest/meta" || return 1
+    for state_entry in "$home/state/$child_id".*; do
+      [ -f "$state_entry" ] && [ ! -L "$state_entry" ] || continue
+      cp -p "$state_entry" "$dest/" || return 1
+    done
+    if [ -f "$home/.firstmate-owner" ] && [ ! -L "$home/.firstmate-owner" ]; then
+      cp -p "$home/.firstmate-owner" "$dest/firstmate-owner" || return 1
+    fi
+    if [ -f "$home/.firstmate-owner.returning" ] \
+       && [ ! -L "$home/.firstmate-owner.returning" ]; then
+      cp -p "$home/.firstmate-owner.returning" \
+        "$dest/firstmate-owner.returning" || return 1
+    fi
+    child_kind=$(teardown_meta_value_exact "$meta" kind required) || return 1
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(teardown_meta_value_exact "$meta" home required) || return 1
+      teardown_stage_evidence_home "$child_home" "$prefix-$child_id" || return 1
+    fi
+    index=$((index + 1))
+  done
+}
+
+teardown_stage_hierarchy_evidence() {
+  local parent tmp state_entry
+  if [ -d "$TEARDOWN_TXN_DIR" ] && [ ! -L "$TEARDOWN_TXN_DIR" ]; then
+    return 0
+  fi
+  [ ! -e "$TEARDOWN_TXN_DIR" ] && [ ! -L "$TEARDOWN_TXN_DIR" ] || return 1
+  parent=${TEARDOWN_TXN_DIR%/*}
+  mkdir -p "$parent" || return 1
+  tmp=$(mktemp -d "$parent/.${ID}.XXXXXX") || return 1
+  TEARDOWN_TXN_DIR=$tmp
+  mkdir -p "$TEARDOWN_TXN_DIR/evidence/top" || return 1
+  printf '%s\n' "$META" > "$TEARDOWN_TXN_DIR/evidence/top/source" || return 1
+  cp -p "$META" "$TEARDOWN_TXN_DIR/evidence/top/meta" || return 1
+  for state_entry in "$STATE/$ID".*; do
+    [ -f "$state_entry" ] && [ ! -L "$state_entry" ] || continue
+    cp -p "$state_entry" "$TEARDOWN_TXN_DIR/evidence/top/" || return 1
+  done
+  if [ -f "$HOME_PATH/.firstmate-owner" ] \
+     && [ ! -L "$HOME_PATH/.firstmate-owner" ]; then
+    cp -p "$HOME_PATH/.firstmate-owner" \
+      "$TEARDOWN_TXN_DIR/evidence/top/firstmate-owner" || return 1
+  fi
+  teardown_stage_evidence_home "$HOME_PATH" home || return 1
+  mv "$TEARDOWN_TXN_DIR" "$parent/$ID" || return 1
+  TEARDOWN_TXN_DIR="$parent/$ID"
+}
+
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home slot_verdict
   sub_state="$home/state"
@@ -1078,13 +1378,22 @@ validate_firstmate_home_children_removal() {
     child_id=$(basename "$child_meta" .meta)
     teardown_task_lock_acquire "$sub_state" "$child_id" || return 1
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
-    child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
-    child_wt=$(meta_value "$child_meta" worktree)
-    child_kind=$(meta_value "$child_meta" kind)
-    [ -n "$child_kind" ] || child_kind=ship
+    teardown_child_meta_read "$child_meta" "$child_id" "$home" || return 1
+    child_backend=$TEARDOWN_CHILD_BACKEND
+    child_wt=$TEARDOWN_CHILD_WORKTREE
+    child_proj=$TEARDOWN_CHILD_PROJECT
+    child_kind=$TEARDOWN_CHILD_KIND
+    teardown_endpoint_generation_matches "$child_backend" "$TEARDOWN_CHILD_WINDOW" \
+      "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" || {
+      echo "REFUSED: child $child_id endpoint generation is stale or cannot be verified" >&2
+      return 1
+    }
     if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
+      child_home=$TEARDOWN_CHILD_HOME
+      if [ ! -e "$child_home" ] \
+         && teardown_home_removal_is_staged "$child_id" "$child_home"; then
+        continue
+      fi
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       if ! fm_pending_reply_task_force_retirable "$sub_state" "$child_id"; then
         echo "REFUSED: child secondmate $child_id has a pending reply that has not reached escalation." >&2
@@ -1112,11 +1421,49 @@ validate_firstmate_home_children_removal() {
           ;;
       esac
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       require_treehouse_return_capability "child worktree" "$child_wt" || return 1
     fi
   done
+}
+
+teardown_child_meta_read() {
+  local meta=$1 expected_id=$2 expected_home=$3 task home
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || {
+    echo "REFUSED: child metadata is missing, unreadable, or not a regular file: $meta" >&2
+    return 1
+  }
+  TEARDOWN_CHILD_WINDOW=$(teardown_meta_value_exact "$meta" window required) || return 1
+  TEARDOWN_CHILD_WORKTREE=$(teardown_meta_value_exact "$meta" worktree required) || return 1
+  TEARDOWN_CHILD_PROJECT=$(teardown_meta_value_exact "$meta" project required) || return 1
+  TEARDOWN_CHILD_KIND=$(teardown_meta_value_exact "$meta" kind required) || return 1
+  task=$(teardown_meta_value_exact "$meta" task required) || return 1
+  home=$(teardown_meta_value_exact "$meta" home required) || return 1
+  TEARDOWN_CHILD_ENDPOINT_GENERATION=$(teardown_meta_value_exact \
+    "$meta" endpoint_generation required) || return 1
+  TEARDOWN_CHILD_BACKEND=$(teardown_meta_value_exact "$meta" backend optional) || return 1
+  [ -n "$TEARDOWN_CHILD_BACKEND" ] || TEARDOWN_CHILD_BACKEND=tmux
+  [ "$task" = "$expected_id" ] || {
+    echo "REFUSED: child metadata identity does not match $expected_id" >&2
+    return 1
+  }
+  case "$TEARDOWN_CHILD_KIND" in ship|scout|secondmate) ;; *) return 1 ;; esac
+  case "$TEARDOWN_CHILD_WORKTREE" in /*) ;; *) return 1 ;; esac
+  case "$TEARDOWN_CHILD_PROJECT" in /*) ;; *) return 1 ;; esac
+  case "$home" in /*) ;; *) return 1 ;; esac
+  case "$TEARDOWN_CHILD_ENDPOINT_GENERATION" in
+    *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
+  esac
+  if ! fm_backend_validate "$TEARDOWN_CHILD_BACKEND" >/dev/null 2>&1; then
+    echo "REFUSED: child $expected_id uses unsupported backend '$TEARDOWN_CHILD_BACKEND'; refusing force teardown" >&2
+    return 1
+  fi
+  if [ "$TEARDOWN_CHILD_KIND" = secondmate ]; then
+    fm_slot_same_path "$home" "$TEARDOWN_CHILD_WORKTREE" || return 1
+  else
+    fm_slot_same_path "$home" "$expected_home" || return 1
+  fi
+  TEARDOWN_CHILD_HOME=$home
 }
 
 validate_child_backend() {
@@ -1137,12 +1484,12 @@ cleanup_firstmate_home_children() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
-    child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
-    child_t=$(meta_value "$child_meta" window)
-    child_wt=$(meta_value "$child_meta" worktree)
-    child_proj=$(meta_value "$child_meta" project)
-    child_kind=$(meta_value "$child_meta" kind)
-    [ -n "$child_kind" ] || child_kind=ship
+    teardown_child_meta_read "$child_meta" "$child_id" "$home" || return 1
+    child_backend=$TEARDOWN_CHILD_BACKEND
+    child_t=$TEARDOWN_CHILD_WINDOW
+    child_wt=$TEARDOWN_CHILD_WORKTREE
+    child_proj=$TEARDOWN_CHILD_PROJECT
+    child_kind=$TEARDOWN_CHILD_KIND
     child_retire_staged=0
     child_retire_source=
     child_resolved_handoff=0
@@ -1162,28 +1509,33 @@ cleanup_firstmate_home_children() {
         return 1
       fi
       [ "$child_resolved_handoff" = 0 ] || child_retire_staged=1
+      if [ "$child_retire_staged" = 1 ]; then
+        TEARDOWN_PENDING_STATES+=("$sub_state")
+        TEARDOWN_PENDING_IDS+=("$child_id")
+        TEARDOWN_PENDING_SOURCES+=("$child_retire_source")
+      fi
     fi
+    teardown_endpoint_generation_matches "$child_backend" "$child_t" \
+      "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" || {
+      echo "REFUSED: child $child_id endpoint generation changed before cleanup" >&2
+      return 1
+    }
     if [ -n "$child_t" ]; then
-      if ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
+      teardown_stage_endpoint_close \
+        "$child_backend" "$child_t" "$TEARDOWN_CHILD_ENDPOINT_GENERATION" || return 1
+      if [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ] \
+         && ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
         echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
         return 1
       fi
     fi
     if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
+      child_home=$TEARDOWN_CHILD_HOME
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return 1
-        # Nested homes belong to their immediate parent home's state and stamp
-        # scope, not to the top-level primary.
+        teardown_commit_staged_returns || return 1
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" \
           "$sub_state" "$home" || return 1
-      fi
-      if [ "$child_retire_staged" = 1 ] \
-         && ! fm_pending_reply_finalize_force_retire_task \
-           "$sub_state" "$child_id" "$STATE" "$child_retire_source"; then
-        echo "REFUSED: could not hand off pending replies for child secondmate $child_id." >&2
-        return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "$home" \
@@ -1199,9 +1551,27 @@ cleanup_firstmate_home_children() {
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
-    [ -z "$child_slot_retain_verdict" ] \
-      || fm_slot_stamp_relinquish "$child_wt" "$child_id" "$home" \
-        "$child_slot_retain_verdict" || return 1
+    if [ -n "$child_slot_retain_verdict" ]; then
+      TEARDOWN_RELINQUISH_WTS+=("$child_wt")
+      TEARDOWN_RELINQUISH_IDS+=("$child_id")
+      TEARDOWN_RELINQUISH_HOMES+=("$home")
+      TEARDOWN_RELINQUISH_VERDICTS+=("$child_slot_retain_verdict")
+    fi
+  done
+}
+
+teardown_finalize_hierarchy_state() {
+  local i
+  for ((i=0; i<${#TEARDOWN_PENDING_STATES[@]}; i++)); do
+    fm_pending_reply_finalize_force_retire_task \
+      "${TEARDOWN_PENDING_STATES[$i]}" "${TEARDOWN_PENDING_IDS[$i]}" "$STATE" \
+      "${TEARDOWN_PENDING_SOURCES[$i]}" || return 1
+  done
+  for ((i=0; i<${#TEARDOWN_RELINQUISH_WTS[@]}; i++)); do
+    fm_slot_stamp_relinquish \
+      "${TEARDOWN_RELINQUISH_WTS[$i]}" "${TEARDOWN_RELINQUISH_IDS[$i]}" \
+      "${TEARDOWN_RELINQUISH_HOMES[$i]}" "${TEARDOWN_RELINQUISH_VERDICTS[$i]}" \
+      || return 1
   done
 }
 
@@ -1215,53 +1585,70 @@ remove_secondmate_registry_entry() {
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
-  teardown_admission_lock_acquire "$HOME_PATH/state" "$HOME_PATH" || exit 1
-  TOP_HOME_SLOT_VERDICT=$(firstmate_home_treehouse_slot_verdict "$HOME_PATH")
-  case "$TOP_HOME_SLOT_VERDICT" in
-    registered)
-      require_treehouse_return_capability "secondmate home" "$HOME_PATH" "$ID" || exit 1
-      require_secondmate_slot_claim "$HOME_PATH" "$ID" "$FM_HOME" \
-        "secondmate home" || exit 1
-      slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
-        secondmate "secondmate home" refuse || exit 1
-      ;;
-    unregistered)
-      if ! plain_legacy_firstmate_clone "$HOME_PATH"; then
-        echo "REFUSED: unregistered secondmate home is not a proven plain legacy clone: $HOME_PATH" >&2
+  if [ ! -e "$HOME_PATH" ] \
+     && teardown_home_removal_is_staged "$ID" "$HOME_PATH"; then
+    TOP_HOME_ALREADY_RETURNED=1
+  else
+    validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+    teardown_admission_lock_acquire "$HOME_PATH/state" "$HOME_PATH" || exit 1
+    TOP_HOME_SLOT_VERDICT=$(firstmate_home_treehouse_slot_verdict "$HOME_PATH")
+    case "$TOP_HOME_SLOT_VERDICT" in
+      registered)
+        require_treehouse_return_capability "secondmate home" "$HOME_PATH" "$ID" || exit 1
+        require_secondmate_slot_claim "$HOME_PATH" "$ID" "$FM_HOME" \
+          "secondmate home" || exit 1
+        slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
+          secondmate "secondmate home" refuse || exit 1
+        ;;
+      unregistered)
+        if ! plain_legacy_firstmate_clone "$HOME_PATH"; then
+          echo "REFUSED: unregistered secondmate home is not a proven plain legacy clone: $HOME_PATH" >&2
+          exit 1
+        fi
+        ;;
+      *)
+        echo "REFUSED: pooled-slot classification is unknown for secondmate home $HOME_PATH" >&2
         exit 1
-      fi
-      ;;
-    *)
-      echo "REFUSED: pooled-slot classification is unknown for secondmate home $HOME_PATH" >&2
-      exit 1
-      ;;
-  esac
-  if [ "$FORCE" = "--force" ]; then
+        ;;
+    esac
+  fi
+  if [ "$TOP_HOME_ALREADY_RETURNED" -eq 1 ]; then
+    :
+  elif [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+  elif [ -d "$HOME_PATH/state" ]; then
+    for child_meta in "$HOME_PATH/state"/*.meta; do
+      [ -e "$child_meta" ] || continue
+      echo "REFUSED: secondmate $ID still has in-flight work in $HOME_PATH/state." >&2
+      echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
+      exit 1
+    done
   fi
   if fm_pending_reply_task_has_open "$STATE" "$ID"; then
     FORCE_RETIRE_SOURCE=$(fm_pending_reply_source_identity "$STATE") || exit 1
-    if [ "$FORCE" = "--force" ] \
-       && fm_pending_reply_stage_force_retire_task "$STATE" "$ID"; then
-      FORCE_RETIRE_STAGED=1
-    else
+    if [ "$FORCE" != "--force" ]; then
       echo "REFUSED: secondmate $ID still has an open pending reply in $STATE/pending-replies." >&2
       echo "Wait for a correlated report or escalation before captain-approved forced teardown." >&2
       exit 1
     fi
+    PARENT_PENDING_OPEN=1
   fi
-fi
-
-if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
-  SUB_STATE="$HOME_PATH/state"
-  if [ -d "$SUB_STATE" ]; then
-    for child_meta in "$SUB_STATE"/*.meta; do
-      [ -e "$child_meta" ] || continue
-      echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
-      echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
+  teardown_stage_hierarchy_evidence || {
+    echo "REFUSED: could not stage durable hierarchy evidence" >&2
+    exit 1
+  }
+  teardown_load_staged_return_claims || {
+    echo "REFUSED: staged hierarchy return claims are ambiguous" >&2
+    exit 1
+  }
+  TEARDOWN_DEFER_RETURN_FINALIZE=1
+  if [ "$PARENT_PENDING_OPEN" -eq 1 ]; then
+    if fm_pending_reply_stage_force_retire_task "$STATE" "$ID"; then
+      FORCE_RETIRE_STAGED=1
+    else
+      echo "REFUSED: secondmate $ID pending reply could not be staged for retirement." >&2
       exit 1
-    done
+    fi
   fi
 fi
 
@@ -1366,7 +1753,16 @@ if [ "$BACKEND" = herdr ] \
 fi
 
 if [ "$BACKEND" = herdr ]; then
-  if ! teardown_herdr_endpoint_focus_safe "$T"; then
+  teardown_endpoint_generation_matches "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" || {
+    echo "REFUSED: task endpoint generation changed before cleanup; preserving task state" >&2
+    exit 1
+  }
+  teardown_stage_endpoint_close "$BACKEND" "$T" "$ENDPOINT_GENERATION" || {
+    echo "REFUSED: could not stage exact endpoint retirement for $ID" >&2
+    exit 1
+  }
+  if [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ] \
+     && ! teardown_herdr_endpoint_focus_safe "$T"; then
     echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
     exit 1
   fi
@@ -1376,18 +1772,30 @@ if [ "$BACKEND" = herdr ]; then
     echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
-  if ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
+  teardown_endpoint_generation_matches "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" || {
+    echo "REFUSED: task endpoint generation changed before cleanup; preserving task state" >&2
+    exit 1
+  }
+  teardown_stage_endpoint_close "$BACKEND" "$T" "$ENDPOINT_GENERATION" || {
+    echo "REFUSED: could not stage exact endpoint retirement for $ID" >&2
+    exit 1
+  }
+  if [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ] \
+     && ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
     echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
     exit 1
   fi
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  TEARDOWN_DEFER_RETURN_FINALIZE=1
   if ! cleanup_firstmate_home_children "$HOME_PATH"; then
     echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent state and home" >&2
     exit 1
   fi
+  teardown_commit_staged_returns || {
+    echo "error: child retirement commit could not be recorded" >&2
+    exit 1
+  }
 fi
 
 # Ownership gate first. A retained lease leaves the slot untouched while the
@@ -1421,17 +1829,6 @@ fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
-  teardown_finalize_staged_returns || {
-    echo "error: secondmate hierarchy returned but ownership transitions remain staged" >&2
-    exit 1
-  }
-  if [ "$FORCE_RETIRE_STAGED" = 1 ] \
-     && ! fm_pending_reply_finalize_force_retire_task \
-       "$STATE" "$ID" "$STATE" "$FORCE_RETIRE_SOURCE"; then
-    echo "error: secondmate $ID was removed but its pending-reply handoff could not be finalized" >&2
-    exit 1
-  fi
-  remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
@@ -1442,11 +1839,32 @@ cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
   exit 1
 }
+if [ "$KIND" = secondmate ]; then
+  teardown_commit_staged_returns || {
+    echo "error: secondmate retirement commit could not be recorded" >&2
+    exit 1
+  }
+  teardown_finalize_hierarchy_state || {
+    echo "error: secondmate hierarchy retirement remains recoverably staged" >&2
+    exit 1
+  }
+  if [ "$FORCE_RETIRE_STAGED" = 1 ] \
+     && ! fm_pending_reply_finalize_force_retire_task \
+       "$STATE" "$ID" "$STATE" "$FORCE_RETIRE_SOURCE"; then
+    echo "error: secondmate pending-reply retirement remains recoverably staged" >&2
+    exit 1
+  fi
+  remove_secondmate_registry_entry "$ID" || exit 1
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
 if [ -n "${TOP_SLOT_RETAIN_VERDICT:-}" ]; then
   fm_slot_stamp_relinquish "$WT" "$ID" "$FM_HOME" "$TOP_SLOT_RETAIN_VERDICT" || exit 1
+fi
+if [ "$KIND" = secondmate ]; then
+  teardown_reconcile_staged_returns
+  rm -rf -- "$TEARDOWN_TXN_DIR"
 fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

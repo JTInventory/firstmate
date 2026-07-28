@@ -795,23 +795,45 @@ test_config_push_propagates_reports_without_ff_and_sends_reread() {
 }
 
 test_config_reread_terminal_cleanup_is_idempotent_after_receipt_removal() {
-  local dir receipt pending
+  local dir receipt pending state
   dir="$TMP_ROOT/config-reread-terminal-cleanup"
   receipt="$dir/receipt"
   pending="$dir/instruction.pending"
   mkdir -p "$dir"
-  printf 'receipt\n' > "$receipt"
-  printf 'instruction\n' > "$pending"
-  fm_secondmate_delivery_finalize_marker "$receipt" "$pending" \
-    || fail "config reread terminal cleanup failed"
-  [ ! -e "$receipt" ] && [ ! -e "$pending" ] \
-    || fail "config reread terminal cleanup left receipt or marker state"
-  printf 'instruction\n' > "$pending"
-  fm_secondmate_delivery_finalize_marker "$receipt" "$pending" \
-    || fail "config reread cleanup did not reconcile a receipt-first crash"
-  [ ! -e "$pending" ] \
-    || fail "config reread cleanup left a marker after receipt-first recovery"
+  for state in confirmed-delivered finalizing complete; do
+    fm_secondmate_delivery_receipt_write "$receipt" config-reread sm \
+      "$dir/home" firstmate:fm-sm endpoint-sm generation-sm tmux:firstmate:fm-sm \
+      0123456789abcdef signature "$state"
+    printf 'instruction\n' > "$pending"
+    fm_secondmate_delivery_finalize_marker "$receipt" "$pending" \
+      || fail "config reread terminal cleanup failed from $state"
+    grep -qx 'state=complete' "$receipt" && [ ! -e "$pending" ] \
+      || fail "config reread terminal cleanup lost its receipt from $state"
+    printf 'instruction\n' > "$pending"
+    fm_secondmate_delivery_finalize_marker "$receipt" "$pending" \
+      || fail "config reread cleanup did not reconcile $state"
+    [ ! -e "$pending" ] && grep -qx 'state=complete' "$receipt" \
+      || fail "config reread cleanup wedged after $state"
+  done
   pass "config reread terminal cleanup is idempotent across receipt-first crashes"
+}
+
+test_delivery_binding_finds_archived_transactions() {
+  local dir state corr rec signature found
+  dir="$TMP_ROOT/archived-delivery-binding"
+  state="$dir/state"
+  signature=transaction-signature
+  mkdir -p "$state"
+  corr=$(fm_pending_reply_create "$dir/home" "$state" sm instruction)
+  rec=$(fm_pending_reply_active_path "$state" "$corr")
+  fm_pending_reply_set "$rec" fm_delivery_transaction "$signature"
+  mkdir -p "$(fm_pending_reply_history_dir "$state")"
+  mv "$rec" "$(fm_pending_reply_history_dir "$state")/$corr"
+  found=$(fm_secondmate_delivery_bound_correlation "$state" "$signature") \
+    || fail "archived delivery transaction could not be rebound"
+  [ "$found" = "$corr" ] \
+    || fail "archived delivery transaction rebound to the wrong correlation"
+  pass "delivery recovery finds transactions after pending-reply archival"
 }
 
 test_config_push_reports_skips_dirty_and_invalid_home() {
@@ -1024,6 +1046,7 @@ test_bootstrap_sweep_no_inheritance_is_noop
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_config_push_propagates_reports_without_ff_and_sends_reread
 test_config_reread_terminal_cleanup_is_idempotent_after_receipt_removal
+test_delivery_binding_finds_archived_transactions
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
 test_config_push_respects_secondmate_lifecycle_lock

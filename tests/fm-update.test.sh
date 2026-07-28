@@ -1155,8 +1155,9 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
   fm_update_obligation_pending \
     "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     && fail "locked secondmate delivery did not acknowledge its generation"
-  [ ! -e "$w/home/state/.secondmate-nudge-delivered/sm1/$generation" ] \
-    || fail "completed secondmate delivery left its transaction receipt"
+  grep -qx 'state=complete' \
+    "$w/home/state/.secondmate-nudge-delivered/sm1/$generation" \
+    || fail "completed secondmate delivery did not retain its terminal receipt"
   pass "T32 secondmate delivery sends and acknowledges under one lifecycle lock"
 }
 
@@ -1414,7 +1415,10 @@ test_confirmed_receipt_reconciles_after_obligation_cleanup_crash() {
   fm_secondmate_delivery_receipt_write "$receipt" update-nudge sm1 "$w/sm1" \
     "$target" endpoint-sm1 "$generation" "$provider" "$correlation" \
     "$(printf '%s' 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' \
-      | cksum | awk '{printf "%s-%s", $1, $2}')" confirmed-delivered
+      | cksum | awk '{printf "%s-%s", $1, $2}')" finalizing
+  mkdir -p "$(fm_pending_reply_history_dir "$w/home/state")"
+  mv "$(fm_pending_reply_active_path "$w/home/state" "$correlation")" \
+    "$(fm_pending_reply_history_dir "$w/home/state")/$correlation"
   fakebin=$(make_fake_tmux "$w/terminal-cleanup-fake")
   out=$(cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
@@ -1422,7 +1426,8 @@ test_confirmed_receipt_reconciles_after_obligation_cleanup_crash() {
     "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
   assert_contains "$out" "delivered-secondmate-nudge: $target" \
     "confirmed orphan receipt did not reconcile"
-  [ ! -e "$receipt" ] || fail "confirmed orphan receipt survived reconciliation"
+  grep -qx 'state=complete' "$receipt" \
+    || fail "confirmed orphan receipt did not become a terminal tombstone"
   sends=$(grep -Fc 'firstmate was updated to the latest' \
     "$w/terminal-cleanup-fake/tmux.log" 2>/dev/null || true)
   [ "$sends" -eq 0 ] || fail "orphan receipt recovery resent the request"

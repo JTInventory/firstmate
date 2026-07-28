@@ -76,7 +76,19 @@ for meta in "$STATE"/*.meta; do
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
 
+  kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
   kind=$(fm_meta_get "$meta" kind)
+  if [ "$kind_count" -ne 1 ]; then
+    echo "ISOLATION: task $id is unproven: kind must appear exactly once; preserve its state and reconcile $meta before any mutation"
+    continue
+  fi
+  case "$kind" in
+    ship|scout|secondmate) ;;
+    *)
+      echo "ISOLATION: task $id is unproven: kind must be one non-empty valid worker kind; preserve its state and reconcile $meta before any mutation"
+      continue
+      ;;
+  esac
   role=crewmate
   expected_home=$HOME_REAL
   if [ "$kind" = secondmate ]; then

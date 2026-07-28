@@ -63,6 +63,10 @@ fm_backend_tmux_set_task_option() {  # <target> <option> <value>
   tmux set-window-option -t "$1" "$2" "$3"
 }
 
+fm_backend_tmux_endpoint_generation() {
+  tmux show-options -w -v -t "$1" @firstmate_endpoint_generation 2>/dev/null
+}
+
 fm_backend_tmux_rename_task() {  # <target> <name>
   tmux rename-window -t "$1" "$2"
 }

@@ -102,10 +102,25 @@ fm_fake_exit0() {
   local fakebin=$1 tool
   shift
   for tool in "$@"; do
-    cat > "$fakebin/$tool" <<'SH'
+    if [ "$tool" = tmux ]; then
+      cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show-options ]; then
+  target=
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
+    shift
+  done
+  printf 'endpoint-%s\n' "${target##*:fm-}"
+fi
+exit 0
+SH
+    else
+      cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
+    fi
     chmod +x "$fakebin/$tool"
   done
 }
@@ -153,12 +168,20 @@ fm_git_worktree() {
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta
 # file (truncating any prior content).
 fm_write_meta() {
-  local file=$1 kv
+  local file=$1 kv id owner_home
   shift
   : > "$file"
   for kv in "$@"; do
     printf '%s\n' "$kv" >> "$file"
   done
+  if grep -q '^kind=' "$file"; then
+    id=$(basename "$file" .meta)
+    owner_home=$(dirname "$(dirname "$file")")
+    grep -q '^task=' "$file" || printf 'task=%s\n' "$id" >> "$file"
+    grep -q '^home=' "$file" || printf 'home=%s\n' "$owner_home" >> "$file"
+    grep -q '^endpoint_generation=' "$file" \
+      || printf 'endpoint_generation=endpoint-%s\n' "$id" >> "$file"
+  fi
 }
 
 # fm_write_secondmate_meta <file> <home> [window] [projects]: write the standard
@@ -166,9 +189,10 @@ fm_write_meta() {
 # to firstmate:fm-<basename-of-home-dir's parent id>? No - window is explicit;
 # defaults to firstmate:fm-domain and projects to alpha to match the common case.
 fm_write_secondmate_meta() {
-  local file=$1 home=$2 window=${3:-firstmate:fm-domain} projects=${4:-alpha}
+  local file=$1 home=$2 window=${3:-} projects=${4:-alpha}
   local id
   id=$(basename "$file" .meta)
+  [ -n "$window" ] || window="firstmate:fm-$id"
   fm_write_meta "$file" \
     "window=$window" \
     "worktree=$home" \

@@ -103,6 +103,7 @@ fm_slot_stamp_write() {
   [ -n "$id" ] && [ -n "$home" ] || return 1
   path=$(fm_slot_stamp_path "$wt") || return 1
   claim=$(fm_slot_return_claim_path "$wt" 2>/dev/null || true)
+  [ -z "$claim" ] || fm_slot_stamp_reconcile_committed_return "$claim" || return 1
   [ -z "$claim" ] || { [ ! -e "$claim" ] && [ ! -L "$claim" ]; } || return 1
   legacy_target=$(fm_slot_return_legacy_path "$wt" 2>/dev/null || true)
   if [ -L "$path" ] && [ -n "$legacy_target" ] \
@@ -321,6 +322,44 @@ fm_slot_stamp_finalize_return() {
   [ -n "$claim" ] || return 0
   [ -n "$legacy" ] || legacy="${claim}.owner"
   rm -f "$legacy" "$claim"
+}
+
+fm_slot_stamp_committed_return_path() {
+  [ -n "$1" ] || return 1
+  printf '%s.committed' "$1"
+}
+
+fm_slot_stamp_mark_return_committed() {
+  local claim=$1 legacy=${2:-} marker tmp
+  [ -n "$claim" ] || return 0
+  [ -n "$legacy" ] || legacy="${claim}.owner"
+  fm_slot_return_claim_record_file "$claim" || return 1
+  fm_slot_owner_record_file "$legacy" || return 1
+  [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$FM_SLOT_STAMP_TASK" ] \
+    && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$FM_SLOT_STAMP_HOME" || return 1
+  marker=$(fm_slot_stamp_committed_return_path "$claim") || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] \
+      && cmp -s "$claim" "$marker"
+    return
+  fi
+  tmp=$(mktemp "${marker}.XXXXXX") || return 1
+  cp "$claim" "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$marker" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
+fm_slot_stamp_reconcile_committed_return() {
+  local claim=$1 marker legacy
+  marker=$(fm_slot_stamp_committed_return_path "$claim") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  legacy="${claim}.owner"
+  if [ -e "$claim" ] || [ -L "$claim" ]; then
+    [ -f "$claim" ] && [ ! -L "$claim" ] && cmp -s "$claim" "$marker" || return 1
+  fi
+  rm -f "$legacy" "$claim" "$marker"
 }
 
 # fm_slot_meta_worktree <meta-file>: the one recorded absolute worktree path.

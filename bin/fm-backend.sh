@@ -531,6 +531,15 @@ fm_backend_set_task_option() {  # <backend> <target> <option> <value>
   esac
 }
 
+fm_backend_endpoint_generation() {
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_generation "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_rename_task() {  # <backend> <target> <name>
   local backend=$1; shift
   fm_backend_source "$backend" || return 1
