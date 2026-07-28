@@ -341,6 +341,46 @@ test_worker_cannot_spawn_or_tear_down() {
   pass "a declared task worker is refused both dispatch and teardown"
 }
 
+test_secondmate_primary_operations_require_its_declared_home() {
+  local home foreign alias out status
+  home=$(make_primary_home "$TMP_ROOT/secondmate-owner-home")
+  foreign=$(make_primary_home "$TMP_ROOT/secondmate-foreign-home")
+  alias="$TMP_ROOT/secondmate-owner-alias"
+  ln -s "$home" "$alias"
+
+  out=$(FM_HOME="$alias" FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain \
+    FM_AGENT_OWNER_HOME="$home" bash -c \
+    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1)
+  status=$?
+  expect_code 0 "$status" "a canonical alias of a secondmate's declared home must remain usable"
+
+  out=$(FM_ROOT_OVERRIDE="$foreign" FM_HOME="$foreign" \
+    FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+    "$LOCK" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate must not lock another operational home"
+  assert_contains "$out" "secondmate" "the foreign-home lock refusal lost the declared role"
+  [ ! -e "$foreign/state/.lock" ] || fail "a secondmate mutated a foreign session lock"
+
+  out=$(FM_ROOT_OVERRIDE="$foreign" FM_HOME="$foreign" FM_SPAWN_NO_GUARD=1 \
+    FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+    "$SPAWN" some-task "$foreign" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate must not spawn from another operational home"
+  assert_contains "$out" "spawn refused" "the foreign-home spawn refusal lost the operation"
+  [ ! -e "$foreign/state/.spawn-some-task.lock" ] \
+    || fail "a foreign-home secondmate reached spawn locking"
+
+  out=$(FM_ROOT_OVERRIDE="$foreign" FM_HOME="$foreign" \
+    FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+    "$TEARDOWN" some-task 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate must not tear down another operational home"
+  assert_contains "$out" "teardown refused" "the foreign-home teardown refusal lost the operation"
+  pass "a secondmate can operate only inside its declared canonical home"
+}
+
 # --- D. /proc is the method of record ---------------------------------------
 
 test_proc_cwd_is_read_from_the_live_process() {
@@ -1054,6 +1094,7 @@ exec /usr/bin/mktemp "$@"
 SH
   chmod +x "$FAKEBIN_DIR/mktemp"
   : > "$CASE_DIR/kill.log"
+  set +e
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -1062,6 +1103,7 @@ SH
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
   status=$?
+  set -e
   expect_code 1 "$status" "spawn should abort when metadata publication cannot start"
   if stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task 2>/dev/null); then
     fail "an aborted spawn left its newly-created claim behind: $stamp"
@@ -1072,6 +1114,7 @@ SH
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_write "$WT_DIR" "$id" "$home_real" ) \
     || fail "could not install the preexisting exact claim fixture"
   : > "$CASE_DIR/kill.log"
+  set +e
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -1080,6 +1123,7 @@ SH
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
   status=$?
+  set -e
   expect_code 1 "$status" "idempotent-claim spawn should reach the metadata abort"
   stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
   [ "$stamp" = "$id" ] || fail "abort cleared a preexisting idempotent claim"
@@ -1095,6 +1139,7 @@ test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
     && fm_slot_stamp_write "$WT_DIR" foreign-g2 "$CASE_DIR/foreign-home" ) \
     || fail "could not install foreign claim fixture"
   : > "$CASE_DIR/kill.log"
+  set +e
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -1103,6 +1148,7 @@ test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
   status=$?
+  set -e
   expect_code 1 "$status" "spawn must refuse a foreign slot claim"
   assert_contains "$out" "could not claim pooled-slot ownership" "foreign claim refusal lost its reason"
   [ ! -e "$WT_DIR/.claude/settings.local.json" ] || fail "spawn mutated hooks before refusing the foreign claim"
@@ -1190,6 +1236,7 @@ test_declared_worker_is_never_a_primary_scope_match
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
+test_secondmate_primary_operations_require_its_declared_home
 test_proc_cwd_is_read_from_the_live_process
 test_declared_agent_lookup_returns_the_root_most_process
 test_provider_process_id_matrix_is_explicit

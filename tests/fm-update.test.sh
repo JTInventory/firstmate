@@ -58,6 +58,7 @@ new_world() {
 
   printf 'v1\n' > "$w/seed/AGENTS.md"
   printf 'r1\n' > "$w/seed/README.md"
+  printf 'state/\ndata/\nconfig/\nprojects/\n' > "$w/seed/.gitignore"
   mkdir -p "$w/seed/bin" "$w/seed/.agents/skills"
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
@@ -595,6 +596,53 @@ test_future_only_legacy_generation_updates_on_first_retry() {
   pass "T19 future-only legacy generations recover on the first retry"
 }
 
+test_update_waits_for_legacy_admission_and_task_locks() {
+  local w out before lock holder
+  w=$(new_world t20)
+  bump_origin "$w" readme
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  for lock in "$w/home/state/.spawn-admission.lock" "$w/home/state/.spawn-old-task.lock"; do
+    (
+      . "$ROOT/bin/fm-wake-lib.sh"
+      fm_lock_try_acquire "$lock" || exit 1
+      touch "$w/lock-ready"
+      while [ ! -e "$w/release-lock" ]; do sleep 0.05; done
+      fm_lock_release "$lock"
+    ) &
+    holder=$!
+    UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
+    while [ ! -e "$w/lock-ready" ]; do sleep 0.05; done
+    out=$(run_update "$w")
+    assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+      "update ignored a mixed-version lifecycle lock"
+    [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+      || fail "update advanced while a mixed-version lifecycle lock was active"
+    touch "$w/release-lock"
+    wait "$holder"
+    rm -f "$w/lock-ready" "$w/release-lock"
+  done
+
+  bash -c 'exec -a /legacy/bin/fm-spawn.sh sleep 300' &
+  holder=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
+  while ! ps -p "$holder" -o command= 2>/dev/null | grep -F '/legacy/bin/fm-spawn.sh' >/dev/null; do
+    sleep 0.05
+  done
+  out=$(run_update "$w")
+  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+    "update ignored a legacy lifecycle process without an admission lock"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "update advanced while a lockless legacy lifecycle process was active"
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+
+  out=$(run_update "$w")
+  assert_contains "$out" "firstmate: updated " \
+    "update did not advance after mixed-version lifecycle locks released"
+  pass "T20 update bridges legacy admission and task-only lifecycle locks"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -612,5 +660,6 @@ test_immutable_generations_preserve_prepared_and_newer_markers
 test_skipped_update_reports_existing_generation
 test_future_legacy_generation_survives_concurrent_ack
 test_future_only_legacy_generation_updates_on_first_retry
+test_update_waits_for_legacy_admission_and_task_locks
 
 echo "# all fm-update tests passed"

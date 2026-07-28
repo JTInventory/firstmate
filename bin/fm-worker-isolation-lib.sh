@@ -96,13 +96,73 @@ fm_worker_owning_home() {
   printf '%s' "${FM_AGENT_OWNER_HOME:-}"
 }
 
+fm_worker_canonical_path() {
+  local path=$1 parent base
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  if [ -d "$path" ]; then
+    cd "$path" 2>/dev/null && pwd -P
+    return
+  fi
+  parent=${path%/*}
+  base=${path##*/}
+  [ -n "$parent" ] || parent=/
+  parent=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "${parent%/}" "$base"
+}
+
+fm_worker_secondmate_scope_matches() {
+  local home=$1 state=$2 owner_real home_real state_real
+  owner_real=$(cd "${FM_AGENT_OWNER_HOME:-}" 2>/dev/null && pwd -P) || return 1
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  state_real=$(fm_worker_canonical_path "$state") || return 1
+  [ "$home_real" = "$owner_real" ] && [ "$state_real" = "$owner_real/state" ]
+}
+
+fm_worker_secondmate_effective_scope_matches() {
+  local home state var value suffix expected actual owner_real root_override
+  home=${FM_HOME:-${FM_ROOT_OVERRIDE:-}}
+  [ -n "$home" ] || return 1
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  fm_worker_secondmate_scope_matches "$home" "$state" || return 1
+  owner_real=$(fm_worker_canonical_path "${FM_AGENT_OWNER_HOME:-}") || return 1
+  root_override=${FM_ROOT_OVERRIDE:-}
+  if [ -n "$root_override" ]; then
+    actual=$(fm_worker_canonical_path "$root_override") || return 1
+    [ "$actual" = "$owner_real" ] || return 1
+  fi
+  for var in FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE; do
+    value=${!var:-}
+    [ -n "$value" ] || continue
+    case "$var" in
+      FM_DATA_OVERRIDE) suffix=data ;;
+      FM_PROJECTS_OVERRIDE) suffix=projects ;;
+      FM_CONFIG_OVERRIDE) suffix=config ;;
+    esac
+    expected="$owner_real/$suffix"
+    actual=$(fm_worker_canonical_path "$value") || return 1
+    [ "$actual" = "$expected" ] || return 1
+  done
+}
+
 # fm_worker_refuse_primary_operation <operation>
 # Fail closed with one actionable line when a declared task worker attempts an
 # operation only a home's primary may perform. Silent and successful for every
 # other process, so a call site can guard unconditionally.
 fm_worker_refuse_primary_operation() {
   local operation=$1
-  fm_worker_is_task_worker || return 0
-  echo "error: $operation refused: this process is task worker '${FM_AGENT_TASK:-unnamed}' launched by ${FM_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
-  return 1
+  case "${FM_AGENT_ROLE:-}" in
+    crewmate)
+      echo "error: $operation refused: this process is task worker '${FM_AGENT_TASK:-unnamed}' launched by ${FM_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
+      return 1
+      ;;
+    secondmate)
+      fm_worker_secondmate_effective_scope_matches && return 0
+      echo "error: $operation refused: secondmate '${FM_AGENT_TASK:-unnamed}' is not operating in its declared home ${FM_AGENT_OWNER_HOME:-<missing>}" >&2
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
 }

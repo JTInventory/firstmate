@@ -40,8 +40,44 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-watcher-protocol-lib.sh
 . "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
+
+FM_UPDATE_ADMISSION_LOCKS=()
+
+fm_ff_target_lock_acquire() {
+  local state_dir=$1 _label=${2:-target} lock
+  FM_UPDATE_ADMISSION_LOCKS=()
+  while IFS= read -r lock; do
+    [ -n "$lock" ] || continue
+    mkdir -p "$(dirname "$lock")" || return 1
+    if ! fm_lock_try_acquire "$lock"; then
+      fm_ff_target_lock_release
+      return 1
+    fi
+    FM_UPDATE_ADMISSION_LOCKS+=("$lock")
+  done < <(fm_spawn_admission_lock_paths "$state_dir")
+  if fm_spawn_legacy_task_lock_busy "$state_dir"; then
+    fm_ff_target_lock_release
+    return 1
+  fi
+  if fm_spawn_legacy_lifecycle_process_busy; then
+    fm_ff_target_lock_release
+    return 1
+  fi
+}
+
+fm_ff_target_lock_release() {
+  local i
+  for ((i=${#FM_UPDATE_ADMISSION_LOCKS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${FM_UPDATE_ADMISSION_LOCKS[$i]}" || true
+  done
+  FM_UPDATE_ADMISSION_LOCKS=()
+}
+
+trap fm_ff_target_lock_release EXIT
 
 usage() {
   echo "usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>]" >&2
@@ -108,7 +144,14 @@ reread_firstmate_generation=""
 restart_firstmate_watcher="no"
 reread_marker=$(fm_watcher_protocol_reread_marker "$STATE")
 fm_update_obligation_pending "$reread_marker" "$FM_ROOT" && reread_firstmate="yes"
-ff_target "$FM_ROOT" "firstmate" origin no no "$reread_marker" instructions
+if fm_ff_target_lock_acquire "$STATE" firstmate; then
+  ff_target "$FM_ROOT" "firstmate" origin no no "$reread_marker" instructions
+  fm_ff_target_lock_release
+else
+  FF_STATUS=skipped
+  FF_OBLIGATION_GENERATION=
+  echo "firstmate: skipped: spawn or teardown is active"
+fi
 reread_firstmate_generation=$FF_OBLIGATION_GENERATION
 if [ "$FF_STATUS" = "updated" ]; then
   installed_update="$FM_ROOT/bin/fm-update.sh"

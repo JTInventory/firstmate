@@ -30,7 +30,10 @@ fm_root_is_secondmate_home() {
 # worker launched inside a primary checkout fire that home's hooks.
 fm_primary_scope_matches() {
   local root=$1 state=$2 git_dir git_common_dir
-  fm_worker_is_task_worker && return 1
+  case "$(fm_worker_declared_role)" in
+    crewmate) return 1 ;;
+    secondmate) fm_worker_secondmate_scope_matches "$root" "$state" || return 1 ;;
+  esac
   if ! fm_root_is_secondmate_home "$root"; then
     git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
     git_common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1

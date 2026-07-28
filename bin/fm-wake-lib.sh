@@ -16,6 +16,48 @@ fm_spawn_admission_lock_path() {
   printf '%s/.locks/spawn-admission.lock\n' "$1"
 }
 
+fm_spawn_admission_lock_paths() {
+  printf '%s/.spawn-admission.lock\n' "$1"
+  fm_spawn_admission_lock_path "$1"
+}
+
+fm_spawn_legacy_task_lock_busy() {
+  local state=$1 lock
+  for lock in "$state"/.spawn-*.lock; do
+    [ -e "$lock" ] || [ -L "$lock" ] || continue
+    [ "$lock" != "$state/.spawn-admission.lock" ] || continue
+    if fm_lock_try_acquire "$lock"; then
+      fm_lock_release "$lock"
+      continue
+    fi
+    return 0
+  done
+  return 1
+}
+
+fm_spawn_legacy_lifecycle_process_busy() {
+  local entry arg pid command
+  if [ -d /proc ]; then
+    for entry in /proc/[0-9]*; do
+      [ -r "$entry/cmdline" ] || continue
+      while IFS= read -r arg; do
+        case "$arg" in
+          */fm-spawn.sh|*/fm-teardown.sh) return 0 ;;
+        esac
+      done < <(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null)
+    done
+    return 1
+  fi
+  while read -r pid command; do
+    for arg in $command; do
+      case "$arg" in
+        */fm-spawn.sh|*/fm-teardown.sh) return 0 ;;
+      esac
+    done
+  done < <(LC_ALL=C ps -A -o pid= -o command= 2>/dev/null)
+  return 1
+}
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }

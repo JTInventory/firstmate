@@ -515,7 +515,7 @@ FF_SEEN_HOMES=""
 # as its own secondmate, and each resolved home is processed at most once.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
-  local reread_marker pending_reread should_nudge
+  local reread_marker pending_reread should_nudge target_locked=0
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -532,6 +532,15 @@ process_secondmate() {
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
   reread_marker="$home_real/state/.watch-protocol-reread-required"
+  if [ "$(type -t fm_ff_target_lock_acquire 2>/dev/null || true)" = function ]; then
+    if ! fm_ff_target_lock_acquire "$home_real/state" "secondmate $id"; then
+      FF_STATUS="skipped"
+      FF_INSTR=""
+      echo "secondmate $id: skipped: spawn or teardown is active"
+      return 0
+    fi
+    target_locked=1
+  fi
   if [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ]; then
       ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$reread_marker" instructions
@@ -540,6 +549,9 @@ process_secondmate() {
     fi
   else
     ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  fi
+  if [ "$target_locked" -eq 1 ]; then
+    fm_ff_target_lock_release
   fi
   pending_reread=0
   fm_update_obligation_pending "$reread_marker" "$home_real" && pending_reread=1

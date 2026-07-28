@@ -1138,8 +1138,8 @@ test_secondmate_teardown_serializes_against_spawn() {
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   [ "$rc" -ne 0 ] || fail "teardown raced through an active spawn task lock"
-  grep -F 'spawn or teardown is already changing task domain' "$err" >/dev/null \
-    || fail "teardown task-lock refusal lost its reason"
+  grep -F 'an older spawn or teardown is still changing' "$err" >/dev/null \
+    || fail "teardown legacy task-lock refusal lost its reason"
   grep -F 'kill-window' "$log" >/dev/null \
     && fail "teardown closed the endpoint while spawn held the task lock"
   [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
@@ -1574,6 +1574,10 @@ test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
   [ "$rc" -ne 0 ] || fail "force teardown raw-deleted a linked child without treehouse"
   grep -F 'treehouse command not found; preserving child worktree' "$err" >/dev/null \
     || fail "missing-treehouse refusal lost its reason"
+  [ ! -s "$log" ] || fail "missing-treehouse preflight closed an endpoint before refusing"
+  [ -e "$home/state/domain.meta" ] || fail "missing-treehouse preflight removed parent metadata"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
+    || fail "missing-treehouse preflight removed the secondmate route"
   [ -d "$childwt" ] || fail "missing treehouse removed the linked child worktree"
   [ -e "$subhome/state/child.meta" ] || fail "missing treehouse removed child metadata"
   stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \

@@ -66,6 +66,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "teardown" || exit 1
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -89,10 +92,6 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-slot-owner-lib.sh
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
-# shellcheck source=bin/fm-worker-isolation-lib.sh
-. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-# A task worker never tears down through an inherited operational home.
-fm_worker_refuse_primary_operation "teardown" || exit 1
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -105,8 +104,11 @@ FORCE_RETIRE_SOURCE=
 TEARDOWN_LOCKS=()
 
 teardown_task_lock_acquire() {
-  local state_dir=$1 id=$2 lock
+  local state_dir=$1 id=$2 lock held
   lock="$state_dir/.spawn-$id.lock"
+  for held in "${TEARDOWN_LOCKS[@]}"; do
+    [ "$held" != "$lock" ] || return 0
+  done
   if ! fm_lock_try_acquire "$lock"; then
     echo "REFUSED: spawn or teardown is already changing task $id in $state_dir" >&2
     return 1
@@ -115,17 +117,27 @@ teardown_task_lock_acquire() {
 }
 
 teardown_admission_lock_acquire() {
-  local state_dir=$1 lock held
-  lock=$(fm_spawn_admission_lock_path "$state_dir") || return 1
-  for held in "${TEARDOWN_LOCKS[@]}"; do
-    [ "$held" != "$lock" ] || return 0
-  done
-  mkdir -p "$(dirname "$lock")" || return 1
-  if ! fm_lock_try_acquire "$lock"; then
-    echo "REFUSED: spawn is already publishing work in $state_dir" >&2
+  local state_dir=$1 lock held already acquired=0
+  while IFS= read -r lock; do
+    [ -n "$lock" ] || continue
+    already=0
+    for held in "${TEARDOWN_LOCKS[@]}"; do
+      [ "$held" != "$lock" ] || already=1
+    done
+    [ "$already" = 1 ] && continue
+    mkdir -p "$(dirname "$lock")" || return 1
+    if ! fm_lock_try_acquire "$lock"; then
+      echo "REFUSED: spawn is already publishing work in $state_dir" >&2
+      return 1
+    fi
+    TEARDOWN_LOCKS+=("$lock")
+    acquired=1
+  done < <(fm_spawn_admission_lock_paths "$state_dir")
+  [ "$acquired" = 1 ] || return 0
+  if fm_spawn_legacy_task_lock_busy "$state_dir"; then
+    echo "REFUSED: an older spawn or teardown is still changing $state_dir" >&2
     return 1
   fi
-  TEARDOWN_LOCKS+=("$lock")
 }
 
 teardown_locks_release() {
@@ -654,6 +666,13 @@ firstmate_home_has_treehouse_slot() {
   worktree_registered_for_project "$FM_ROOT" "$home"
 }
 
+require_treehouse_return_capability() {
+  local label=$1 target=$2
+  command -v treehouse >/dev/null 2>&1 && return 0
+  echo "REFUSED: treehouse command not found; preserving $label $target and all lifecycle state" >&2
+  return 1
+}
+
 validate_removal_target() {
   local target=$1 label=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 0
@@ -881,12 +900,14 @@ validate_firstmate_home_children_removal() {
       fi
       validate_firstmate_home_children_removal "$child_home" || return 1
       if firstmate_home_has_treehouse_slot "$child_home"; then
+        require_treehouse_return_capability "child firstmate home" "$child_home" || return 1
         slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" "$child_home" \
           secondmate "child firstmate home" refuse || return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      require_treehouse_return_capability "child worktree" "$child_wt" || return 1
     fi
   done
 }
@@ -997,6 +1018,7 @@ if [ "$KIND" = secondmate ]; then
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   teardown_admission_lock_acquire "$HOME_PATH/state" || exit 1
   if firstmate_home_has_treehouse_slot "$HOME_PATH"; then
+    require_treehouse_return_capability "secondmate home" "$HOME_PATH" || exit 1
     slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
       secondmate "secondmate home" refuse || exit 1
   fi
@@ -1093,6 +1115,10 @@ fi
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 validate_direct_pr_state_cleanup || exit 1
 validate_direct_pr_ref_cleanup || exit 1
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+   && [ -d "$WT" ] && worktree_registered_for_project "$PROJ" "$WT"; then
+  require_treehouse_return_capability "worktree" "$WT" || exit 1
+fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0

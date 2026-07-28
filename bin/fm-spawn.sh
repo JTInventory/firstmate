@@ -109,6 +109,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "spawn" || exit 1
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -132,14 +135,10 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-task-label-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-worker-isolation-lib.sh
-. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 # shellcheck source=bin/fm-agent-cwd-lib.sh
 . "$SCRIPT_DIR/fm-agent-cwd-lib.sh"
 # shellcheck source=bin/fm-slot-owner-lib.sh
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
-# A task worker never dispatches from an inherited operational home.
-fm_worker_refuse_primary_operation "spawn" || exit 1
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -237,8 +236,7 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
-SPAWN_ADMISSION_LOCK=
-SPAWN_ADMISSION_LOCK_HELD=0
+SPAWN_ADMISSION_LOCKS=()
 SPAWN_SLOT_CLAIM_CREATED=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
@@ -296,7 +294,7 @@ spawn_herdr_flat_uncertainty_record() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? cleanup_session
+  local status=$? cleanup_session i
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
   fi
@@ -378,10 +376,10 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
-  if [ "$SPAWN_ADMISSION_LOCK_HELD" = 1 ]; then
-    SPAWN_ADMISSION_LOCK_HELD=0
-    fm_lock_release "$SPAWN_ADMISSION_LOCK" || true
-  fi
+  for ((i=${#SPAWN_ADMISSION_LOCKS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${SPAWN_ADMISSION_LOCKS[$i]}" || true
+  done
+  SPAWN_ADMISSION_LOCKS=()
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -461,19 +459,29 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   }
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
-SPAWN_ADMISSION_LOCK=$(fm_spawn_admission_lock_path "$STATE")
-mkdir -p "$(dirname "$SPAWN_ADMISSION_LOCK")" || exit 1
-if ! fm_lock_try_acquire "$SPAWN_ADMISSION_LOCK"; then
-  echo "error: teardown is already retiring this firstmate home" >&2
+while IFS= read -r SPAWN_ADMISSION_LOCK; do
+  [ -n "$SPAWN_ADMISSION_LOCK" ] || continue
+  mkdir -p "$(dirname "$SPAWN_ADMISSION_LOCK")" || exit 1
+  if ! fm_lock_try_acquire "$SPAWN_ADMISSION_LOCK"; then
+    echo "error: teardown is already retiring this firstmate home" >&2
+    exit 1
+  fi
+  SPAWN_ADMISSION_LOCKS+=("$SPAWN_ADMISSION_LOCK")
+done < <(fm_spawn_admission_lock_paths "$STATE")
+if fm_spawn_legacy_task_lock_busy "$STATE"; then
+  echo "error: an older spawn or teardown is still changing this firstmate home" >&2
   exit 1
 fi
-SPAWN_ADMISSION_LOCK_HELD=1
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
-if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+SPAWN_TASK_LOCK_COVERED=0
+for SPAWN_ADMISSION_LOCK in "${SPAWN_ADMISSION_LOCKS[@]}"; do
+  [ "$SPAWN_ADMISSION_LOCK" != "$SPAWN_TASK_LOCK" ] || SPAWN_TASK_LOCK_COVERED=1
+done
+if [ "$SPAWN_TASK_LOCK_COVERED" != 1 ] && ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
 fi
-SPAWN_TASK_LOCK_HELD=1
+[ "$SPAWN_TASK_LOCK_COVERED" = 1 ] || SPAWN_TASK_LOCK_HELD=1
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/$ID.herdr-cleanup-uncertain"
 if [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; then
   echo "error: unresolved Herdr cleanup uncertainty for $ID at $HERDR_FLAT_ABORT_UNCERTAINTY_FILE; refusing another spawn" >&2
@@ -1688,10 +1696,10 @@ if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_LOCK" || exit 1
 fi
-if [ "$SPAWN_ADMISSION_LOCK_HELD" = 1 ]; then
-  SPAWN_ADMISSION_LOCK_HELD=0
-  fm_lock_release "$SPAWN_ADMISSION_LOCK" || exit 1
-fi
+for ((i=${#SPAWN_ADMISSION_LOCKS[@]} - 1; i >= 0; i--)); do
+  fm_lock_release "${SPAWN_ADMISSION_LOCKS[$i]}" || exit 1
+done
+SPAWN_ADMISSION_LOCKS=()
 trap - EXIT
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"
