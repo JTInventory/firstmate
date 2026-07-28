@@ -942,6 +942,9 @@ remove_secondmate_registry_entry() {
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+  if firstmate_home_has_treehouse_slot "$HOME_PATH"; then
+    slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "secondmate home" refuse || exit 1
+  fi
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi

@@ -66,57 +66,75 @@ for meta in "$STATE"/*.meta; do
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
 
-  record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX")
-  source=$(fm_agent_verdict_field "$record" source)
-  if [ "$source" != proc ]; then
-    if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
-      echo "BOOTSTRAP_INFO: isolation for $id is unproven: no live agent process could be identified, and a pane path is only a hint"
-    fi
-    continue
-  fi
-  pid=$(fm_agent_verdict_field "$record" pid)
-  cwd=$(fm_agent_verdict_field "$record" cwd)
-  cwd_real=$(fm_agent_canonical_dir "$cwd") || cwd_real=$cwd
-
-  # A resumed agent that carries a declared owning home from another home is the
-  # inheritance defect itself, not merely a misplaced cwd.
-  #
-  # The home a record EXPECTS is not always this one. A secondmate is
-  # deliberately launched with FM_AGENT_OWNER_HOME set to its OWN home while its
-  # record lives in the launching primary's state directory, because it is the
-  # primary of that home and only there (bin/fm-worker-isolation-lib.sh).
-  # Comparing it against this home would report every healthy secondmate in the
-  # fleet as a foreign worker on every session start, so the expected owner is
-  # taken from the record itself.
   kind=$(fm_meta_get "$meta" kind)
+  role=crewmate
   expected_home=$HOME_REAL
   if [ "$kind" = secondmate ]; then
+    role=secondmate
     expected_declared=$(fm_meta_get "$meta" home)
     [ -n "$expected_declared" ] || expected_declared=$recorded
     expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
   fi
-  declared_home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
-  if [ -n "$declared_home" ]; then
-    declared_real=$(fm_agent_canonical_dir "$declared_home") || declared_real=$declared_home
-    if [ "$declared_real" != "$expected_home" ]; then
-      echo "ISOLATION: task $id is running as a worker of home $declared_real, not the home that owns it ($expected_home); stop it before it acts on that home's records"
+  task_declared=0
+  conflict_identities=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
+    -v t="$id" -v h="$expected_home" -v r="$role" \
+    '$1 == t && ($2 != h || $3 != r) {print $2 "\t" $3}' | sort -u)
+  while IFS=$'\t' read -r conflict_home conflict_role; do
+    [ -n "$conflict_home" ] && [ -n "$conflict_role" ] || continue
+    conflict_pids=$(fm_agent_root_pids_for_identity "$id" "$conflict_home" "$conflict_role" "$PID_INDEX" 2>/dev/null || true)
+    while IFS= read -r conflict_pid; do
+      [ -n "$conflict_pid" ] || continue
+      task_declared=1
+      echo "ISOLATION: task $id has conflicting worker identity at process $conflict_pid: home=$conflict_home role=$conflict_role, expected home=$expected_home role=$role; stop it before it acts on either home's records"
+    done <<EOF
+$conflict_pids
+EOF
+  done <<EOF
+$conflict_identities
+EOF
+  pids=$(fm_agent_root_pids_for_identity "$id" "$expected_home" "$role" "$PID_INDEX" 2>/dev/null || true)
+  [ -z "$pids" ] || task_declared=1
+  if printf '%s\n' "$PID_INDEX" | awk -F'\t' -v t="$id" '$1 == t {found=1} END {exit !found}'; then
+    task_declared=1
+  fi
+  if [ -z "$pids" ]; then
+    [ "$task_declared" = 0 ] || continue
+    record=$(fm_agent_cwd_verdict "" "" "" "$backend" "$target" "$PID_INDEX")
+    if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
+      pids=$(fm_agent_verdict_field "$record" pid)
+    else
+      if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
+        echo "BOOTSTRAP_INFO: isolation for $id is unproven: no live agent process could be identified, and a pane path is only a hint"
+      fi
       continue
     fi
   fi
 
   recorded_real=$(fm_agent_canonical_dir "$recorded") || recorded_real=$recorded
-  if fm_agent_path_within "$recorded_real" "$cwd_real"; then
-    if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
-      echo "BOOTSTRAP_INFO: isolation for $id proved from agent process $pid in $cwd_real"
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
+    if [ -z "$cwd" ]; then
+      [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ] \
+        && echo "BOOTSTRAP_INFO: isolation for $id is unproven for agent process $pid"
+      continue
     fi
-    continue
-  fi
+    cwd_real=$(fm_agent_canonical_dir "$cwd") || cwd_real=$cwd
+    if fm_agent_path_within "$recorded_real" "$cwd_real"; then
+      if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
+        echo "BOOTSTRAP_INFO: isolation for $id proved from agent process $pid in $cwd_real"
+      fi
+      continue
+    fi
 
-  if fm_agent_path_within "$ROOT_REAL" "$cwd_real" || fm_agent_path_within "$HOME_REAL" "$cwd_real"; then
-    echo "ISOLATION: task $id collapsed onto the primary checkout - agent process $pid is running in $cwd_real instead of its worktree $recorded_real; stop that worker before it writes, then relaunch it in an isolated worktree"
-    continue
-  fi
-  echo "ISOLATION: task $id is not in its recorded worktree - agent process $pid is running in $cwd_real instead of $recorded_real; reconcile the record before any disposal or steer"
+    if fm_agent_path_within "$ROOT_REAL" "$cwd_real" || fm_agent_path_within "$HOME_REAL" "$cwd_real"; then
+      echo "ISOLATION: task $id collapsed onto the primary checkout - agent process $pid is running in $cwd_real instead of its worktree $recorded_real; stop that worker before it writes, then relaunch it in an isolated worktree"
+      continue
+    fi
+    echo "ISOLATION: task $id is not in its recorded worktree - agent process $pid is running in $cwd_real instead of $recorded_real; reconcile the record before any disposal or steer"
+  done <<EOF
+$pids
+EOF
 done
 
 exit 0

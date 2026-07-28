@@ -81,14 +81,25 @@ fm_slot_stamp_path() {
   printf '%s/%s' "$git_dir" "$FM_SLOT_OWNER_STAMP_NAME"
 }
 
-# fm_slot_stamp_write <worktree> <task-id> <home>: record current ownership of
-# the slot. Best-effort by design - a slot that cannot be stamped simply has no
-# stamp evidence later, which is the pre-existing behavior.
+# fm_slot_stamp_write <worktree> <task-id> <home>: claim current ownership of
+# the slot without replacing another owner's evidence.
 fm_slot_stamp_write() {
-  local wt=$1 id=$2 home=$3 path
+  local wt=$1 id=$2 home=$3 path stamp_task stamp_home
   [ -n "$id" ] && [ -n "$home" ] || return 1
   path=$(fm_slot_stamp_path "$wt") || return 1
-  printf 'task=%s\nhome=%s\n' "$id" "$home" > "$path" 2>/dev/null || return 1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    stamp_task=$(sed -n 's/^task=//p' "$path" 2>/dev/null | head -1)
+    stamp_home=$(sed -n 's/^home=//p' "$path" 2>/dev/null | head -1)
+    [ "$stamp_task" = "$id" ] && [ "$stamp_home" = "$home" ]
+    return
+  fi
+  ( set -C; printf 'task=%s\nhome=%s\n' "$id" "$home" > "$path" ) 2>/dev/null \
+    && return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  stamp_task=$(sed -n 's/^task=//p' "$path" 2>/dev/null | head -1)
+  stamp_home=$(sed -n 's/^home=//p' "$path" 2>/dev/null | head -1)
+  [ "$stamp_task" = "$id" ] && [ "$stamp_home" = "$home" ]
 }
 
 # fm_slot_stamp_field <worktree> <task|home>: the stamped value, or 1.

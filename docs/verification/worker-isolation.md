@@ -83,7 +83,7 @@ orca    no per-pane process id
 A provider with no process id reports `unknown` rather than degrading to its pane path:
 
 ```sh
-. bin/fm-agent-cwd-lib.sh && fm_agent_cwd_verdict '' herdr 'ses:pane' | cat -A
+. bin/fm-agent-cwd-lib.sh && fm_agent_cwd_verdict '' '' '' herdr 'ses:pane' | cat -A
 ```
 
 ```text

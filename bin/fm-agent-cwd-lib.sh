@@ -118,8 +118,9 @@ fm_agent_proc_env() {
   printf '%s' "$value"
 }
 
-# fm_agent_task_pid_index: one `<task-id>\t<pid>` line per live process that
-# declares a task, built from a SINGLE walk of /proc.
+# fm_agent_task_pid_index: one
+# `<task-id>\t<owner-home>\t<role>\t<pid>` line per live declared process,
+# built from a SINGLE walk of /proc.
 #
 # Reading one process's environment costs several processes of its own, so a
 # caller that asks about MANY tasks builds this index once and hands it back to
@@ -128,30 +129,35 @@ fm_agent_proc_env() {
 # exists for had 17 concurrent tasks.
 # Returns 1 when procfs is unavailable or no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid task found=1
+  local entry pid task home role env found=1
   [ -d /proc ] || return 1
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
-    task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK) || continue
-    printf '%s\t%s\n' "$task" "$pid"
+    env=$(fm_agent_environ "$pid") || continue
+    task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+    home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+    [ -n "$task" ] && [ -n "$home" ] || continue
+    case "$role" in crewmate|secondmate) ;; *) continue ;; esac
+    printf '%s\t%s\t%s\t%s\n' "$task" "$home" "$role" "$pid"
     found=0
   done
   return "$found"
 }
 
-# fm_agent_pids_for_task <task-id> [pid-index]: every live process whose
-# environment declares this task, newline separated. Only the launch command
-# itself carries the marker, so the set is the agent plus its descendants.
+# fm_agent_pids_for_identity <task-id> <owner-home> <role> [pid-index]: every
+# live process carrying this complete declaration, newline separated.
 # A supplied <pid-index> (fm_agent_task_pid_index) is consulted instead of
 # walking /proc again; an empty one is a real answer - no process declares a
 # task - not a missing argument.
-fm_agent_pids_for_task() {
-  local id=$1 index pids entry pid found=1
-  [ -n "$id" ] || return 1
-  if [ "$#" -ge 2 ]; then
-    index=$2
-    pids=$(printf '%s\n' "$index" | awk -F'\t' -v t="$id" '$1 == t {print $2}')
+fm_agent_pids_for_identity() {
+  local id=$1 home=$2 role=$3 index pids entry pid env found=1
+  [ -n "$id" ] && [ -n "$home" ] && [ -n "$role" ] || return 1
+  if [ "$#" -ge 4 ]; then
+    index=$4
+    pids=$(printf '%s\n' "$index" | awk -F'\t' -v t="$id" -v h="$home" -v r="$role" \
+      '$1 == t && $2 == h && $3 == r {print $4}')
     [ -n "$pids" ] || return 1
     printf '%s\n' "$pids"
     return 0
@@ -160,23 +166,25 @@ fm_agent_pids_for_task() {
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
-    fm_agent_environ "$pid" | grep -qxF "FM_AGENT_TASK=$id" || continue
+    env=$(fm_agent_environ "$pid") || continue
+    printf '%s\n' "$env" | grep -qxF "FM_AGENT_TASK=$id" || continue
+    printf '%s\n' "$env" | grep -qxF "FM_AGENT_OWNER_HOME=$home" || continue
+    printf '%s\n' "$env" | grep -qxF "FM_AGENT_ROLE=$role" || continue
     printf '%s\n' "$pid"
     found=0
   done
   return "$found"
 }
 
-# fm_agent_pid_for_task <task-id> [pid-index]: the ROOT-most declared process
-# for the task - the launched agent itself rather than one of its tool
-# subprocesses, which is the process whose cwd answers "is this worker
-# isolated?". The root is the match whose own parent is not also a match.
-fm_agent_pid_for_task() {
-  local id=$1 matches pid ppid
-  if [ "$#" -ge 2 ]; then
-    matches=$(fm_agent_pids_for_task "$id" "$2") || return 1
+# fm_agent_root_pids_for_identity <task-id> <owner-home> <role> [pid-index]:
+# every root-most process carrying the identity. Multiple roots are all real
+# workers and must all be evaluated.
+fm_agent_root_pids_for_identity() {
+  local id=$1 home=$2 role=$3 matches pid ppid roots=
+  if [ "$#" -ge 4 ]; then
+    matches=$(fm_agent_pids_for_identity "$id" "$home" "$role" "$4") || return 1
   else
-    matches=$(fm_agent_pids_for_task "$id") || return 1
+    matches=$(fm_agent_pids_for_identity "$id" "$home" "$role") || return 1
   fi
   [ -n "$matches" ] || return 1
   while IFS= read -r pid; do
@@ -185,15 +193,12 @@ fm_agent_pid_for_task() {
     if [ -n "$ppid" ] && printf '%s\n' "$matches" | grep -qxF "$ppid"; then
       continue
     fi
-    printf '%s' "$pid"
-    return 0
+    roots="${roots}${roots:+$'\n'}$pid"
   done <<EOF
 $matches
 EOF
-  # Every match claims a matching parent (a cycle cannot happen, but a race
-  # between the scan and a reap can): fall back to the lowest pid seen rather
-  # than reporting nothing.
-  printf '%s' "$(printf '%s\n' "$matches" | sort -n | head -1)"
+  [ -n "$roots" ] || roots=$(printf '%s\n' "$matches" | sort -n | head -1)
+  printf '%s\n' "$roots"
 }
 
 # fm_agent_tmux_window_id <target>: the STABLE window id behind a tmux target.
@@ -293,19 +298,19 @@ fm_agent_harness_pid_below() {
   printf '%s' "$best"
 }
 
-# fm_agent_cwd_verdict <task-id> [backend] [target] [pid-index]
+# fm_agent_cwd_verdict <task-id> <owner-home> <role> [backend] [target] [pid-index]
 # Print the tab-separated verdict record documented in this file's header.
 # Never falls back to a pane value: a caller that wants a hint must ask its
 # backend for one and label it as a hint.
 # A caller looping over many tasks passes one fm_agent_task_pid_index so the
 # declared-agent lookup costs a single /proc walk for the whole loop.
 fm_agent_cwd_verdict() {
-  local id=${1:-} backend=${2:-} target=${3:-} pid='' cwd shell_pid
-  if [ -n "$id" ]; then
-    if [ "$#" -ge 4 ]; then
-      pid=$(fm_agent_pid_for_task "$id" "$4") || pid=
+  local id=${1:-} home=${2:-} role=${3:-} backend=${4:-} target=${5:-} pid='' cwd shell_pid
+  if [ -n "$id" ] && [ -n "$home" ] && [ -n "$role" ]; then
+    if [ "$#" -ge 6 ]; then
+      pid=$(fm_agent_root_pids_for_identity "$id" "$home" "$role" "$6" | head -1) || pid=
     else
-      pid=$(fm_agent_pid_for_task "$id") || pid=
+      pid=$(fm_agent_root_pids_for_identity "$id" "$home" "$role" | head -1) || pid=
     fi
   fi
   if [ -n "$pid" ]; then

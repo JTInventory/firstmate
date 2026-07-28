@@ -1365,7 +1365,7 @@ EOF
 esac
 spawn_settle_path() {  # <target>
   local record
-  record=$(fm_agent_cwd_verdict "" "$BACKEND" "$1")
+  record=$(fm_agent_cwd_verdict "" "" "" "$BACKEND" "$1")
   if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
     fm_agent_verdict_field "$record" cwd
     return 0
@@ -1542,7 +1542,11 @@ fi
 mkdir -p "$STATE"
 # Record current ownership in the linked worktree's private git directory.
 # Metadata is historical; teardown uses this stamp as independent evidence.
-fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null || true
+if ! fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")"; then
+  cleanup_spawn_window "$WID"
+  echo "error: could not claim pooled-slot ownership for $WT; refusing to publish task $ID" >&2
+  exit 1
+fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 {

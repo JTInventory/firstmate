@@ -1093,7 +1093,7 @@ EOF
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-contested-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "secondmate teardown should refuse a home another task still records"
@@ -1103,6 +1103,8 @@ EOF
     && fail "a contested secondmate home lease was returned to the pool"
   [ -d "$subhome" ] || fail "a contested secondmate home was removed"
   [ -e "$lease" ] || fail "a contested secondmate home lease was released"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "a contested secondmate teardown closed an endpoint before ownership refusal"
   [ -e "$home/state/domain.meta" ] || fail "a refused secondmate teardown cleared its own metadata"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
     || fail "a refused secondmate teardown removed the routing entry"

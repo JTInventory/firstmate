@@ -363,9 +363,11 @@ test_declared_agent_lookup_returns_the_root_most_process() {
   root_pid=$!
   BG_PIDS+=("$root_pid")
   sleep 0.5
-  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_pid_for_task "$id" )
+  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+    && fm_agent_root_pids_for_identity "$id" "$TMP_ROOT/proc-home" crewmate )
   [ -n "$out" ] || fail "the declared agent process was not found at all"
-  child=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_pids_for_task "$id" | wc -l )
+  child=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+    && fm_agent_pids_for_identity "$id" "$TMP_ROOT/proc-home" crewmate | wc -l )
   [ "$child" -ge 2 ] || fail "the fixture did not produce a declared parent and child"
   [ "$out" = "$root_pid" ] \
     || fail "the lookup returned $out, not the root-most declared process $root_pid"
@@ -382,7 +384,7 @@ test_provider_process_id_matrix_is_explicit() {
     done )
   [ -z "$out" ] || fail "a provider with no verified per-pane process id claimed one: $out"
   out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
-    && fm_agent_cwd_verdict '' herdr 'ses:pane' )
+    && fm_agent_cwd_verdict '' '' '' herdr 'ses:pane' )
   case "$out" in
     unknown*) : ;;
     *) fail "a provider without a process id must report unknown, not a pane value: $out" ;;
@@ -446,7 +448,7 @@ test_a_lost_window_name_never_answers_with_firstmates_own_pane() {
   status=$?
   expect_code 1 "$status" "a window name that resolves to nothing must not yield a pid"
   [ -z "$out" ] || fail "a lost window name answered with another window's pane pid: $out"
-  out=$(agent_cwd_call "$fakebin" fm_agent_cwd_verdict '' tmux 'firstmate:fm-renamed-away')
+  out=$(agent_cwd_call "$fakebin" fm_agent_cwd_verdict '' '' '' tmux 'firstmate:fm-renamed-away')
   case "$out" in
     unknown*) : ;;
     *) fail "a lost window name produced a verdict instead of unknown: $out" ;;
@@ -468,7 +470,7 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
   assert_contains "$index" "$one" "the single process walk missed a declared task"
   assert_contains "$index" "$two" "the single process walk missed a declared task"
   out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
-    && fm_agent_cwd_verdict "$two" '' '' "$index" )
+    && fm_agent_cwd_verdict "$two" "$TMP_ROOT/proc-home" crewmate '' '' "$index" )
   case "$out" in
     proc*"$dir_real") : ;;
     *) fail "a verdict taken from the shared index did not prove the process cwd: $out" ;;
@@ -476,7 +478,7 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
   # An index with no entry for the task is a real answer, not a missing
   # argument: it must not silently fall back to a fresh walk that finds one.
   out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
-    && fm_agent_cwd_verdict "$two" '' '' '' )
+    && fm_agent_cwd_verdict "$two" "$TMP_ROOT/proc-home" crewmate '' '' '' )
   case "$out" in
     unknown*) : ;;
     *) fail "an empty shared index was treated as no index at all: $out" ;;
@@ -537,7 +539,7 @@ slot_verdict() {  # <state> <id> <wt> <home>
 }
 
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
-  local rec task
+  local rec task home
   rec=$(make_slot_world slot-stamp)
   read_slot_world "$rec"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
@@ -545,12 +547,19 @@ test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
     || fail "a linked worktree could not be stamped"
   task=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
   [ "$task" = task-e1 ] || fail "the slot stamp did not record its task: $task"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" foreign-e1 "$WORLD/foreign-home" ) 2>/dev/null \
+    && fail "a foreign owner replaced the slot stamp"
+  task=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
+  home=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" home )
+  [ "$task" = task-e1 ] && [ "$home" = "$WORLD/home" ] \
+    || fail "a failed foreign claim changed the existing ownership stamp"
   [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
     || fail "the slot stamp dirtied the working tree"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$PROJ_DIR" task-e1 "$WORLD/home" ) 2>/dev/null \
     && fail "a plain checkout was stamped as a disposable slot"
-  pass "slot ownership is stamped invisibly in a linked worktree and refused for a plain checkout"
+  pass "slot ownership claims never replace another owner or stamp a plain checkout"
 }
 
 test_clean_ownership_disposes() {
@@ -821,7 +830,7 @@ test_sweep_reports_an_agent_declared_for_another_home() {
   mkdir -p "$world/other-home"
   start_declared_agent "$world/wt" "$id" "$world/other-home" >/dev/null
   out=$(run_sweep "$world")
-  assert_contains "$out" "ISOLATION: task $id is running as a worker of home" \
+  assert_contains "$out" "ISOLATION: task $id has conflicting worker identity" \
     "the resume sweep did not report an agent declared for another home"
   pass "the resume sweep reports an agent that declares another home as its owner"
 }
@@ -854,9 +863,42 @@ test_sweep_still_reports_a_secondmate_running_for_a_foreign_home() {
   fm_write_secondmate_meta "$world/home/state/$id.meta" "$sub_home" "firstmate:fm-$id"
   start_declared_agent "$sub_home" "$id" "$world/other-home" secondmate >/dev/null
   out=$(run_sweep "$world")
-  assert_contains "$out" "ISOLATION: task $id is running as a worker of home" \
+  assert_contains "$out" "ISOLATION: task $id has conflicting worker identity" \
     "the resume sweep excused a secondmate declaring a home its record does not name"
   pass "the resume sweep still reports a secondmate whose declared home is not the one it owns"
+}
+
+test_sweep_reports_a_worker_declared_with_the_wrong_role() {
+  local world out id
+  require_procfs || { pass "skip: this host has no readable procfs for wrong-role proof"; return 0; }
+  world=$(make_sweep_home sweep-wrong-role)
+  id="task-f8-$RUN_TAG"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  start_declared_agent "$world/wt" "$id" "$world/home" secondmate >/dev/null
+  out=$(run_sweep "$world")
+  assert_contains "$out" "ISOLATION: task $id has conflicting worker identity" \
+    "the sweep did not report a worker whose role conflicts with its task record"
+  assert_contains "$out" "role=secondmate" \
+    "the wrong-role finding did not report the declared role"
+  pass "the resume sweep reports a task declaration with the wrong role"
+}
+
+test_sweep_evaluates_every_matching_root_process() {
+  local world out id
+  require_procfs || { pass "skip: this host has no readable procfs for duplicate-root proof"; return 0; }
+  world=$(make_sweep_home sweep-duplicate-roots)
+  id="task-f7-$RUN_TAG"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  start_declared_agent "$world/wt" "$id" "$world/home" >/dev/null
+  start_declared_agent "$world/project" "$id" "$world/home" >/dev/null
+  out=$(run_sweep "$world")
+  assert_contains "$out" "ISOLATION: task $id collapsed onto the primary checkout" \
+    "the sweep hid a collapsed duplicate root behind the healthy root"
+  pass "the resume sweep evaluates every root process for the complete worker identity"
 }
 
 test_crewmate_declaration_clears_every_inherited_home
@@ -889,5 +931,7 @@ test_sweep_never_promotes_a_pane_path_to_evidence
 test_sweep_reports_an_agent_declared_for_another_home
 test_sweep_is_silent_for_a_healthy_secondmate
 test_sweep_still_reports_a_secondmate_running_for_a_foreign_home
+test_sweep_evaluates_every_matching_root_process
+test_sweep_reports_a_worker_declared_with_the_wrong_role
 
 echo "# all fm-worker-isolation tests passed"
