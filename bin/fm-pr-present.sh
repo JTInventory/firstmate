@@ -19,6 +19,9 @@ fm_pr_task_id_valid "$ID" && fm_pr_url_parse "$RAW_URL" && [ "$FM_PR_PROVIDER" =
   echo 'error: presentation requires a canonical GitHub PR URL' >&2; exit 1;
 }
 URL=$FM_PR_URL
+OWNER=$FM_PR_OWNER
+REPO=$FM_PR_REPO
+NUMBER=$FM_PR_NUMBER
 PRESENTATION_LOCK="$STATE/.$ID.pr-presentation.lock"
 PRESENTATION_LOCK_HELD=0
 release_presentation_lock() {
@@ -46,7 +49,35 @@ done < "$META"
   && [ "$head_count" -eq 1 ] && fm_pr_head_valid "$recorded_head" || {
     echo 'error: PR validation did not produce one exact head; refusing presentation' >&2; exit 1;
   }
-fm_pr_presentation_publish "$STATE" "$ID" "$URL" "$recorded_head" || {
+PRESENTED_PR=$(gh-axi api GET "/repos/$OWNER/$REPO/pulls/$NUMBER" \
+  --jq '{head_b64: (.head.sha | @base64), base_ref_b64: (.base.ref | @base64), base_b64: (.base.sha | @base64)}' \
+  2>/dev/null || true)
+if fm_pr_toon_base64_field_parse "$PRESENTED_PR" head_b64; then
+  PRESENTED_HEAD=$FM_PR_TOON_VALUE
+else
+  PRESENTED_HEAD=
+fi
+if fm_pr_toon_base64_field_parse "$PRESENTED_PR" base_b64; then
+  PRESENTED_BASE=$FM_PR_TOON_VALUE
+else
+  PRESENTED_BASE=
+fi
+if fm_pr_toon_base64_field_parse "$PRESENTED_PR" base_ref_b64; then
+  PRESENTED_BASE_REF=$FM_PR_TOON_VALUE
+else
+  PRESENTED_BASE_REF=
+fi
+fm_pr_head_valid "$PRESENTED_HEAD" && [ "$PRESENTED_HEAD" = "$recorded_head" ] \
+  && git check-ref-format "refs/heads/$PRESENTED_BASE_REF" >/dev/null 2>&1 \
+  && fm_pr_head_valid "$PRESENTED_BASE" || {
+    echo 'error: could not verify the exact presented PR head and base' >&2; exit 1;
+  }
+PRESENTATION_NONCE=$(fm_pr_presentation_nonce_new) || {
+  echo 'error: could not create a unique PR presentation identity' >&2; exit 1;
+}
+fm_pr_presentation_publish "$STATE" "$ID" "$URL" "$PRESENTED_HEAD" \
+  "$PRESENTED_BASE_REF" "$PRESENTED_BASE" "$PRESENTATION_NONCE" || {
   echo 'error: could not publish protected PR presentation receipt' >&2; exit 1;
 }
-printf 'presented: %s at %s\n' "$URL" "$recorded_head"
+printf 'presented: %s at %s onto %s@%s with nonce %s\n' \
+  "$URL" "$PRESENTED_HEAD" "$PRESENTED_BASE_REF" "$PRESENTED_BASE" "$PRESENTATION_NONCE"

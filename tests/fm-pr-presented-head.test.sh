@@ -25,12 +25,23 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
 if [ "$1 $2 $3" = 'api GET /repos/JTInventory/firstmate/pulls/47' ]; then
-  printf 'head: %s\nhead_repo: JTInventory/firstmate\nhead_ref: codex/task-x1\n' "$FAKE_FORGE_HEAD"
+  head=$(printf '%s' "$FAKE_FORGE_HEAD" | base64 | tr -d '\n')
+  base_ref=$(printf '%s' "${FAKE_FORGE_BASE_REF:-main}" | base64 | tr -d '\n')
+  base=$(printf '%s' "$FAKE_FORGE_BASE" | base64 | tr -d '\n')
+  repo=$(printf '%s' JTInventory/firstmate | base64 | tr -d '\n')
+  ref=$(printf '%s' codex/task-x1 | base64 | tr -d '\n')
+  printf 'head_b64: %s\nbase_ref_b64: %s\nbase_b64: %s\nhead_repo_b64: %s\nhead_ref_b64: %s\n' \
+    "$head" "$base_ref" "$base" "$repo" "$ref"
 fi
-[ "$1" != api ] || [ "$2" != PUT ] || [ "${FAKE_PUT_FAIL:-0}" != 1 ] || exit 1
 SH
-  chmod +x "$dir/bin/fm-pr-check" "$dir/bin/gh-axi"
+  cat > "$dir/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+[ "${FAKE_PUT_FAIL:-0}" != 1 ]
+SH
+  chmod +x "$dir/bin/fm-pr-check" "$dir/bin/gh-axi" "$dir/bin/gh"
   printf '%s\n' "$head" > "$dir/head"
+  printf '%s\n' cccccccccccccccccccccccccccccccccccccccc > "$dir/base"
   printf '%s\n' "$dir"
 }
 
@@ -38,15 +49,23 @@ run_present() {
   local dir=$1
   PATH="$dir/bin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_PR_CHECK_BIN="$dir/bin/fm-pr-check" FAKE_HEAD="$(cat "$dir/head")" \
+    FAKE_FORGE_HEAD="$(cat "$dir/head")" FAKE_FORGE_BASE="$(cat "$dir/base")" \
+    GH_LOG="$dir/gh.log" \
     "$PRESENT" task-x1 https://github.com/JTInventory/firstmate/pull/47
 }
 
 run_merge() {
-  local dir=$1; shift
+  local dir=$1 approved_head approved_nonce
+  shift
+  approved_head=${FAKE_APPROVED_HEAD:-$(sed -n 's/^presented_pr_head=//p' "$dir/state/task-x1.pr-presentation")}
+  approved_nonce=${FAKE_APPROVED_NONCE:-$(sed -n 's/^presentation_nonce=//p' "$dir/state/task-x1.pr-presentation")}
   PATH="$dir/bin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_PR_CHECK_BIN="$dir/bin/fm-pr-check" FAKE_HEAD="$FAKE_FORGE_HEAD" \
+    FAKE_FORGE_BASE="${FAKE_FORGE_BASE:-$(cat "$dir/base")}" \
+    FAKE_FORGE_BASE_REF="${FAKE_FORGE_BASE_REF:-main}" \
     FAKE_PUT_FAIL="${FAKE_PUT_FAIL:-0}" GH_LOG="$dir/gh.log" FM_CAPTAIN_APPROVED_MERGE=1 \
-    FM_CAPTAIN_APPROVED_PR_HEAD="${FAKE_APPROVED_HEAD:-$FAKE_FORGE_HEAD}" \
+    FM_CAPTAIN_APPROVED_PR_HEAD="$approved_head" \
+    FM_CAPTAIN_APPROVED_PRESENTATION_NONCE="$approved_nonce" \
     "$MERGE" task-x1 https://github.com/JTInventory/firstmate/pull/47 "$@"
 }
 
@@ -54,6 +73,9 @@ test_present_receipt_is_immutable_across_poll_refresh() {
   local dir; dir=$(make_case immutable)
   run_present "$dir" >/dev/null || fail 'presentation failed'
   grep -qxF 'presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$dir/state/task-x1.pr-presentation" || fail 'presented head missing'
+  grep -qxF 'presented_pr_base_ref=main' "$dir/state/task-x1.pr-presentation" || fail 'presented base branch missing'
+  grep -qxF 'presented_pr_base=cccccccccccccccccccccccccccccccccccccccc' "$dir/state/task-x1.pr-presentation" || fail 'presented base missing'
+  grep -Eq '^presentation_nonce=[0-9a-f]{32}$' "$dir/state/task-x1.pr-presentation" || fail 'unique presentation nonce missing'
   FAKE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$dir/bin/fm-pr-check" task-x1 https://github.com/JTInventory/firstmate/pull/47
   grep -qxF 'presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$dir/state/task-x1.pr-presentation" || fail 'ordinary poll rewrote presentation receipt'
   pass 'ordinary PR refresh cannot rewrite the presented head'
@@ -63,7 +85,7 @@ test_merge_binds_atomic_api_to_presented_head() {
   local dir; dir=$(make_case unchanged)
   run_present "$dir" >/dev/null || fail 'presentation failed'
   FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_merge "$dir" >/dev/null || fail 'unchanged head merge failed'
-  grep -qxF 'api PUT /repos/JTInventory/firstmate/pulls/47/merge --field sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --field merge_method=squash' "$dir/gh.log" || fail 'merge API was not atomically bound to presented head'
+  grep -qxF 'api --method PUT /repos/JTInventory/firstmate/pulls/47/merge --raw-field sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --raw-field merge_method=squash' "$dir/gh.log" || fail 'merge API was not atomically bound to presented head'
   [ ! -e "$dir/state/task-x1.pr-presentation" ] || fail 'successful merge retained its consumed approval receipt'
   pass 'merge uses the forge atomic expected-head primitive'
 }
@@ -78,7 +100,7 @@ test_changed_head_invalidates_approval_and_never_calls_put() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'changed head was accepted'
-  ! grep -q '^api PUT ' "$dir/gh.log" || fail 'stale approval reached merge API'
+  ! grep -q '^api --method PUT ' "$dir/gh.log" || fail 'stale approval reached merge API'
   [ ! -e "$dir/state/task-x1.pr-presentation" ] || fail 'stale presentation receipt was retained'
   pass 'changed head invalidates approval before merge mutation'
 }
@@ -88,11 +110,11 @@ test_missing_or_malformed_receipt_and_yolo_refuse() {
   dir=$(make_case missing)
   set +e; FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa FM_YOLO=1 run_merge "$dir" >/dev/null 2>&1; rc=$?; set -e
   [ "$rc" -ne 0 ] || fail 'yolo bypassed missing presentation'
-  printf 'version=firstmate-pr-presentation-v1\npr=https://github.com/JTInventory/firstmate/pull/47\npresented_pr_head=bad\n' > "$dir/state/task-x1.pr-presentation"
+  printf 'version=firstmate-pr-presentation-v2\npr=https://github.com/JTInventory/firstmate/pull/47\npresented_pr_head=bad\n' > "$dir/state/task-x1.pr-presentation"
   chmod 0600 "$dir/state/task-x1.pr-presentation"
   set +e; FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_merge "$dir" >/dev/null 2>&1; rc=$?; set -e
   [ "$rc" -ne 0 ] || fail 'malformed receipt was accepted'
-  [ ! -e "$dir/gh.log" ] || ! grep -q '^api PUT ' "$dir/gh.log" || fail 'refused receipt reached merge API'
+  [ ! -e "$dir/gh.log" ] || ! grep -q '^api --method PUT ' "$dir/gh.log" || fail 'refused receipt reached merge API'
   pass 'missing and malformed receipts fail closed even in yolo mode'
 }
 
@@ -104,7 +126,7 @@ test_atomic_forge_rejection_invalidates_approval() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'forge TOCTOU rejection was accepted'
-  grep -q '^api PUT .*sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$dir/gh.log" || fail 'atomic request omitted presented SHA'
+  grep -q '^api --method PUT .*sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$dir/gh.log" || fail 'atomic request omitted presented SHA'
   [ ! -e "$dir/state/task-x1.pr-presentation" ] || fail 'rejected atomic merge retained approval'
   pass 'forge-side head race invalidates approval after atomic rejection'
 }
@@ -119,12 +141,41 @@ test_approval_is_bound_to_the_presented_head() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'approval for a different presentation was accepted'
-  [ ! -e "$dir/gh.log" ] || ! grep -q '^api PUT ' "$dir/gh.log" \
+  [ ! -e "$dir/gh.log" ] || ! grep -q '^api --method PUT ' "$dir/gh.log" \
     || fail 'mismatched approval reached the merge API'
   grep -qxF 'presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
     "$dir/state/task-x1.pr-presentation" \
     || fail 'mismatched approval invalidated the receipt it did not own'
   pass 'merge approval is bound to the exact presented head'
+}
+
+test_approval_is_bound_to_unique_presentation_and_base() {
+  local dir old_nonce rc
+  dir=$(make_case nonce-base)
+  run_present "$dir" >/dev/null || fail 'initial presentation failed'
+  old_nonce=$(sed -n 's/^presentation_nonce=//p' "$dir/state/task-x1.pr-presentation")
+  run_present "$dir" >/dev/null || fail 'replacement presentation failed'
+  set +e
+  FAKE_APPROVED_NONCE="$old_nonce" \
+    FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    run_merge "$dir" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'approval for a replaced presentation was accepted'
+  grep -qxF "presentation_nonce=$old_nonce" "$dir/state/task-x1.pr-presentation" \
+    && fail 'replacement presentation reused its nonce'
+
+  run_present "$dir" >/dev/null || fail 'base-change presentation failed'
+  set +e
+  FAKE_FORGE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    FAKE_FORGE_BASE_REF=release \
+    run_merge "$dir" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'changed base was accepted'
+  ! grep -q '^api --method PUT ' "$dir/gh.log" \
+    || fail 'stale base approval reached merge API'
+  pass 'approval binds a unique URL head and base presentation'
 }
 
 test_concurrent_presentation_waits_for_receipt_consumption() {
@@ -135,9 +186,17 @@ test_concurrent_presentation_waits_for_receipt_consumption() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
 if [ "$1 $2 $3" = 'api GET /repos/JTInventory/firstmate/pulls/47' ]; then
-  printf 'head: %s\nhead_repo: JTInventory/firstmate\nhead_ref: codex/task-x1\n' "$FAKE_FORGE_HEAD"
-  : > "$GH_GET_READY"
-  while [ ! -e "$GH_GET_RELEASE" ]; do sleep 0.02; done
+  head=$(printf '%s' "$FAKE_FORGE_HEAD" | base64 | tr -d '\n')
+  base_ref=$(printf '%s' "${FAKE_FORGE_BASE_REF:-main}" | base64 | tr -d '\n')
+  base=$(printf '%s' "$FAKE_FORGE_BASE" | base64 | tr -d '\n')
+  repo=$(printf '%s' JTInventory/firstmate | base64 | tr -d '\n')
+  ref=$(printf '%s' codex/task-x1 | base64 | tr -d '\n')
+  printf 'head_b64: %s\nbase_ref_b64: %s\nbase_b64: %s\nhead_repo_b64: %s\nhead_ref_b64: %s\n' \
+    "$head" "$base_ref" "$base" "$repo" "$ref"
+  if [ -n "${GH_GET_READY:-}" ]; then
+    : > "$GH_GET_READY"
+    while [ ! -e "$GH_GET_RELEASE" ]; do sleep 0.02; done
+  fi
 fi
 SH
   chmod +x "$dir/bin/gh-axi"
@@ -157,7 +216,7 @@ SH
   grep -qxF 'presented_pr_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     "$dir/state/task-x1.pr-presentation" \
     || fail 'new presentation was deleted by stale merge invalidation'
-  rc=$(grep -c '^api PUT ' "$dir/gh.log")
+  rc=$(grep -c '^api --method PUT ' "$dir/gh.log")
   [ "$rc" -eq 1 ] || fail 'serialized merge did not issue exactly one mutation'
   pass 'receipt replacement and consumption are serialized'
 }
@@ -180,14 +239,20 @@ test_receipt_inode_swap_is_refused() {
   receipt="$dir/state/task-x1.pr-presentation"
   swap="$dir/state/swap-receipt"
   cat > "$receipt" <<'EOF'
-firstmate-pr-presentation-v1
+firstmate-pr-presentation-v2
 pr=https://github.com/JTInventory/firstmate/pull/47
 presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+presented_pr_base_ref=main
+presented_pr_base=cccccccccccccccccccccccccccccccccccccccc
+presentation_nonce=11111111111111111111111111111111
 EOF
   cat > "$swap" <<'EOF'
-firstmate-pr-presentation-v1
+firstmate-pr-presentation-v2
 pr=https://github.com/JTInventory/firstmate/pull/47
 presented_pr_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+presented_pr_base_ref=main
+presented_pr_base=cccccccccccccccccccccccccccccccccccccccc
+presentation_nonce=22222222222222222222222222222222
 EOF
   chmod 0600 "$receipt" "$swap"
   set +e
@@ -208,6 +273,7 @@ test_changed_head_invalidates_approval_and_never_calls_put
 test_missing_or_malformed_receipt_and_yolo_refuse
 test_atomic_forge_rejection_invalidates_approval
 test_approval_is_bound_to_the_presented_head
+test_approval_is_bound_to_unique_presentation_and_base
 test_concurrent_presentation_waits_for_receipt_consumption
 test_gitlab_presentation_remains_unsupported_without_side_effect
 test_receipt_inode_swap_is_refused

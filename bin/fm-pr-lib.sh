@@ -111,6 +111,9 @@ FM_PR_POLL_REPLACEMENT_ACTIVE=0
 FM_PR_POLL_REPLACEMENT_COMPLETE=0
 FM_PR_PRESENTATION_URL=
 FM_PR_PRESENTATION_HEAD=
+FM_PR_PRESENTATION_BASE_REF=
+FM_PR_PRESENTATION_BASE=
+FM_PR_PRESENTATION_NONCE=
 FM_PR_TOON_VALUE=
 
 fm_task_id_path_safe() {
@@ -236,8 +239,8 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
-fm_pr_toon_field_parse() {
-  local data=$1 key=$2 line count=0
+fm_pr_toon_base64_field_parse() {
+  local data=$1 key=$2 line encoded decoded count=0
   FM_PR_TOON_VALUE=
   case "$key" in
     ''|*[!A-Za-z0-9_]*) return 1 ;;
@@ -246,11 +249,52 @@ fm_pr_toon_field_parse() {
     case "$line" in
       "$key":\ *)
         count=$((count + 1))
-        FM_PR_TOON_VALUE=${line#*: }
+        encoded=${line#*: }
         ;;
     esac
   done <<< "$data"
-  [ "$count" -eq 1 ] && [ -n "$FM_PR_TOON_VALUE" ]
+  [ "$count" -eq 1 ] && [ -n "$encoded" ] || return 1
+  [[ "$encoded" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] || return 1
+  [ $(( ${#encoded} % 4 )) -eq 0 ] || return 1
+  if decoded=$(printf '%s' "$encoded" | base64 --decode 2>/dev/null); then
+    :
+  elif decoded=$(printf '%s' "$encoded" | base64 -D 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
+  [ -n "$decoded" ] || return 1
+  FM_PR_TOON_VALUE=$decoded
+}
+
+fm_pr_presentation_nonce_valid() {
+  local nonce=${1-}
+  local LC_ALL=C
+  [[ "$nonce" =~ ^[0-9a-f]{32}$ ]]
+}
+
+fm_pr_presentation_nonce_new() {
+  local nonce
+  nonce=$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]') || return 1
+  fm_pr_presentation_nonce_valid "$nonce" || return 1
+  printf '%s\n' "$nonce"
+}
+
+fm_pr_url_encode_ref_path() {
+  local input=$1 output= char value encoded i
+  local LC_ALL=C
+  for ((i = 0; i < ${#input}; i++)); do
+    char=${input:i:1}
+    case "$char" in
+      [A-Za-z0-9._~/-]) output+=$char ;;
+      *)
+        printf -v value '%d' "'$char"
+        printf -v encoded '%%%02X' "$value"
+        output+=$encoded
+        ;;
+    esac
+  done
+  printf '%s\n' "$output"
 }
 
 fm_pr_file_mode() {
@@ -378,9 +422,12 @@ fm_pr_regular_destination_on_device_or_absent() {
 # A presentation receipt is an immutable approval boundary: ordinary PR polls
 # may refresh task metadata, but only fm-pr-present.sh may replace this file.
 fm_pr_presentation_parse() {
-  local file=$1 version url head _extra state_device path_identity fd_identity
+  local file=$1 version url head base_ref base nonce _extra state_device path_identity fd_identity
   FM_PR_PRESENTATION_URL=
   FM_PR_PRESENTATION_HEAD=
+  FM_PR_PRESENTATION_BASE_REF=
+  FM_PR_PRESENTATION_BASE=
+  FM_PR_PRESENTATION_NONCE=
   [ ! -L "$file" ] || return 1
   state_device=$(fm_pr_file_device "$(dirname "$file")") || return 1
   exec 8< "$file" || return 1
@@ -395,32 +442,49 @@ fm_pr_presentation_parse() {
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
   IFS= read -r url <&8 || { exec 8<&-; return 1; }
   IFS= read -r head <&8 || { exec 8<&-; return 1; }
+  IFS= read -r base_ref <&8 || { exec 8<&-; return 1; }
+  IFS= read -r base <&8 || { exec 8<&-; return 1; }
+  IFS= read -r nonce <&8 || { exec 8<&-; return 1; }
   if IFS= read -r _extra <&8; then exec 8<&-; return 1; fi
   exec 8<&-
-  [ "$version" = firstmate-pr-presentation-v1 ] || return 1
+  [ "$version" = firstmate-pr-presentation-v2 ] || return 1
   case "$url" in pr=*) url=${url#pr=} ;; *) return 1 ;; esac
   case "$head" in presented_pr_head=*) head=${head#presented_pr_head=} ;; *) return 1 ;; esac
+  case "$base_ref" in presented_pr_base_ref=*) base_ref=${base_ref#presented_pr_base_ref=} ;; *) return 1 ;; esac
+  case "$base" in presented_pr_base=*) base=${base#presented_pr_base=} ;; *) return 1 ;; esac
+  case "$nonce" in presentation_nonce=*) nonce=${nonce#presentation_nonce=} ;; *) return 1 ;; esac
   fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
-  fm_pr_head_valid "$head" || return 1
+  fm_pr_head_valid "$head" && fm_pr_head_valid "$base" \
+    && git check-ref-format "refs/heads/$base_ref" >/dev/null 2>&1 \
+    && fm_pr_presentation_nonce_valid "$nonce" || return 1
   FM_PR_PRESENTATION_URL=$FM_PR_URL
   FM_PR_PRESENTATION_HEAD=$head
+  FM_PR_PRESENTATION_BASE_REF=$base_ref
+  FM_PR_PRESENTATION_BASE=$base
+  FM_PR_PRESENTATION_NONCE=$nonce
 }
 
 fm_pr_presentation_publish() {
-  local state=$1 id=$2 url=$3 head=$4 dest tmp state_device canonical_url
+  local state=$1 id=$2 url=$3 head=$4 base_ref=$5 base=$6 nonce=$7 dest tmp state_device canonical_url
   fm_pr_task_id_valid "$id" && fm_pr_url_parse "$url" \
-    && [ "$FM_PR_PROVIDER" = github ] && fm_pr_head_valid "$head" || return 1
+    && [ "$FM_PR_PROVIDER" = github ] && fm_pr_head_valid "$head" \
+    && git check-ref-format "refs/heads/$base_ref" >/dev/null 2>&1 \
+    && fm_pr_head_valid "$base" && fm_pr_presentation_nonce_valid "$nonce" || return 1
   canonical_url=$FM_PR_URL
   dest="$state/$id.pr-presentation"
   state_device=$(fm_pr_file_device "$state") || return 1
   fm_pr_regular_destination_on_device_or_absent "$dest" "$state_device" || return 1
   tmp=$(mktemp "$state/.fm-pr-presentation.XXXXXX") || return 1
-  if ! printf 'firstmate-pr-presentation-v1\npr=%s\npresented_pr_head=%s\n' "$canonical_url" "$head" > "$tmp" \
+  if ! printf 'firstmate-pr-presentation-v2\npr=%s\npresented_pr_head=%s\npresented_pr_base_ref=%s\npresented_pr_base=%s\npresentation_nonce=%s\n' \
+      "$canonical_url" "$head" "$base_ref" "$base" "$nonce" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
     || ! fm_pr_presentation_parse "$tmp" \
     || [ "$FM_PR_PRESENTATION_URL" != "$canonical_url" ] \
     || [ "$FM_PR_PRESENTATION_HEAD" != "$head" ] \
+    || [ "$FM_PR_PRESENTATION_BASE_REF" != "$base_ref" ] \
+    || [ "$FM_PR_PRESENTATION_BASE" != "$base" ] \
+    || [ "$FM_PR_PRESENTATION_NONCE" != "$nonce" ] \
     || ! mv -f -- "$tmp" "$dest" \
     || ! fm_pr_presentation_parse "$dest"; then
     rm -f -- "$tmp"

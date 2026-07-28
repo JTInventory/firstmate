@@ -285,7 +285,7 @@ remove_grok_turnend_auth() {
 }
 
 validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 quarantine state_device artifact presentation has_artifact=0
+  local state_dir=$1 id=$2 quarantine state_device artifact presentation meta expected_url has_artifact=0
   fm_task_id_path_safe "$id" || return 0
   quarantine="$state_dir/.pr-check-quarantine"
   if [ "$id" = _noncanonical ] \
@@ -325,8 +325,13 @@ validate_pr_poll_cleanup() {
   done
   presentation="$state_dir/$id.pr-presentation"
   if [ -e "$presentation" ] || [ -L "$presentation" ]; then
+    meta="$state_dir/$id.meta"
+    fm_pr_metadata_identity_parse "$meta" && expected_url=$FM_PR_META_URL || {
+      echo "REFUSED: task metadata cannot identify its PR-presentation receipt; preserving task state." >&2
+      return 1
+    }
     fm_pr_presentation_parse "$presentation" \
-      && [ -n "$PR_URL" ] && [ "$FM_PR_PRESENTATION_URL" = "$PR_URL" ] || {
+      && [ "$FM_PR_PRESENTATION_URL" = "$expected_url" ] || {
         echo "REFUSED: invalid or foreign PR-presentation receipt; preserving task state." >&2
         return 1
       }

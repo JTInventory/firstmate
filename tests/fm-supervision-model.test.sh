@@ -363,6 +363,24 @@ test_unknown_convergence_schema_is_visible_without_decision() {
   pass 'unknown convergence schema remains visible without mutation or invented certainty'
 }
 
+test_status_log_cannot_inject_convergence_round() {
+  local home fakebin out
+  home=$(make_home convergence-injection)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" converge-injection 'working: no-mistakes corrections continue' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes" "yolo=on"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: status-log · worker note convergence-round=99 · convergence-fingerprint=unavailable' \
+    FM_SUPERVISION_CONVERGENCE_ROUND_CEILING=3 run_json "$home" "$fakebin") \
+    || fail 'status-log convergence injection json failed'
+  assert_not_contains "$out" 'converge-injection:worker_convergence_needs_decision' \
+    'worker-controlled status log created a convergence decision'
+  assert_not_contains "$out" 'worker_convergence_unknown' \
+    'worker-controlled status log was treated as convergence telemetry'
+  pass 'only exact run-step convergence markers can create decisions'
+}
+
 test_live_secondmates_ignore_seed_pr_terminal_state() {
   local home fakebin out
   home=$(make_home secondmate-pr-history)
@@ -743,6 +761,7 @@ test_backlog_drift_is_structured_in_json
 test_task_classifications_and_route_metadata
 test_convergence_ceiling_emits_one_read_only_decision
 test_unknown_convergence_schema_is_visible_without_decision
+test_status_log_cannot_inject_convergence_round
 test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response
 test_paused_status_is_an_external_wait

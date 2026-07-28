@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Captain-gated merge bound atomically to the exact head shown to the captain.
-# Usage: FM_CAPTAIN_APPROVED_MERGE=1 FM_CAPTAIN_APPROVED_PR_HEAD=<sha> fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge args>]
+# Captain-gated merge bound to one exact URL, head, base, and presentation nonce.
+# Usage: FM_CAPTAIN_APPROVED_MERGE=1 FM_CAPTAIN_APPROVED_PR_HEAD=<sha> FM_CAPTAIN_APPROVED_PRESENTATION_NONCE=<nonce> fm-pr-merge.sh <task-id> <full-pr-url> [-- <merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,8 +70,13 @@ while [ "$#" -gt 0 ]; do
 done
 
 APPROVED_HEAD=${FM_CAPTAIN_APPROVED_PR_HEAD:-}
+APPROVED_NONCE=${FM_CAPTAIN_APPROVED_PRESENTATION_NONCE:-}
 fm_pr_head_valid "$APPROVED_HEAD" || {
   echo 'error: captain approval must include the exact presented head in FM_CAPTAIN_APPROVED_PR_HEAD' >&2
+  exit 1
+}
+fm_pr_presentation_nonce_valid "$APPROVED_NONCE" || {
+  echo 'error: captain approval must include the exact presentation nonce in FM_CAPTAIN_APPROVED_PRESENTATION_NONCE' >&2
   exit 1
 }
 [ -z "$match_head" ] || {
@@ -94,33 +99,41 @@ PRESENTATION_LOCK_HELD=1
 
 fm_pr_presentation_parse "$RECEIPT" \
   && [ "$FM_PR_PRESENTATION_URL" = "$URL" ] \
-  && [ "$FM_PR_PRESENTATION_HEAD" = "$APPROVED_HEAD" ] || {
+  && [ "$FM_PR_PRESENTATION_HEAD" = "$APPROVED_HEAD" ] \
+  && [ "$FM_PR_PRESENTATION_NONCE" = "$APPROVED_NONCE" ] || {
     echo 'error: missing, malformed, or foreign PR presentation receipt; present the PR again' >&2; exit 1;
   }
 PRESENTED_HEAD=$FM_PR_PRESENTATION_HEAD
+PRESENTED_BASE_REF=$FM_PR_PRESENTATION_BASE_REF
+PRESENTED_BASE=$FM_PR_PRESENTATION_BASE
 
 # Refresh mutable poll/meta state, but never the separate presentation receipt.
 "$CHECK_BIN" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo 'error: PR validation did not preserve identity' >&2; exit 1; }
 
 CURRENT_PR=$(gh-axi api GET "/repos/$OWNER/$REPO/pulls/$NUMBER" \
-  --jq '{head: .head.sha, head_repo: .head.repo.full_name, head_ref: .head.ref}' 2>/dev/null || true)
-if fm_pr_toon_field_parse "$CURRENT_PR" head; then CURRENT_HEAD=$FM_PR_TOON_VALUE; else CURRENT_HEAD=; fi
-if ! fm_pr_head_valid "$CURRENT_HEAD" || [ "$CURRENT_HEAD" != "$PRESENTED_HEAD" ]; then
+  --jq '{head_b64: (.head.sha | @base64), base_ref_b64: (.base.ref | @base64), base_b64: (.base.sha | @base64), head_repo_b64: (.head.repo.full_name | @base64), head_ref_b64: (.head.ref | @base64)}' \
+  2>/dev/null || true)
+if fm_pr_toon_base64_field_parse "$CURRENT_PR" head_b64; then CURRENT_HEAD=$FM_PR_TOON_VALUE; else CURRENT_HEAD=; fi
+if fm_pr_toon_base64_field_parse "$CURRENT_PR" base_ref_b64; then CURRENT_BASE_REF=$FM_PR_TOON_VALUE; else CURRENT_BASE_REF=; fi
+if fm_pr_toon_base64_field_parse "$CURRENT_PR" base_b64; then CURRENT_BASE=$FM_PR_TOON_VALUE; else CURRENT_BASE=; fi
+if ! fm_pr_head_valid "$CURRENT_HEAD" || [ "$CURRENT_HEAD" != "$PRESENTED_HEAD" ] \
+  || [ "$CURRENT_BASE_REF" != "$PRESENTED_BASE_REF" ] \
+  || ! fm_pr_head_valid "$CURRENT_BASE" || [ "$CURRENT_BASE" != "$PRESENTED_BASE" ]; then
   fm_pr_presentation_invalidate "$STATE" "$ID" || true
-  echo 'error: PR head changed or could not be verified; captain approval is stale and presentation was invalidated' >&2
+  echo 'error: PR head or base changed or could not be verified; captain approval is stale and presentation was invalidated' >&2
   exit 1
 fi
 
-merge_fields=(--field "sha=$PRESENTED_HEAD" --field "merge_method=$method")
-[ -z "$commit_title" ] || merge_fields+=(--field "commit_title=$commit_title")
-[ -z "$commit_message" ] || merge_fields+=(--field "commit_message=$commit_message")
+merge_fields=(--raw-field "sha=$PRESENTED_HEAD" --raw-field "merge_method=$method")
+[ -z "$commit_title" ] || merge_fields+=(--raw-field "commit_title=$commit_title")
+[ -z "$commit_message" ] || merge_fields+=(--raw-field "commit_message=$commit_message")
 if [ "$delete_branch" -eq 1 ]; then
-  fm_pr_toon_field_parse "$CURRENT_PR" head_repo || {
+  fm_pr_toon_base64_field_parse "$CURRENT_PR" head_repo_b64 || {
     echo 'error: could not verify the PR head repository for branch deletion' >&2; exit 1;
   }
   HEAD_REPO=$FM_PR_TOON_VALUE
-  fm_pr_toon_field_parse "$CURRENT_PR" head_ref || {
+  fm_pr_toon_base64_field_parse "$CURRENT_PR" head_ref_b64 || {
     echo 'error: could not verify the PR head branch for deletion' >&2; exit 1;
   }
   HEAD_REF=$FM_PR_TOON_VALUE
@@ -130,9 +143,13 @@ if [ "$delete_branch" -eq 1 ]; then
       echo 'error: unsafe PR head repository or branch; refusing requested branch deletion' >&2
       exit 1
     }
+  ENCODED_HEAD_REF=$(fm_pr_url_encode_ref_path "$HEAD_REF") || {
+    echo 'error: could not encode the PR head branch for deletion' >&2
+    exit 1
+  }
 fi
 
-if ! gh-axi api PUT "/repos/$OWNER/$REPO/pulls/$NUMBER/merge" "${merge_fields[@]}"; then
+if ! gh api --method PUT "/repos/$OWNER/$REPO/pulls/$NUMBER/merge" "${merge_fields[@]}"; then
   fm_pr_presentation_invalidate "$STATE" "$ID" || true
   echo 'error: atomic merge failed; presentation was invalidated' >&2
   exit 1
@@ -141,6 +158,6 @@ if ! fm_pr_presentation_invalidate "$STATE" "$ID"; then
   echo 'warning: merge succeeded but the consumed presentation receipt could not be removed; teardown must reconcile it' >&2
 fi
 if [ "$delete_branch" -eq 1 ] \
-  && ! gh-axi api DELETE "/repos/$HEAD_REPO/git/refs/heads/$HEAD_REF"; then
+  && ! gh-axi api DELETE "/repos/$HEAD_REPO/git/refs/heads/$ENCODED_HEAD_REF"; then
   echo 'warning: merge succeeded but the requested remote branch deletion failed' >&2
 fi

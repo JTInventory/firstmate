@@ -610,9 +610,12 @@ fm_supervision_convergence_observation() {  # <id> <remaining seconds>
   local id=$1 remaining=$2 line round
   [ "$remaining" -gt 0 ] || return 0
   line=$(FM_CREW_STATE_NM_TIMEOUT="$remaining" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in *convergence-round=*) ;; *) return 0 ;; esac
-  round=${line#*convergence-round=}
-  round=${round%% *}
+  case "$line" in
+    'state: working · source: run-step · validating (fixing) · convergence-round='*' · convergence-fingerprint=unavailable') ;;
+    *) return 0 ;;
+  esac
+  round=${line#'state: working · source: run-step · validating (fixing) · convergence-round='}
+  round=${round%' · convergence-fingerprint=unavailable'}
   case "$round" in unknown) printf 'unknown' ;; ''|*[!0-9]*) printf 'unknown' ;; *) printf '%s' "$round" ;; esac
 }
 
