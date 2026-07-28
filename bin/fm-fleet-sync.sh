@@ -27,7 +27,19 @@
 # passing its full projects/dotfiles-private path.
 set -eu
 
+usage() {
+  echo "usage: fm-fleet-sync.sh [<project-dir-or-name>]" >&2
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  usage
+  exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "fleet sync" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -46,14 +58,6 @@ if ! [[ "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS" =~ ^([0-9]+([.][0-9]*)?|[
   FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1
 fi
 
-usage() {
-  echo "usage: fm-fleet-sync.sh [<project-dir-or-name>]" >&2
-}
-
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  usage
-  exit 0
-fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {

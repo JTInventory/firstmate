@@ -312,6 +312,21 @@ test_bootstrap_refuses_worker_mutation_before_home_resolution() {
     "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
     || fail "documented detect-only bootstrap was refused for a worker"
   [ ! -e "$foreign/state" ] || fail "detect-only bootstrap created operational state"
+
+  cat > "$fakebin/brew" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_INSTALL_MARKER"
+SH
+  chmod +x "$fakebin/brew"
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_TEST_INSTALL_MARKER="$case_dir/install-ran" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=worker FM_AGENT_OWNER_HOME="$owner" \
+    "$ROOT/bin/fm-bootstrap.sh" install tmux 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "detect-only flag bypassed worker refusal for install mode"
+  printf '%s\n' "$out" | grep -F 'bootstrap refused' >/dev/null \
+    || fail "worker install refusal lost its operation"
+  [ ! -e "$case_dir/install-ran" ] || fail "worker bootstrap reached install eval"
   pass "bootstrap refuses worker mutation while preserving detect-only inspection"
 }
 

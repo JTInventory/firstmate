@@ -1724,7 +1724,7 @@ test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
 test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
   local home subhome nested grandproj grandwt fmroot fakebin log err rc
   local home_before home_after sub_before sub_after nested_before nested_after
-  local grand_stamp
+  local grand_before grand_after grand_stamp_path grand_stamp_before grand_stamp_after
   home="$TMP_ROOT/no-treehouse-recursive-home"
   subhome="$TMP_ROOT/no-treehouse-recursive-subhome"
   nested="$TMP_ROOT/no-treehouse-recursive-nested"
@@ -1757,6 +1757,9 @@ test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
   home_before=$(snapshot_tree_identity "$home")
   sub_before=$(snapshot_tree_identity "$subhome")
   nested_before=$(snapshot_tree_identity "$nested")
+  grand_before=$(snapshot_tree_identity "$grandwt")
+  grand_stamp_path=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$grandwt" )
+  grand_stamp_before=$(cksum "$grand_stamp_path")
   fakebin=$(make_fake_tmux "$TMP_ROOT/no-treehouse-recursive-fake")
   log="$TMP_ROOT/no-treehouse-recursive-fake/tmux.log"
   rm -f "$fakebin/treehouse"
@@ -1770,19 +1773,21 @@ test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
   home_after=$(snapshot_tree_identity "$home")
   sub_after=$(snapshot_tree_identity "$subhome")
   nested_after=$(snapshot_tree_identity "$nested")
+  grand_after=$(snapshot_tree_identity "$grandwt")
+  grand_stamp_after=$(cksum "$grand_stamp_path")
   [ "$home_after" = "$home_before" ] || fail "recursive preflight changed the parent home tree"
   [ "$sub_after" = "$sub_before" ] || fail "recursive preflight changed the child home tree"
   [ "$nested_after" = "$nested_before" ] || fail "recursive preflight changed the nested home tree"
+  [ "$grand_after" = "$grand_before" ] || fail "recursive preflight changed the pooled grandchild tree"
+  [ "$grand_stamp_after" = "$grand_stamp_before" ] \
+    || fail "recursive preflight changed the complete pooled ownership stamp"
   [ ! -s "$log" ] || fail "recursive preflight closed an endpoint"
   [ -d "$subhome" ] && [ -d "$nested" ] && [ -d "$grandwt" ] \
     || fail "recursive preflight removed a home or worktree"
-  grand_stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$grandwt" task )
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$subhome" ) 2>/dev/null \
     && fail "recursive preflight added a stamp to the plain parent home"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$nested" ) 2>/dev/null \
     && fail "recursive preflight added a stamp to the plain nested home"
-  [ "$grand_stamp" = grand ] \
-    || fail "recursive preflight changed pooled ownership stamps"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
     || fail "recursive preflight removed the parent route"
   pass "recursive missing-Treehouse preflight preserves every nested lifecycle surface"

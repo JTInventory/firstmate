@@ -738,10 +738,10 @@ SH
 }
 
 test_lifecycle_identity_uses_command_position_and_fail_closed_scope() {
-  local w out holder rc
+  local w out holder rc script
   w=$(new_world t24)
   bump_origin "$w" readme
-  mkdir -p "$w/legacy-argument"
+  mkdir -p "$w/legacy-argument" "$w/other-home"
   : > "$w/legacy-argument/fm-teardown.sh"
   bash -c 'while :; do sleep 1; done' "$w/legacy-argument/fm-teardown.sh" &
   holder=$!
@@ -766,7 +766,71 @@ test_lifecycle_identity_uses_command_position_and_fail_closed_scope() {
       999 "$w/legacy-argument/fm-teardown.sh" "$w/home" "$w/home/state"
   ) || rc=$?
   [ "$rc" -eq 2 ] || fail "unreadable lifecycle scope did not return unknown"
+
+  script="$w/legacy-argument/fm-spawn.sh"
+  cat > "$script" <<'SH'
+#!/usr/bin/env bash
+while :; do sleep 1; done
+SH
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_script_from_argv bash --norc "$script"
+    [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
+    fm_lifecycle_script_from_argv env -u UNUSED bash --norc "$script"
+    [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
+    ! fm_lifecycle_script_from_argv bash -c 'exit 0' "$script"
+  ) || fail "lifecycle command parser lost shell or env option grammar"
+
+  bump_origin "$w" instr
+  FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" \
+    env -u UNUSED bash --norc "$script" &
+  holder=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
+  out=$(run_update "$w")
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+    "shell or env options hid exact lifecycle work from the process bridge"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_process_environment() {
+      FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
+      FM_LIFECYCLE_ENVIRONMENT="FM_HOME=$w/other-home
+FM_STATE_OVERRIDE=$w/home/state"
+    }
+    fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
+  ) || fail "exact target-state evidence was ignored when home evidence differed"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_process_environment() {
+      FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
+      FM_LIFECYCLE_ENVIRONMENT="FM_HOME=$w/home
+FM_STATE_OVERRIDE=$w/other-home/state"
+    }
+    fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
+  ) || fail "conflicting lifecycle home and state evidence did not fail closed"
   pass "T24 lifecycle identity is positional and unreadable scope fails closed"
+}
+
+test_lifecycle_quiescence_clamps_timing_overrides() {
+  local w log
+  w=$(new_world t25)
+  log="$w/quiescence-sleeps"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_spawn_legacy_lifecycle_process_busy() { return 1; }
+    sleep() { printf '%s\n' "$1" >> "$log"; }
+    FM_LEGACY_LIFECYCLE_QUIESCENCE_PASSES=999 \
+      FM_LEGACY_LIFECYCLE_QUIESCENCE_WAIT=0.000001 \
+      fm_spawn_legacy_lifecycle_quiescent "$w/home" "$w/home/state"
+  ) || fail "clamped lifecycle quiescence refused an empty interval"
+  [ "$(wc -l < "$log")" -eq 2 ] \
+    || fail "unbounded quiescence pass override was accepted"
+  [ "$(sort -u "$log")" = 0.1 ] \
+    || fail "microscopic quiescence wait override was accepted"
+  pass "T25 lifecycle quiescence timing stays within safe bounds"
 }
 
 test_updates_main_and_secondmate
@@ -791,5 +855,6 @@ test_update_waits_for_legacy_admission_and_task_locks
 test_update_ignores_legacy_lifecycle_process_for_another_home
 test_update_quiescence_catches_late_legacy_lifecycle_start
 test_lifecycle_identity_uses_command_position_and_fail_closed_scope
+test_lifecycle_quiescence_clamps_timing_overrides
 
 echo "# all fm-update tests passed"

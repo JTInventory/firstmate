@@ -88,9 +88,14 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_MODE=${1:-bootstrap}
+BOOTSTRAP_READ_ONLY=0
+if [ "$BOOTSTRAP_MODE" != install ] && [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+  BOOTSTRAP_READ_ONLY=1
+fi
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
   fm_worker_refuse_primary_operation "bootstrap" || exit 1
 fi
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -111,7 +116,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
   # shellcheck source=bin/fm-watcher-protocol-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
 fi
@@ -858,7 +863,7 @@ fi
 # identity-matched watcher, holds its lock, and neutralizes legacy PR checks
 # before any tool detection or later bootstrap mutation can leave old artifacts
 # runnable. Detect-only sessions never touch state.
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
 fi
 
@@ -897,7 +902,7 @@ gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
-  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+  if [ "$BOOTSTRAP_READ_ONLY" = 1 ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the fleet lock"
   else
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
@@ -913,7 +918,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync || exit 1
   x_mode_setup

@@ -444,9 +444,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_BATCH_PARENT_PID=$$ "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_BATCH_PARENT_PID=$$ "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
   exit "$rc"
@@ -473,7 +473,16 @@ if fm_spawn_legacy_task_lock_busy "$STATE"; then
   echo "error: an older spawn or teardown is still changing this firstmate home" >&2
   exit 1
 fi
-if ! fm_spawn_legacy_lifecycle_quiescent "$FM_HOME" "$STATE" "$$"; then
+LEGACY_EXCLUDE_PIDS=$$
+if [ "${FM_SPAWN_BATCH_PARENT_PID:-}" = "$PPID" ] \
+  && fm_lifecycle_process_script "$PPID"; then
+  BATCH_PARENT_SCRIPT=$(fm_lifecycle_canonical_path "$FM_LIFECYCLE_SCRIPT" 2>/dev/null || true)
+  CURRENT_SPAWN_SCRIPT=$(fm_lifecycle_canonical_path "$FM_ROOT/bin/fm-spawn.sh" 2>/dev/null || true)
+  if [ -n "$BATCH_PARENT_SCRIPT" ] && [ "$BATCH_PARENT_SCRIPT" = "$CURRENT_SPAWN_SCRIPT" ]; then
+    LEGACY_EXCLUDE_PIDS="$LEGACY_EXCLUDE_PIDS $PPID"
+  fi
+fi
+if ! fm_spawn_legacy_lifecycle_quiescent "$FM_HOME" "$STATE" "$LEGACY_EXCLUDE_PIDS"; then
   echo "error: an older spawn or teardown is still starting in this firstmate home" >&2
   exit 1
 fi

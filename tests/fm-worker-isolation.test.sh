@@ -341,6 +341,58 @@ test_worker_cannot_spawn_or_tear_down() {
   pass "a declared task worker is refused both dispatch and teardown"
 }
 
+test_worker_cannot_run_direct_primary_mutators() {
+  local home foreign out status script operation args
+  home=$(make_primary_home "$TMP_ROOT/direct-mutator-owner")
+  foreign="$TMP_ROOT/direct-mutator-foreign"
+  mkdir -p "$foreign"
+
+  while IFS='|' read -r script operation args; do
+    status=0
+    # shellcheck disable=SC2086
+    out=$(FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+      FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
+      "$ROOT/bin/$script" $args 2>&1) || status=$?
+    expect_code 1 "$status" "$script must refuse a declared worker"
+    assert_contains "$out" "$operation refused" "$script refusal lost its operation"
+    [ ! -e "$foreign/state" ] || fail "$script resolved foreign state before refusal"
+  done <<'ROWS'
+fm-config-push.sh|config push|
+fm-home-seed.sh|home seed|domain /tmp/worker-home alpha
+fm-fleet-sync.sh|fleet sync|
+fm-merge-local.sh|local merge|task
+ROWS
+
+  while IFS='|' read -r script operation args; do
+    status=0
+    # shellcheck disable=SC2086
+    out=$(FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+      "$ROOT/bin/$script" $args 2>&1) || status=$?
+    expect_code 1 "$status" "$script must refuse a foreign-home secondmate"
+    assert_contains "$out" "$operation refused" "$script secondmate refusal lost its operation"
+  done <<'ROWS'
+fm-config-push.sh|config push|
+fm-home-seed.sh|home seed|domain /tmp/worker-home alpha
+fm-fleet-sync.sh|fleet sync|
+fm-merge-local.sh|local merge|task
+ROWS
+
+  FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
+    "$ROOT/bin/fm-config-push.sh" --help >/dev/null \
+    || fail "config push help was not kept read-only"
+  FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
+    "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "home seed validation was not kept read-only"
+  FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
+    "$ROOT/bin/fm-fleet-sync.sh" --help >/dev/null \
+    || fail "fleet sync help was not kept read-only"
+  pass "declared workers cannot run direct primary mutators"
+}
+
 test_secondmate_primary_operations_require_its_declared_home() {
   local home foreign alias out status
   home=$(make_primary_home "$TMP_ROOT/secondmate-owner-home")
@@ -1276,6 +1328,7 @@ test_declared_worker_is_never_a_primary_scope_match
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
+test_worker_cannot_run_direct_primary_mutators
 test_secondmate_primary_operations_require_its_declared_home
 test_proc_cwd_is_read_from_the_live_process
 test_declared_agent_lookup_returns_the_root_most_process

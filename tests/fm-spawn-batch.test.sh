@@ -40,6 +40,8 @@ test_batch_dispatches_every_pair() {
     || fail "first pair was not dispatched/reported"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-b-z2 (projects/none-b)' >/dev/null \
     || fail "second pair was not dispatched/reported (loop stopped early?)"
+  printf '%s\n' "$out" | grep -F 'an older spawn or teardown is still starting' >/dev/null \
+    && fail "batch children mistook their authenticated parent for legacy lifecycle work"
   pass "batch dispatch re-execs and reports every id=repo pair"
 }
 
