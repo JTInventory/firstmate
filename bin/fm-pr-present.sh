@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Freeze the exact GitHub PR head that was presented to the captain.
+# Freeze the exact GitHub PR URL, head, base, and nonce presented to the captain.
 # Usage: fm-pr-present.sh <task-id> <full-pr-url>
 set -eu
 
