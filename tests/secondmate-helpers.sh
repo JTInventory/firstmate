@@ -25,6 +25,13 @@ make_fake_tmux() {
 set -u
 case "${1:-}" in
   has-session|new-session|send-keys|kill-window)
+    if [ "${1:-}" = send-keys ] && [ -n "${FM_FAKE_REQUIRED_LOCK:-}" ]; then
+      [ -e "$FM_FAKE_REQUIRED_LOCK" ] || exit 42
+    fi
+    if [ "${1:-}" = send-keys ] && [ -n "${FM_FAKE_REPLACE_META_ON_SEND:-}" ]; then
+      sed -i 's/^endpoint_generation=.*/endpoint_generation=recycled/' \
+        "$FM_FAKE_REPLACE_META_ON_SEND"
+    fi
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     exit 0
     ;;
@@ -97,17 +104,31 @@ case "${1:-}" in
     exit 0
     ;;
   return)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'Usage: treehouse return [--if-lease-holder HOLDER] WORKTREE'
+      exit 0
+    fi
     shift
-    target=
+    target= expected_holder= lease_file=
     while [ $# -gt 0 ]; do
       case "$1" in
         --force) ;;
+        --if-lease-holder) shift; expected_holder=${1:-} ;;
+        --if-lease-holder=*) expected_holder=${1#--if-lease-holder=} ;;
         *) target=$1 ;;
       esac
       shift
     done
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
-    [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
+    lease_file=${FM_FAKE_TREEHOUSE_LEASE_FILE:-}
+    if [ -n "${FM_FAKE_TREEHOUSE_LEASE_DIR:-}" ] && [ -n "$target" ]; then
+      lease_file="$FM_FAKE_TREEHOUSE_LEASE_DIR/$(basename "$target").lease"
+    fi
+    if [ -n "$expected_holder" ]; then
+      [ -n "$lease_file" ] || exit 18
+      [ "$(cat "$lease_file" 2>/dev/null || true)" = "$expected_holder" ] || exit 18
+    fi
+    [ -n "$lease_file" ] && rm -f "$lease_file"
     [ -n "$target" ] && rm -rf -- "$target"
     exit 0
     ;;

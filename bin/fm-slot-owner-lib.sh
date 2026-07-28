@@ -128,11 +128,10 @@ fm_slot_stamp_field() {
   esac
 }
 
-fm_slot_stamp_record() {
-  local wt=$1 path task_count home_count line_count
+fm_slot_owner_record_file() {
+  local path=$1 task_count home_count line_count
   FM_SLOT_STAMP_TASK=
   FM_SLOT_STAMP_HOME=
-  path=$(fm_slot_stamp_path "$wt") || return 2
   if [ ! -e "$path" ] && [ ! -L "$path" ]; then
     return 1
   fi
@@ -144,6 +143,12 @@ fm_slot_stamp_record() {
   FM_SLOT_STAMP_TASK=$(sed -n 's/^task=//p' "$path")
   FM_SLOT_STAMP_HOME=$(sed -n 's/^home=//p' "$path")
   [ -n "$FM_SLOT_STAMP_TASK" ] && [ -n "$FM_SLOT_STAMP_HOME" ] || return 2
+}
+
+fm_slot_stamp_record() {
+  local wt=$1 path
+  path=$(fm_slot_stamp_path "$wt") || return 2
+  fm_slot_owner_record_file "$path"
 }
 
 # fm_slot_stamp_clear <worktree>: drop the stamp once the slot is released.
@@ -160,6 +165,64 @@ fm_slot_stamp_clear_exact() {  # <worktree> <task-id> <home>
   [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
     && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 0
   rm -f "$path"
+}
+
+fm_slot_return_backup_path() {
+  local state=$1 id=$2 dir
+  case "$id" in ''|*[!A-Za-z0-9._-]*|*/*) return 1 ;; esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  dir="$state/.slot-return-stamps"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  else
+    mkdir "$dir" || return 1
+  fi
+  printf '%s/%s.stamp' "$dir" "$id"
+}
+
+fm_slot_stamp_stage_return() {
+  local wt=$1 id=$2 home=$3 state=$4 path backup tmp
+  FM_SLOT_RETURN_STAGED=0
+  FM_SLOT_RETURN_BACKUP=
+  path=$(fm_slot_stamp_path "$wt") || return 1
+  backup=$(fm_slot_return_backup_path "$state" "$id") || return 1
+  if [ -e "$backup" ] || [ -L "$backup" ]; then
+    fm_slot_owner_record_file "$backup" || return 1
+    [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+      && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
+  fi
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    fm_slot_owner_record_file "$path" || return 1
+    [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+      && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
+    if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+      tmp=$(mktemp "${backup}.XXXXXX") || return 1
+      chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+      printf 'task=%s\nhome=%s\n' "$id" "$home" > "$tmp" \
+        && mv "$tmp" "$backup" || { rm -f "$tmp"; return 1; }
+    fi
+    rm -f "$path" || return 1
+  elif [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+    return 0
+  fi
+  FM_SLOT_RETURN_STAGED=1
+  FM_SLOT_RETURN_BACKUP=$backup
+}
+
+fm_slot_stamp_restore_return() {
+  local wt=$1 id=$2 home=$3 backup=$4
+  [ -n "$backup" ] || return 0
+  fm_slot_owner_record_file "$backup" || return 1
+  [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+    && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
+  fm_slot_stamp_write "$wt" "$id" "$home" || return 1
+  rm -f "$backup"
+}
+
+fm_slot_stamp_finalize_return() {
+  local backup=$1
+  [ -n "$backup" ] || return 0
+  rm -f "$backup"
 }
 
 # fm_slot_meta_worktree <meta-file>: the recorded worktree path, or empty.
@@ -202,18 +265,38 @@ fm_slot_meta_referencing_tasks() {
 # fm_slot_live_occupant_tasks <worktree> <task-id> <home> <role>: other
 # complete identities whose declared
 # live agent process is running inside the slot right now, newline separated
-# and deduplicated. Requires procfs; a host without it simply contributes no
-# evidence from this source.
+# and deduplicated. Missing process capability returns an unknown result.
 fm_slot_live_occupant_tasks() {
-  local wt=$1 self=$2 self_home=$3 self_role=$4 wt_real entry pid task home role cwd env hits
+  local wt=$1 self=$2 self_home=$3 self_role=$4 wt_real entry pid task home role cwd raw_cwd env hits state
   wt_real=$(fm_agent_canonical_dir "$wt") || return 1
   [ -d /proc ] || return 2
   hits=
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
-    cwd=$(fm_agent_proc_cwd "$pid") || continue
-    cwd=$(fm_agent_canonical_dir "$cwd") || continue
+    if ! cwd=$(fm_agent_proc_cwd "$pid"); then
+      [ ! -d "$entry" ] && continue
+      state=$(sed -n 's/^State:[[:space:]]*\([^[:space:]]\).*/\1/p' "$entry/status" 2>/dev/null || true)
+      case "$state" in Z|X|x) continue ;; esac
+      grep -Eq '^Kthread:[[:space:]]*1$' "$entry/status" 2>/dev/null && continue
+      if ! cwd=$(fm_agent_proc_cwd "$pid"); then
+        [ ! -d "$entry" ] && continue
+        state=$(sed -n 's/^State:[[:space:]]*\([^[:space:]]\).*/\1/p' "$entry/status" 2>/dev/null || true)
+        case "$state" in Z|X|x) continue ;; esac
+        return 2
+      fi
+    fi
+    raw_cwd=$cwd
+    if ! cwd=$(fm_agent_canonical_dir "$raw_cwd"); then
+      [ ! -d "$entry" ] && continue
+      case "$raw_cwd" in
+        *" (deleted)")
+          raw_cwd=${raw_cwd%" (deleted)"}
+          fm_agent_path_within "$wt_real" "$raw_cwd" || continue
+          ;;
+      esac
+      return 2
+    fi
     fm_agent_path_within "$wt_real" "$cwd" || continue
     if env=$(fm_agent_environ "$pid"); then
       task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)

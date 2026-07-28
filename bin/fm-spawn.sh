@@ -1640,7 +1640,9 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
     echo "herdr_pane_id=$HERDR_PANE_ID"
   fi
   if [ "$KIND" = secondmate ]; then
+    echo "task=$ID"
     echo "home=$PROJ_ABS"
+    echo "endpoint_generation=${META_TMP##*.}"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }

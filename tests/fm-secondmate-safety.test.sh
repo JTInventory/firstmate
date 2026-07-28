@@ -1118,6 +1118,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "could not stamp the secondmate teardown fixture"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
   log="$TMP_ROOT/teardown-fake/tmux.log"
   lease="$TMP_ROOT/teardown-fake/lease"
@@ -1139,12 +1142,67 @@ EOF
   kill "$agent_pid" 2>/dev/null || true
   wait "$agent_pid" 2>/dev/null || true
   [ "$rc" -eq 0 ] || fail "teardown treated its live secondmate as a foreign slot occupant"
-  grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not release the secondmate home lease via treehouse return"
+  grep -F "treehouse return --force $subhome_abs --if-lease-holder domain" "$log" >/dev/null || fail "teardown did not conditionally release the secondmate home lease"
   [ ! -e "$lease" ] || fail "teardown left the secondmate home lease held after retirement"
   [ ! -d "$subhome" ] || fail "teardown did not remove the retired secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
   pass "secondmate teardown retires empty homes and releases routing"
+}
+
+test_secondmate_teardown_refuses_mismatched_lease_holder() {
+  local home subhome fakebin log lease fmroot err rc
+  home="$TMP_ROOT/teardown-holder-home"
+  subhome="$TMP_ROOT/teardown-holder-subhome"
+  fmroot="$TMP_ROOT/teardown-holder-fmroot"
+  err="$TMP_ROOT/teardown-holder.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-holder-fake")
+  log="$TMP_ROOT/teardown-holder-fake/tmux.log"
+  lease="$TMP_ROOT/teardown-holder-fake/lease"
+  printf 'domain\n' > "$lease"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-holder-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "missing ownership stamp released a secondmate lease"
+  ! grep -F "treehouse return --force" "$log" >/dev/null \
+    || fail "missing ownership stamp reached Treehouse return"
+  [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
+    || fail "missing ownership stamp changed secondmate lifecycle state"
+
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "could not stamp the conditional-holder fixture"
+  printf 'replacement\n' > "$lease"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-holder-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "stale metadata released another secondmate lease holder"
+  [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
+    || fail "holder mismatch changed secondmate lifecycle state"
+  [ "$(cat "$lease")" = replacement ] || fail "holder mismatch cleared the replacement lease"
+  grep -F "treehouse return --force" "$log" | grep -F -- "--if-lease-holder domain" >/dev/null \
+    || fail "secondmate return did not bind the proven lease holder"
+  pass "secondmate teardown refuses a mismatched lease holder"
 }
 
 test_secondmate_teardown_serializes_against_spawn() {
@@ -1309,6 +1367,9 @@ test_secondmate_teardown_blocks_child_publication_during_census() {
     "window=firstmate:fm-blocker" "worktree=" "project=" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=unknown"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "could not stamp the child-census fixture"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-admission-fake")
   log="$TMP_ROOT/teardown-admission-fake/tmux.log"
   cat > "$fakebin/basename" <<'SH'
@@ -1326,13 +1387,13 @@ SH
     FM_TEST_ADMISSION_RELEASE="$release" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
   teardown_pid=$!
-  for _ in $(seq 1 250); do
+  for _ in $(seq 1 1000); do
     [ -e "$ready" ] && break
     sleep 0.02
   done
   [ -e "$ready" ] || {
     kill "$teardown_pid" 2>/dev/null || true
-    fail "teardown did not reach its locked child census"
+    fail "teardown did not reach its locked child census: $(cat "$err" 2>/dev/null)"
   }
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -1444,7 +1505,7 @@ EOF
 test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent() {
   # Named primary_home, not home: bin/fm-slot-owner-lib.sh is sourced below and
   # carries its own `home` local, which makes shellcheck read the two as one.
-  local primary_home subhome nested nested_abs fakebin log fmroot
+  local primary_home subhome nested nested_abs fakebin log fmroot lease_dir
   primary_home="$TMP_ROOT/nested-scope-home"
   subhome="$TMP_ROOT/nested-scope-subhome"
   nested="$TMP_ROOT/nested-scope-child"
@@ -1487,8 +1548,13 @@ EOF
     || fail "the nested home fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/nested-scope-fake")
   log="$TMP_ROOT/nested-scope-fake/tmux.log"
+  lease_dir="$TMP_ROOT/nested-scope-fake/leases"
+  mkdir -p "$lease_dir"
+  printf 'child\n' > "$lease_dir/$(basename "$nested").lease"
+  printf 'domain\n' > "$lease_dir/$(basename "$subhome").lease"
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$primary_home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-scope-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_DIR="$lease_dir" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
     || fail "force teardown refused a nested child home its own parent owned"
   grep -F "treehouse return --force $nested_abs" "$log" >/dev/null \
@@ -1792,12 +1858,16 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
 }
 
 test_secondmate_force_teardown_discards_child_work() {
-  local home subhome childproj childwt fakebin log
+  local home subhome childproj childwt fakebin log err
   home="$TMP_ROOT/force-teardown-home"
   subhome="$TMP_ROOT/force-teardown-subhome"
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/force-child-worktree"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  err="$TMP_ROOT/force-teardown.err"
+  mkdir -p "$home/state" "$home/data"
+  git clone --quiet "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state"
   fm_git_worktree "$childproj" "$childwt" force-child
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
@@ -1828,8 +1898,8 @@ EOF
     fail "teardown allowed a secondmate with in-flight child work"
   fi
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
-    || fail "force teardown failed to discard child work"
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+    || fail "force teardown failed to discard child work: $(cat "$err")"
   [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
@@ -1846,7 +1916,10 @@ test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/no-treehouse-child-worktree"
   err="$TMP_ROOT/no-treehouse.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  mkdir -p "$home/state" "$home/data"
+  git clone --quiet "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state"
   fm_git_worktree "$childproj" "$childwt" no-treehouse-child
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   fm_write_meta "$home/state/domain.meta" \
@@ -1963,7 +2036,11 @@ test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
     target="$subhome/internal-$opdir"
     err="$TMP_ROOT/symlink-inside-teardown-$opdir.err"
     rm -rf "$home" "$subhome"
-    mkdir -p "$home/state" "$home/data" "$subhome" "$target"
+    mkdir -p "$home/state" "$home/data"
+    git clone --quiet "$ROOT" "$subhome"
+    git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+    rm -rf "$subhome/$opdir"
+    mkdir -p "$target"
     printf 'domain\n' > "$subhome/.fm-secondmate-home"
     ln -s "$target" "$subhome/$opdir"
     cat > "$home/state/domain.meta" <<EOF
@@ -2224,7 +2301,10 @@ test_secondmate_force_teardown_refuses_unknown_child_backend() {
   home="$TMP_ROOT/unknown-backend-teardown-home"
   subhome="$TMP_ROOT/unknown-backend-teardown-subhome"
   err="$TMP_ROOT/unknown-backend-teardown.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/data"
+  mkdir -p "$home/state" "$home/data"
+  git clone --quiet "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state" "$subhome/data"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -2246,7 +2326,7 @@ harness=echo
 kind=ship
 mode=no-mistakes
 yolo=off
-backend=orca
+backend=unknown
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/unknown-backend-teardown-fake")
   log="$TMP_ROOT/unknown-backend-teardown-fake/tmux.log"
@@ -2256,8 +2336,8 @@ EOF
   fi
   [ -d "$subhome" ] || fail "force teardown removed the subhome after unsupported-backend refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown removed child metadata after unknown-backend refusal"
-  grep -F "REFUSED: child child uses unsupported backend 'orca'" "$err" >/dev/null \
-    || fail "force teardown did not explain unsupported child backend"
+  grep -F "REFUSED: child child uses unsupported backend 'unknown'" "$err" >/dev/null \
+    || fail "force teardown did not explain unsupported child backend: $(cat "$err")"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed a window before unknown-backend refusal"
   pass "force teardown refuses unknown child backends before cleanup"
 }
@@ -2269,7 +2349,10 @@ test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   childproj="$subhome/projects/alpha"
   childwt="$home/data"
   err="$TMP_ROOT/child-active-descendant.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
+  mkdir -p "$home/state" "$home/data"
+  git clone --quiet "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state" "$childproj"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -2315,8 +2398,9 @@ test_secondmate_force_teardown_refuses_child_repo_descendant() {
   fakeroot="$TMP_ROOT/child-repo-descendant-root"
   childwt="$fakeroot/data"
   err="$TMP_ROOT/child-repo-descendant.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
   make_firstmate_git_root "$fakeroot"
+  git -C "$fakeroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj"
   mkdir -p "$childwt"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
@@ -2331,6 +2415,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "could not stamp the repo-descendant parent fixture"
   cat > "$subhome/state/child.meta" <<EOF
 window=firstmate:fm-child
 worktree=$childwt
@@ -2362,7 +2449,10 @@ test_secondmate_force_teardown_refuses_unregistered_child_worktree() {
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/unregistered-child-worktree"
   err="$TMP_ROOT/unregistered-child.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$childproj" "$childwt"
+  mkdir -p "$home/state" "$home/data" "$childwt"
+  git clone --quiet "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state" "$childproj"
   fm_git_init_commit "$childproj"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
@@ -2607,6 +2697,7 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_secondmate_spawn_allows_plain_clone_home_without_stamp
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_refuses_mismatched_lease_holder
 test_secondmate_teardown_serializes_against_spawn
 test_secondmate_teardown_blocks_prelock_legacy_spawn
 test_secondmate_teardown_quiescence_catches_late_legacy_spawn

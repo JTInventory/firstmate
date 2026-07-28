@@ -829,6 +829,25 @@ test_unavailable_occupant_evidence_retains() {
   pass "unavailable authoritative occupant evidence retains the slot"
 }
 
+test_unclassified_live_process_retains() {
+  local rec verdict
+  require_procfs || { pass "skip: this host has no procfs for cwd failure proof"; return 0; }
+  rec=$(make_slot_world slot-unclassified-process)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-unclassified.meta" \
+    "window=firstmate:fm-task-unclassified" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  verdict=$(
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_agent_proc_cwd() { return 1; }
+    fm_slot_disposal_verdict "$WORLD/home/state" task-unclassified "$WT_DIR" \
+      "$WORLD/home" "$WORLD/home" crewmate
+  )
+  [ "$verdict" = "retain: authoritative live-occupant evidence is unavailable" ] \
+    || fail "an unclassified live process did not retain the slot: $verdict"
+  pass "authoritative cwd failures retain the slot"
+}
+
 test_undeclared_in_slot_process_retains() {
   local rec verdict pid
   require_procfs || { pass "skip: this host has no readable procfs for undeclared occupant proof"; return 0; }
@@ -1115,6 +1134,9 @@ test_stamp_survives_failed_pool_return() {
   fakebin=$(fm_fakebin "$WORLD/fake")
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+target=${@: -1}
+git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
+[ ! -e "$git_dir/fm-slot-owner" ] || exit 19
 exit 17
 SH
   chmod +x "$fakebin/treehouse"
@@ -1159,6 +1181,8 @@ test_successful_pool_return_never_mutates_reused_slot() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 target=${@: -1}
+git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
+[ ! -e "$git_dir/fm-slot-owner" ] || exit 19
 git -C "$FM_REUSE_PROJECT" worktree remove --force "$target"
 git -C "$FM_REUSE_PROJECT" worktree add --quiet -b replacement-owner "$target"
 mkdir -p "$target/.claude" "$target/.opencode/plugins"
@@ -1581,6 +1605,7 @@ test_exact_stamp_clear_accepts_canonical_home_alias
 test_clean_ownership_disposes
 test_malformed_or_partial_stamp_retains
 test_unavailable_occupant_evidence_retains
+test_unclassified_live_process_retains
 test_undeclared_in_slot_process_retains
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot

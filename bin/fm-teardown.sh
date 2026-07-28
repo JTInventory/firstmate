@@ -272,16 +272,39 @@ treehouse_return_is_index_lock_error() {
 }
 
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 out attempt=0 retries
+  local dir=$1 cd_dir=$2 label=$3 post_check=${4:-} state_scope=${5:-}
+  local stamp_id=${6:-} stamp_home=${7:-} lease_holder=${8:-}
+  local out attempt=0 retries backup= staged=0 return_status
   retries=$TREEHOUSE_RETURN_LOCK_RETRIES
   case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
+  if [ -n "$post_check" ]; then
+    "$post_check" || return 1
+  fi
+  if [ -n "$state_scope" ] && [ -n "$stamp_id" ] && [ -n "$stamp_home" ]; then
+    fm_slot_stamp_stage_return "$dir" "$stamp_id" "$stamp_home" "$state_scope" || return 1
+    staged=${FM_SLOT_RETURN_STAGED:-0}
+    backup=${FM_SLOT_RETURN_BACKUP:-}
+  fi
   while :; do
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if [ -n "$lease_holder" ]; then
+      out=$( ( cd "$cd_dir" && treehouse return --force "$dir" \
+        --if-lease-holder "$lease_holder" ) 2>&1 ) && return_status=0 || return_status=$?
+    else
+      out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ) \
+        && return_status=0 || return_status=$?
+    fi
+    if [ "$return_status" -eq 0 ]; then
       [ -n "$out" ] && printf '%s\n' "$out"
+      [ "$staged" -eq 0 ] || fm_slot_stamp_finalize_return "$backup" || true
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
     if ! treehouse_return_is_index_lock_error "$out" || [ "$attempt" -ge "$retries" ]; then
+      if [ "$staged" -eq 1 ]; then
+        fm_slot_stamp_restore_return "$dir" "$stamp_id" "$stamp_home" "$backup" || {
+          echo "error: could not restore ownership evidence for $label $dir" >&2
+        }
+      fi
       return 1
     fi
     attempt=$(( attempt + 1 ))
@@ -718,10 +741,16 @@ plain_legacy_firstmate_clone() {
 }
 
 require_treehouse_return_capability() {
-  local label=$1 target=$2
-  command -v treehouse >/dev/null 2>&1 && return 0
-  echo "REFUSED: treehouse command not found; preserving $label $target and all lifecycle state" >&2
-  return 1
+  local label=$1 target=$2 lease_holder=${3:-}
+  command -v treehouse >/dev/null 2>&1 || {
+    echo "REFUSED: treehouse command not found; preserving $label $target and all lifecycle state" >&2
+    return 1
+  }
+  if [ -n "$lease_holder" ] \
+    && ! treehouse return --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'; then
+    echo "REFUSED: conditional Treehouse lease-holder return is unavailable; preserving $label $target and all lifecycle state" >&2
+    return 1
+  fi
 }
 
 validate_removal_target() {
@@ -906,6 +935,19 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worke
   return 1
 }
 
+require_secondmate_slot_claim() {
+  local wt=$1 id=$2 owner_home=$3 label=$4
+  fm_slot_stamp_record "$wt" || {
+    echo "REFUSED: $label $wt has no complete ownership stamp for lease holder $id" >&2
+    return 1
+  }
+  [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+    && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$owner_home" || {
+      echo "REFUSED: $label $wt ownership stamp does not prove lease holder $id" >&2
+      return 1
+    }
+}
+
 remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scope]
   local home=$1 label=$2 expected_id=${3:-} state_scope=${4:-$STATE} home_scope=${5:-$FM_HOME} abs_home_path slot_verdict
   [ -n "$home" ] || return 0
@@ -919,9 +961,12 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
         echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
         return 1
       }
+      require_secondmate_slot_claim "$abs_home_path" "${expected_id:-$ID}" \
+        "$home_scope" "$label" || return 1
       slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
         "$home_scope" "$abs_home_path" secondmate "$label" refuse || return 1
-      teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+      teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" \
+        "$state_scope" "${expected_id:-$ID}" "$home_scope" "${expected_id:-$ID}" || {
         echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
         return 1
       }
@@ -965,7 +1010,9 @@ validate_firstmate_home_children_removal() {
       slot_verdict=$(firstmate_home_treehouse_slot_verdict "$child_home")
       case "$slot_verdict" in
         registered)
-          require_treehouse_return_capability "child firstmate home" "$child_home" || return 1
+          require_treehouse_return_capability "child firstmate home" "$child_home" "$child_id" || return 1
+          require_secondmate_slot_claim "$child_home" "$child_id" "$home" \
+            "child firstmate home" || return 1
           slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" "$child_home" \
             secondmate "child firstmate home" refuse || return 1
           ;;
@@ -1063,7 +1110,7 @@ cleanup_firstmate_home_children() {
           return 1
         }
         teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
-          || return 1
+          "" "$sub_state" "$child_id" "$home" || return 1
       else
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
@@ -1094,7 +1141,9 @@ if [ "$KIND" = secondmate ]; then
   TOP_HOME_SLOT_VERDICT=$(firstmate_home_treehouse_slot_verdict "$HOME_PATH")
   case "$TOP_HOME_SLOT_VERDICT" in
     registered)
-      require_treehouse_return_capability "secondmate home" "$HOME_PATH" || exit 1
+      require_treehouse_return_capability "secondmate home" "$HOME_PATH" "$ID" || exit 1
+      require_secondmate_slot_claim "$HOME_PATH" "$ID" "$FM_HOME" \
+        "secondmate home" || exit 1
       slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
         secondmate "secondmate home" refuse || exit 1
       ;;
@@ -1279,7 +1328,8 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
       post_lock_cleanup_check=validate_worktree_teardown_safety
     fi
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+      "$STATE" "$ID" "$FM_HOME" || {
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
       exit 1
     }

@@ -3,8 +3,8 @@
 # Usage: fm-config-push.sh [--help]
 #
 # Config-only convergence for mid-session changes such as config/crew-dispatch.json
-# edits. This discovers live secondmate homes from state/*.meta, backfills
-# home= from data/secondmates.md for older meta records, and reuses the same
+# edits. This discovers live secondmate homes from complete state/*.meta
+# lifecycle records and reuses the same
 # propagate_inheritable_config machinery as bootstrap, but does not fast-forward
 # tracked files. Changed config is delivered through the shared reread path.
 # Warnings-only skips exit 0; propagation or reread delivery errors exit non-zero.
@@ -25,8 +25,7 @@ This is inheritance-only:
   - exits non-zero for propagation, CONFIG_REREAD publication, or delivery errors
 
 Live homes come from state/*.meta records with kind=secondmate.
-data/secondmates.md is only a fallback for missing home= fields in older or
-incomplete meta records.
+Incomplete or ambiguous lifecycle records are refused.
 
 Environment overrides follow the rest of firstmate:
   FM_HOME            active firstmate home
@@ -103,7 +102,7 @@ echo "config-push: $CONFIG -> live secondmate homes"
 
 seen_homes=""
 errors=0
-while IFS='|' read -r id home _window meta; do
+while IFS='|' read -r id home _window meta _endpoint_generation; do
   [ -n "$id" ] || continue
   if [ -z "$home" ]; then
     printf 'secondmate %s: skipped - no home= in %s and no registry home\n' "$id" "$meta"

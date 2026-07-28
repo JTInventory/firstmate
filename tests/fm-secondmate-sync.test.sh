@@ -27,6 +27,9 @@ set -u
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
 
+fm_ff_target_lock_acquire() { return 0; }
+fm_ff_target_lock_release() { return 0; }
+
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 # Deterministic, isolated git identity for fixture commits.
@@ -71,6 +74,8 @@ add_sm_worktree() {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
     printf 'home=%s/%s\n' "$w" "$id"
+    printf 'task=%s\n' "$id"
+    printf 'endpoint_generation=endpoint-%s\n' "$id"
   } > "$w/home/state/$id.meta"
 }
 
@@ -360,6 +365,8 @@ test_bootstrap_retry_clears_child_obligation() {
     printf 'id=sm-retry\n'
     printf 'selector=fm-sm-retry\n'
     printf 'home=%s/sm-retry\n' "$w"
+    printf 'window=firstmate:fm-sm-retry\n'
+    printf 'endpoint_generation=endpoint-sm-retry\n'
     printf 'commit=%s\n' "$commit"
     printf 'instructions=AGENTS.md\n'
     printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
@@ -390,6 +397,8 @@ test_bootstrap_retry_respects_secondmate_lifecycle_lock() {
     printf 'id=sm-retry-lock\n'
     printf 'selector=fm-sm-retry-lock\n'
     printf 'home=%s/sm-retry-lock\n' "$w"
+    printf 'window=firstmate:fm-sm-retry-lock\n'
+    printf 'endpoint_generation=endpoint-sm-retry-lock\n'
     printf 'commit=%s\n' "$commit"
     printf 'instructions=AGENTS.md\n'
     printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
@@ -413,6 +422,26 @@ test_bootstrap_retry_respects_secondmate_lifecycle_lock() {
   assert_contains "$out" "lifecycle identity changed or lock is busy" \
     "bootstrap did not report locked retry recovery"
   pass "bootstrap retry recovery keeps markers and acknowledgements behind the lifecycle lock"
+}
+
+test_bootstrap_refuses_ambiguous_lifecycle_metadata() {
+  local w c1 before fakebin out
+  w=$(new_world boot-ambiguous)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-ambiguous "$c1"
+  bump_primary "$w" instr
+  before=$(head_of "$w/sm-ambiguous")
+  printf 'endpoint_generation=recycled\n' >> "$w/home/state/sm-ambiguous.meta"
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  [ "$(head_of "$w/sm-ambiguous")" = "$before" ] \
+    || fail "bootstrap advanced a home with ambiguous lifecycle metadata"
+  assert_contains "$out" "ambiguous lifecycle metadata" \
+    "bootstrap did not report ambiguous lifecycle metadata"
+  pass "bootstrap refuses ambiguous lifecycle metadata before mutation"
 }
 
 # --- T11: spawning a secondmate fast-forwards its worktree before launch ------
@@ -497,6 +526,7 @@ test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_sweep_surfaces_skipped_home
 test_bootstrap_retry_clears_child_obligation
 test_bootstrap_retry_respects_secondmate_lifecycle_lock
+test_bootstrap_refuses_ambiguous_lifecycle_metadata
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 

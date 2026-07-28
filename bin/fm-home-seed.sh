@@ -647,7 +647,13 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  if ! treehouse return --help 2>&1 \
+    | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'; then
+    echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; conditional holder proof is unavailable" >&2
+    return 0
+  fi
+  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" \
+    --if-lease-holder "$SEED_LEASE_HOLDER" >/dev/null ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
@@ -822,6 +828,7 @@ seed_home() {
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
   SEED_HOME=
+  SEED_LEASE_HOLDER=$id
   SEED_HOME_ACQUIRED=0
   SEED_HOME_CREATED=0
   SEED_HOME_ACQUIRED=0

@@ -21,6 +21,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/secondmate-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 UPDATE="$ROOT/bin/fm-update.sh"
 # shellcheck source=bin/fm-ff-lib.sh
@@ -113,6 +115,8 @@ add_sm() {
     printf 'window=main:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
     printf 'home=%s/%s\n' "$w" "$id"
+    printf 'task=%s\n' "$id"
+    printf 'endpoint_generation=endpoint-%s\n' "$id"
   } > "$w/home/state/$id.meta"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
 }
@@ -1027,12 +1031,14 @@ test_secondmate_lock_covers_recovery_callback() {
     . "$ROOT/bin/fm-ff-lib.sh"
     FM_ROOT="$w/main"
     FM_HOME="$w/home"
+    STATE="$w/home/state"
     lock_held=0
     resolve_path() { cd "$1" && pwd -P; }
     validate_secondmate_home() {
       VALIDATED_HOME=$(cd "$2" && pwd -P)
       return 0
     }
+    fm_secondmate_lifecycle_identity_matches() { return 0; }
     fm_ff_target_lock_acquire() { lock_held=1; }
     fm_ff_target_lock_release() { lock_held=0; }
     ff_target() {
@@ -1048,7 +1054,7 @@ test_secondmate_lock_covers_recovery_callback() {
     fm_ff_after_instruction_update() {
       [ "$lock_held" -eq 1 ]
     }
-    process_secondmate sm1 "$w/sm1" main:fm-sm1 origin no
+    process_secondmate sm1 "$w/sm1" main:fm-sm1 origin no endpoint-sm1
     [ "$lock_held" -eq 0 ]
   ) || rc=$?
   [ "$rc" -eq 0 ] || fail "secondmate lifecycle lock did not cover the recovery callback"
@@ -1104,6 +1110,78 @@ test_secondmate_acknowledgement_respects_lifecycle_lock() {
   pass "T30 secondmate acknowledgement stays behind the lifecycle lock"
 }
 
+test_ambiguous_lifecycle_metadata_refuses_update() {
+  local w out before
+  w=$(new_world t31)
+  add_sm "$w" sm1
+  before=$(git -C "$w/sm1" rev-parse HEAD)
+  bump_origin "$w" instr
+  printf 'home=%s/recycled\n' "$w" >> "$w/home/state/sm1.meta"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
+
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
+    || fail "ambiguous lifecycle metadata authorized a secondmate update"
+  assert_contains "$out" "ambiguous lifecycle metadata" \
+    "ambiguous lifecycle metadata refusal was not reported"
+  pass "T31 ambiguous lifecycle metadata refuses update mutations"
+}
+
+test_secondmate_delivery_is_one_locked_generation_transaction() {
+  local w generation fakebin out lock
+  w=$(new_world t32)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  mkdir -p "$w/sm1/state"
+  fm_update_obligation_write \
+    "$w/sm1/state/.watch-protocol-reread-required" "$generation"
+  fakebin=$(make_fake_tmux "$w/send-fake")
+  lock="$w/sm1/state/.spawn-admission.lock"
+
+  out=$(cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/send-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/send-fake/pane.txt" \
+    FM_FAKE_REQUIRED_LOCK="$lock" FM_SEND_SETTLE=0 \
+    "$UPDATE" --deliver-secondmate-nudge main:fm-sm1 "$generation")
+
+  assert_contains "$out" "delivered-secondmate-nudge: main:fm-sm1" \
+    "locked secondmate delivery did not report completion"
+  fm_update_obligation_pending \
+    "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
+    && fail "locked secondmate delivery did not acknowledge its generation"
+  [ ! -e "$w/home/state/.secondmate-nudge-delivered/sm1/$generation" ] \
+    || fail "completed secondmate delivery left its transaction receipt"
+  pass "T32 secondmate delivery sends and acknowledges under one lifecycle lock"
+}
+
+test_secondmate_delivery_refuses_recycled_endpoint_ack() {
+  local w generation fakebin lock rc=0
+  w=$(new_world t33)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  mkdir -p "$w/sm1/state"
+  fm_update_obligation_write \
+    "$w/sm1/state/.watch-protocol-reread-required" "$generation"
+  fakebin=$(make_fake_tmux "$w/recycle-fake")
+  lock="$w/sm1/state/.spawn-admission.lock"
+
+  (cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/recycle-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/recycle-fake/pane.txt" \
+    FM_FAKE_REQUIRED_LOCK="$lock" \
+    FM_FAKE_REPLACE_META_ON_SEND="$w/home/state/sm1.meta" \
+    FM_SEND_SETTLE=0 "$UPDATE" --deliver-secondmate-nudge \
+    main:fm-sm1 "$generation" >/dev/null 2>&1) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "delivery acknowledged a recycled endpoint generation"
+  fm_update_obligation_pending \
+    "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
+    || fail "recycled endpoint cleared the durable nudge obligation"
+  pass "T33 secondmate delivery refuses acknowledgement after endpoint reuse"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -1132,5 +1210,8 @@ test_fallback_argv_provider_fails_closed_without_boundaries
 test_secondmate_lock_covers_recovery_callback
 test_locked_secondmate_action_revalidates_after_acquire
 test_secondmate_acknowledgement_respects_lifecycle_lock
+test_ambiguous_lifecycle_metadata_refuses_update
+test_secondmate_delivery_is_one_locked_generation_transaction
+test_secondmate_delivery_refuses_recycled_endpoint_ack
 
 echo "# all fm-update tests passed"

@@ -268,7 +268,8 @@ secondmate_sync() {
   }
 
   secondmate_write_nudge_marker() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker tmp parent
+    local id=$1 home=$2 window=$3 endpoint_generation=$4 commit=$5 instr=$6
+    local selector marker tmp parent
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || return 1
     parent=${marker%/*}
@@ -278,6 +279,8 @@ secondmate_sync() {
       printf 'id=%s\n' "$id"
       printf 'selector=%s\n' "$selector"
       printf 'home=%s\n' "$home"
+      printf 'window=%s\n' "$window"
+      printf 'endpoint_generation=%s\n' "$endpoint_generation"
       printf 'commit=%s\n' "$commit"
       printf 'instructions=%s\n' "$instr"
       printf 'message=%s\n' "$SECOND_MATE_NUDGE_MESSAGE"
@@ -286,32 +289,34 @@ secondmate_sync() {
   }
 
   secondmate_locked_identity_matches() {
-    local id=$1 expected=$2 meta meta_home
-    meta="$STATE/$id.meta"
-    [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 1
-    meta_home=$(fm_meta_get "$meta" home)
-    [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
-    validate_secondmate_home "$id" "$meta_home" \
-      && [ "$VALIDATED_HOME" = "$expected" ]
+    local id=$1 expected=$2 window=$3 endpoint_generation=$4
+    fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$expected" \
+      "$window" "$endpoint_generation"
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
-    secondmate_locked_identity_matches "$id" "$home" || return 1
+    local id=$1 home=$2 window=$3 endpoint_generation=$4 commit=$5 instr=$6
+    local selector marker out
+    secondmate_locked_identity_matches "$id" "$home" "$window" \
+      "$endpoint_generation" || return 1
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
       return 0
     }
-    if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
+    if ! secondmate_write_nudge_marker "$id" "$home" "$window" \
+      "$endpoint_generation" "$commit" "$instr"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       return 0
     fi
-    secondmate_locked_identity_matches "$id" "$home" || return 1
+    secondmate_locked_identity_matches "$id" "$home" "$window" \
+      "$endpoint_generation" || return 1
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-      secondmate_locked_identity_matches "$id" "$home" || return 1
+      secondmate_locked_identity_matches "$id" "$home" "$window" \
+        "$endpoint_generation" || return 1
       rm -f "$marker"
-      secondmate_locked_identity_matches "$id" "$home" || return 1
+      secondmate_locked_identity_matches "$id" "$home" "$window" \
+        "$endpoint_generation" || return 1
       fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" "$commit" "$home" || true
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
@@ -320,8 +325,9 @@ secondmate_sync() {
   }
 
   fm_ff_after_target_update() {
-    local id=$1 home=$2 _window=$3
-    secondmate_locked_identity_matches "$id" "$home" || return 1
+    local id=$1 home=$2 window=$3 endpoint_generation=$4
+    secondmate_locked_identity_matches "$id" "$home" "$window" \
+      "$endpoint_generation" || return 1
     if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: watcher protocol restart could not be verified"
       return 1
@@ -332,20 +338,26 @@ secondmate_sync() {
   }
 
   fm_ff_after_instruction_update() {
-    local id=$1 home=$2 _window=$3 instr=$4
-    secondmate_locked_identity_matches "$id" "$home" || return 1
-    secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
+    local id=$1 home=$2 window=$3 instr=$4 endpoint_generation=$5
+    secondmate_locked_identity_matches "$id" "$home" "$window" \
+      "$endpoint_generation" || return 1
+    secondmate_send_nudge "$id" "$home" "$window" "$endpoint_generation" \
+      "$primary_head" "$instr"
   }
 
   secondmate_retry_pending_nudge_locked() {
-    local id=$1 home=$2 marker=$3 selector=$4 commit=$5 out
-    secondmate_locked_identity_matches "$id" "$home" || return 1
+    local id=$1 home=$2 marker=$3 selector=$4 commit=$5 window=$6
+    local endpoint_generation=$7 out
+    secondmate_locked_identity_matches "$id" "$home" "$window" \
+      "$endpoint_generation" || return 1
     [ "$(git -C "$home" rev-parse HEAD 2>/dev/null || true)" = "$commit" ] || return 1
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-      secondmate_locked_identity_matches "$id" "$home" || return 1
+      secondmate_locked_identity_matches "$id" "$home" "$window" \
+        "$endpoint_generation" || return 1
       rm -f "$marker"
-      secondmate_locked_identity_matches "$id" "$home" || return 1
+      secondmate_locked_identity_matches "$id" "$home" "$window" \
+        "$endpoint_generation" || return 1
       fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" \
         "$commit" "$home" || true
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
@@ -354,12 +366,37 @@ secondmate_sync() {
     fi
   }
 
+  secondmate_retry_marker_read() {
+    local marker=$1 key count
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    [ "$(wc -l < "$marker" | tr -d ' ')" -eq 8 ] || return 1
+    for key in id selector home window endpoint_generation commit instructions message; do
+      count=$(grep -c "^${key}=" "$marker" 2>/dev/null || true)
+      [ "$count" -eq 1 ] || return 1
+    done
+    RETRY_ID=$(sed -n 's/^id=//p' "$marker")
+    RETRY_SELECTOR=$(sed -n 's/^selector=//p' "$marker")
+    RETRY_HOME=$(sed -n 's/^home=//p' "$marker")
+    RETRY_WINDOW=$(sed -n 's/^window=//p' "$marker")
+    RETRY_ENDPOINT_GENERATION=$(sed -n 's/^endpoint_generation=//p' "$marker")
+    RETRY_COMMIT=$(sed -n 's/^commit=//p' "$marker")
+    RETRY_MESSAGE=$(sed -n 's/^message=//p' "$marker")
+    [ -n "$RETRY_ID" ] && [ -n "$RETRY_SELECTOR" ] && [ -n "$RETRY_HOME" ] \
+      && [ -n "$RETRY_WINDOW" ] && [ -n "$RETRY_ENDPOINT_GENERATION" ] \
+      && [ -n "$RETRY_COMMIT" ] && [ -n "$RETRY_MESSAGE" ]
+  }
+
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message expected_marker meta meta_home home_real head
+    local marker id selector home commit message window endpoint_generation
+    local expected_marker home_real head
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
-      id=$(fm_meta_get "$marker" id)
+      if ! secondmate_retry_marker_read "$marker"; then
+        echo "NUDGE_SECONDMATES: secondmate unknown: send failed: retry marker is ambiguous"
+        continue
+      fi
+      id=$RETRY_ID
       if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
         continue
@@ -368,10 +405,12 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
         continue
       }
-      selector=$(fm_meta_get "$marker" selector)
-      home=$(fm_meta_get "$marker" home)
-      commit=$(fm_meta_get "$marker" commit)
-      message=$(fm_meta_get "$marker" message)
+      selector=$RETRY_SELECTOR
+      home=$RETRY_HOME
+      window=$RETRY_WINDOW
+      endpoint_generation=$RETRY_ENDPOINT_GENERATION
+      commit=$RETRY_COMMIT
+      message=$RETRY_MESSAGE
       [ "$selector" = "fm-$id" ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
         continue
@@ -380,22 +419,16 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
         continue
       }
-      meta="$STATE/$id.meta"
-      [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
-        continue
-      }
-      meta_home=$(fm_meta_get "$meta" home)
-      [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
-      if ! validate_secondmate_home "$id" "$meta_home"; then
+      if ! validate_secondmate_home "$id" "$home"; then
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
         continue
       fi
       home_real="$VALIDATED_HOME"
-      [ "$home_real" = "$home" ] || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home changed"
+      if ! secondmate_locked_identity_matches "$id" "$home_real" "$window" \
+        "$endpoint_generation"; then
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target lifecycle changed"
         continue
-      }
+      fi
       head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
       [ -n "$head" ] && [ "$head" = "$commit" ] || {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
@@ -403,6 +436,7 @@ secondmate_sync() {
       }
       fm_ff_locked_secondmate_action "$id" "$home_real" "secondmate $id" \
         secondmate_retry_pending_nudge_locked "$marker" "$selector" "$commit" \
+        "$window" "$endpoint_generation" \
         || echo "NUDGE_SECONDMATES: secondmate $id: send failed: lifecycle identity changed or lock is busy"
     done
   }
@@ -437,8 +471,10 @@ secondmate_sync() {
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
   secondmate_propagate_locked() {
-    local id=$1 home_real=$2 reread_skip_pending=$3 home_lock report reread_out
-    secondmate_locked_identity_matches "$id" "$home_real" || return 1
+    local id=$1 home_real=$2 window=$3 endpoint_generation=$4 reread_skip_pending=$5
+    local home_lock report reread_out
+    secondmate_locked_identity_matches "$id" "$home_real" "$window" \
+      "$endpoint_generation" || return 1
     home_lock=$(fm_config_inherit_lock_path "$home_real") || {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
       return 1
@@ -447,7 +483,8 @@ secondmate_sync() {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
       return 1
     }
-    if ! secondmate_locked_identity_matches "$id" "$home_real"; then
+    if ! secondmate_locked_identity_matches "$id" "$home_real" "$window" \
+      "$endpoint_generation"; then
       fm_lock_release "$home_lock" || true
       return 1
     fi
@@ -471,7 +508,8 @@ secondmate_sync() {
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
     fi
-    if ! secondmate_locked_identity_matches "$id" "$home_real"; then
+    if ! secondmate_locked_identity_matches "$id" "$home_real" "$window" \
+      "$endpoint_generation"; then
       rm -f "$report"
       fm_lock_release "$home_lock" || true
       return 1
@@ -492,10 +530,10 @@ secondmate_sync() {
     fm_lock_release "$home_lock" || true
   }
 
-  local id home home_real propagated_homes reread_skip_pending
+  local id home window endpoint_generation home_real propagated_homes reread_skip_pending
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
-  while IFS='|' read -r id home _window _meta; do
+  while IFS='|' read -r id home window _meta endpoint_generation; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in
@@ -511,7 +549,7 @@ secondmate_sync() {
       *" $id "*) reread_skip_pending=1 ;;
     esac
     fm_ff_locked_secondmate_action "$id" "$home_real" "secondmate $id" \
-      secondmate_propagate_locked "$reread_skip_pending" \
+      secondmate_propagate_locked "$window" "$endpoint_generation" "$reread_skip_pending" \
       || echo "SECONDMATE_SYNC: secondmate $id: skipped: lifecycle identity changed or lock is busy"
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   fm_ff_target_lock_release

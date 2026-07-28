@@ -167,12 +167,16 @@ fm_write_meta() {
 # defaults to firstmate:fm-domain and projects to alpha to match the common case.
 fm_write_secondmate_meta() {
   local file=$1 home=$2 window=${3:-firstmate:fm-domain} projects=${4:-alpha}
+  local id
+  id=$(basename "$file" .meta)
   fm_write_meta "$file" \
     "window=$window" \
     "worktree=$home" \
     "project=$home" \
     "harness=echo" \
     "kind=secondmate" \
+    "task=$id" \
+    "endpoint_generation=endpoint-$id" \
     "mode=secondmate" \
     "yolo=off" \
     "home=$home" \

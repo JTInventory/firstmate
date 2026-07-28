@@ -28,7 +28,7 @@
 #   - restart-secondmate-watchers: <window-targets...>|none
 #   - nudge-secondmates: <window-targets...>|none   (updated live secondmates to nudge)
 #
-# Usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>]
+# Usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>|--deliver-secondmate-nudge <target> <generation>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,7 +83,7 @@ fm_ff_target_lock_release() {
 trap fm_ff_target_lock_release EXIT
 
 usage() {
-  echo "usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>]" >&2
+  echo "usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>|--deliver-secondmate-nudge <target> <generation>]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -92,20 +92,15 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 
 update_live_secondmate_identity_matches() {
-  local id=$1 expected=$2 target=${3:-} record_id candidate window _meta matches=0
-  while IFS='|' read -r record_id candidate window _meta; do
-    [ "$record_id" = "$id" ] || continue
-    [ -z "$target" ] || [ "$window" = "$target" ] || continue
-    validate_secondmate_home "$record_id" "$candidate" || continue
-    [ "$VALIDATED_HOME" = "$expected" ] || continue
-    matches=$((matches + 1))
-  done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
-  [ "$matches" -eq 1 ]
+  local id=$1 expected=$2 target=$3 endpoint_generation=$4
+  fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$expected" \
+    "$target" "$endpoint_generation"
 }
 
 ack_secondmate_nudge_locked() {
-  local id=$1 home=$2 target=$3 generation=$4 marker
-  update_live_secondmate_identity_matches "$id" "$home" "$target" || return 1
+  local id=$1 home=$2 target=$3 generation=$4 endpoint_generation=$5 marker
+  update_live_secondmate_identity_matches "$id" "$home" "$target" \
+    "$endpoint_generation" || return 1
   marker="$home/state/.watch-protocol-reread-required"
   fm_update_obligation_ack "$marker" "$generation" "$home" || {
     echo "secondmate nudge acknowledgement: generation mismatch for $target" >&2
@@ -115,13 +110,16 @@ ack_secondmate_nudge_locked() {
 }
 
 ack_secondmate_nudge() {
-  local target=$1 generation=$2 id="" record_id candidate home window meta matches=0
+  local target=$1 generation=$2 id="" record_id candidate home window meta
+  local endpoint_generation record_generation matches=0
   home=""
-  while IFS='|' read -r record_id candidate window meta; do
+  endpoint_generation=
+  while IFS='|' read -r record_id candidate window meta record_generation; do
     if [ "$window" = "$target" ]; then
       matches=$((matches + 1))
       id=$record_id
       home=$candidate
+      endpoint_generation=$record_generation
     fi
   done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
   [ "$matches" -eq 1 ] || {
@@ -133,8 +131,100 @@ ack_secondmate_nudge() {
     return 1
   }
   fm_ff_locked_secondmate_action "$id" "$VALIDATED_HOME" "secondmate $id" \
-    ack_secondmate_nudge_locked "$target" "$generation" || {
+    ack_secondmate_nudge_locked "$target" "$generation" "$endpoint_generation" || {
       echo "secondmate nudge acknowledgement: lifecycle identity changed or lock is busy for $target" >&2
+      return 1
+    }
+}
+
+secondmate_delivery_receipt_path() {
+  local id=$1 generation=$2
+  case "$id" in
+    *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
+  esac
+  case "$generation" in
+    *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
+  esac
+  printf '%s/.secondmate-nudge-delivered/%s/%s\n' "$STATE" "$id" "$generation"
+}
+
+secondmate_delivery_receipt_matches() {
+  local receipt=$1 id=$2 home=$3 target=$4 endpoint_generation=$5 generation=$6
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  [ "$(wc -l < "$receipt" | tr -d ' ')" -eq 5 ] \
+    && [ "$(grep -Fxc "id=$id" "$receipt" 2>/dev/null || true)" -eq 1 ] \
+    && [ "$(grep -Fxc "home=$home" "$receipt" 2>/dev/null || true)" -eq 1 ] \
+    && [ "$(grep -Fxc "target=$target" "$receipt" 2>/dev/null || true)" -eq 1 ] \
+    && [ "$(grep -Fxc "endpoint_generation=$endpoint_generation" "$receipt" 2>/dev/null || true)" -eq 1 ] \
+    && [ "$(grep -Fxc "generation=$generation" "$receipt" 2>/dev/null || true)" -eq 1 ]
+}
+
+deliver_secondmate_nudge_locked() {
+  local id=$1 home=$2 target=$3 generation=$4 endpoint_generation=$5
+  local marker receipt parent tmp out
+  update_live_secondmate_identity_matches "$id" "$home" "$target" \
+    "$endpoint_generation" || return 1
+  marker="$home/state/.watch-protocol-reread-required"
+  [ "$(fm_update_obligation_generation "$marker" "$home" 2>/dev/null || true)" = "$generation" ] || {
+    echo "secondmate nudge delivery: generation mismatch for $target" >&2
+    return 1
+  }
+  receipt=$(secondmate_delivery_receipt_path "$id" "$generation") || return 1
+  parent=${receipt%/*}
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    secondmate_delivery_receipt_matches "$receipt" "$id" "$home" "$target" \
+      "$endpoint_generation" "$generation" || return 1
+  else
+    if ! out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-send.sh" "$target" \
+      'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' 2>&1); then
+      echo "secondmate nudge delivery: send failed for $target: $(first_line "$out")" >&2
+      return 1
+    fi
+    update_live_secondmate_identity_matches "$id" "$home" "$target" \
+      "$endpoint_generation" || return 1
+    mkdir -p "$parent" || return 1
+    tmp=$(mktemp "$parent/.delivery.XXXXXX") || return 1
+    {
+      printf 'id=%s\n' "$id"
+      printf 'home=%s\n' "$home"
+      printf 'target=%s\n' "$target"
+      printf 'endpoint_generation=%s\n' "$endpoint_generation"
+      printf 'generation=%s\n' "$generation"
+    } > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$receipt" || {
+      rm -f "$tmp"
+      return 1
+    }
+  fi
+  update_live_secondmate_identity_matches "$id" "$home" "$target" \
+    "$endpoint_generation" || return 1
+  fm_update_obligation_ack "$marker" "$generation" "$home" || return 1
+  rm -f "$receipt" || return 1
+  rmdir "$parent" 2>/dev/null || true
+  echo "delivered-secondmate-nudge: $target"
+}
+
+deliver_secondmate_nudge() {
+  local target=$1 generation=$2 id= record_id home= candidate window meta
+  local endpoint_generation= record_generation matches=0
+  while IFS='|' read -r record_id candidate window meta record_generation; do
+    [ "$window" = "$target" ] || continue
+    matches=$((matches + 1))
+    id=$record_id
+    home=$candidate
+    endpoint_generation=$record_generation
+  done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
+  [ "$matches" -eq 1 ] || {
+    echo "secondmate nudge delivery: target is not uniquely live: $target" >&2
+    return 1
+  }
+  validate_secondmate_home "$id" "$home" || {
+    echo "secondmate nudge delivery: unsafe home for $target: $VALIDATION_ERROR" >&2
+    return 1
+  }
+  fm_ff_locked_secondmate_action "$id" "$VALIDATED_HOME" "secondmate $id" \
+    deliver_secondmate_nudge_locked "$target" "$generation" "$endpoint_generation" || {
+      echo "secondmate nudge delivery: lifecycle identity changed or lock is busy for $target" >&2
       return 1
     }
 }
@@ -152,6 +242,11 @@ case "${1:-}" in
   --ack-secondmate-nudge)
     [ $# -eq 3 ] || { usage; exit 1; }
     ack_secondmate_nudge "$2" "$3"
+    exit $?
+    ;;
+  --deliver-secondmate-nudge)
+    [ $# -eq 3 ] || { usage; exit 1; }
+    deliver_secondmate_nudge "$2" "$3"
     exit $?
     ;;
   '')
@@ -212,9 +307,10 @@ FF_SEEN_HOMES=""
 restart_secondmate_watchers=""
 
 fm_ff_after_target_update() {
-  local id=$1 home=$2 window=$3
+  local id=$1 home=$2 window=$3 endpoint_generation=$4
   [ -n "$window" ] || return 0
-  update_live_secondmate_identity_matches "$id" "$home" "$window" || return 1
+  update_live_secondmate_identity_matches "$id" "$home" "$window" \
+    "$endpoint_generation" || return 1
   if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
     echo "secondmate $id: skipped: watcher protocol restart could not be verified" >&2
     return 1
@@ -238,6 +334,7 @@ if [ -f "$SECONDMATES_MD" ]; then
     esac
     id=$(printf '%s\n' "$line" | sed -n 's/^- \([^ ][^ ]*\) - .*/\1/p')
     home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+    [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || continue
     process_secondmate "$id" "$home" "" origin no
   done < "$SECONDMATES_MD"
 fi
