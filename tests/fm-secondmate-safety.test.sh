@@ -14,6 +14,11 @@ TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 
 hold_test_task_lock() {
   local state=$1 id=$2 ready=$3
+  hold_test_lock "$state" "$state/.spawn-$id.lock" "$ready"
+}
+
+hold_test_lock() {
+  local state=$1 lock=$2 ready=$3
   (
     exec env FM_STATE_OVERRIDE="$state" bash -c '
       . "$1/bin/fm-wake-lib.sh"
@@ -27,7 +32,7 @@ hold_test_task_lock() {
       }
       trap cleanup EXIT TERM INT
       while :; do sleep 1; done
-    ' _ "$ROOT" "$state/.spawn-$id.lock" "$ready"
+    ' _ "$ROOT" "$lock" "$ready"
   ) >/dev/null 2>&1 &
   printf '%s\n' "$!"
 }
@@ -1021,6 +1026,8 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp() {
   [ -f "$home/state/domain.meta" ] || fail "plain-clone secondmate spawn did not publish metadata"
   [ ! -e "$home/state/.spawn-domain.lock" ] \
     || fail "successful plain-clone spawn left its task lock held"
+  [ ! -e "$home/state/.spawn-admission.lock" ] \
+    || fail "successful plain-clone spawn left its admission lock held"
   if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$subhome" task >/dev/null 2>&1 ); then
     fail "plain-clone secondmate spawn wrote a pooled-slot stamp"
@@ -1143,6 +1150,48 @@ test_secondmate_teardown_serializes_against_spawn() {
   [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
     || fail "teardown mutated secondmate state while spawn held the task lock"
   pass "secondmate spawn and teardown serialize on one task identity lock"
+}
+
+test_secondmate_teardown_blocks_child_publication_during_census() {
+  local home subhome fakebin log fmroot ready holder err rc
+  home="$TMP_ROOT/teardown-admission-home"
+  subhome="$TMP_ROOT/teardown-admission-subhome"
+  fmroot="$TMP_ROOT/teardown-admission-fmroot"
+  ready="$TMP_ROOT/teardown-admission.ready"
+  err="$TMP_ROOT/teardown-admission.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-admission-fake")
+  log="$TMP_ROOT/teardown-admission-fake/tmux.log"
+  holder=$(hold_test_lock "$subhome/state" "$subhome/state/.spawn-admission.lock" "$ready")
+  for _ in $(seq 1 50); do
+    [ -e "$ready" ] && break
+    sleep 0.02
+  done
+  [ -e "$ready" ] || fail "admission-lock holder did not start"
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-admission-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "teardown raced through active child publication"
+  grep -F "spawn is already publishing work in $subhome/state" "$err" >/dev/null \
+    || fail "teardown admission-lock refusal lost its reason"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "teardown closed the endpoint while child publication held admission"
+  [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
+    || fail "teardown mutated secondmate state during child publication"
+  pass "secondmate teardown holds a home-wide admission boundary across child census"
 }
 
 # A leased secondmate home sits in the same reusable pool as a task worktree, so
@@ -1332,7 +1381,7 @@ test_secondmate_force_teardown_preflights_nested_home_ownership() {
 }
 
 test_secondmate_teardown_refuses_failed_leased_home_return() {
-  local home subhome subhome_abs fakebin log fmroot err rc
+  local home subhome subhome_abs fakebin log fmroot err rc stamp
   home="$TMP_ROOT/teardown-return-fail-home"
   subhome="$TMP_ROOT/teardown-return-fail-subhome"
   fmroot="$TMP_ROOT/teardown-return-fail-fmroot"
@@ -1354,6 +1403,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "failed-return fixture could not publish its ownership stamp"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-return-fail-fake")
   log="$TMP_ROOT/teardown-return-fail-fake/tmux.log"
 
@@ -1369,6 +1421,9 @@ EOF
   grep -F 'treehouse return failed for secondmate home' "$err" >/dev/null || fail "teardown did not report failed leased home return"
   [ -d "$subhome" ] || fail "teardown removed a leased home after return failed"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared meta after leased home return failed"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$subhome" task || printf 'none' )
+  [ "$stamp" = domain ] || fail "teardown cleared ownership evidence before leased-home return succeeded"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null || fail "teardown removed registry route after leased home return failed"
   pass "secondmate teardown refuses to hide failed leased-home return"
 }
@@ -2109,6 +2164,7 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_serializes_against_spawn
+test_secondmate_teardown_blocks_child_publication_during_census
 test_secondmate_teardown_refuses_home_referenced_by_another_task
 test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent
 test_secondmate_force_teardown_preflights_nested_home_ownership

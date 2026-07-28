@@ -237,6 +237,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_ADMISSION_LOCK=
+SPAWN_ADMISSION_LOCK_HELD=0
 SPAWN_SLOT_CLAIM_CREATED=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
@@ -376,6 +378,10 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
+  if [ "$SPAWN_ADMISSION_LOCK_HELD" = 1 ]; then
+    SPAWN_ADMISSION_LOCK_HELD=0
+    fm_lock_release "$SPAWN_ADMISSION_LOCK" || true
+  fi
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -455,6 +461,12 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   }
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
+SPAWN_ADMISSION_LOCK="$STATE/.spawn-admission.lock"
+if ! fm_lock_try_acquire "$SPAWN_ADMISSION_LOCK"; then
+  echo "error: teardown is already retiring this firstmate home" >&2
+  exit 1
+fi
+SPAWN_ADMISSION_LOCK_HELD=1
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1674,6 +1686,10 @@ fm_backend_send_key "$BACKEND" "$WID" Enter
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_LOCK" || exit 1
+fi
+if [ "$SPAWN_ADMISSION_LOCK_HELD" = 1 ]; then
+  SPAWN_ADMISSION_LOCK_HELD=0
+  fm_lock_release "$SPAWN_ADMISSION_LOCK" || exit 1
 fi
 trap - EXIT
 

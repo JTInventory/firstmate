@@ -806,6 +806,74 @@ SH
   pass "teardown retires a contested lease, leaves the slot untouched, and --force does not waive it"
 }
 
+test_retained_stamp_survives_failed_metadata_retirement() {
+  local rec fakebin out status stamp git_dir
+  rec=$(make_slot_world slot-retain-failure)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  fm_fake_exit0 "$fakebin" tmux gh-axi gh treehouse
+  fm_write_meta "$WORLD/home/state/task-e11.meta" \
+    "window=firstmate:fm-task-e11" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off"
+  fm_write_meta "$WORLD/home/state/paused-e11.meta" \
+    "window=firstmate:fm-paused-e11" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e11 "$WORLD/home" ) \
+    || fail "failed-retirement fixture could not be stamped"
+  git_dir=$(git -C "$WT_DIR" rev-parse --path-format=absolute --git-common-dir)
+  git --git-dir="$git_dir" update-ref refs/firstmate/direct-pr/task-e11/base HEAD
+  mkdir -p "$git_dir/refs/firstmate/direct-pr/task-e11/base.lock"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-e11 --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "metadata-retirement failure unexpectedly completed"$'\n'"$out"
+  assert_present "$WORLD/home/state/task-e11.meta" "failed metadata retirement removed task metadata"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = task-e11 ] \
+    || fail "failed metadata retirement cleared ownership evidence: $stamp"
+  pass "retained ownership evidence survives incomplete lifecycle metadata retirement"
+}
+
+test_stamp_survives_failed_pool_return() {
+  local rec fakebin out status stamp
+  rec=$(make_slot_world slot-return-failure)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 17
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" tmux gh-axi gh
+  fm_write_meta "$WORLD/home/state/task-e12.meta" \
+    "window=firstmate:fm-task-e12" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e12 "$WORLD/home" ) \
+    || fail "failed-return fixture could not be stamped"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-e12 --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "failed pool return unexpectedly completed"$'\n'"$out"
+  assert_present "$WORLD/home/state/task-e12.meta" "failed pool return removed task metadata"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = task-e12 ] || fail "failed pool return cleared ownership evidence: $stamp"
+  pass "ownership evidence survives until pooled return succeeds"
+}
+
 # --- F. restore-time re-assertion -------------------------------------------
 
 make_sweep_home() {
@@ -1067,6 +1135,8 @@ test_a_relinquished_slot_is_releasable_by_its_remaining_holder
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks
 test_same_task_stamp_in_another_home_survives_relinquish
 test_teardown_retires_a_contested_lease_even_with_force
+test_retained_stamp_survives_failed_metadata_retirement
+test_stamp_survives_failed_pool_return
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence

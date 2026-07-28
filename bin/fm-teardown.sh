@@ -102,7 +102,7 @@ ID=$1
 FORCE=${2:-}
 FORCE_RETIRE_STAGED=0
 FORCE_RETIRE_SOURCE=
-TEARDOWN_TASK_LOCKS=()
+TEARDOWN_LOCKS=()
 
 teardown_task_lock_acquire() {
   local state_dir=$1 id=$2 lock
@@ -111,18 +111,32 @@ teardown_task_lock_acquire() {
     echo "REFUSED: spawn or teardown is already changing task $id in $state_dir" >&2
     return 1
   fi
-  TEARDOWN_TASK_LOCKS+=("$lock")
+  TEARDOWN_LOCKS+=("$lock")
 }
 
-teardown_task_locks_release() {
+teardown_admission_lock_acquire() {
+  local state_dir=$1 lock held
+  lock="$state_dir/.spawn-admission.lock"
+  for held in "${TEARDOWN_LOCKS[@]}"; do
+    [ "$held" != "$lock" ] || return 0
+  done
+  mkdir -p "$state_dir" || return 1
+  if ! fm_lock_try_acquire "$lock"; then
+    echo "REFUSED: spawn is already publishing work in $state_dir" >&2
+    return 1
+  fi
+  TEARDOWN_LOCKS+=("$lock")
+}
+
+teardown_locks_release() {
   local status=$? i
-  for ((i=${#TEARDOWN_TASK_LOCKS[@]} - 1; i >= 0; i--)); do
-    fm_lock_release "${TEARDOWN_TASK_LOCKS[$i]}" || true
+  for ((i=${#TEARDOWN_LOCKS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${TEARDOWN_LOCKS[$i]}" || true
   done
   return "$status"
 }
 
-trap teardown_task_locks_release EXIT
+trap teardown_locks_release EXIT
 teardown_task_lock_acquire "$STATE" "$ID" || exit 1
 
 META="$STATE/$ID.meta"
@@ -795,8 +809,10 @@ EOF
 }
 
 TEARDOWN_SLOT_RETAINED=0
+TEARDOWN_SLOT_RETAIN_VERDICT=
 slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <label> <retire|refuse>
   local state=$1 id=$2 wt=$3 stamp_home=$4 worker_home=$5 role=$6 label=$7 disposition=$8 verdict
+  TEARDOWN_SLOT_RETAIN_VERDICT=
   case "$disposition" in
     retire|refuse) ;;
     *)
@@ -810,7 +826,7 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worke
   echo "teardown: $label $wt lease RETAINED, not returned to the pool: ${verdict#retain: }" >&2
   echo "teardown: the directory is left untouched on disk; --force does not waive this ownership gate." >&2
   if [ "$disposition" = retire ]; then
-    fm_slot_stamp_relinquish "$wt" "$id" "$stamp_home" "$verdict"
+    TEARDOWN_SLOT_RETAIN_VERDICT=$verdict
     echo "teardown: once nothing references the slot, tearing down its remaining holder releases it; docs/worker-isolation.md owns manual reclaim." >&2
   else
     echo "teardown: refusing to continue for $label $wt and leaving every record for $id in place." >&2
@@ -831,11 +847,11 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
     }
     slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
       "$home_scope" "$abs_home_path" secondmate "$label" refuse || return 1
-    fm_slot_stamp_clear "$abs_home_path"
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
+    fm_slot_stamp_clear_exact "$abs_home_path" "${expected_id:-$ID}" "$home_scope" || return 1
     return 0
   fi
   safe_rm_rf "$abs_home_path" "$label"
@@ -844,7 +860,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home
   sub_state="$home/state"
-  [ -d "$sub_state" ] || return 0
+  teardown_admission_lock_acquire "$sub_state" || return 1
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
@@ -886,7 +902,7 @@ validate_child_backend() {
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
-  local child_retire_staged child_retire_source child_resolved_handoff
+  local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -901,6 +917,7 @@ cleanup_firstmate_home_children() {
     child_retire_staged=0
     child_retire_source=
     child_resolved_handoff=0
+    child_slot_retain_verdict=
     if [ "$child_kind" = secondmate ]; then
       child_retire_source=$(fm_pending_reply_source_identity "$sub_state") || return 1
       if fm_pending_reply_task_has_open "$sub_state" "$child_id"; then
@@ -944,21 +961,25 @@ cleanup_firstmate_home_children() {
         crewmate "child worktree" retire; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-        fm_slot_stamp_clear "$child_wt"
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
-            || safe_rm_rf_child_worktree "$child_wt" "$child_proj" \
             || return 1
+          fm_slot_stamp_clear_exact "$child_wt" "$child_id" "$home" || return 1
         else
           safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return 1
         fi
+      else
+        child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.grok-turnend-token"
+      "$sub_state/$child_id.grok-turnend-token" || return 1
+    if [ -n "$child_slot_retain_verdict" ]; then
+      fm_slot_stamp_relinquish "$child_wt" "$child_id" "$home" "$child_slot_retain_verdict" || return 1
+    fi
   done
 }
 
@@ -973,6 +994,7 @@ remove_secondmate_registry_entry() {
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+  teardown_admission_lock_acquire "$HOME_PATH/state" || exit 1
   if firstmate_home_has_treehouse_slot "$HOME_PATH"; then
     slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
       secondmate "secondmate home" refuse || exit 1
@@ -1128,6 +1150,7 @@ fi
 # Ownership gate first. A retained lease leaves the slot untouched while the
 # rest of teardown retires this task's endpoint and records.
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  TOP_SLOT_RETAIN_VERDICT=
   if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
     crewmate "worktree" retire; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -1138,7 +1161,6 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
     # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-    fm_slot_stamp_clear "$WT"
     # Kills remaining processes in the worktree (including the agent), resets, returns
     # to pool. treehouse resolves the pool from the working directory, so run it from
     # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -1151,6 +1173,9 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
       exit 1
     }
+    fm_slot_stamp_clear_exact "$WT" "$ID" "$FM_HOME" || exit 1
+  else
+    TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
   fi
 fi
 
@@ -1177,6 +1202,9 @@ cleanup_direct_pr_refs || {
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
+if [ -n "${TOP_SLOT_RETAIN_VERDICT:-}" ]; then
+  fm_slot_stamp_relinquish "$WT" "$ID" "$FM_HOME" "$TOP_SLOT_RETAIN_VERDICT" || exit 1
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
