@@ -104,6 +104,9 @@ FORCE_RETIRE_STAGED=0
 FORCE_RETIRE_SOURCE=
 TEARDOWN_LOCKS=()
 TEARDOWN_LOCK_DIRS_CREATED=()
+TEARDOWN_RETURN_CLAIMS=()
+TEARDOWN_RETURN_LEGACIES=()
+TEARDOWN_DEFER_RETURN_FINALIZE=0
 
 teardown_task_lock_acquire() {
   local state_dir=$1 id=$2 lock held
@@ -119,7 +122,8 @@ teardown_task_lock_acquire() {
 }
 
 teardown_admission_lock_acquire() {
-  local state_dir=$1 target_home=$2 lock held lock_dir already acquired=0
+  local state_dir=$1 target_home=$2 lock held lock_dir already acquired=0 current_pid
+  current_pid=${BASHPID:-$$}
   while IFS= read -r lock; do
     [ -n "$lock" ] || continue
     already=0
@@ -144,7 +148,8 @@ teardown_admission_lock_acquire() {
     echo "REFUSED: an older spawn or teardown is still changing $state_dir" >&2
     return 1
   fi
-  if ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir" "$$"; then
+  if ! fm_spawn_legacy_lifecycle_quiescent \
+    "$target_home" "$state_dir" "$$ $current_pid"; then
     echo "REFUSED: an older spawn or teardown is still starting in $target_home" >&2
     return 1
   fi
@@ -161,18 +166,70 @@ teardown_locks_release() {
   return "$status"
 }
 
+META="$STATE/$ID.meta"
+[ -f "$META" ] && [ ! -L "$META" ] && [ -r "$META" ] \
+  || { echo "REFUSED: task metadata is missing, unreadable, or not a regular file: $META" >&2; exit 1; }
+
+teardown_meta_value_exact() {
+  local meta=$1 key=$2 required=$3 count value
+  count=$(grep -c "^${key}=" "$meta" 2>/dev/null) || count=0
+  if [ "$required" = required ]; then
+    [ "$count" -eq 1 ] || {
+      echo "REFUSED: task metadata must contain exactly one non-empty $key= field: $meta" >&2
+      return 1
+    }
+  elif [ "$count" -gt 1 ]; then
+    echo "REFUSED: task metadata contains ambiguous $key= fields: $meta" >&2
+    return 1
+  elif [ "$count" -eq 0 ]; then
+    printf ''
+    return 0
+  fi
+  value=$(sed -n "s/^${key}=//p" "$meta")
+  [ -n "$value" ] || {
+    echo "REFUSED: task metadata contains an empty $key= field: $meta" >&2
+    return 1
+  }
+  printf '%s' "$value"
+}
+
+WT=$(teardown_meta_value_exact "$META" worktree required) || exit 1
+T=$(teardown_meta_value_exact "$META" window required) || exit 1
+PROJ=$(teardown_meta_value_exact "$META" project required) || exit 1
+KIND=$(teardown_meta_value_exact "$META" kind required) || exit 1
+HOME_PATH=$(teardown_meta_value_exact "$META" home optional) || exit 1
+BACKEND=$(teardown_meta_value_exact "$META" backend optional) || exit 1
+[ -n "$BACKEND" ] || BACKEND=tmux
+case "$WT" in /*) ;; *) echo "REFUSED: task worktree scope is not absolute: $WT" >&2; exit 1 ;; esac
+case "$PROJ" in /*) ;; *) echo "REFUSED: task project scope is not absolute: $PROJ" >&2; exit 1 ;; esac
+case "$KIND" in ship|scout|secondmate) ;; *) echo "REFUSED: task kind is invalid: $KIND" >&2; exit 1 ;; esac
+if [ "$KIND" = secondmate ]; then
+  case "$HOME_PATH" in
+    /*) ;;
+    *) echo "REFUSED: secondmate home scope is missing or not absolute" >&2; exit 1 ;;
+  esac
+elif [ -n "$HOME_PATH" ]; then
+  case "$HOME_PATH" in /*) ;; *) echo "REFUSED: task home scope is not absolute: $HOME_PATH" >&2; exit 1 ;; esac
+fi
+fm_backend_validate "$BACKEND" || exit 1
+if [ "$BACKEND" = herdr ]; then
+  HERDR_SCOPE_SESSION=$(teardown_meta_value_exact "$META" herdr_session required) || exit 1
+  HERDR_SCOPE_PANE=$(teardown_meta_value_exact "$META" herdr_pane_id required) || exit 1
+  [ "$T" = "$HERDR_SCOPE_SESSION:$HERDR_SCOPE_PANE" ] || {
+    echo "REFUSED: task endpoint metadata representations conflict" >&2
+    exit 1
+  }
+fi
+META_IDENTITY=$(cksum "$META") || exit 1
+
 trap teardown_locks_release EXIT
 teardown_admission_lock_acquire "$STATE" "$FM_HOME" || exit 1
 teardown_task_lock_acquire "$STATE" "$ID" || exit 1
+[ "$(cksum "$META" 2>/dev/null || true)" = "$META_IDENTITY" ] || {
+  echo "REFUSED: task metadata changed while teardown acquired lifecycle locks" >&2
+  exit 1
+}
 
-META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
-WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
-T=$(grep '^window=' "$META" | cut -d= -f2-)
-PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
-BACKEND=$(fm_backend_of_meta "$META")
-fm_backend_validate "$BACKEND" || exit 1
-HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
@@ -195,8 +252,6 @@ validated_task_tmp_cleanup_path() {
   printf '%s\n' "$expected"
 }
 
-KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
-[ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 TASK_TMP_CLEANUP=$(validated_task_tmp_cleanup_path "$TASK_TMP") || exit 1
@@ -299,9 +354,14 @@ teardown_treehouse_return() {
     fi
     if [ "$return_status" -eq 0 ]; then
       [ -n "$out" ] && printf '%s\n' "$out"
-      if [ "$staged" -eq 1 ] && ! fm_slot_stamp_finalize_return "$claim" "$legacy"; then
-        echo "error: returned $label $dir but could not retire its transition claim" >&2
-        return 1
+      if [ "$staged" -eq 1 ]; then
+        if [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
+          TEARDOWN_RETURN_CLAIMS+=("$claim")
+          TEARDOWN_RETURN_LEGACIES+=("$legacy")
+        elif ! fm_slot_stamp_finalize_return "$claim" "$legacy"; then
+          echo "error: returned $label $dir but could not retire its transition claim" >&2
+          return 1
+        fi
       fi
       return 0
     fi
@@ -319,6 +379,16 @@ teardown_treehouse_return() {
     echo "teardown: $label return hit a transient git index lock; retrying ($attempt/$retries)" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
   done
+}
+
+teardown_finalize_staged_returns() {
+  local i
+  for ((i=0; i<${#TEARDOWN_RETURN_CLAIMS[@]}; i++)); do
+    fm_slot_stamp_finalize_return \
+      "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" || return 1
+  done
+  TEARDOWN_RETURN_CLAIMS=()
+  TEARDOWN_RETURN_LEGACIES=()
 }
 
 if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ]; then
@@ -1129,14 +1199,9 @@ cleanup_firstmate_home_children() {
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
-    remove_grok_turnend_auth "$sub_state" "$child_id"
-    remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.grok-turnend-token" || return 1
-    if [ -n "$child_slot_retain_verdict" ]; then
-      fm_slot_stamp_relinquish "$child_wt" "$child_id" "$home" "$child_slot_retain_verdict" || return 1
-    fi
+    [ -z "$child_slot_retain_verdict" ] \
+      || fm_slot_stamp_relinquish "$child_wt" "$child_id" "$home" \
+        "$child_slot_retain_verdict" || return 1
   done
 }
 
@@ -1318,6 +1383,7 @@ elif [ "$BACKEND" != orca ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  TEARDOWN_DEFER_RETURN_FINALIZE=1
   if ! cleanup_firstmate_home_children "$HOME_PATH"; then
     echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent state and home" >&2
     exit 1
@@ -1355,6 +1421,10 @@ fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
+  teardown_finalize_staged_returns || {
+    echo "error: secondmate hierarchy returned but ownership transitions remain staged" >&2
+    exit 1
+  }
   if [ "$FORCE_RETIRE_STAGED" = 1 ] \
      && ! fm_pending_reply_finalize_force_retire_task \
        "$STATE" "$ID" "$STATE" "$FORCE_RETIRE_SOURCE"; then

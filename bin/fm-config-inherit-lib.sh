@@ -621,8 +621,7 @@ fm_config_reread_send_pointer() {
     "$FM_CONFIG_REREAD_ENDPOINT_GENERATION" "$FM_CONFIG_REREAD_PROVIDER_IDENTITY" \
     config-reread "$generation" "$message"; then
     receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
-    rm -f "$pending_path" || return 1
-    fm_secondmate_delivery_finish "$receipt"
+    fm_secondmate_delivery_finalize_marker "$receipt" "$pending_path"
   else
     fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "delivery is unconfirmed"
   fi

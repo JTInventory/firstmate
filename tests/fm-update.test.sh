@@ -1394,6 +1394,41 @@ SH
   pass "T39 delivery preparation rollback leaves no orphan transaction"
 }
 
+test_confirmed_receipt_reconciles_after_obligation_cleanup_crash() {
+  local w generation target provider signature correlation receipt fakebin out sends
+  w=$(new_world t40)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  target=main:fm-sm1
+  provider="tmux:$target"
+  signature=$(printf '%s' \
+    "update-nudge|sm1|$w/sm1|$target|endpoint-sm1|$provider|$generation|$(printf '%s' 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' | cksum | awk '{printf "%s-%s", $1, $2}')" \
+    | cksum | awk '{printf "%s-%s", $1, $2}')
+  correlation=$(fm_pending_reply_create "$w/home" "$w/home/state" sm1 \
+    'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.')
+  fm_pending_reply_set "$(fm_pending_reply_path "$w/home/state" "$correlation")" \
+    fm_delivery_transaction "$signature"
+  fm_pending_reply_prepare_delivery "$w/home/state" "$correlation"
+  fm_pending_reply_mark_delivered "$w/home/state" "$correlation" 100
+  receipt="$w/home/state/.secondmate-nudge-delivered/sm1/$generation"
+  fm_secondmate_delivery_receipt_write "$receipt" update-nudge sm1 "$w/sm1" \
+    "$target" endpoint-sm1 "$generation" "$provider" "$correlation" \
+    "$(printf '%s' 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' \
+      | cksum | awk '{printf "%s-%s", $1, $2}')" confirmed-delivered
+  fakebin=$(make_fake_tmux "$w/terminal-cleanup-fake")
+  out=$(cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/terminal-cleanup-fake/tmux.log" \
+    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
+  assert_contains "$out" "delivered-secondmate-nudge: $target" \
+    "confirmed orphan receipt did not reconcile"
+  [ ! -e "$receipt" ] || fail "confirmed orphan receipt survived reconciliation"
+  sends=$(grep -Fc 'firstmate was updated to the latest' \
+    "$w/terminal-cleanup-fake/tmux.log" 2>/dev/null || true)
+  [ "$sends" -eq 0 ] || fail "orphan receipt recovery resent the request"
+  pass "update reconciles confirmed receipts after obligation cleanup crashes"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -1431,5 +1466,6 @@ test_do_not_resend_delivery_is_acknowledged_once
 test_conflicting_herdr_window_refuses_lifecycle_mutation
 test_ambiguous_delivery_bindings_refuse_without_send
 test_delivery_prepare_failure_rolls_back_receipt_and_binding
+test_confirmed_receipt_reconciles_after_obligation_cleanup_crash
 
 echo "# all fm-update tests passed"

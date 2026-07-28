@@ -120,6 +120,7 @@ case "${1:-}" in
       shift
     done
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
+    [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL_TARGET:-}" != "$target" ] || exit 17
     lease_file=${FM_FAKE_TREEHOUSE_LEASE_FILE:-}
     if [ -n "${FM_FAKE_TREEHOUSE_LEASE_DIR:-}" ] && [ -n "$target" ]; then
       lease_file="$FM_FAKE_TREEHOUSE_LEASE_DIR/$(basename "$target").lease"

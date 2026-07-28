@@ -319,12 +319,9 @@ secondmate_sync() {
       receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
       secondmate_locked_identity_matches "$id" "$home" "$window" \
         "$endpoint_generation" "$provider_identity" || return 1
-      fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" \
-        "$commit" "$home" || return 1
-      secondmate_locked_identity_matches "$id" "$home" "$window" \
-        "$endpoint_generation" "$provider_identity" || return 1
-      fm_secondmate_delivery_finish "$receipt" || return 1
-      rm -f "$marker" || return 1
+      fm_secondmate_delivery_finalize_update "$receipt" \
+        "$home/state/.watch-protocol-reread-required" "$commit" "$home" "$marker" \
+        || return 1
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: delivery is unconfirmed"
@@ -366,12 +363,9 @@ secondmate_sync() {
       receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
       secondmate_locked_identity_matches "$id" "$home" "$window" \
         "$endpoint_generation" "$provider_identity" || return 1
-      fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" \
-        "$commit" "$home" || return 1
-      secondmate_locked_identity_matches "$id" "$home" "$window" \
-        "$endpoint_generation" "$provider_identity" || return 1
-      fm_secondmate_delivery_finish "$receipt" || return 1
-      rm -f "$marker" || return 1
+      fm_secondmate_delivery_finalize_update "$receipt" \
+        "$home/state/.watch-protocol-reread-required" "$commit" "$home" "$marker" \
+        || return 1
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: delivery is unconfirmed"

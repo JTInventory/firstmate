@@ -187,7 +187,35 @@ fm_secondmate_delivery_send_locked() {
 fm_secondmate_delivery_finish() {
   local receipt=$1 parent
   [ -n "$receipt" ] || return 1
+  if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
+    return 0
+  fi
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
   parent=${receipt%/*}
   rm -f "$receipt" || return 1
   rmdir "$parent" 2>/dev/null || true
+}
+
+fm_secondmate_delivery_finalize_update() {
+  local receipt=$1 marker=$2 generation=$3 dir=$4 retry_marker=${5:-} selected
+  if selected=$(fm_update_obligation_generation "$marker" "$dir" 2>/dev/null); then
+    [ "$selected" = "$generation" ] || return 1
+    fm_update_obligation_ack "$marker" "$generation" "$dir" || return 1
+  elif fm_update_obligation_pending "$marker" "$dir"; then
+    return 1
+  fi
+  if [ -n "$retry_marker" ]; then
+    [ ! -e "$retry_marker" ] && [ ! -L "$retry_marker" ] \
+      || fm_secondmate_delivery_finalize_marker "" "$retry_marker" || return 1
+  fi
+  fm_secondmate_delivery_finish "$receipt"
+}
+
+fm_secondmate_delivery_finalize_marker() {
+  local receipt=$1 marker=$2
+  [ -z "$receipt" ] || fm_secondmate_delivery_finish "$receipt" || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f "$marker" || return 1
+  fi
 }

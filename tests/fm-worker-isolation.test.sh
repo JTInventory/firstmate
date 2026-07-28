@@ -893,6 +893,34 @@ test_a_second_recorded_task_retains_the_slot() {
   pass "a slot still recorded by another task - live, paused, or quarantined - retains its lease"
 }
 
+test_ambiguous_sibling_scope_metadata_retains_the_slot() {
+  local rec verdict sibling
+  rec=$(make_slot_world slot-ambiguous-sibling)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-scope.meta" \
+    "window=firstmate:fm-task-scope" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  sibling="$WORLD/home/state/paused-scope.meta"
+  fm_write_meta "$sibling" \
+    "window=firstmate:fm-paused-scope" "worktree=$WT_DIR" "worktree=$PROJ_DIR" \
+    "project=$PROJ_DIR" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  verdict=$(slot_verdict "$WORLD/home/state" task-scope "$WT_DIR" "$WORLD/home")
+  assert_contains "$verdict" "paused-scope (scope metadata unproven)" \
+    "conflicting duplicate sibling worktree metadata did not retain"
+  fm_write_meta "$sibling" \
+    "window=firstmate:fm-paused-scope" "worktree=" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  verdict=$(slot_verdict "$WORLD/home/state" task-scope "$WT_DIR" "$WORLD/home")
+  assert_contains "$verdict" "paused-scope (scope metadata unproven)" \
+    "empty sibling worktree metadata did not retain"
+  rm -f "$sibling"
+  ln -s "$WORLD/missing-meta" "$sibling"
+  verdict=$(slot_verdict "$WORLD/home/state" task-scope "$WT_DIR" "$WORLD/home")
+  assert_contains "$verdict" "paused-scope (scope metadata unproven)" \
+    "unreadable sibling metadata did not retain"
+  pass "ambiguous sibling scope metadata retains pooled-slot ownership"
+}
+
 test_a_stamp_naming_another_task_retains_the_slot() {
   local rec verdict
   rec=$(make_slot_world slot-stale)
@@ -1411,6 +1439,59 @@ SH
   pass "ordinary teardown refuses ambiguous disposal before lifecycle mutation"
 }
 
+test_teardown_refuses_duplicate_core_metadata_before_mutation() {
+  local rec fakebin log key out status
+  rec=$(make_slot_world teardown-duplicate-core)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  log="$WORLD/tmux.log"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" gh-axi gh treehouse
+  for key in worktree window project kind home; do
+    fm_write_meta "$WORLD/home/state/task-core.meta" \
+      "window=firstmate:fm-task-core" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+      "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    case "$key" in
+      worktree) printf 'worktree=%s\n' "$PROJ_DIR" >> "$WORLD/home/state/task-core.meta" ;;
+      window) printf 'window=other:fm-task-core\n' >> "$WORLD/home/state/task-core.meta" ;;
+      project) printf 'project=%s\n' "$WT_DIR" >> "$WORLD/home/state/task-core.meta" ;;
+      kind) printf 'kind=scout\n' >> "$WORLD/home/state/task-core.meta" ;;
+      home)
+        printf 'home=%s\nhome=%s\n' "$WORLD/home" "$WORLD/other-home" \
+          >> "$WORLD/home/state/task-core.meta"
+        ;;
+    esac
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+      FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+      FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+      "$TEARDOWN" task-core --force 2>&1)
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] || fail "teardown accepted duplicate $key metadata"
+    assert_contains "$out" "$key=" "duplicate $key refusal did not identify the field"
+    [ -e "$WORLD/home/state/task-core.meta" ] \
+      || fail "duplicate $key metadata was removed"
+    [ ! -s "$log" ] || fail "duplicate $key metadata authorized endpoint mutation"
+  done
+  pass "teardown resolves every core metadata field before lifecycle mutation"
+}
+
+test_verification_capture_includes_lifecycle_clears() {
+  local doc prefix count
+  doc="$ROOT/docs/verification/worker-isolation.md"
+  prefix='FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT='
+  count=$(grep -Fc "$prefix" "$doc" 2>/dev/null || true)
+  [ "$count" -eq 7 ] \
+    || fail "worker-isolation verification has $count lifecycle-clear captures, expected 7"
+  pass "worker-isolation verification captures the complete launch prefix"
+}
+
 # --- F. restore-time re-assertion -------------------------------------------
 
 make_sweep_home() {
@@ -1704,6 +1785,7 @@ test_unavailable_occupant_evidence_retains
 test_unclassified_live_process_retains
 test_undeclared_in_slot_process_retains
 test_a_second_recorded_task_retains_the_slot
+test_ambiguous_sibling_scope_metadata_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot
 test_same_task_in_another_home_or_role_retains_the_slot
@@ -1719,6 +1801,8 @@ test_failed_pool_return_never_restores_over_a_reused_slot
 test_foreign_transition_holder_retains_before_mutation
 test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
+test_teardown_refuses_duplicate_core_metadata_before_mutation
+test_verification_capture_includes_lifecycle_clears
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence

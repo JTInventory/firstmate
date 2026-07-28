@@ -118,13 +118,8 @@ $conflict_identities
 EOF
   pids=$(fm_agent_root_pids_for_identity "$id" "$expected_home" "$role" "$PID_INDEX" 2>/dev/null || true)
   if [ -z "$pids" ]; then
-    record=$(fm_agent_cwd_verdict "" "" "" "$backend" "$target" "$PID_INDEX")
-    if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
-      pids=$(fm_agent_verdict_field "$record" pid)
-    else
-      echo "ISOLATION: task $id is unproven: no authoritative live agent process could be identified; treat the task as isolated-unsafe until its worker identity and process cwd are proved"
-      continue
-    fi
+    echo "ISOLATION: task $id is unproven: no live agent process declares the required task=$id home=$expected_home role=$role identity; stop any undeclared endpoint process and relaunch the worker with complete isolation declarations"
+    continue
   fi
 
   while IFS= read -r pid; do

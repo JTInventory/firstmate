@@ -1387,7 +1387,7 @@ SH
     FM_TEST_ADMISSION_RELEASE="$release" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
   teardown_pid=$!
-  for _ in $(seq 1 1000); do
+  for _ in $(seq 1 3000); do
     [ -e "$ready" ] && break
     sleep 0.02
   done
@@ -1857,8 +1857,70 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   pass "child hook and lifecycle state survive failed treehouse return"
 }
 
+test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed() {
+  local home subhome project_a project_b child_a child_b fakebin log err lease_dir claim
+  home="$TMP_ROOT/staged-hierarchy-home"
+  subhome="$TMP_ROOT/staged-hierarchy-subhome"
+  project_a="$subhome/projects/alpha"
+  project_b="$subhome/projects/beta"
+  child_a="$TMP_ROOT/staged-hierarchy-child-a"
+  child_b="$TMP_ROOT/staged-hierarchy-child-b"
+  lease_dir="$TMP_ROOT/staged-hierarchy-leases"
+  err="$TMP_ROOT/staged-hierarchy.err"
+  mkdir -p "$home/state" "$home/data" "$lease_dir"
+  git clone -q "$ROOT" "$subhome"
+  git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
+  mkdir -p "$subhome/state"
+  fm_git_worktree "$project_a" "$child_a" staged-child-a
+  fm_git_worktree "$project_b" "$child_b" staged-child-b
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha,beta"
+  fm_write_meta "$subhome/state/child-a.meta" \
+    "window=firstmate:fm-child-a" "worktree=$child_a" "project=$project_a" \
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fm_write_meta "$subhome/state/child-b.meta" \
+    "window=firstmate:fm-child-b" "worktree=$child_b" "project=$project_b" \
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha, beta; added 2026-06-22)' \
+    > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$child_a" child-a "$subhome" \
+    && fm_slot_stamp_write "$child_b" child-b "$subhome" ) \
+    || fail "staged hierarchy fixture could not stamp child ownership"
+  claim=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_return_claim_path "$child_a" )
+  printf 'child-a\n' > "$lease_dir/$(basename "$child_a").lease"
+  printf 'child-b\n' > "$lease_dir/$(basename "$child_b").lease"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/staged-hierarchy-fake")
+  log="$TMP_ROOT/staged-hierarchy-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/staged-hierarchy-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_DIR="$lease_dir" \
+    FM_FAKE_TREEHOUSE_RETURN_FAIL_TARGET="$child_b" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown succeeded after a late sibling return failed"
+  fi
+  [ -e "$home/state/domain.meta" ] \
+    && [ -e "$subhome/state/child-a.meta" ] \
+    && [ -e "$subhome/state/child-b.meta" ] \
+    || fail "late sibling failure partially retired hierarchy metadata"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
+    || fail "late sibling failure removed the parent route"
+  [ -f "$claim" ] || fail "late sibling failure discarded the earlier return claim"
+  grep -F 'task=child-a' "$claim" >/dev/null \
+    || fail "earlier child return claim lost its owner"
+  grep -F "treehouse return --force $child_a" "$log" >/dev/null \
+    || fail "first child return was not exercised"
+  grep -F "treehouse return --force $child_b" "$log" >/dev/null \
+    || fail "late sibling return failure was not exercised"
+  pass "nested force teardown retains hierarchy evidence until all returns succeed"
+}
+
 test_secondmate_force_teardown_discards_child_work() {
-  local home subhome childproj childwt fakebin log err
+  local home subhome childproj childwt fakebin log err lease
   home="$TMP_ROOT/force-teardown-home"
   subhome="$TMP_ROOT/force-teardown-subhome"
   childproj="$subhome/projects/alpha"
@@ -1893,11 +1955,15 @@ yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
+  lease="$TMP_ROOT/force-teardown-fake/child.lease"
+  printf 'child\n' > "$lease"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
     fail "teardown allowed a secondmate with in-flight child work"
   fi
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
     || fail "force teardown failed to discard child work: $(cat "$err")"
   [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
@@ -2711,6 +2777,7 @@ test_secondmate_teardown_retains_unregistered_foreign_worktree
 test_secondmate_teardown_resolves_relative_origin_identity
 test_secondmate_force_teardown_preflights_unregistered_nested_home
 test_secondmate_force_teardown_preserves_child_hooks_on_return_failure
+test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_preserves_linked_child_without_treehouse
 test_secondmate_force_teardown_recursively_preserves_without_treehouse

@@ -794,6 +794,26 @@ test_config_push_propagates_reports_without_ff_and_sends_reread() {
   pass "B12 config-push propagates under lock, sends exact reread content, and does not fast-forward"
 }
 
+test_config_reread_terminal_cleanup_is_idempotent_after_receipt_removal() {
+  local dir receipt pending
+  dir="$TMP_ROOT/config-reread-terminal-cleanup"
+  receipt="$dir/receipt"
+  pending="$dir/instruction.pending"
+  mkdir -p "$dir"
+  printf 'receipt\n' > "$receipt"
+  printf 'instruction\n' > "$pending"
+  fm_secondmate_delivery_finalize_marker "$receipt" "$pending" \
+    || fail "config reread terminal cleanup failed"
+  [ ! -e "$receipt" ] && [ ! -e "$pending" ] \
+    || fail "config reread terminal cleanup left receipt or marker state"
+  printf 'instruction\n' > "$pending"
+  fm_secondmate_delivery_finalize_marker "$receipt" "$pending" \
+    || fail "config reread cleanup did not reconcile a receipt-first crash"
+  [ ! -e "$pending" ] \
+    || fail "config reread cleanup left a marker after receipt-first recovery"
+  pass "config reread terminal cleanup is idempotent across receipt-first crashes"
+}
+
 test_config_push_reports_skips_dirty_and_invalid_home() {
   local w head out err status stale_real dirty_real bad_home err_text tmp
   w=$(new_world config-push-warnings)
@@ -1003,6 +1023,7 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_no_inheritance_is_noop
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_config_push_propagates_reports_without_ff_and_sends_reread
+test_config_reread_terminal_cleanup_is_idempotent_after_receipt_removal
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
 test_config_push_respects_secondmate_lifecycle_lock

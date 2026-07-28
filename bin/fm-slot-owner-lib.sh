@@ -154,8 +154,22 @@ fm_slot_owner_record_file() {
 }
 
 fm_slot_stamp_record() {
-  local wt=$1 path
+  local wt=$1 path claim legacy stamp_task stamp_home
   path=$(fm_slot_stamp_path "$wt") || return 2
+  claim=$(fm_slot_return_claim_path "$wt" 2>/dev/null || true)
+  legacy=$(fm_slot_return_legacy_path "$wt" 2>/dev/null || true)
+  if [ -L "$path" ] && [ -n "$claim" ] && [ -n "$legacy" ] \
+    && [ "$(readlink "$path" 2>/dev/null || true)" = "$legacy" ]; then
+    fm_slot_owner_record_file "$legacy" || return 2
+    stamp_task=$FM_SLOT_STAMP_TASK
+    stamp_home=$FM_SLOT_STAMP_HOME
+    fm_slot_return_claim_record_file "$claim" || return 2
+    [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$stamp_task" ] \
+      && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$stamp_home" || return 2
+    FM_SLOT_STAMP_TASK=$stamp_task
+    FM_SLOT_STAMP_HOME=$stamp_home
+    return 0
+  fi
   fm_slot_owner_record_file "$path"
 }
 
@@ -309,11 +323,17 @@ fm_slot_stamp_finalize_return() {
   rm -f "$legacy" "$claim"
 }
 
-# fm_slot_meta_worktree <meta-file>: the recorded worktree path, or empty.
+# fm_slot_meta_worktree <meta-file>: the one recorded absolute worktree path.
 fm_slot_meta_worktree() {
-  local meta=$1
-  [ -f "$meta" ] || return 0
-  grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  local meta=$1 count value
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 2
+  count=$(grep -c '^worktree=' "$meta" 2>/dev/null) || count=0
+  [ "$count" -eq 1 ] || return 2
+  value=$(sed -n 's/^worktree=//p' "$meta")
+  case "$value" in
+    /*) printf '%s' "$value" ;;
+    *) return 2 ;;
+  esac
 }
 
 # fm_slot_same_path <a> <b>: physical comparison where both paths exist, exact
@@ -331,14 +351,22 @@ fm_slot_same_path() {
 # fm_slot_meta_referencing_tasks <state-dir> <task-id> <worktree>: other task
 # ids in this home whose metadata names the same slot, newline separated.
 fm_slot_meta_referencing_tasks() {
-  local state=$1 self=$2 wt=$3 meta id other found=1
+  local state=$1 self=$2 wt=$3 meta id other found=1 status
   [ -d "$state" ] || return 1
   for meta in "$state"/*.meta; do
-    [ -f "$meta" ] || continue
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
     [ "$id" != "$self" ] || continue
-    other=$(fm_slot_meta_worktree "$meta")
-    [ -n "$other" ] || continue
+    if other=$(fm_slot_meta_worktree "$meta"); then
+      status=0
+    else
+      status=$?
+    fi
+    if [ "$status" -eq 2 ]; then
+      printf '%s\n' "$id (scope metadata unproven)"
+      found=0
+      continue
+    fi
     fm_slot_same_path "$other" "$wt" || continue
     printf '%s\n' "$id"
     found=0

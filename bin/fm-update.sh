@@ -144,14 +144,17 @@ ack_secondmate_nudge() {
 
 deliver_secondmate_nudge_locked() {
   local id=$1 home=$2 target=$3 generation=$4 endpoint_generation=$5
-  local provider_identity=$6 marker receipt
+  local provider_identity=$6 marker receipt existing_receipt
   update_live_secondmate_identity_matches "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" || return 1
   marker="$home/state/.watch-protocol-reread-required"
-  [ "$(fm_update_obligation_generation "$marker" "$home" 2>/dev/null || true)" = "$generation" ] || {
-    echo "secondmate nudge delivery: generation mismatch for $target" >&2
-    return 1
-  }
+  existing_receipt=$(fm_secondmate_delivery_receipt_path \
+    "$STATE" update-nudge "$id" "$generation") || return 1
+  if [ "$(fm_update_obligation_generation "$marker" "$home" 2>/dev/null || true)" != "$generation" ] \
+    && { [ ! -e "$existing_receipt" ] && [ ! -L "$existing_receipt" ]; }; then
+      echo "secondmate nudge delivery: generation mismatch for $target" >&2
+      return 1
+  fi
   fm_secondmate_delivery_send_locked "$STATE" "$FM_HOME" "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" update-nudge "$generation" \
     'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' \
@@ -159,8 +162,8 @@ deliver_secondmate_nudge_locked() {
   receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
   update_live_secondmate_identity_matches "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" || return 1
-  fm_update_obligation_ack "$marker" "$generation" "$home" || return 1
-  fm_secondmate_delivery_finish "$receipt" || return 1
+  fm_secondmate_delivery_finalize_update "$receipt" "$marker" "$generation" "$home" \
+    || return 1
   echo "delivered-secondmate-nudge: $target"
 }
 
