@@ -78,7 +78,8 @@ test_present_receipt_is_immutable_across_poll_refresh() {
   grep -qxF 'presented_pr_base_ref=main' "$dir/state/task-x1.pr-presentation" || fail 'presented base branch missing'
   grep -qxF 'presented_pr_base=cccccccccccccccccccccccccccccccccccccccc' "$dir/state/task-x1.pr-presentation" || fail 'presented base missing'
   grep -Eq '^presentation_nonce=[0-9a-f]{32}$' "$dir/state/task-x1.pr-presentation" || fail 'unique presentation nonce missing'
-  FAKE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$dir/bin/fm-pr-check" task-x1 https://github.com/JTInventory/firstmate/pull/47
+  FM_STATE_OVERRIDE="$dir/state" FAKE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    "$dir/bin/fm-pr-check" task-x1 https://github.com/JTInventory/firstmate/pull/47
   grep -qxF 'presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$dir/state/task-x1.pr-presentation" || fail 'ordinary poll rewrote presentation receipt'
   pass 'ordinary PR refresh cannot rewrite the presented head'
 }
