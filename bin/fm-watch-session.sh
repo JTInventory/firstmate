@@ -12,6 +12,20 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mode=${1:-start}
+usage() {
+  echo "usage: $(basename "$0") [start|--status|status|stop|restart]" >&2
+}
+case "$mode" in
+  -h|--help|help) usage; exit 0 ;;
+  status|--status) FM_WAKE_LIB_READ_ONLY=1 ;;
+  start|--start|stop|--stop|restart|--restart)
+    # shellcheck source=bin/fm-worker-isolation-lib.sh
+    . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+    fm_worker_refuse_primary_operation "watch session" || exit 1
+    ;;
+  *) usage; exit 2 ;;
+esac
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-detach-lib.sh
@@ -37,10 +51,6 @@ WATCH_LOCK="$STATE/.watch.lock"
 RETRY_DELAY=${FM_WATCH_SESSION_REARM_DELAY:-${FM_WATCH_SESSION_RETRY_DELAY:-1}}
 AFK_DELAY=${FM_WATCH_SESSION_AFK_DELAY:-15}
 STOP_WATCH_POLLS=${FM_WATCH_SESSION_STOP_POLLS:-60}
-
-usage() {
-  echo "usage: $(basename "$0") [start|--status|status|stop|restart]" >&2
-}
 
 shell_quote() {
   # POSIX single-quote escaping.
@@ -176,7 +186,6 @@ stop_runner() {
   return 0
 }
 
-mode=${1:-start}
 case "$mode" in
   start|--start)
     refuse_grok_primary || exit 1

@@ -366,6 +366,10 @@ fm-wake-drain.sh|wake drain|
 fm-promote.sh|promote|task
 fm-backlog-handoff.sh|backlog handoff|domain item
 fm-brief.sh|brief|task alpha
+fm-afk-launch.sh|afk|start
+fm-watch.sh|watch|
+fm-watch-session.sh|watch session|start
+fm-send.sh|send|fm-task hello
 ROWS
 
   while IFS='|' read -r script operation args; do
@@ -386,6 +390,10 @@ fm-wake-drain.sh|wake drain|
 fm-promote.sh|promote|task
 fm-backlog-handoff.sh|backlog handoff|domain item
 fm-brief.sh|brief|task alpha
+fm-afk-launch.sh|afk|start
+fm-watch.sh|watch|
+fm-watch-session.sh|watch session|start
+fm-send.sh|send|fm-task hello
 ROWS
 
   FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
@@ -400,6 +408,21 @@ ROWS
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
     "$ROOT/bin/fm-fleet-sync.sh" --help >/dev/null \
     || fail "fleet sync help was not kept read-only"
+  status=0
+  out=$(FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
+    "$ROOT/bin/fm-afk-launch.sh" status 2>&1) || status=$?
+  expect_code 0 "$status" "AFK status must remain read-only for a worker"
+  assert_not_contains "$out" "refused" "AFK status was guarded as a mutation"
+  [ ! -e "$foreign/state" ] || fail "AFK status created foreign state"
+  status=0
+  out=$(FM_HOME="$foreign" FM_ROOT_OVERRIDE="$foreign" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
+    "$ROOT/bin/fm-watch-session.sh" status 2>&1) || status=$?
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ] \
+    || fail "watch-session status did not remain available to a worker"
+  assert_not_contains "$out" "refused" "watch-session status was guarded as a mutation"
+  [ ! -e "$foreign/state" ] || fail "watch-session status created foreign state"
   pass "declared workers cannot run direct primary mutators"
 }
 

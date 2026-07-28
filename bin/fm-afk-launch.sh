@@ -8,6 +8,20 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AFK_MODE=${1:-start}
+usage() {
+  printf '%s\n' "usage: $(basename "$0") [start|status|stop]" >&2
+}
+case "$AFK_MODE" in
+  -h|--help|help) usage; exit 0 ;;
+  status|--status) FM_WAKE_LIB_READ_ONLY=1 ;;
+  start|--start|stop|--stop|return|--return)
+    # shellcheck source=bin/fm-worker-isolation-lib.sh
+    . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+    fm_worker_refuse_primary_operation "afk" || exit 1
+    ;;
+  *) usage; exit 2 ;;
+esac
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-detach-lib.sh
@@ -53,10 +67,6 @@ afk_exit_or_fail() {
   fi
   printf '%s\n' 'afk: could not clear the durable away flag; state retained' >&2
   return 1
-}
-
-usage() {
-  printf '%s\n' "usage: $(basename "$0") [start|status|stop]" >&2
 }
 
 daemon_owned() {  # 0 only when the recorded daemon is this live launch
@@ -255,7 +265,7 @@ status_afk() {
   fi
 }
 
-case "${1:-start}" in
+case "$AFK_MODE" in
   start|--start) start_afk ;;
   stop|--stop|return|--return) stop_afk ;;
   status|--status) status_afk ;;

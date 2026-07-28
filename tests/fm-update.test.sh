@@ -837,6 +837,98 @@ FM_STATE_OVERRIDE=$w/home/state"
     fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
   ) || fail "conflicting same-axis lifecycle markers were allowed to override target evidence"
 
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_process_environment() {
+      FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
+      FM_LIFECYCLE_ENVIRONMENT="FM_HOME=$w/other-home
+FM_ROOT_OVERRIDE=$w/home"
+    }
+    fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
+  ) || fail "target root override was ignored when FM_HOME named another home"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() {
+      FM_LIFECYCLE_ARGV=(bash --norc "$script")
+    }
+    fm_lifecycle_process_executable() { printf '%s\n' /bin/bash; }
+    fm_lifecycle_process_script 999
+    [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
+  ) || fail "compatible executable and shell argv identity was rejected"
+
+  rc=0
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() {
+      FM_LIFECYCLE_ARGV=(fm-spawn.sh)
+    }
+    fm_lifecycle_process_executable() { printf '%s\n' /bin/sleep; }
+    fm_lifecycle_process_script 999
+  ) || rc=$?
+  [ "$rc" -eq 3 ] || fail "argv0 lifecycle spoof was not rejected by executable identity"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() {
+      FM_LIFECYCLE_ARGV=(masked --norc "$script")
+    }
+    fm_lifecycle_process_executable() { printf '%s\n' /bin/bash; }
+    fm_lifecycle_process_script 999
+    [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
+  ) || fail "rewritten argv0 hid a lifecycle script from executable reconciliation"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() { return 1; }
+    fm_lifecycle_read_fallback_argv() {
+      FM_LIFECYCLE_ARGV=(bash "$script" "later argument contains -c text")
+    }
+    fm_lifecycle_process_executable() { printf '%s\n' /bin/bash; }
+    fm_lifecycle_process_script 999
+    [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
+  ) || fail "boundary-preserving fallback argv was not parsed by script position"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() { return 1; }
+    fm_lifecycle_read_fallback_argv() {
+      FM_LIFECYCLE_ARGV=(editor "$script")
+    }
+    fm_lifecycle_process_executable() { printf '%s\n' /usr/bin/editor; }
+    ! fm_lifecycle_process_script 999
+  ) || fail "fallback argv invented lifecycle identity from an arbitrary argument"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() { return 2; }
+    fm_lifecycle_process_live() { return 1; }
+    ! fm_lifecycle_process_script 999
+  ) || fail "a vanished process was treated as live identity uncertainty"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() { return 2; }
+    fm_lifecycle_process_live() { return 0; }
+    fm_lifecycle_process_kernel_thread() { return 0; }
+    ! fm_lifecycle_process_script 999
+  ) || fail "a kernel thread was treated as lifecycle identity uncertainty"
+
+  rc=0
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_read_proc_argv() { return 2; }
+    fm_lifecycle_process_live() { return 0; }
+    fm_lifecycle_process_kernel_thread() { return 1; }
+    fm_lifecycle_read_fallback_argv() { return 2; }
+    fm_lifecycle_process_script 999
+  ) || rc=$?
+  [ "$rc" -eq 2 ] || fail "unresolved live process identity did not remain fail-closed"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lifecycle_identity_result_busy 2
+  ) || fail "live identity uncertainty was skipped by the lifecycle census"
+
   rc=0
   (
     . "$ROOT/bin/fm-wake-lib.sh"
