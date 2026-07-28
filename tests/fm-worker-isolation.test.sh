@@ -1138,7 +1138,8 @@ test_stamp_survives_failed_pool_return() {
 #!/usr/bin/env bash
 target=${3:-}
 git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
-[ ! -e "$git_dir/fm-slot-owner" ] || exit 19
+[ -f "$git_dir/fm-slot-owner" ] || exit 19
+grep -Fx 'task=task-e12' "$git_dir/fm-slot-owner" >/dev/null || exit 23
 common_dir=$(git -C "$target" rev-parse --git-common-dir)
 case "$common_dir" in /*) ;; *) common_dir="$target/$common_dir" ;; esac
 claim="$common_dir/fm-slot-return-claims/${git_dir##*/}.claim"
@@ -1174,8 +1175,8 @@ SH
     && fm_slot_return_claim_record "$WT_DIR" \
     && printf '%s' "$FM_SLOT_RETURN_CLAIM_TASK" || printf 'none' )
   [ "$stamp" = task-e12 ] || fail "failed pool return cleared transition evidence: $stamp"
-  [ -L "$(git -C "$WT_DIR" rev-parse --absolute-git-dir)/fm-slot-owner" ] \
-    || fail "failed pool return did not leave mixed-version refusal evidence"
+  [ -f "$(git -C "$WT_DIR" rev-parse --absolute-git-dir)/fm-slot-owner" ] \
+    || fail "failed pool return did not leave legacy-visible ownership evidence"
   [ "$(git -C "$WT_DIR" rev-parse --abbrev-ref HEAD)" = "$branch" ] \
     || fail "failed pool return changed the retry branch identity"
   assert_present "$WT_DIR/.claude/settings.local.json" "failed pool return removed the Claude hook"
@@ -1193,13 +1194,17 @@ test_successful_pool_return_never_mutates_reused_slot() {
 #!/usr/bin/env bash
 target=${3:-}
 git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
-[ ! -e "$git_dir/fm-slot-owner" ] || exit 19
+[ -f "$git_dir/fm-slot-owner" ] || exit 19
+grep -Fx 'task=task-reuse' "$git_dir/fm-slot-owner" >/dev/null || exit 23
 common_dir=$(git -C "$target" rev-parse --git-common-dir)
 case "$common_dir" in /*) ;; *) common_dir="$target/$common_dir" ;; esac
 claim="$common_dir/fm-slot-return-claims/${git_dir##*/}.claim"
 [ -f "$claim" ] || exit 20
 grep -Fx 'task=task-reuse' "$claim" >/dev/null || exit 21
 grep -Fx 'lease_holder=task-reuse' "$claim" >/dev/null || exit 22
+transition=$(readlink "$git_dir/fm-slot-owner" 2>/dev/null || true)
+[ -n "$transition" ] || exit 24
+rm -f "$transition"
 git -C "$FM_REUSE_PROJECT" worktree remove --force "$target"
 git -C "$FM_REUSE_PROJECT" worktree add --quiet -b replacement-owner "$target"
 mkdir -p "$target/.claude" "$target/.opencode/plugins"
@@ -1234,6 +1239,23 @@ SH
     && fm_slot_stamp_field "$WT_DIR" task || printf none )
   [ "$stamp" = replacement ] || fail "teardown cleared replacement ownership after return: $stamp"
   pass "successful pool return never mutates a slot after reuse"
+}
+
+test_foreign_transition_holder_retains_before_mutation() {
+  local rec claim verdict
+  rec=$(make_slot_world slot-foreign-transition-holder)
+  read_slot_world "$rec"
+  claim=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_return_claim_path "$WT_DIR" )
+  mkdir -p "${claim%/*}"
+  printf 'task=task-holder\nhome=%s\nlease_holder=foreign-holder\n' \
+    "$WORLD/home" > "$claim"
+  verdict=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_disposal_verdict "$WORLD/home/state" task-holder "$WT_DIR" \
+      "$WORLD/home" "$WORLD/home" crewmate )
+  assert_contains "$verdict" "transition lease holder foreign-holder, not task-holder" \
+    "foreign transition holder passed disposal preflight"
+  pass "foreign transition holders retain before teardown mutation"
 }
 
 test_ordinary_teardown_acquires_admission_before_task_lock() {
@@ -1635,6 +1657,7 @@ test_teardown_retires_a_contested_lease_even_with_force
 test_retained_stamp_survives_failed_metadata_retirement
 test_stamp_survives_failed_pool_return
 test_successful_pool_return_never_mutates_reused_slot
+test_foreign_transition_holder_retains_before_mutation
 test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout

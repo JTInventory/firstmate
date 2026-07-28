@@ -108,6 +108,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-secondmate-delivery-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-delivery-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
@@ -295,10 +297,10 @@ secondmate_sync() {
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 window=$3 endpoint_generation=$4 commit=$5 instr=$6
-    local selector marker out
+    local id=$1 home=$2 window=$3 endpoint_generation=$4 provider_identity=$5 commit=$6 instr=$7
+    local selector marker receipt
     secondmate_locked_identity_matches "$id" "$home" "$window" \
-      "$endpoint_generation" || return 1
+      "$endpoint_generation" "$provider_identity" || return 1
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
@@ -310,17 +312,21 @@ secondmate_sync() {
       return 0
     fi
     secondmate_locked_identity_matches "$id" "$home" "$window" \
-      "$endpoint_generation" || return 1
-    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      "$endpoint_generation" "$provider_identity" || return 1
+    if fm_secondmate_delivery_send_locked "$STATE" "$FM_HOME" "$id" "$home" "$window" \
+      "$endpoint_generation" "$provider_identity" update-nudge "$commit" \
+      "$SECOND_MATE_NUDGE_MESSAGE"; then
+      receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
       secondmate_locked_identity_matches "$id" "$home" "$window" \
-        "$endpoint_generation" || return 1
+        "$endpoint_generation" "$provider_identity" || return 1
       rm -f "$marker"
       secondmate_locked_identity_matches "$id" "$home" "$window" \
         "$endpoint_generation" || return 1
       fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" "$commit" "$home" || true
+      fm_secondmate_delivery_finish "$receipt" || return 1
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: delivery is unconfirmed"
     fi
   }
 
@@ -343,17 +349,20 @@ secondmate_sync() {
     secondmate_locked_identity_matches "$id" "$home" "$window" \
       "$endpoint_generation" "$provider_identity" || return 1
     secondmate_send_nudge "$id" "$home" "$window" "$endpoint_generation" \
-      "$primary_head" "$instr"
+      "$provider_identity" "$primary_head" "$instr"
   }
 
   secondmate_retry_pending_nudge_locked() {
     local id=$1 home=$2 marker=$3 selector=$4 commit=$5 window=$6
-    local endpoint_generation=$7 out
+    local endpoint_generation=$7 provider_identity receipt
     secondmate_locked_identity_matches "$id" "$home" "$window" \
       "$endpoint_generation" || return 1
+    provider_identity=$FM_SECONDMATE_META_PROVIDER_IDENTITY
     [ "$(git -C "$home" rev-parse HEAD 2>/dev/null || true)" = "$commit" ] || return 1
-    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+    if fm_secondmate_delivery_send_locked "$STATE" "$FM_HOME" "$id" "$home" "$window" \
+      "$endpoint_generation" "$provider_identity" update-nudge "$commit" \
+      "$SECOND_MATE_NUDGE_MESSAGE"; then
+      receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
       secondmate_locked_identity_matches "$id" "$home" "$window" \
         "$endpoint_generation" || return 1
       rm -f "$marker"
@@ -361,9 +370,10 @@ secondmate_sync() {
         "$endpoint_generation" || return 1
       fm_update_obligation_ack "$home/state/.watch-protocol-reread-required" \
         "$commit" "$home" || true
+      fm_secondmate_delivery_finish "$receipt" || return 1
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: delivery is unconfirmed"
     fi
   }
 
@@ -492,7 +502,8 @@ secondmate_sync() {
     fi
     if [ "$reread_skip_pending" -eq 0 ] \
       && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
-      fm_config_reread_retry_pending "$id" "$home_real" || true
+      fm_config_reread_retry_pending "$id" "$home_real" "$window" \
+        "$endpoint_generation" "$provider_identity" || true
       if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
         echo "CONFIG_REREAD: secondmate $id: send failed: retry instruction queue is full"
         fm_lock_release "$home_lock" || true
@@ -519,7 +530,8 @@ secondmate_sync() {
     if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
-      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" "$window" \
+        "$endpoint_generation" "$provider_identity" 2>&1); then
       if [ -n "$reread_out" ]; then
         printf '%s\n' "$reread_out"
       else
@@ -574,8 +586,68 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
-  local endpoint_generation provider_identity
+  local meta id home window endpoint_generation provider_identity
+  local -a liveness_admission_locks=()
+  fm_ff_target_lock_acquire() {
+    local state_dir=$1 _label=${2:-target} _target_home=${3:-} lock
+    liveness_admission_locks=()
+    while IFS= read -r lock; do
+      [ -n "$lock" ] || continue
+      mkdir -p "$(dirname "$lock")" || return 1
+      if ! fm_lock_try_acquire "$lock"; then
+        fm_ff_target_lock_release
+        return 1
+      fi
+      liveness_admission_locks+=("$lock")
+    done < <(fm_spawn_admission_lock_paths "$state_dir")
+  }
+  fm_ff_target_lock_release() {
+    local i
+    for ((i=${#liveness_admission_locks[@]} - 1; i >= 0; i--)); do
+      fm_lock_release "${liveness_admission_locks[$i]}" || true
+    done
+    liveness_admission_locks=()
+  }
+  secondmate_liveness_locked() {
+    local id=$1 locked_home=$2 expected_window=$3 expected_generation=$4
+    local expected_provider=$5 harness backend target agent_state out cause owner_pid owner_identity
+    fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$locked_home" \
+      "$expected_window" "$expected_generation" "$expected_provider" || return 1
+    harness=$FM_SECONDMATE_META_HARNESS
+    backend=$FM_SECONDMATE_META_BACKEND
+    target=$FM_SECONDMATE_META_TARGET
+    agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+    case "$agent_state" in
+      alive)
+        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
+          || echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
+        ;;
+      dead|missing)
+        fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$locked_home" \
+          "$expected_window" "$expected_generation" "$expected_provider" || return 1
+        if [ "$agent_state" = dead ]; then
+          cause="confirmed agent absence on existing endpoint"
+          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        else
+          cause="recorded endpoint confidently missing"
+        fi
+        owner_pid=${BASHPID:-$$}
+        owner_identity=$(fm_pid_identity "$owner_pid") || return 1
+        if out=$(FM_SPAWN_NO_GUARD=1 FM_SPAWN_PRELOCK_OWNER_PID="$owner_pid" \
+          FM_SPAWN_PRELOCK_OWNER_IDENTITY="$owner_identity" \
+          "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
+            || echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
+        else
+          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+        fi
+        ;;
+      ambiguous) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)" ;;
+      unreadable) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)" ;;
+      *) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent recovery classifier unverified (backend=$backend)" ;;
+    esac
+  }
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -585,67 +657,19 @@ secondmate_liveness_sweep() {
       echo "SECONDMATE_LIVENESS: secondmate $id: refused: ${FM_SECONDMATE_META_ERROR:-ambiguous lifecycle metadata}"
       continue
     fi
+    home=$FM_SECONDMATE_META_HOME
     window=$FM_SECONDMATE_META_WINDOW
-    harness=$FM_SECONDMATE_META_HARNESS
-    backend=$FM_SECONDMATE_META_BACKEND
-    target=$FM_SECONDMATE_META_TARGET
     endpoint_generation=$FM_SECONDMATE_META_ENDPOINT_GENERATION
     provider_identity=$FM_SECONDMATE_META_PROVIDER_IDENTITY
-    fm_secondmate_lifecycle_identity_matches "$STATE" "$id" \
-      "$FM_SECONDMATE_META_HOME" "$window" "$endpoint_generation" \
-      "$provider_identity" || {
-        echo "SECONDMATE_LIVENESS: secondmate $id: refused: lifecycle identity changed"
-        continue
-      }
-    agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
-    case "$harness" in
-      claude|codex|opencode|pi|grok) ;;
-      *)
-        case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
-        ;;
-    esac
-    case "$agent_state" in
-      alive)
-        if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
-          echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
-        fi
-        ;;
-      dead|missing)
-        fm_secondmate_lifecycle_identity_matches "$STATE" "$id" \
-          "$FM_SECONDMATE_META_HOME" "$window" "$endpoint_generation" \
-          "$provider_identity" || {
-            echo "SECONDMATE_LIVENESS: secondmate $id: refused: lifecycle identity changed"
-            continue
-          }
-        if [ "$agent_state" = dead ]; then
-          cause="confirmed agent absence on existing endpoint"
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
-        else
-          cause="recorded endpoint confidently missing"
-        fi
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
-          if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
-            echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
-          fi
-        else
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
-        fi
-        ;;
-      ambiguous)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)"
-        ;;
-      unreadable)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)"
-        ;;
-      unverified-harness)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
-        ;;
-      *)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent recovery classifier unverified (backend=$backend)"
-        ;;
-    esac
+    if ! validate_secondmate_home "$id" "$home"; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: refused: unsafe lifecycle home"
+      continue
+    fi
+    fm_ff_locked_secondmate_action "$id" "$VALIDATED_HOME" "secondmate $id" \
+      secondmate_liveness_locked "$window" "$endpoint_generation" "$provider_identity" \
+      || echo "SECONDMATE_LIVENESS: secondmate $id: refused: lifecycle identity changed or lock is busy"
   done
+  unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release secondmate_liveness_locked
   return 0
 }
 

@@ -35,6 +35,8 @@
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces}"
+_FM_CONFIG_INHERIT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$_FM_CONFIG_INHERIT_LIB_DIR/fm-secondmate-delivery-lib.sh"
 
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp
@@ -369,12 +371,14 @@ fm_config_reread_retry_queue_is_full() {
 }
 
 fm_config_reread_retry_pending() {
-  local id=$1 dest_home=$2 report retry_out rc
+  local id=$1 dest_home=$2 window=${3:-} endpoint_generation=${4:-}
+  local provider_identity=${5:-} report retry_out rc
   report=$(mktemp "${TMPDIR:-/tmp}/fm-config-reread-retry.XXXXXX" 2>/dev/null) || {
     printf 'CONFIG_REREAD: secondmate %s: send failed: could not create retry report\n' "$id"
     return 1
   }
-  retry_out=$(fm_config_send_reread_nudge "$id" "$dest_home" "$report" 2>&1)
+  retry_out=$(fm_config_send_reread_nudge "$id" "$dest_home" "$report" \
+    "$window" "$endpoint_generation" "$provider_identity" 2>&1)
   rc=$?
   rm -f "$report"
   [ -z "$retry_out" ] || printf '%s\n' "$retry_out"
@@ -592,7 +596,7 @@ fm_config_reread_send_failure() {
 
 # fm_config_reread_send_pointer <id> <instruction-path>
 fm_config_reread_send_pointer() {
-  local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer
+  local id=$1 instruction_path=$2 pending_path message pending_pointer generation receipt
   pending_path="$instruction_path.pending"
   if [ ! -f "$instruction_path" ] || [ -L "$instruction_path" ]; then
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is missing\n' "$id"
@@ -603,30 +607,25 @@ fm_config_reread_send_pointer() {
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is mismatched\n' "$id"
     return 1
   fi
-  selector="fm-$id"
-  send_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-send.sh"
-  if [ ! -x "$send_bin" ]; then
-    fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "fm-send.sh not executable at $send_bin"
-    return 1
-  fi
-  if [ -z "${FM_HOME:-}" ]; then
-    fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "FM_HOME is not set"
+  if [ -z "${FM_HOME:-}" ] || [ -z "${FM_CONFIG_REREAD_HOME:-}" ] \
+    || [ -z "${FM_CONFIG_REREAD_WINDOW:-}" ] \
+    || [ -z "${FM_CONFIG_REREAD_ENDPOINT_GENERATION:-}" ] \
+    || [ -z "${FM_CONFIG_REREAD_PROVIDER_IDENTITY:-}" ]; then
+    fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "lifecycle identity is unavailable"
     return 1
   fi
   message="CONFIG_REREAD: $instruction_path"
-  out=$(FM_HOME="$FM_HOME" \
-    FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
-    FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
-    FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \
-    "$send_bin" "$selector" "$message" 2>&1) && rc=0 || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    rm -f "$pending_path"
-    return 0
+  generation=${instruction_path##*/}
+  if fm_secondmate_delivery_send_locked "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "$FM_HOME" \
+    "$id" "$FM_CONFIG_REREAD_HOME" "$FM_CONFIG_REREAD_WINDOW" \
+    "$FM_CONFIG_REREAD_ENDPOINT_GENERATION" "$FM_CONFIG_REREAD_PROVIDER_IDENTITY" \
+    config-reread "$generation" "$message"; then
+    receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
+    rm -f "$pending_path" || return 1
+    fm_secondmate_delivery_finish "$receipt"
+  else
+    fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "delivery is unconfirmed"
   fi
-  out=${out%%$'\n'*}
-  [ -n "$out" ] || out="fm-send exited $rc"
-  fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "$out"
-  return 1
 }
 
 # fm_config_reread_discard_pending <dest-home>
@@ -781,7 +780,8 @@ fm_config_reread_quarantine_pending() {
 # failure, print a concrete CONFIG_REREAD retry diagnostic to stdout and return
 # non-zero - never claim the live agent reread the values.
 fm_config_send_reread_nudge() {
-  local id=$1 dest_home=$2 report=$3
+  local id=$1 dest_home=$2 report=$3 window=${4:-} endpoint_generation=${5:-}
+  local provider_identity=${6:-}
   local dest_home_abs state source_home_abs changed_items pending_paths stage_paths delivery_paths
   local stage_path instruction_path current_stage_path exact_tmp
   local send_failures retry_report_paths retry_report_path retry_stage_path retry_record_path
@@ -792,6 +792,10 @@ fm_config_send_reread_nudge() {
     printf 'CONFIG_REREAD: secondmate %s: send failed: destination home is not readable\n' "$id"
     return 1
   }
+  FM_CONFIG_REREAD_HOME=$dest_home_abs
+  FM_CONFIG_REREAD_WINDOW=$window
+  FM_CONFIG_REREAD_ENDPOINT_GENERATION=$endpoint_generation
+  FM_CONFIG_REREAD_PROVIDER_IDENTITY=$provider_identity
   state="$dest_home_abs/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
   changed_items=$(fm_config_reread_changed_items "$report")
   pending_paths=""

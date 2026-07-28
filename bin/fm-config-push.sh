@@ -156,7 +156,8 @@ config_push_locked() {
     return 1
   fi
   if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
-    fm_config_reread_retry_pending "$id" "$home_real" || true
+    fm_config_reread_retry_pending "$id" "$home_real" "$window" \
+      "$endpoint_generation" "$provider_identity" || true
     if ! fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$home_real" "$window" \
       "$endpoint_generation" "$provider_identity" \
       || fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
@@ -190,7 +191,8 @@ config_push_locked() {
   fi
   if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$STATE" \
-    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+    fm_config_send_reread_nudge "$id" "$home_real" "$report" "$window" \
+      "$endpoint_generation" "$provider_identity" 2>&1); then
     rc=1
     if [ -n "$reread_out" ]; then
       printf '%s\n' "$reread_out"

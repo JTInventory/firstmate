@@ -903,6 +903,57 @@ test_bootstrap_liveness_refuses_ambiguous_provider_identity() {
   pass "B16 bootstrap liveness refuses ambiguous provider identity"
 }
 
+test_bootstrap_liveness_holds_lifecycle_lock_through_kill_and_respawn() {
+  local w head fakebin out
+  w=$(new_world bootstrap-locked-liveness)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  fakebin=$(make_fake_toolchain "$w")
+  cat > "$w/main/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+legacy="$FM_LOCK_WORLD/sm/state/.spawn-admission.lock"
+current="$FM_LOCK_WORLD/sm/state/.locks/spawn-admission.lock"
+[ -L "$legacy" ] && [ -L "$current" ] || exit 51
+[ "$(cat "$legacy/pid")" = "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 52
+[ "$(cat "$current/pid")" = "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 53
+printf 'locked\n' > "$FM_LOCK_WORLD/liveness-spawn"
+exit 54
+SH
+  chmod +x "$w/main/bin/fm-spawn.sh"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'fm-sm\n' ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'bash\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  kill-window)
+    legacy="$FM_LOCK_WORLD/sm/state/.spawn-admission.lock"
+    current="$FM_LOCK_WORLD/sm/state/.locks/spawn-admission.lock"
+    [ -L "$legacy" ] && [ -L "$current" ] || exit 41
+    [ "$(cat "$legacy/pid")" = "$(cat "$current/pid")" ] || exit 42
+    printf 'locked\n' > "$FM_LOCK_WORLD/liveness-kill"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_LOCK_WORLD="$w" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  [ "$(cat "$w/liveness-kill" 2>/dev/null || true)" = locked ] \
+    || fail "liveness killed an endpoint outside the lifecycle lock"
+  [ "$(cat "$w/liveness-spawn" 2>/dev/null || true)" = locked ] \
+    || fail "liveness respawn escaped the lifecycle lock"
+  assert_contains "$out" "respawn failed after confirmed agent absence" \
+    "liveness did not keep the locked transaction through respawn"
+  pass "B17 bootstrap liveness serializes validation, kill, and respawn"
+}
+
 test_harness_resolution
 test_propagate_lib
 test_spawn_split_and_inherit
@@ -924,5 +975,6 @@ test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
 test_config_push_respects_secondmate_lifecycle_lock
 test_bootstrap_liveness_refuses_ambiguous_provider_identity
+test_bootstrap_liveness_holds_lifecycle_lock_through_kill_and_respawn
 
 echo "# all fm-secondmate-harness tests passed"

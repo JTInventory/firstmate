@@ -460,15 +460,27 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   }
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
-while IFS= read -r SPAWN_ADMISSION_LOCK; do
-  [ -n "$SPAWN_ADMISSION_LOCK" ] || continue
-  mkdir -p "$(dirname "$SPAWN_ADMISSION_LOCK")" || exit 1
-  if ! fm_lock_try_acquire "$SPAWN_ADMISSION_LOCK"; then
-    echo "error: teardown is already retiring this firstmate home" >&2
-    exit 1
-  fi
-  SPAWN_ADMISSION_LOCKS+=("$SPAWN_ADMISSION_LOCK")
-done < <(fm_spawn_admission_lock_paths "$STATE")
+if [ -n "${FM_SPAWN_PRELOCK_OWNER_PID:-}" ]; then
+  case "$FM_SPAWN_PRELOCK_OWNER_PID" in *[!0-9]*|'') exit 1 ;; esac
+  [ "$PPID" = "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 1
+  [ "$(fm_pid_identity "$FM_SPAWN_PRELOCK_OWNER_PID" 2>/dev/null || true)" = \
+    "${FM_SPAWN_PRELOCK_OWNER_IDENTITY:-}" ] || exit 1
+  while IFS= read -r SPAWN_ADMISSION_LOCK; do
+    [ -n "$SPAWN_ADMISSION_LOCK" ] || continue
+    [ "$(cat "$SPAWN_ADMISSION_LOCK/pid" 2>/dev/null || true)" = \
+      "$FM_SPAWN_PRELOCK_OWNER_PID" ] || exit 1
+  done < <(fm_spawn_admission_lock_paths "$STATE")
+else
+  while IFS= read -r SPAWN_ADMISSION_LOCK; do
+    [ -n "$SPAWN_ADMISSION_LOCK" ] || continue
+    mkdir -p "$(dirname "$SPAWN_ADMISSION_LOCK")" || exit 1
+    if ! fm_lock_try_acquire "$SPAWN_ADMISSION_LOCK"; then
+      echo "error: teardown is already retiring this firstmate home" >&2
+      exit 1
+    fi
+    SPAWN_ADMISSION_LOCKS+=("$SPAWN_ADMISSION_LOCK")
+  done < <(fm_spawn_admission_lock_paths "$STATE")
+fi
 if fm_spawn_legacy_task_lock_busy "$STATE"; then
   echo "error: an older spawn or teardown is still changing this firstmate home" >&2
   exit 1

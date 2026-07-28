@@ -45,6 +45,8 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 . "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-secondmate-delivery-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-delivery-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -140,56 +142,9 @@ ack_secondmate_nudge() {
     }
 }
 
-secondmate_delivery_receipt_path() {
-  local id=$1 generation=$2
-  case "$id" in
-    *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
-  esac
-  case "$generation" in
-    *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
-  esac
-  printf '%s/.secondmate-nudge-delivered/%s/%s\n' "$STATE" "$id" "$generation"
-}
-
-secondmate_delivery_receipt_matches() {
-  local receipt=$1 id=$2 home=$3 target=$4 endpoint_generation=$5 generation=$6
-  local provider_identity=$7 correlation=$8 state
-  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
-  [ "$(wc -l < "$receipt" | tr -d ' ')" -eq 8 ] \
-    && [ "$(grep -Fxc "id=$id" "$receipt" 2>/dev/null || true)" -eq 1 ] \
-    && [ "$(grep -Fxc "home=$home" "$receipt" 2>/dev/null || true)" -eq 1 ] \
-    && [ "$(grep -Fxc "target=$target" "$receipt" 2>/dev/null || true)" -eq 1 ] \
-    && [ "$(grep -Fxc "endpoint_generation=$endpoint_generation" "$receipt" 2>/dev/null || true)" -eq 1 ] \
-    && [ "$(grep -Fxc "generation=$generation" "$receipt" 2>/dev/null || true)" -eq 1 ] \
-    && [ "$(grep -Fxc "provider_identity=$provider_identity" "$receipt" 2>/dev/null || true)" -eq 1 ] \
-    && [ "$(grep -Fxc "correlation=$correlation" "$receipt" 2>/dev/null || true)" -eq 1 ] \
-    && [ "$(grep -Ec '^state=(prepared|confirmed-delivered|do-not-resend)$' "$receipt" 2>/dev/null || true)" -eq 1 ]
-}
-
-secondmate_delivery_receipt_write() {
-  local receipt=$1 id=$2 home=$3 target=$4 endpoint_generation=$5 generation=$6
-  local provider_identity=$7 correlation=$8 delivery_state=$9 parent tmp
-  parent=${receipt%/*}
-  mkdir -p "$parent" || return 1
-  tmp=$(mktemp "$parent/.delivery.XXXXXX") || return 1
-  {
-    printf 'id=%s\n' "$id"
-    printf 'home=%s\n' "$home"
-    printf 'target=%s\n' "$target"
-    printf 'endpoint_generation=%s\n' "$endpoint_generation"
-    printf 'generation=%s\n' "$generation"
-    printf 'provider_identity=%s\n' "$provider_identity"
-    printf 'correlation=%s\n' "$correlation"
-    printf 'state=%s\n' "$delivery_state"
-  } > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$receipt" || {
-    rm -f "$tmp"
-    return 1
-  }
-}
-
 deliver_secondmate_nudge_locked() {
   local id=$1 home=$2 target=$3 generation=$4 endpoint_generation=$5
-  local provider_identity=$6 marker receipt parent out correlation receipt_state
+  local provider_identity=$6 marker receipt
   update_live_secondmate_identity_matches "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" || return 1
   marker="$home/state/.watch-protocol-reread-required"
@@ -197,45 +152,16 @@ deliver_secondmate_nudge_locked() {
     echo "secondmate nudge delivery: generation mismatch for $target" >&2
     return 1
   }
-  receipt=$(secondmate_delivery_receipt_path "$id" "$generation") || return 1
-  parent=${receipt%/*}
-  correlation=$(printf '%s\n' "$id|$home|$target|$endpoint_generation|$generation|$provider_identity" \
-    | git hash-object --stdin 2>/dev/null) || return 1
-  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-    secondmate_delivery_receipt_matches "$receipt" "$id" "$home" "$target" \
-      "$endpoint_generation" "$generation" "$provider_identity" "$correlation" || return 1
-    receipt_state=$(sed -n 's/^state=//p' "$receipt")
-  else
-    secondmate_delivery_receipt_write "$receipt" "$id" "$home" "$target" \
-      "$endpoint_generation" "$generation" "$provider_identity" "$correlation" prepared \
-      || return 1
-    if ! out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-send.sh" "fm-$id" \
-      'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' 2>&1); then
-      if printf '%s\n' "$out" | grep -Fq 'Do not resend'; then
-        secondmate_delivery_receipt_write "$receipt" "$id" "$home" "$target" \
-          "$endpoint_generation" "$generation" "$provider_identity" "$correlation" \
-          do-not-resend || return 1
-        receipt_state=do-not-resend
-      else
-        rm -f "$receipt"
-        rmdir "$parent" 2>/dev/null || true
-        echo "secondmate nudge delivery: send failed for $target: $(first_line "$out")" >&2
-        return 1
-      fi
-    else
-      secondmate_delivery_receipt_write "$receipt" "$id" "$home" "$target" \
-        "$endpoint_generation" "$generation" "$provider_identity" "$correlation" \
-        confirmed-delivered || return 1
-      receipt_state=confirmed-delivered
-    fi
-  fi
+  fm_secondmate_delivery_send_locked "$STATE" "$FM_HOME" "$id" "$home" "$target" \
+    "$endpoint_generation" "$provider_identity" update-nudge "$generation" \
+    'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' \
+    || return $?
+  receipt=$FM_SECONDMATE_DELIVERY_RECEIPT
   update_live_secondmate_identity_matches "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" || return 1
   fm_update_obligation_ack "$marker" "$generation" "$home" || return 1
-  rm -f "$receipt" || return 1
-  rmdir "$parent" 2>/dev/null || true
-  echo "delivered-secondmate-nudge: $target ($receipt_state)"
+  fm_secondmate_delivery_finish "$receipt" || return 1
+  echo "delivered-secondmate-nudge: $target"
 }
 
 deliver_secondmate_nudge() {

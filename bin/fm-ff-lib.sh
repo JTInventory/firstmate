@@ -454,9 +454,13 @@ fm_secondmate_lifecycle_meta_read() {
         return 1
       fi
       case "$session$workspace$tab$pane" in
-        *'|'*) FM_SECONDMATE_META_ERROR="unsafe provider endpoint"; return 1 ;;
+        *'|'*|*:* ) FM_SECONDMATE_META_ERROR="unsafe provider endpoint"; return 1 ;;
       esac
       target="$session:$pane"
+      if [ "$window" != "$target" ]; then
+        FM_SECONDMATE_META_ERROR="conflicting Herdr endpoint representations"
+        return 1
+      fi
       provider_identity="herdr:$session:$workspace:$tab:$pane"
       ;;
     *)

@@ -27,6 +27,10 @@ set -u
 UPDATE="$ROOT/bin/fm-update.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$ROOT/bin/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-secondmate-delivery-lib.sh
+. "$ROOT/bin/fm-secondmate-delivery-lib.sh"
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -1208,7 +1212,7 @@ test_duplicate_provider_fields_refuse_lifecycle_mutation() {
 }
 
 test_prepared_delivery_transaction_is_never_resent() {
-  local w generation receipt correlation provider target fakebin out
+  local w generation receipt correlation provider target fakebin out rc=0
   w=$(new_world t35)
   add_sm "$w" sm1
   generation=$(git -C "$w/sm1" rev-parse HEAD)
@@ -1219,34 +1223,34 @@ test_prepared_delivery_transaction_is_never_resent() {
     "$w/sm1/state/.watch-protocol-reread-required" "$generation"
   receipt="$w/home/state/.secondmate-nudge-delivered/sm1/$generation"
   mkdir -p "${receipt%/*}"
-  correlation=$(printf '%s\n' \
-    "sm1|$w/sm1|$target|endpoint-sm1|$generation|$provider" \
-    | git hash-object --stdin)
-  {
-    printf 'id=sm1\n'
-    printf 'home=%s/sm1\n' "$w"
-    printf 'target=%s\n' "$target"
-    printf 'endpoint_generation=endpoint-sm1\n'
-    printf 'generation=%s\n' "$generation"
-    printf 'provider_identity=%s\n' "$provider"
-    printf 'correlation=%s\n' "$correlation"
-    printf 'state=prepared\n'
-  } > "$receipt"
+  correlation=$(FM_PENDING_REPLY_NOW=100 \
+    fm_pending_reply_create "$w/home" "$w/home/state" sm1 \
+      'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.')
+  fm_pending_reply_set "$(fm_pending_reply_path "$w/home/state" "$correlation")" \
+    fm_delivery_transaction \
+    "$(printf '%s' "update-nudge|sm1|$w/sm1|$target|endpoint-sm1|$provider|$generation|$(printf '%s' 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' | cksum | awk '{printf "%s-%s", $1, $2}')" \
+      | cksum | awk '{printf "%s-%s", $1, $2}')"
+  fm_pending_reply_prepare_delivery "$w/home/state" "$correlation"
+  fm_secondmate_delivery_receipt_write "$receipt" update-nudge sm1 "$w/sm1" \
+    "$target" endpoint-sm1 "$generation" "$provider" "$correlation" \
+    "$(printf '%s' 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.' \
+      | cksum | awk '{printf "%s-%s", $1, $2}')" prepared
   fakebin=$(make_fake_tmux "$w/prepared-fake")
 
   out=$(cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_FAKE_TMUX_LOG="$w/prepared-fake/tmux.log" \
-    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
+    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation" 2>&1) || rc=$?
 
-  assert_contains "$out" "delivered-secondmate-nudge: $target (prepared)" \
-    "prepared delivery transaction was not recovered"
+  [ "$rc" -ne 0 ] || fail "indeterminate prepared delivery was acknowledged"
+  assert_contains "$out" "delivery is indeterminate" \
+    "prepared delivery transaction did not fail closed"
   [ ! -s "$w/prepared-fake/tmux.log" ] \
     || fail "prepared delivery transaction was sent again"
   fm_update_obligation_pending \
     "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
-    && fail "prepared delivery recovery did not acknowledge the obligation"
-  pass "T35 prepared delivery transactions cannot duplicate a send"
+    || fail "prepared delivery recovery cleared the obligation without delivery proof"
+  pass "T35 prepared delivery transactions remain pending without delivery proof"
 }
 
 test_do_not_resend_delivery_is_acknowledged_once() {
@@ -1263,7 +1267,12 @@ test_do_not_resend_delivery_is_acknowledged_once() {
 #!/usr/bin/env bash
 for arg in "$@"; do
   [ -f "$arg" ] || continue
-  grep -q '^confirmed=' "$arg" 2>/dev/null && exit 1
+  if grep -q '^schema=fm-pending-reply.v1$' "$arg" 2>/dev/null \
+    && grep -Eq '^delivered_epoch=[0-9]+$' "$arg" 2>/dev/null \
+    && [ ! -e "${FM_FAKE_MV_ONCE:?}" ]; then
+    : > "$FM_FAKE_MV_ONCE"
+    exit 1
+  fi
 done
 exec /bin/mv "$@"
 SH
@@ -1273,9 +1282,10 @@ SH
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_FAKE_TMUX_LOG="$w/do-not-resend-fake/tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$w/do-not-resend-fake/pane.txt" FM_SEND_SETTLE=0 \
+    FM_FAKE_MV_ONCE="$w/do-not-resend-fake/mv-once" \
     "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
 
-  assert_contains "$out" "delivered-secondmate-nudge: $target (do-not-resend)" \
+  assert_contains "$out" "delivered-secondmate-nudge: $target" \
     "confirmed delivery failure was not classified as do-not-resend"
   sends=$(grep -Fc 'firstmate was updated to the latest' \
     "$w/do-not-resend-fake/tmux.log" 2>/dev/null || true)
@@ -1284,6 +1294,29 @@ SH
     "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     && fail "do-not-resend delivery left a duplicate retry obligation"
   pass "T36 do-not-resend delivery outcomes are acknowledged once"
+}
+
+test_conflicting_herdr_window_refuses_lifecycle_mutation() {
+  local w before out
+  w=$(new_world t37)
+  add_sm "$w" sm1
+  before=$(git -C "$w/sm1" rev-parse HEAD)
+  bump_origin "$w" instr
+  {
+    printf 'backend=herdr\n'
+    printf 'herdr_session=session-a\n'
+    printf 'herdr_workspace_id=workspace-a\n'
+    printf 'herdr_tab_id=tab-a\n'
+    printf 'herdr_pane_id=pane-a\n'
+  } >> "$w/home/state/sm1.meta"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
+
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
+    || fail "conflicting Herdr window authorized a secondmate update"
+  assert_contains "$out" "conflicting Herdr endpoint representations" \
+    "conflicting Herdr window did not produce a lifecycle refusal"
+  pass "T37 conflicting Herdr endpoint representations refuse lifecycle mutation"
 }
 
 test_updates_main_and_secondmate
@@ -1320,5 +1353,6 @@ test_secondmate_delivery_refuses_recycled_endpoint_ack
 test_duplicate_provider_fields_refuse_lifecycle_mutation
 test_prepared_delivery_transaction_is_never_resent
 test_do_not_resend_delivery_is_acknowledged_once
+test_conflicting_herdr_window_refuses_lifecycle_mutation
 
 echo "# all fm-update tests passed"
