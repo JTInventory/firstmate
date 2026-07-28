@@ -322,6 +322,47 @@ test_task_classifications_and_route_metadata() {
   pass "task classifications preserve current route metadata"
 }
 
+test_convergence_ceiling_emits_one_read_only_decision() {
+  local home fakebin out before after
+  home=$(make_home convergence-ceiling)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" converge 'working: no-mistakes corrections continue' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes" "yolo=on"
+  before=$(find "$home/state" "$home/data" -type f -print0 | sort -z | xargs -0 sha256sum)
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · convergence-round=3 · convergence-fingerprint=unavailable' \
+    FM_SUPERVISION_CONVERGENCE_ROUND_CEILING=3 run_json "$home" "$fakebin") || fail 'convergence ceiling json failed'
+  after=$(find "$home/state" "$home/data" -type f -print0 | sort -z | xargs -0 sha256sum)
+  [ "$before" = "$after" ] || fail 'convergence observer mutated state'
+  assert_json_valid "$out" 'convergence ceiling output'
+  FM_TEST_JSON="$out" python3 - <<'PY' || fail 'convergence decision was not uniquely deduplicated'
+import json, os
+data = json.loads(os.environ['FM_TEST_JSON'])
+items = [x for x in data['checklist'] if x['id'] == 'converge:worker_convergence_needs_decision']
+if len(items) != 1:
+    raise SystemExit(f'expected one convergence decision, got {len(items)}')
+if items[0]['owner'] != 'captain' or items[0]['severity'] != 'medium':
+    raise SystemExit(f'unexpected decision: {items[0]}')
+PY
+  pass 'round ceiling emits one read-only captain decision even in yolo mode'
+}
+
+test_unknown_convergence_schema_is_visible_without_decision() {
+  local home fakebin out
+  home=$(make_home convergence-unknown)
+  fakebin="$home/fakebin"
+  write_fakebin "$fakebin"
+  write_meta "$home" converge-unknown 'working: no-mistakes corrections continue' \
+    "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · convergence-round=unknown · convergence-fingerprint=unavailable' \
+    run_json "$home" "$fakebin") || fail 'unknown convergence json failed'
+  assert_task_classification "$out" converge-unknown worker_convergence_unknown 'unknown convergence schema should remain visible'
+  assert_not_contains "$out" 'converge-unknown:worker_convergence_needs_decision' 'unknown schema invented a ceiling decision'
+  pass 'unknown convergence schema remains visible without mutation or invented certainty'
+}
+
 test_live_secondmates_ignore_seed_pr_terminal_state() {
   local home fakebin out
   home=$(make_home secondmate-pr-history)
@@ -466,7 +507,9 @@ test_paused_reconciliation_has_a_fleet_budget() {
   write_fakebin "$fakebin"
   write_meta "$home" paused-budget 'paused: waiting for vendor response' \
     "project=demo" "window=live" "kind=ship" "mode=no-mistakes"
-  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$log" FM_SUPERVISION_PAUSE_RECONCILE_SECS=0 run_json "$home" "$fakebin") || fail "paused budget json failed"
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$log" \
+    FM_SUPERVISION_PAUSE_RECONCILE_SECS=0 FM_SUPERVISION_CONVERGENCE_OBSERVE_SECS=0 \
+    run_json "$home" "$fakebin") || fail "paused budget json failed"
   assert_json_valid "$out" "paused budget output"
   assert_task_classification "$out" paused-budget worker_external_wait "unreconciled pause remains visible"
   [ ! -e "$log" ] || fail "exhausted pause budget should skip crew-state reads"
@@ -602,9 +645,13 @@ test_absolute_project_meta_runs_treehouse_status() {
   project="$home/projects/demo"
   mkdir -p "$project"
   write_meta "$home" absolute 'working: still running' "project=$project" "window=live"
-  out=$(PATH="$fakebin:$PATH" TREEHOUSE_FAIL=1 FM_HOME="$home" "$CLI" --json --no-default-reminders) \
+  out=$(PATH="$fakebin:$PATH" TREEHOUSE_FAIL=1 FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · convergence-round=3 · convergence-fingerprint=unavailable' \
+    "$CLI" --json --no-default-reminders) \
     || fail "absolute project json failed"
   assert_contains "$out" 'stale_treehouse_state' "absolute project meta should run treehouse status"
+  assert_not_contains "$out" 'absolute:worker_convergence_needs_decision' "convergence should not mask treehouse failure"
   pass "absolute project meta runs treehouse status"
 }
 
@@ -694,6 +741,8 @@ test_injection_wedge_is_structured_in_json
 test_registered_secondmate_is_expected_backlog_exception
 test_backlog_drift_is_structured_in_json
 test_task_classifications_and_route_metadata
+test_convergence_ceiling_emits_one_read_only_decision
+test_unknown_convergence_schema_is_visible_without_decision
 test_live_secondmates_ignore_seed_pr_terminal_state
 test_live_secondmate_done_status_surfaces_response
 test_paused_status_is_an_external_wait

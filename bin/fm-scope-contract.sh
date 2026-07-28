@@ -93,10 +93,32 @@ validate_brief() {
 }
 
 validate_marker() {
-  local marker=$1 actual
+  local marker=$1
   [ -f "$marker" ] && [ ! -L "$marker" ] || die "scope marker must be a regular file"
-  actual=$(cat -- "$marker"; printf '.')
-  [ "$actual" = "$(printf 'firstmate-scope-contract-v1\n.')" ] || die "scope marker has invalid bytes"
+  [ "$(stat -c %h "$marker" 2>/dev/null || stat -f %l "$marker" 2>/dev/null)" = 1 ] \
+    || die "scope marker must have one link"
+  printf 'firstmate-scope-contract-v1\n' | cmp -s - "$marker" \
+    || die "scope marker has invalid bytes"
+}
+
+publish_marker() {
+  local marker=$1 directory tmp
+  directory=$(dirname "$marker")
+  [ -d "$directory" ] && [ ! -L "$directory" ] || die "scope marker directory is invalid"
+  [ ! -L "$marker" ] || die "scope marker destination must not be a symlink"
+  if [ -e "$marker" ]; then
+    [ -f "$marker" ] || die "scope marker destination must be a regular file"
+    [ "$(stat -c %h "$marker" 2>/dev/null || stat -f %l "$marker" 2>/dev/null)" = 1 ] \
+      || die "scope marker destination must have one link"
+  fi
+  tmp=$(mktemp "$directory/.scope-contract-enabled.XXXXXX") || die "cannot create scope marker"
+  SCOPE_TMP_TWO=$tmp
+  printf 'firstmate-scope-contract-v1\n' > "$tmp" || die "cannot write scope marker"
+  chmod 0600 "$tmp" || die "cannot protect scope marker"
+  validate_marker "$tmp"
+  mv -f -- "$tmp" "$marker" || die "cannot publish scope marker"
+  SCOPE_TMP_TWO=
+  validate_marker "$marker"
 }
 
 audit_body() {
@@ -131,7 +153,12 @@ audit_body() {
       fields[count]=value
       return count
     }
-    split_markdown_row($0, field) >= 5 {
+    /^(```|~~~)/ { fenced=!fenced; next }
+    /<!--/ { commented=1 }
+    commented { if ($0 ~ /-->/) commented=0; next }
+    !fenced && /^#{1,6}[[:space:]]+PR scope ledger \(advisory\)[[:space:]]*$/ { headings++; ledger=1; next }
+    ledger && /^#{1,6}[[:space:]]+/ { ledger=0; next }
+    ledger && !fenced && split_markdown_row($0, field) >= 5 {
       id=trim(field[2]); status=trim(field[3]); evidence=trim(field[4]); risk=trim(field[5])
       if (id !~ /^[A-Z][A-Z0-9]*-[0-9]+$/) next
       count[id]++
@@ -141,6 +168,7 @@ audit_body() {
       if (risk == "" || risk ~ /^\{[^}]+\}$/) print "scope-ledger-finding\tempty-residual-risk\t" id
     }
     END {
+      if (headings > 1) print "scope-ledger-finding\tduplicate-heading\tPR-scope-ledger"
       for (id in expected) {
         if (!(id in count)) print "scope-ledger-finding\tmissing\t" id
         else if (count[id] > 1) print "scope-ledger-finding\tduplicate\t" id
@@ -174,6 +202,10 @@ case "$command" in
   validate-marker)
     [ "$#" -eq 2 ] || die "usage: $0 validate-marker <marker>"
     validate_marker "$2"
+    ;;
+  publish-marker)
+    [ "$#" -eq 2 ] || die "usage: $0 publish-marker <marker>"
+    publish_marker "$2"
     ;;
   audit-body)
     [ "$#" -eq 3 ] || die "usage: $0 audit-body <brief.md> <pr-body.md>"

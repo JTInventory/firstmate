@@ -27,6 +27,7 @@ After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervi
 Routine watcher polling, re-arm no-ops, elapsed waiting time, and absorbed benign wakes stay silent; an idle crew costs you nothing.
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
+For active fixing rows it defensively reads the v1.37 round field, exposes an unknown value when the schema cannot prove one, and explicitly declares finding-fingerprint support unavailable. The read-only supervision model uses only that round signal and a bounded fleet budget to emit one checklist decision at the configured ceiling; it never controls the no-mistakes run.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
@@ -48,6 +49,7 @@ A shared tool-path helper appends existing `$HOME/.nvm/versions/node/*/bin` and 
 Bootstrap, spawn, teardown, and the read-only supervision model use it before tool lookup, so SSH and other clean non-interactive sessions can find HOME-installed Axi tools consistently.
 It combines GitHub commit status and check-runs when classifying PR CI, so Actions failures such as stale or failed check-runs are not treated as green just because legacy commit status is empty.
 It also classifies a scout report as teardown work before PR or missing-worktree checks only when the latest status is `done:`, and a live `kind=secondmate` record as a persistent direct report unless the latest status is `done:`, `blocked:`, `needs-decision:`, `failed:`, or valid `paused: <reason>`. Before classifying a pause as `worker_external_wait`, it shares the bounded `FM_SUPERVISION_PAUSE_RECONCILE_SECS` budget across paused records to read current state; authoritative active or terminal state supersedes the pause.
+Separately, `FM_SUPERVISION_CONVERGENCE_OBSERVE_SECS` bounds read-only no-mistakes convergence reads and `FM_SUPERVISION_CONVERGENCE_ROUND_CEILING` defaults to 3. A proven ceiling emits one captain-owned decision item per task; an unknown schema stays visibly unknown, and neither path writes status or sends a gate response.
 The drain script calls that guard after emptying the queue, which avoids repeating the queued-wakes warning for records it just consumed while still warning on stale watcher liveness.
 It leads with prominent bordered banners for the tangle and no-watcher cases so they cannot be skimmed past.
 
@@ -186,8 +188,8 @@ The `data/secondmates.md` line schema and the secondmate environment variables a
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
-Every PR merge remains captain-gated, including for `+yolo` projects: after explicit approval, firstmate uses `FM_CAPTAIN_APPROVED_MERGE=1 bin/fm-pr-merge.sh <id> <full GitHub PR URL>` rather than invoking `gh-axi pr merge` directly.
-The wrapper records PR metadata before merging, accepts only a qualified GitHub PR URL, derives its repository from that URL, defaults to squash, and refuses repository override arguments.
+Every PR merge remains captain-gated, including for `+yolo` projects. Immediately before showing the PR to the captain, firstmate runs `bin/fm-pr-present.sh <id> <full GitHub PR URL>` to freeze the exact head in a protected receipt that ordinary polls cannot refresh. After explicit approval, firstmate uses `FM_CAPTAIN_APPROVED_MERGE=1 bin/fm-pr-merge.sh <id> <full GitHub PR URL>` rather than invoking a merge command directly.
+The wrapper accepts only a qualified GitHub PR URL, requires the current forge head to equal the presented head, defaults to squash, and supplies that SHA to GitHub's atomic merge API. A missing, malformed, stale, or unverifiable receipt fails closed and requires a fresh presentation and approval.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 Before failing a `treehouse return`, teardown retries only the transient Git `index.lock`/`File exists` case; all other return failures remain fail-closed.
 Landed work is accepted when `HEAD` is reachable from any remote-tracking branch, when a merged PR's GitHub head contains the current local work, or when the worktree content is already present in the freshly fetched default branch.

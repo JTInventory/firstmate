@@ -371,7 +371,10 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 $DOD
 EOF
 if [ "$SCOPE_CONTRACT_SET" -eq 1 ]; then
+  "$SCRIPT_DIR/fm-scope-contract.sh" publish-marker "$DATA/$ID/scope-contract-enabled" || exit 1
+  # Publish the protected opt-in first. A crash or append failure therefore
+  # leaves a marker whose missing/invalid brief fails closed at spawn, never a
+  # marker-free contract fence that could be mistaken for a legacy brief.
   "$SCRIPT_DIR/fm-scope-contract.sh" append-brief "$SCOPE_CONTRACT" "$BRIEF" "$MODE" || exit 1
-  printf '%s\n' firstmate-scope-contract-v1 > "$DATA/$ID/scope-contract-enabled"
 fi
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

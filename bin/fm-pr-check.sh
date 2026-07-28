@@ -32,6 +32,10 @@ fm_scope_ledger_audit() (
     printf 'scope-ledger\tunknown\treason=gh-unavailable\n'
     return 0
   fi
+  if ! "$SCRIPT_DIR/fm-scope-contract.sh" validate-brief "$SCOPE_BRIEF" >/dev/null 2>&1; then
+    printf 'scope-ledger\tunknown\treason=local-contract-invalid\n'
+    return 0
+  fi
   SCOPE_BODY=$(mktemp "${TMPDIR:-/tmp}/fm-pr-body.XXXXXX") || {
     printf 'scope-ledger\tunknown\treason=temp-unavailable\n'
     return 0
@@ -57,7 +61,7 @@ fm_scope_ledger_audit() (
       SCOPE_FETCHED=0
     fi
   else
-    if (cd "${WT:-$FM_ROOT}" && "$SCOPE_TIMEOUT_RUN" "$SCOPE_TIMEOUT" gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
+    if (cd "${WT:-$FM_ROOT}" && "$SCOPE_TIMEOUT_RUN" --kill-after=1 "$SCOPE_TIMEOUT" gh pr view "$URL" --json body -q .body > "$SCOPE_BODY" 2>/dev/null); then
       SCOPE_FETCHED=1
     else
       SCOPE_FETCHED=0

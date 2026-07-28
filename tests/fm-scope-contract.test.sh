@@ -91,6 +91,7 @@ test_ledger_audit_is_advisory_and_treats_body_as_data() {
   "$SCOPE" append-brief "$spec" "$brief" no-mistakes
 
   cat > "$body" <<EOF
+## PR scope ledger (advisory)
 | ID | Status | Evidence | Residual risk |
 | AC-1 | covered | tests pass | none |
 | AC-1 | covered | duplicate | none |
@@ -107,6 +108,7 @@ EOF
   assert_absent "$marker" "PR body bytes executed as shell instructions"
 
   cat > "$body" <<'EOF'
+## PR scope ledger (advisory)
 | ID | Status | Evidence | Residual risk |
 | AC-1 | covered | fixture one \| fixture two | none |
 | AC-2 | not-applicable | fixture two | documented exception |

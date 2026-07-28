@@ -62,7 +62,8 @@ Each file also starts with a short header comment.
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check-migrate.sh` | Preserve eligible legacy custom checks by byte binding; quarantine or rebuild older task polls without execution |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
+| `fm-pr-present.sh`       | Freeze the exact validated GitHub PR head immediately before captain presentation    |
+| `fm-pr-merge.sh`         | Captain-gated atomic GitHub merge bound to the separately presented head SHA         |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

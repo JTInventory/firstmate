@@ -302,6 +302,42 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
+test_teardown_reconciles_consumed_presentation_receipt() {
+  local case_dir receipt
+  case_dir=$(make_case presentation-receipt)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  receipt="$case_dir/state/task-x1.pr-presentation"
+  cat > "$receipt" <<'EOF'
+firstmate-pr-presentation-v1
+pr=https://github.com/example/repo/pull/7
+presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  chmod 0600 "$receipt"
+  run_teardown "$case_dir" >/dev/null || fail 'teardown refused valid leftover presentation receipt'
+  assert_absent "$receipt" 'teardown left a validated presentation receipt orphaned'
+  pass 'teardown reconciles a validated leftover presentation receipt'
+}
+
+test_teardown_refuses_foreign_presentation_receipt() {
+  local case_dir receipt rc
+  case_dir=$(make_case presentation-foreign)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  receipt="$case_dir/state/task-x1.pr-presentation"
+  cat > "$receipt" <<'EOF'
+firstmate-pr-presentation-v1
+pr=https://github.com/example/repo/pull/8
+presented_pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  chmod 0600 "$receipt"
+  set +e; run_teardown "$case_dir" >/dev/null 2>"$case_dir/stderr"; rc=$?; set -e
+  expect_code 1 "$rc" 'foreign presentation receipt must fail closed'
+  assert_present "$receipt" 'foreign presentation receipt was removed'
+  assert_present "$case_dir/state/task-x1.meta" 'foreign presentation receipt allowed task cleanup'
+  pass 'teardown preserves task state on foreign presentation evidence'
+}
+
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   local case_dir out
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -1189,6 +1225,8 @@ test_projection_journal_retires_before_worktree_return() {
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_reconciles_consumed_presentation_receipt
+test_teardown_refuses_foreign_presentation_receipt
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_teardown_refuses_unsafe_tasktmp
 test_local_only_truly_unpushed_refuses

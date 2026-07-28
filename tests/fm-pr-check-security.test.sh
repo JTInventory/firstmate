@@ -3588,6 +3588,7 @@ test_scope_ledger_shadow_does_not_block_pr_watch() {
   "$ROOT/bin/fm-scope-contract.sh" append-brief "$spec" "$brief" no-mistakes
   printf '%s\n' firstmate-scope-contract-v1 > "$dir/home/data/task-a/scope-contract-enabled"
   cat > "$body" <<EOF
+## PR scope ledger (advisory)
 | ID | Status | Evidence | Residual risk |
 | AC-1 | violated | | |
 | ZZ-9 | covered | \$(touch "$marker") | none |
@@ -3662,7 +3663,7 @@ test_scope_ledger_body_fetch_is_bounded() {
   printf 'AC-1\tFeature behavior is proved.\nNG-1\tGlobal enforcement remains disabled.\n' > "$spec"
   "$ROOT/bin/fm-scope-contract.sh" append-brief "$spec" "$brief" no-mistakes
   printf '%s\n' firstmate-scope-contract-v1 > "$dir/home/data/task-a/scope-contract-enabled"
-  printf '| AC-1 | covered | proof | none |\n| NG-1 | out-of-scope | proof | none |\n' > "$body"
+  printf '## PR scope ledger (advisory)\n| AC-1 | covered | proof | none |\n| NG-1 | out-of-scope | proof | none |\n' > "$body"
 
   start=$(date +%s)
   set +e

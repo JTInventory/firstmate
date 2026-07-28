@@ -285,7 +285,7 @@ remove_grok_turnend_auth() {
 }
 
 validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
+  local state_dir=$1 id=$2 quarantine state_device artifact presentation has_artifact=0
   fm_task_id_path_safe "$id" || return 0
   quarantine="$state_dir/.pr-check-quarantine"
   if [ "$id" = _noncanonical ] \
@@ -299,6 +299,7 @@ validate_pr_poll_cleanup() {
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-replacement" \
+    "$state_dir/$id.pr-presentation" \
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
@@ -312,6 +313,7 @@ validate_pr_poll_cleanup() {
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-replacement" \
+    "$state_dir/$id.pr-presentation" \
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
@@ -321,6 +323,14 @@ validate_pr_poll_cleanup() {
       return 1
     fi
   done
+  presentation="$state_dir/$id.pr-presentation"
+  if [ -e "$presentation" ] || [ -L "$presentation" ]; then
+    fm_pr_presentation_parse "$presentation" \
+      && [ -n "$PR_URL" ] && [ "$FM_PR_PRESENTATION_URL" = "$PR_URL" ] || {
+        echo "REFUSED: invalid or foreign PR-presentation receipt; preserving task state." >&2
+        return 1
+      }
+  fi
   if [ -e "$state_dir/$id.pr-poll-retirement" ] \
     || [ -L "$state_dir/$id.pr-poll-retirement" ]; then
     fm_pr_poll_retirement_state_valid "$state_dir" "$id" || {
@@ -364,6 +374,7 @@ remove_pr_poll_artifacts() {
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-replacement" \
+    "$state_dir/$id.pr-presentation" \
     "$state_dir/$id.check-trust" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
