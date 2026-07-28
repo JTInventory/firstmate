@@ -1182,6 +1182,53 @@ EOF
   pass "a nested child secondmate home is judged against its own parent's scope, not the primary's"
 }
 
+test_secondmate_force_teardown_preflights_nested_home_ownership() {
+  local primary_home subhome nested fakebin log fmroot err
+  primary_home="$TMP_ROOT/nested-preflight-home"
+  subhome="$TMP_ROOT/nested-preflight-subhome"
+  nested="$TMP_ROOT/nested-preflight-child"
+  fmroot="$TMP_ROOT/nested-preflight-fmroot"
+  err="$TMP_ROOT/nested-preflight.err"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  git -C "$fmroot" worktree add --quiet --detach "$nested" HEAD
+  mkdir -p "$primary_home/state" "$primary_home/data" "$subhome/state" "$nested/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'child\n' > "$nested/.fm-secondmate-home"
+  fm_write_meta "$primary_home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  fm_write_meta "$subhome/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$nested" "project=$nested" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$nested" "projects=alpha"
+  fm_write_meta "$subhome/state/paused-child.meta" \
+    "window=firstmate:fm-paused-child" "worktree=$nested" "project=$nested" \
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$primary_home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$nested" child "$subhome" \
+    && fm_slot_stamp_write "$subhome" domain "$primary_home" ) \
+    || fail "the nested ownership-preflight fixture could not be stamped"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/nested-preflight-fake")
+  log="$TMP_ROOT/nested-preflight-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$primary_home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-preflight-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "force teardown mutated the tree before refusing contested nested ownership"
+  fi
+  [ -d "$subhome" ] && [ -d "$nested" ] \
+    || fail "nested ownership refusal removed a secondmate home"
+  [ -e "$primary_home/state/domain.meta" ] && [ -e "$subhome/state/child.meta" ] \
+    || fail "nested ownership refusal cleared lifecycle metadata"
+  grep -F 'kill-window' "$log" >/dev/null \
+    && fail "nested ownership refusal killed an endpoint before recursive preflight completed"
+  grep -F 'slot is also recorded by task(s) paused-child' "$err" >/dev/null \
+    || fail "nested ownership refusal did not report the contested pooled slot"
+  pass "force teardown recursively preflights every nested pooled-home owner before mutation"
+}
+
 test_secondmate_teardown_refuses_failed_leased_home_return() {
   local home subhome subhome_abs fakebin log fmroot err rc
   home="$TMP_ROOT/teardown-return-fail-home"
@@ -1960,6 +2007,7 @@ test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_home_referenced_by_another_task
 test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent
+test_secondmate_force_teardown_preflights_nested_home_ownership
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work

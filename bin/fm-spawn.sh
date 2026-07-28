@@ -237,6 +237,27 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_SLOT_CLAIM_CREATED=0
+SPAWN_SLOT_CLAIMED=0
+SPAWN_SLOT_CLAIM_PUBLISHED=0
+SPAWN_SLOT_CLAIM_WT=
+SPAWN_SLOT_CLAIM_HOME=
+
+claim_spawn_slot() {
+  local home
+  home=$(fm_agent_canonical_dir "$FM_HOME" 2>/dev/null || printf '%s' "$FM_HOME")
+  if ! fm_slot_stamp_write "$WT" "$ID" "$home"; then
+    if [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
+      fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 || true
+    fi
+    echo "error: could not claim pooled-slot ownership for $WT; refusing to publish task $ID" >&2
+    return 1
+  fi
+  SPAWN_SLOT_CLAIM_CREATED=${FM_SLOT_STAMP_CREATED:-0}
+  SPAWN_SLOT_CLAIMED=1
+  SPAWN_SLOT_CLAIM_WT=$WT
+  SPAWN_SLOT_CLAIM_HOME=$home
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -274,6 +295,13 @@ spawn_herdr_flat_uncertainty_record() {
 
 spawn_abort_cleanup() {
   local status=$? cleanup_session
+  if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
+    fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
+  fi
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] \
+     && [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
+    fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 || true
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -854,6 +882,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
+  claim_spawn_slot || exit 1
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
@@ -1401,6 +1430,7 @@ if [ "$KIND" != secondmate ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  claim_spawn_slot || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -1540,13 +1570,6 @@ if [ "$KIND" != secondmate ]; then
 fi
 
 mkdir -p "$STATE"
-# Record current ownership in the linked worktree's private git directory.
-# Metadata is historical; teardown uses this stamp as independent evidence.
-if ! fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")"; then
-  cleanup_spawn_window "$WID"
-  echo "error: could not claim pooled-slot ownership for $WT; refusing to publish task $ID" >&2
-  exit 1
-fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 {
@@ -1584,6 +1607,7 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   fi
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
+SPAWN_SLOT_CLAIM_PUBLISHED=1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
   if [ "$HERDR_LABEL_LOCK_HELD" = 1 ]; then

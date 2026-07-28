@@ -75,7 +75,7 @@ for meta in "$STATE"/*.meta; do
     [ -n "$expected_declared" ] || expected_declared=$recorded
     expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
   fi
-  task_declared=0
+  recorded_real=$(fm_agent_canonical_dir "$recorded") || recorded_real=$recorded
   conflict_identities=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
     -v t="$id" -v h="$expected_home" -v r="$role" \
     '$1 == t && ($2 != h || $3 != r) {print $2 "\t" $3}' | sort -u)
@@ -84,7 +84,10 @@ for meta in "$STATE"/*.meta; do
     conflict_pids=$(fm_agent_root_pids_for_identity "$id" "$conflict_home" "$conflict_role" "$PID_INDEX" 2>/dev/null || true)
     while IFS= read -r conflict_pid; do
       [ -n "$conflict_pid" ] || continue
-      task_declared=1
+      conflict_cwd=$(fm_agent_proc_cwd "$conflict_pid" 2>/dev/null || true)
+      [ -n "$conflict_cwd" ] || continue
+      conflict_cwd_real=$(fm_agent_canonical_dir "$conflict_cwd") || conflict_cwd_real=$conflict_cwd
+      fm_agent_path_within "$recorded_real" "$conflict_cwd_real" || continue
       echo "ISOLATION: task $id has conflicting worker identity at process $conflict_pid: home=$conflict_home role=$conflict_role, expected home=$expected_home role=$role; stop it before it acts on either home's records"
     done <<EOF
 $conflict_pids
@@ -93,12 +96,7 @@ EOF
 $conflict_identities
 EOF
   pids=$(fm_agent_root_pids_for_identity "$id" "$expected_home" "$role" "$PID_INDEX" 2>/dev/null || true)
-  [ -z "$pids" ] || task_declared=1
-  if printf '%s\n' "$PID_INDEX" | awk -F'\t' -v t="$id" '$1 == t {found=1} END {exit !found}'; then
-    task_declared=1
-  fi
   if [ -z "$pids" ]; then
-    [ "$task_declared" = 0 ] || continue
     record=$(fm_agent_cwd_verdict "" "" "" "$backend" "$target" "$PID_INDEX")
     if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
       pids=$(fm_agent_verdict_field "$record" pid)
@@ -110,7 +108,6 @@ EOF
     fi
   fi
 
-  recorded_real=$(fm_agent_canonical_dir "$recorded") || recorded_real=$recorded
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)

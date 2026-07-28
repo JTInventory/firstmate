@@ -162,7 +162,12 @@ case "${1:-}" in
     esac
     exit 0
     ;;
-  has-session|new-session|kill-window) exit 0 ;;
+  has-session|new-session) exit 0 ;;
+  kill-window)
+    [ -z "${FM_FAKE_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_KILL_LOG"
+    : > "$FAKE_TMUX_STATE"
+    exit 0
+    ;;
   new-window)
     name=
     prev=
@@ -534,8 +539,9 @@ $1
 EOF
 }
 
-slot_verdict() {  # <state> <id> <wt> <home>
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_disposal_verdict "$@" )
+slot_verdict() {  # <state> <id> <wt> <home> [role]
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${5:-crewmate}" )
 }
 
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
@@ -632,6 +638,30 @@ test_a_live_agent_of_another_task_retains_the_slot() {
     *) fail "a slot occupied by another task's live agent did not retain: $verdict" ;;
   esac
   pass "a slot occupied by another task's live agent retains its lease"
+}
+
+test_same_task_in_another_home_or_role_retains_the_slot() {
+  local rec verdict id
+  require_procfs || { pass "skip: this host has no readable procfs for identity occupancy proof"; return 0; }
+  rec=$(make_slot_world slot-same-task-foreign-identity)
+  read_slot_world "$rec"
+  id="same-task-e9-$RUN_TAG"
+  start_declared_agent "$WT_DIR" "$id" "$WORLD/other-home" crewmate >/dev/null
+  verdict=$(slot_verdict "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: a live agent for task(s) $id"*) ;;
+    *) fail "same task in another home did not retain the slot: $verdict" ;;
+  esac
+  rec=$(make_slot_world slot-same-task-foreign-role)
+  read_slot_world "$rec"
+  id="same-task-role-e9-$RUN_TAG"
+  start_declared_agent "$WT_DIR" "$id" "$WORLD/home" secondmate >/dev/null
+  verdict=$(slot_verdict "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home" crewmate)
+  case "$verdict" in
+    "retain: a live agent for task(s) $id"*) ;;
+    *) fail "same task and home with another role did not retain the slot: $verdict" ;;
+  esac
+  pass "live slot occupancy excludes only the exact task, home, and role identity"
 }
 
 test_a_relinquished_slot_is_releasable_by_its_remaining_holder() {
@@ -835,6 +865,98 @@ test_sweep_reports_an_agent_declared_for_another_home() {
   pass "the resume sweep reports an agent that declares another home as its owner"
 }
 
+test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id() {
+  local world out id unrelated
+  require_procfs || { pass "skip: this host has no readable procfs for same-id isolation proof"; return 0; }
+  world=$(make_sweep_home sweep-unrelated-same-id)
+  unrelated="$world/unrelated"
+  mkdir -p "$unrelated" "$world/other-home"
+  id="task-f9-$RUN_TAG"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  start_declared_agent "$unrelated" "$id" "$world/other-home" secondmate >/dev/null
+  out=$(run_sweep "$world")
+  [ -z "$out" ] || fail "the sweep attached an unrelated complete identity to this record: $out"
+  out=$(FM_ISOLATION_VERBOSE=1 run_sweep "$world")
+  assert_contains "$out" "isolation for $id is unproven" \
+    "an unrelated same-id identity suppressed conservative provider fallback"
+  pass "the resume sweep preserves complete identity and ignores unrelated same-id agents"
+}
+
+test_spawn_claim_abort_clears_only_a_new_exact_claim() {
+  local rec id out status home_real stamp
+  id="claim-abort-g1-$RUN_TAG"
+  rec=$(make_launch_case claim-abort "$id")
+  read_launch_record "$rec"
+  cat > "$FAKEBIN_DIR/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *".meta."*) exit 1 ;; esac
+exec /usr/bin/mktemp "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/mktemp"
+  : > "$CASE_DIR/kill.log"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" FM_FAKE_KILL_LOG="$CASE_DIR/kill.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
+  status=$?
+  expect_code 1 "$status" "spawn should abort when metadata publication cannot start"
+  if stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task 2>/dev/null); then
+    fail "an aborted spawn left its newly-created claim behind: $stamp"
+  fi
+  assert_grep 'kill-window' "$CASE_DIR/kill.log" "aborted spawn did not close its new endpoint"
+
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_write "$WT_DIR" "$id" "$home_real" ) \
+    || fail "could not install the preexisting exact claim fixture"
+  : > "$CASE_DIR/kill.log"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" FM_FAKE_KILL_LOG="$CASE_DIR/kill.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
+  status=$?
+  expect_code 1 "$status" "idempotent-claim spawn should reach the metadata abort"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
+  [ "$stamp" = "$id" ] || fail "abort cleared a preexisting idempotent claim"
+  pass "spawn abort clears only a claim newly created by that invocation"
+}
+
+test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
+  local rec id out status stamp exclude
+  id="foreign-claim-g2-$RUN_TAG"
+  rec=$(make_launch_case foreign-claim "$id")
+  read_launch_record "$rec"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" foreign-g2 "$CASE_DIR/foreign-home" ) \
+    || fail "could not install foreign claim fixture"
+  : > "$CASE_DIR/kill.log"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" FM_FAKE_KILL_LOG="$CASE_DIR/kill.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
+  status=$?
+  expect_code 1 "$status" "spawn must refuse a foreign slot claim"
+  assert_contains "$out" "could not claim pooled-slot ownership" "foreign claim refusal lost its reason"
+  [ ! -e "$WT_DIR/.claude/settings.local.json" ] || fail "spawn mutated hooks before refusing the foreign claim"
+  exclude=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  ! grep -qxF '.claude/settings.local.json' "$exclude" 2>/dev/null \
+    || fail "spawn mutated the slot exclude file before refusing the foreign claim"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
+  [ "$stamp" = foreign-g2 ] || fail "foreign claim was cleared or replaced"
+  assert_grep 'kill-window' "$CASE_DIR/kill.log" "foreign claim refusal did not close the new endpoint"
+  pass "spawn claims immediately and a foreign owner leaves the contested slot untouched"
+}
+
 test_sweep_is_silent_for_a_healthy_secondmate() {
   # A secondmate is deliberately launched declaring its OWN home while its
   # record lives in the launching primary's state directory. Judging that
@@ -922,6 +1044,7 @@ test_clean_ownership_disposes
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot
+test_same_task_in_another_home_or_role_retains_the_slot
 test_a_relinquished_slot_is_releasable_by_its_remaining_holder
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks
 test_teardown_retires_a_contested_lease_even_with_force
@@ -929,9 +1052,12 @@ test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence
 test_sweep_reports_an_agent_declared_for_another_home
+test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id
 test_sweep_is_silent_for_a_healthy_secondmate
 test_sweep_still_reports_a_secondmate_running_for_a_foreign_home
 test_sweep_evaluates_every_matching_root_process
 test_sweep_reports_a_worker_declared_with_the_wrong_role
+test_spawn_claim_abort_clears_only_a_new_exact_claim
+test_spawn_refuses_a_foreign_claim_before_slot_mutation
 
 echo "# all fm-worker-isolation tests passed"
