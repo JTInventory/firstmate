@@ -78,7 +78,7 @@ append_brief() {
     printf '```\n'
     if [ "$mode" != local-only ]; then
       printf '\n# PR scope ledger (advisory)\n'
-      printf 'Include one PR-body table row per AC/NG identifier using `| ID | Status | Evidence | Residual risk |`.\n'
+      printf 'Include one contiguous PR-body table row per AC/NG identifier using `| ID | Status | Evidence | Residual risk |` followed by `| --- | --- | --- | --- |`.\n'
       printf 'Status must be exactly `covered`, `not-applicable`, or `out-of-scope`; use `none` when no residual risk remains.\n'
       printf 'This ledger is advisory during the pilot: omissions stay visible but never block PR publication or merge.\n'
     fi
@@ -153,6 +153,48 @@ audit_body() {
       fields[count]=value
       return count
     }
+    function parse_table_row(line, fields,    indent, count) {
+      indent=0
+      while (indent < length(line) && substr(line, indent + 1, 1) == " ") indent++
+      if (indent > 3 || substr(line, indent + 1, 1) == "\t") return 0
+      count=split_markdown_row(substr(line, indent + 1), fields)
+      return count == 6 && trim(fields[1]) == "" && trim(fields[6]) == ""
+    }
+    function is_table_header(fields) {
+      return trim(fields[2]) == "ID" \
+        && trim(fields[3]) == "Status" \
+        && trim(fields[4]) == "Evidence" \
+        && trim(fields[5]) == "Residual risk"
+    }
+    function is_separator_cell(value) {
+      value=trim(value)
+      sub(/^:/, "", value)
+      sub(/:$/, "", value)
+      return value ~ /^-+$/
+    }
+    function is_table_separator(fields,    i) {
+      for (i=2; i<=5; i++) if (!is_separator_cell(fields[i])) return 0
+      return 1
+    }
+    function markdown_indent(line,    indent) {
+      indent=0
+      while (indent < length(line) && substr(line, indent + 1, 1) == " ") indent++
+      return indent
+    }
+    function is_scope_heading(line,    indent) {
+      indent=markdown_indent(line)
+      if (indent > 3) return 0
+      return substr(line, indent + 1) ~ /^#{1,6}[[:space:]]+PR scope ledger \(advisory\)[[:space:]]*$/
+    }
+    function is_heading(line,    indent) {
+      indent=markdown_indent(line)
+      if (indent > 3) return 0
+      return substr(line, indent + 1) ~ /^#{1,6}[[:space:]]+/
+    }
+    function stop_ledger() {
+      ledger=0
+      table_state=0
+    }
     function parse_fence(line, closing,    indent, marker, rest, run) {
       indent=0
       while (indent < length(line) && substr(line, indent + 1, 1) == " ") indent++
@@ -176,24 +218,42 @@ audit_body() {
       }
       next
     }
-    /<!--/ { commented=1 }
+    /<!--/ { if (ledger) stop_ledger(); commented=1 }
     commented { if ($0 ~ /-->/) commented=0; next }
     parse_fence($0, 0) {
+      if (ledger) stop_ledger()
       fenced=1
       fence_marker=fence_candidate_marker
       fence_length=fence_candidate_length
       next
     }
-    !fenced && /^#{1,6}[[:space:]]+PR scope ledger \(advisory\)[[:space:]]*$/ { headings++; ledger=1; next }
-    ledger && /^#{1,6}[[:space:]]+/ { ledger=0; next }
-    ledger && !fenced && split_markdown_row($0, field) >= 5 {
-      id=trim(field[2]); status=trim(field[3]); evidence=trim(field[4]); risk=trim(field[5])
-      if (id !~ /^[A-Z][A-Z0-9]*-[0-9]+$/) next
-      count[id]++
-      if (!(id in expected)) print "scope-ledger-finding\tunknown\t" id
-      if (status != "covered" && status != "not-applicable" && status != "out-of-scope") print "scope-ledger-finding\tinvalid-status\t" id
-      if (evidence == "" || evidence ~ /^\{[^}]+\}$/) print "scope-ledger-finding\tempty-evidence\t" id
-      if (risk == "" || risk ~ /^\{[^}]+\}$/) print "scope-ledger-finding\tempty-residual-risk\t" id
+    is_scope_heading($0) { headings++; ledger=1; table_state=1; next }
+    ledger && is_heading($0) { stop_ledger(); next }
+    ledger {
+      if (table_state == 1) {
+        if (trim($0) == "") next
+        if (parse_table_row($0, field) && is_table_header(field)) table_state=2
+        else stop_ledger()
+        next
+      }
+      if (table_state == 2) {
+        if (parse_table_row($0, field) && is_table_separator(field)) table_state=3
+        else stop_ledger()
+        next
+      }
+      if (table_state == 3) {
+        if (!parse_table_row($0, field)) {
+          stop_ledger()
+          next
+        }
+        id=trim(field[2]); status=trim(field[3]); evidence=trim(field[4]); risk=trim(field[5])
+        if (id !~ /^[A-Z][A-Z0-9]*-[0-9]+$/) next
+        count[id]++
+        if (!(id in expected)) print "scope-ledger-finding\tunknown\t" id
+        if (status != "covered" && status != "not-applicable" && status != "out-of-scope") print "scope-ledger-finding\tinvalid-status\t" id
+        if (evidence == "" || evidence ~ /^\{[^}]+\}$/) print "scope-ledger-finding\tempty-evidence\t" id
+        if (risk == "" || risk ~ /^\{[^}]+\}$/) print "scope-ledger-finding\tempty-residual-risk\t" id
+      }
     }
     END {
       if (headings > 1) print "scope-ledger-finding\tduplicate-heading\tPR-scope-ledger"
