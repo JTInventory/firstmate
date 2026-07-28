@@ -153,9 +153,37 @@ audit_body() {
       fields[count]=value
       return count
     }
-    /^(```|~~~)/ { fenced=!fenced; next }
+    function parse_fence(line, closing,    indent, marker, rest, run) {
+      indent=0
+      while (indent < length(line) && substr(line, indent + 1, 1) == " ") indent++
+      if (indent > 3) return 0
+      rest=substr(line, indent + 1)
+      marker=substr(rest, 1, 1)
+      if (marker != "`" && marker != "~") return 0
+      run=0
+      while (substr(rest, run + 1, 1) == marker) run++
+      if (run < 3) return 0
+      fence_tail=substr(rest, run + 1)
+      if (closing && fence_tail !~ /^[[:space:]]*$/) return 0
+      if (!closing && marker == "`" && fence_tail ~ /`/) return 0
+      fence_candidate_marker=marker
+      fence_candidate_length=run
+      return 1
+    }
+    fenced {
+      if (parse_fence($0, 1) && fence_candidate_marker == fence_marker && fence_candidate_length >= fence_length) {
+        fenced=0
+      }
+      next
+    }
     /<!--/ { commented=1 }
     commented { if ($0 ~ /-->/) commented=0; next }
+    parse_fence($0, 0) {
+      fenced=1
+      fence_marker=fence_candidate_marker
+      fence_length=fence_candidate_length
+      next
+    }
     !fenced && /^#{1,6}[[:space:]]+PR scope ledger \(advisory\)[[:space:]]*$/ { headings++; ledger=1; next }
     ledger && /^#{1,6}[[:space:]]+/ { ledger=0; next }
     ledger && !fenced && split_markdown_row($0, field) >= 5 {

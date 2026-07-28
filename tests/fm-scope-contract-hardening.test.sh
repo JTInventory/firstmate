@@ -67,6 +67,22 @@ test_fenced_heading_cannot_authorize_rows() {
   pass 'backtick and tilde fenced headings cannot authorize ledger rows'
 }
 
+test_fence_delimiter_length_and_indentation_are_respected() {
+  cat > "$TMP/body.md" <<'EOF'
+   ````md
+```
+~~~
+## PR scope ledger (advisory)
+| AC-1 | covered | fake | none |
+| NG-1 | out-of-scope | fake | none |
+   ````
+EOF
+  out=$("$SCRIPT" audit-body "$TMP/brief.md" "$TMP/body.md")
+  printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tAC-1' || fail 'mismatched or short fence close exposed AC-1'
+  printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tNG-1' || fail 'mismatched or short fence close exposed NG-1'
+  pass 'fence closing matches the opening delimiter, length, and indentation'
+}
+
 test_marker_rejects_nul_and_symlink_destination() {
   printf 'firstmate-scope-contract-v1\n\0suffix' > "$TMP/bad-marker"
   ! "$SCRIPT" validate-marker "$TMP/bad-marker" >/dev/null 2>&1 || fail 'NUL marker was accepted'
@@ -81,4 +97,5 @@ test_visible_uniquely_headed_ledger_only
 test_code_and_comment_rows_cannot_fake_completion
 test_duplicate_ledger_heading_is_visible
 test_fenced_heading_cannot_authorize_rows
+test_fence_delimiter_length_and_indentation_are_respected
 test_marker_rejects_nul_and_symlink_destination
