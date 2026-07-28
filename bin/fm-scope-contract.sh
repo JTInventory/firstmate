@@ -195,6 +195,26 @@ audit_body() {
       ledger=0
       table_state=0
     }
+    function starts_raw_html(line,    indent, text, lower) {
+      indent=markdown_indent(line)
+      if (indent > 3) return 0
+      text=substr(line, indent + 1)
+      lower=tolower(text)
+      raw_html_end=""
+      raw_html_blank=0
+      if (lower ~ /^<script([[:space:]>]|$)/) raw_html_end="</script>"
+      else if (lower ~ /^<pre([[:space:]>]|$)/) raw_html_end="</pre>"
+      else if (lower ~ /^<style([[:space:]>]|$)/) raw_html_end="</style>"
+      else if (lower ~ /^<textarea([[:space:]>]|$)/) raw_html_end="</textarea>"
+      else if (substr(text, 1, 4) == "<!--") raw_html_end="-->"
+      else if (substr(text, 1, 2) == "<?") raw_html_end="?>"
+      else if (text ~ /^<![A-Z]/) raw_html_end=">"
+      else if (substr(text, 1, 9) == "<![CDATA[") raw_html_end="]]>"
+      else if (lower ~ /^<\/?(address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)([[:space:]>/]|$)/) raw_html_blank=1
+      else if (text ~ /^<\/?[A-Za-z][A-Za-z0-9-]*([[:space:]>/])/ && text ~ />[[:space:]]*$/) raw_html_blank=1
+      else return 0
+      return 1
+    }
     function parse_fence(line, closing,    indent, marker, rest, run) {
       indent=0
       while (indent < length(line) && substr(line, indent + 1, 1) == " ") indent++
@@ -218,8 +238,19 @@ audit_body() {
       }
       next
     }
-    /<!--/ { if (ledger) stop_ledger(); commented=1 }
-    commented { if ($0 ~ /-->/) commented=0; next }
+    raw_html {
+      if (raw_html_blank) {
+        if (trim($0) == "") raw_html=0
+      } else if (index(tolower($0), raw_html_end)) {
+        raw_html=0
+      }
+      next
+    }
+    starts_raw_html($0) {
+      if (ledger) stop_ledger()
+      if (raw_html_blank || !index(tolower($0), raw_html_end)) raw_html=1
+      next
+    }
     parse_fence($0, 0) {
       if (ledger) stop_ledger()
       fenced=1

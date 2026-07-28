@@ -118,6 +118,40 @@ EOF
   pass 'table separator cells require at least three hyphens'
 }
 
+test_raw_html_blocks_cannot_fake_completion() {
+  for wrapper in script pre div; do
+    {
+      printf '<%s>\n' "$wrapper"
+      printf '%s\n' '## PR scope ledger (advisory)'
+      printf '%s\n' '| ID | Status | Evidence | Residual risk |'
+      printf '%s\n' '| --- | --- | --- | --- |'
+      printf '%s\n' '| AC-1 | covered | fake | none |'
+      printf '%s\n' '| NG-1 | out-of-scope | fake | none |'
+      printf '</%s>\n' "$wrapper"
+    } > "$TMP/body.md"
+    out=$("$SCRIPT" audit-body "$TMP/brief.md" "$TMP/body.md")
+    printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tAC-1' || fail "raw $wrapper block satisfied AC-1"
+    printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tNG-1' || fail "raw $wrapper block satisfied NG-1"
+  done
+  pass 'raw HTML blocks cannot satisfy the ledger'
+}
+
+test_visible_ledger_after_raw_html_block_counts() {
+  cat > "$TMP/body.md" <<'EOF'
+<script>
+## PR scope ledger (advisory)
+</script>
+## PR scope ledger (advisory)
+| ID | Status | Evidence | Residual risk |
+| --- | --- | --- | --- |
+| AC-1 | covered | test proof | none |
+| NG-1 | out-of-scope | scope boundary | none |
+EOF
+  out=$("$SCRIPT" audit-body "$TMP/brief.md" "$TMP/body.md")
+  [ "$out" = $'scope-ledger\tpass\tfindings=0' ] || fail "visible ledger after raw HTML did not pass: $out"
+  pass 'ledger parsing resumes after a closed raw HTML block'
+}
+
 test_marker_rejects_nul_and_symlink_destination() {
   printf 'firstmate-scope-contract-v1\n\0suffix' > "$TMP/bad-marker"
   ! "$SCRIPT" validate-marker "$TMP/bad-marker" >/dev/null 2>&1 || fail 'NUL marker was accepted'
@@ -135,4 +169,6 @@ test_fenced_heading_cannot_authorize_rows
 test_fence_delimiter_length_and_indentation_are_respected
 test_only_contiguous_table_rows_satisfy_the_ledger
 test_separator_cells_require_three_hyphens
+test_raw_html_blocks_cannot_fake_completion
+test_visible_ledger_after_raw_html_block_counts
 test_marker_rejects_nul_and_symlink_destination
