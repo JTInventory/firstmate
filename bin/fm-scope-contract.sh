@@ -195,6 +195,42 @@ audit_body() {
       ledger=0
       table_state=0
     }
+    function strip_html_comments(line,    result, start, ending, hidden) {
+      comment_touched=0
+      comment_has_pipe=0
+      comment_cross_line=html_comment
+      result=""
+      if (html_comment) {
+        comment_touched=1
+        ending=index(line, "-->")
+        if (!ending) {
+          if (index(line, "|")) comment_has_pipe=1
+          stripped_line=""
+          return 0
+        }
+        hidden=substr(line, 1, ending + 2)
+        if (index(hidden, "|")) comment_has_pipe=1
+        line=substr(line, ending + 3)
+        html_comment=0
+      }
+      while ((start=index(line, "<!--")) > 0) {
+        comment_touched=1
+        result=result substr(line, 1, start - 1)
+        line=substr(line, start + 4)
+        ending=index(line, "-->")
+        if (!ending) {
+          if (index(line, "|")) comment_has_pipe=1
+          html_comment=1
+          stripped_line=result
+          return 0
+        }
+        hidden=substr(line, 1, ending - 1)
+        if (index(hidden, "|")) comment_has_pipe=1
+        line=substr(line, ending + 3)
+      }
+      stripped_line=result line
+      return !comment_cross_line
+    }
     function starts_raw_html(line,    indent, text, lower) {
       indent=markdown_indent(line)
       if (indent > 3) return 0
@@ -206,7 +242,6 @@ audit_body() {
       else if (lower ~ /^<pre([[:space:]>]|$)/) raw_html_end="</pre>"
       else if (lower ~ /^<style([[:space:]>]|$)/) raw_html_end="</style>"
       else if (lower ~ /^<textarea([[:space:]>]|$)/) raw_html_end="</textarea>"
-      else if (substr(text, 1, 4) == "<!--") raw_html_end="-->"
       else if (substr(text, 1, 2) == "<?") raw_html_end="?>"
       else if (text ~ /^<![A-Z]/) raw_html_end=">"
       else if (substr(text, 1, 9) == "<![CDATA[") raw_html_end="]]>"
@@ -246,6 +281,13 @@ audit_body() {
       }
       next
     }
+    {
+      if (!strip_html_comments($0)) {
+        if (ledger) stop_ledger()
+        next
+      }
+      $0=stripped_line
+    }
     starts_raw_html($0) {
       if (ledger) stop_ledger()
       if (raw_html_blank || !index(tolower($0), raw_html_end)) raw_html=1
@@ -258,22 +300,22 @@ audit_body() {
       fence_length=fence_candidate_length
       next
     }
-    is_scope_heading($0) { headings++; ledger=1; table_state=1; next }
+    !comment_touched && is_scope_heading($0) { headings++; ledger=1; table_state=1; next }
     ledger && is_heading($0) { stop_ledger(); next }
     ledger {
       if (table_state == 1) {
         if (trim($0) == "") next
-        if (parse_table_row($0, field) && is_table_header(field)) table_state=2
+        if (!comment_touched && parse_table_row($0, field) && is_table_header(field)) table_state=2
         else stop_ledger()
         next
       }
       if (table_state == 2) {
-        if (parse_table_row($0, field) && is_table_separator(field)) table_state=3
+        if (!comment_touched && parse_table_row($0, field) && is_table_separator(field)) table_state=3
         else stop_ledger()
         next
       }
       if (table_state == 3) {
-        if (!parse_table_row($0, field)) {
+        if (comment_has_pipe || !parse_table_row($0, field)) {
           stop_ledger()
           next
         }

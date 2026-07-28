@@ -152,6 +152,35 @@ EOF
   pass 'ledger parsing resumes after a closed raw HTML block'
 }
 
+test_inline_comments_cannot_supply_evidence() {
+  cat > "$TMP/body.md" <<'EOF'
+## PR scope ledger (advisory)
+| ID | Status | Evidence | Residual risk |
+| --- | --- | --- | --- |
+| AC-1 | covered | <!-- hidden --> | none |
+| NG-1 | out-of-scope | scope boundary | none |
+EOF
+  out=$("$SCRIPT" audit-body "$TMP/brief.md" "$TMP/body.md")
+  printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tempty-evidence\tAC-1' || fail 'inline comment supplied visible evidence'
+  pass 'inline comments are removed before ledger cell validation'
+}
+
+test_multiline_inline_comments_hide_ledger_structure() {
+  cat > "$TMP/body.md" <<'EOF'
+intro <!--
+## PR scope ledger (advisory)
+| ID | Status | Evidence | Residual risk |
+| --- | --- | --- | --- |
+| AC-1 | covered | fake | none |
+| NG-1 | out-of-scope | fake | none |
+-->
+EOF
+  out=$("$SCRIPT" audit-body "$TMP/brief.md" "$TMP/body.md")
+  printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tAC-1' || fail 'multiline comment exposed AC-1'
+  printf '%s\n' "$out" | grep -q $'scope-ledger-finding\tmissing\tNG-1' || fail 'multiline comment exposed NG-1'
+  pass 'multiline inline comments cannot expose hidden ledger structure'
+}
+
 test_marker_rejects_nul_and_symlink_destination() {
   printf 'firstmate-scope-contract-v1\n\0suffix' > "$TMP/bad-marker"
   ! "$SCRIPT" validate-marker "$TMP/bad-marker" >/dev/null 2>&1 || fail 'NUL marker was accepted'
@@ -171,4 +200,6 @@ test_only_contiguous_table_rows_satisfy_the_ledger
 test_separator_cells_require_three_hyphens
 test_raw_html_blocks_cannot_fake_completion
 test_visible_ledger_after_raw_html_block_counts
+test_inline_comments_cannot_supply_evidence
+test_multiline_inline_comments_hide_ledger_structure
 test_marker_rejects_nul_and_symlink_destination
