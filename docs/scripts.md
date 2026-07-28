@@ -21,6 +21,11 @@ Each file also starts with a short header comment.
 | `fm-test-run.sh`         | Serial behavior-test runner: selection, timing markers, family totals, JSON artifact |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
+| `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
+| `fm-worker-isolation-lib.sh` | Launched-agent home declarations and declared task-worker refusals                  |
+| `fm-agent-cwd-lib.sh`    | Authoritative agent-process cwd and provider process-id capability matrix             |
+| `fm-slot-owner-lib.sh`   | Pooled-worktree ownership evidence and release-or-retain verdict                      |
+| `fm-isolation-sweep.sh`  | Read-only restore-time isolation recheck; prints proven `ISOLATION:` findings        |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
