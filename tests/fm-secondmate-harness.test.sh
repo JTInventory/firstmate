@@ -25,6 +25,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 
@@ -227,11 +229,18 @@ SH
 # seed marker, AGENTS.md, bin/, and a charter to launch). config/ is intentionally
 # left absent so the spawn's propagation is what creates it.
 make_seeded_home() {
-  local home=$1 id=$2
-  mkdir -p "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
+  local home=$1 id=$2 seed
+  seed="${home}.seed"
+  git init -q -b main "$seed"
+  mkdir -p "$seed/bin" "$seed/data"
+  printf '# Firstmate\n' > "$seed/AGENTS.md"
+  printf '#!/usr/bin/env bash\n' > "$seed/bin/fm-bootstrap.sh"
+  printf 'charter\n' > "$seed/data/charter.md"
+  printf 'config/\ndata/\nstate/\n.fm-secondmate-home\n' > "$seed/.gitignore"
+  git -C "$seed" add -A
+  git -C "$seed" commit -qm seeded-home
+  git -C "$seed" worktree add -q --detach "$home" HEAD
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
-  printf 'charter\n' > "$home/data/charter.md"
 }
 
 # spawn_secondmate <world> <id> <home> [explicit-harness] [extra fm-spawn args...]
@@ -246,7 +255,8 @@ spawn_secondmate() {
     harness=$1
     shift
   fi
-  mkdir -p "$world/home/state" "$world/home/data"
+  mkdir -p "$world/home/state" "$world/home/data/$id"
+  printf 'secondmate fixture\n' > "$world/home/data/$id/brief.md"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
@@ -407,9 +417,10 @@ test_spawn_invalid_secondmate_profile_refused() {
   local w sm fakebin err rc
   w="$TMP_ROOT/spawn-profile-invalid"
   sm="$w/sm"
-  mkdir -p "$w/home/config" "$w/home/state"
+  mkdir -p "$w/home/config" "$w/home/state" "$w/home/data/sm"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf '{"model":"gpt-5.5","effort":"turbo"}\n' > "$w/home/config/secondmate-profile.json"
+  printf 'secondmate fixture\n' > "$w/home/data/sm/brief.md"
   make_seeded_home "$sm" sm
   fakebin=$(make_noop_tmux "$w/tmux")
   err="$w/spawn.err"
@@ -434,8 +445,9 @@ test_spawn_unverified_secondmate_harness_refused() {
   local w sm fakebin err rc
   w="$TMP_ROOT/spawn-unverified"
   sm="$w/sm"
-  mkdir -p "$w/home/config" "$w/home/state"
+  mkdir -p "$w/home/config" "$w/home/state" "$w/home/data/sm"
   printf 'bogus\n' > "$w/home/config/secondmate-harness"
+  printf 'secondmate fixture\n' > "$w/home/data/sm/brief.md"
   make_seeded_home "$sm" sm
   fakebin=$(make_noop_tmux "$w/tmux")
   err="$w/spawn.err"
@@ -493,7 +505,10 @@ add_sm_worktree() {
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
     printf 'home=%s/%s\n' "$w" "$id"
+    printf 'task=%s\n' "$id"
+    printf 'endpoint_generation=endpoint-%s\n' "$id"
   } > "$w/home/state/$id.meta"
 }
 
@@ -735,10 +750,6 @@ test_config_push_propagates_reports_without_ff_and_sends_reread() {
   add_sm_worktree "$w" sm "$c1"
   sm_real=$(cd "$w/sm" && pwd -P)
   printf -- '- sm - config push target (home: %s; scope: config; projects: alpha; added 2026-06-30)\n' "$sm_real" > "$w/home/data/secondmates.md"
-  tmp="$w/home/state/sm.meta.tmp"
-  grep -v '^home=' "$w/home/state/sm.meta" > "$tmp"
-  mv "$tmp" "$w/home/state/sm.meta"
-
   printf 'v2\n' > "$w/main/AGENTS.md"
   git -C "$w/main" add AGENTS.md
   git -C "$w/main" commit -qm c2
@@ -754,7 +765,7 @@ test_config_push_propagates_reports_without_ff_and_sends_reread() {
   assert_contains "$out" "config-push: $w/home/config -> live secondmate homes" \
     "config push lacked the header"
   assert_contains "$out" "secondmate sm ($sm_real):" \
-    "config push did not discover the live secondmate through registry fallback"
+    "config push did not discover the strict live secondmate record"
   assert_contains "$out" "crew-dispatch.json: pushed" \
     "config push did not report crew-dispatch as pushed"
   assert_contains "$out" "crew-harness: pushed" \
@@ -820,12 +831,13 @@ test_config_push_reports_skips_dirty_and_invalid_home() {
     "config push did not report stale home"
   assert_contains "$out" "crew-dispatch.json: skipped - destination does not allow inherited item" \
     "config push did not report non-allowing item skip"
-  assert_contains "$out" "secondmate bad ($bad_home): skipped - unsafe home: not a seeded secondmate home" \
-    "config push did not report invalid secondmate home"
+  assert_not_contains "$out" "secondmate bad (" \
+    "config push resolved an incomplete lifecycle record"
+  [ -d "$bad_home" ] || fail "config push mutated an incomplete lifecycle record's home"
   err_text=$(cat "$err")
   assert_contains "$err_text" "fm-config-inherit: warning: skipped crew-dispatch.json" \
     "config push did not inherit the lib's skip stderr warning"
-  pass "B13 config-push reports dirty, non-allowing, and invalid homes without failing warnings-only runs"
+  pass "B13 config-push reports warnings and refuses incomplete lifecycle records"
 }
 
 test_config_push_exits_nonzero_on_copy_error() {
@@ -851,6 +863,46 @@ test_config_push_exits_nonzero_on_copy_error() {
   pass "B14 config-push exits nonzero on real propagation errors"
 }
 
+test_config_push_respects_secondmate_lifecycle_lock() {
+  local w head lock out status
+  w=$(new_world config-push-lifecycle-lock)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  lock="$w/sm/state/.spawn-admission.lock"
+  mkdir -p "$w/sm/state"
+  fm_lock_try_acquire "$lock" || fail "could not hold config-push lifecycle fixture lock"
+  set +e
+  out=$(run_config_push "$w" 2>&1)
+  status=$?
+  set -e
+  fm_lock_release "$lock"
+  [ "$status" -ne 0 ] || fail "config push crossed an active lifecycle lock"
+  [ ! -e "$w/sm/config/crew-harness" ] \
+    || fail "config push mutated a lifecycle-locked home"
+  assert_contains "$out" "lifecycle identity changed or lock is busy" \
+    "config push did not report its lifecycle refusal"
+  pass "B15 config-push holds the secondmate lifecycle boundary"
+}
+
+test_bootstrap_liveness_refuses_ambiguous_provider_identity() {
+  local w head before out after
+  w=$(new_world bootstrap-ambiguous-provider)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  printf 'backend=tmux\nbackend=herdr\n' >> "$w/home/state/sm.meta"
+  before=$(git hash-object "$w/home/state/sm.meta")
+
+  out=$(run_bootstrap "$w")
+  after=$(git hash-object "$w/home/state/sm.meta")
+
+  [ "$after" = "$before" ] \
+    || fail "ambiguous liveness metadata was killed or respawned"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm: refused:" \
+    "ambiguous liveness metadata did not refuse before endpoint resolution"
+  pass "B16 bootstrap liveness refuses ambiguous provider identity"
+}
+
 test_harness_resolution
 test_propagate_lib
 test_spawn_split_and_inherit
@@ -870,5 +922,7 @@ test_bootstrap_sweep_surfaces_config_propagation_failure
 test_config_push_propagates_reports_without_ff_and_sends_reread
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
+test_config_push_respects_secondmate_lifecycle_lock
+test_bootstrap_liveness_refuses_ambiguous_provider_identity
 
 echo "# all fm-secondmate-harness tests passed"

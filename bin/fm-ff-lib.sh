@@ -351,15 +351,26 @@ secondmate_registry_field() {
 FM_SECONDMATE_META_HOME=
 FM_SECONDMATE_META_WINDOW=
 FM_SECONDMATE_META_ENDPOINT_GENERATION=
+FM_SECONDMATE_META_HARNESS=
+FM_SECONDMATE_META_BACKEND=
+FM_SECONDMATE_META_TARGET=
+FM_SECONDMATE_META_PROVIDER_IDENTITY=
 FM_SECONDMATE_META_ERROR=
 
 fm_secondmate_lifecycle_meta_read() {
   local meta=$1 expected_id=$2 line key value
   local kind_count=0 home_count=0 task_count=0 window_count=0 generation_count=0
-  local kind= home= task= window= generation=
+  local harness_count=0 backend_count=0 session_count=0 workspace_count=0
+  local tab_count=0 pane_count=0
+  local kind= home= task= window= generation= harness= backend=
+  local session= workspace= tab= pane= target= provider_identity=
   FM_SECONDMATE_META_HOME=
   FM_SECONDMATE_META_WINDOW=
   FM_SECONDMATE_META_ENDPOINT_GENERATION=
+  FM_SECONDMATE_META_HARNESS=
+  FM_SECONDMATE_META_BACKEND=
+  FM_SECONDMATE_META_TARGET=
+  FM_SECONDMATE_META_PROVIDER_IDENTITY=
   FM_SECONDMATE_META_ERROR=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     FM_SECONDMATE_META_ERROR="metadata is missing, unreadable, or not a regular file"
@@ -375,6 +386,12 @@ fm_secondmate_lifecycle_meta_read() {
       home) home_count=$((home_count + 1)); home=$value ;;
       task) task_count=$((task_count + 1)); task=$value ;;
       window) window_count=$((window_count + 1)); window=$value ;;
+      harness) harness_count=$((harness_count + 1)); harness=$value ;;
+      backend) backend_count=$((backend_count + 1)); backend=$value ;;
+      herdr_session) session_count=$((session_count + 1)); session=$value ;;
+      herdr_workspace_id) workspace_count=$((workspace_count + 1)); workspace=$value ;;
+      herdr_tab_id) tab_count=$((tab_count + 1)); tab=$value ;;
+      herdr_pane_id) pane_count=$((pane_count + 1)); pane=$value ;;
       endpoint_generation)
         generation_count=$((generation_count + 1))
         generation=$value
@@ -390,12 +407,14 @@ fm_secondmate_lifecycle_meta_read() {
   }
   if [ "$kind_count" -ne 1 ] || [ "$home_count" -ne 1 ] \
     || [ "$task_count" -ne 1 ] || [ "$window_count" -ne 1 ] \
-    || [ "$generation_count" -ne 1 ]; then
+    || [ "$generation_count" -ne 1 ] || [ "$harness_count" -ne 1 ] \
+    || [ "$backend_count" -gt 1 ]; then
     FM_SECONDMATE_META_ERROR="ambiguous lifecycle metadata"
     return 1
   fi
   [ "$kind" = secondmate ] && [ "$task" = "$expected_id" ] \
-    && [ -n "$home" ] && [ -n "$window" ] && [ -n "$generation" ] || {
+    && [ -n "$home" ] && [ -n "$window" ] && [ -n "$generation" ] \
+    && [ -n "$harness" ] || {
       FM_SECONDMATE_META_ERROR="incomplete or mismatched lifecycle metadata"
       return 1
     }
@@ -411,16 +430,58 @@ fm_secondmate_lifecycle_meta_read() {
       return 1
       ;;
   esac
+  case "$harness" in
+    claude|codex|opencode|pi|grok) ;;
+    *) FM_SECONDMATE_META_ERROR="unverified lifecycle harness"; return 1 ;;
+  esac
+  backend=${backend:-tmux}
+  case "$backend" in
+    tmux)
+      if [ "$session_count" -ne 0 ] || [ "$workspace_count" -ne 0 ] \
+        || [ "$tab_count" -ne 0 ] || [ "$pane_count" -ne 0 ]; then
+        FM_SECONDMATE_META_ERROR="provider fields do not match lifecycle backend"
+        return 1
+      fi
+      target=$window
+      provider_identity="tmux:$window"
+      ;;
+    herdr)
+      if [ "$session_count" -ne 1 ] || [ "$workspace_count" -ne 1 ] \
+        || [ "$tab_count" -ne 1 ] || [ "$pane_count" -ne 1 ] \
+        || [ -z "$session" ] || [ -z "$workspace" ] \
+        || [ -z "$tab" ] || [ -z "$pane" ]; then
+        FM_SECONDMATE_META_ERROR="incomplete or ambiguous Herdr endpoint"
+        return 1
+      fi
+      case "$session$workspace$tab$pane" in
+        *'|'*) FM_SECONDMATE_META_ERROR="unsafe provider endpoint"; return 1 ;;
+      esac
+      target="$session:$pane"
+      provider_identity="herdr:$session:$workspace:$tab:$pane"
+      ;;
+    *)
+      FM_SECONDMATE_META_ERROR="unknown lifecycle backend"
+      return 1
+      ;;
+  esac
   FM_SECONDMATE_META_HOME=$home
   FM_SECONDMATE_META_WINDOW=$window
   FM_SECONDMATE_META_ENDPOINT_GENERATION=$generation
+  FM_SECONDMATE_META_HARNESS=$harness
+  FM_SECONDMATE_META_BACKEND=$backend
+  FM_SECONDMATE_META_TARGET=$target
+  FM_SECONDMATE_META_PROVIDER_IDENTITY=$provider_identity
 }
 
 fm_secondmate_lifecycle_identity_matches() {
   local state=$1 id=$2 expected_home=$3 expected_window=$4 expected_generation=$5
+  local expected_provider=${6:-}
   fm_secondmate_lifecycle_meta_read "$state/$id.meta" "$id" || return 1
   [ "$FM_SECONDMATE_META_WINDOW" = "$expected_window" ] \
     && [ "$FM_SECONDMATE_META_ENDPOINT_GENERATION" = "$expected_generation" ] \
+    || return 1
+  [ -z "$expected_provider" ] \
+    || [ "$FM_SECONDMATE_META_PROVIDER_IDENTITY" = "$expected_provider" ] \
     || return 1
   validate_secondmate_home "$id" "$FM_SECONDMATE_META_HOME" || return 1
   [ "$VALIDATED_HOME" = "$expected_home" ]
@@ -437,8 +498,9 @@ live_secondmate_meta_records() {
       echo "secondmate $id: refused: ${FM_SECONDMATE_META_ERROR:-ambiguous lifecycle metadata}" >&2
       continue
     fi
-    printf '%s|%s|%s|%s|%s\n' "$id" "$FM_SECONDMATE_META_HOME" \
-      "$FM_SECONDMATE_META_WINDOW" "$meta" "$FM_SECONDMATE_META_ENDPOINT_GENERATION"
+    printf '%s|%s|%s|%s|%s|%s\n' "$id" "$FM_SECONDMATE_META_HOME" \
+      "$FM_SECONDMATE_META_WINDOW" "$meta" "$FM_SECONDMATE_META_ENDPOINT_GENERATION" \
+      "$FM_SECONDMATE_META_PROVIDER_IDENTITY"
   done
 }
 
@@ -612,7 +674,8 @@ fm_ff_locked_secondmate_action() {
 # as its own secondmate, and each resolved home is processed at most once.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no}
-  local endpoint_generation=${6:-} lifecycle_state=${7:-${STATE:-}} home_real fm_root_real
+  local endpoint_generation=${6:-} lifecycle_state=${7:-${STATE:-}}
+  local provider_identity=${8:-} home_real fm_root_real
   local reread_marker pending_reread should_nudge target_locked=0 ff_rc=0
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
@@ -626,7 +689,8 @@ process_secondmate() {
   home_real="$VALIDATED_HOME"
   if [ -n "$window" ] && { [ -z "$lifecycle_state" ] \
     || ! fm_secondmate_lifecycle_identity_matches \
-      "$lifecycle_state" "$id" "$home_real" "$window" "$endpoint_generation"; }; then
+      "$lifecycle_state" "$id" "$home_real" "$window" "$endpoint_generation" \
+      "$provider_identity"; }; then
     echo "secondmate $id: refused: lifecycle metadata is ambiguous or changed" >&2
     return 1
   fi
@@ -654,7 +718,8 @@ process_secondmate() {
     return 1
   fi
   if [ -n "$window" ] && ! fm_secondmate_lifecycle_identity_matches \
-    "$lifecycle_state" "$id" "$home_real" "$window" "$endpoint_generation"; then
+      "$lifecycle_state" "$id" "$home_real" "$window" "$endpoint_generation" \
+      "$provider_identity"; then
     fm_ff_target_lock_release
     return 1
   fi
@@ -677,8 +742,10 @@ process_secondmate() {
     if ! validate_secondmate_home "$id" "$home_real" \
       || [ "$VALIDATED_HOME" != "$home_real" ] \
       || { [ -n "$window" ] && ! fm_secondmate_lifecycle_identity_matches \
-        "$lifecycle_state" "$id" "$home_real" "$window" "$endpoint_generation"; } \
-      || ! fm_ff_after_target_update "$id" "$home_real" "$window" "$endpoint_generation"; then
+        "$lifecycle_state" "$id" "$home_real" "$window" "$endpoint_generation" \
+          "$provider_identity"; } \
+      || ! fm_ff_after_target_update "$id" "$home_real" "$window" \
+        "$endpoint_generation" "$provider_identity"; then
       fm_ff_target_lock_release
       return 1
     fi
@@ -696,8 +763,9 @@ process_secondmate() {
         || [ "$VALIDATED_HOME" != "$home_real" ] \
         || ! fm_secondmate_lifecycle_identity_matches \
           "$lifecycle_state" "$id" "$home_real" "$window" "$endpoint_generation" \
+          "$provider_identity" \
         || ! fm_ff_after_instruction_update "$id" "$home_real" "$window" \
-          "$FF_INSTR" "$endpoint_generation"; then
+          "$FF_INSTR" "$endpoint_generation" "$provider_identity"; then
         fm_ff_target_lock_release
         return 1
       fi
@@ -719,10 +787,10 @@ process_secondmate() {
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
 sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md}
-  local id home window meta endpoint_generation
+  local id home window meta endpoint_generation provider_identity
   [ -d "$state" ] || return 0
-  while IFS='|' read -r id home window meta endpoint_generation; do
+  while IFS='|' read -r id home window meta endpoint_generation provider_identity; do
     process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" \
-      "$endpoint_generation" "$state" || return 1
+      "$endpoint_generation" "$state" "$provider_identity" || return 1
   done < <(live_secondmate_meta_records "$state" "$registry")
 }

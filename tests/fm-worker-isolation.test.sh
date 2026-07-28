@@ -47,6 +47,7 @@ RUN_TAG=$$
 BG_PIDS=()
 worker_isolation_cleanup() {
   local pid entry marker
+  set +e
   for pid in "${BG_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
   done
@@ -59,6 +60,7 @@ worker_isolation_cleanup() {
     kill -9 "$pid" 2>/dev/null
   done
   fm_test_cleanup
+  return 0
 }
 trap worker_isolation_cleanup EXIT
 
@@ -1134,9 +1136,15 @@ test_stamp_survives_failed_pool_return() {
   fakebin=$(fm_fakebin "$WORLD/fake")
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-target=${@: -1}
+target=${3:-}
 git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
 [ ! -e "$git_dir/fm-slot-owner" ] || exit 19
+common_dir=$(git -C "$target" rev-parse --git-common-dir)
+case "$common_dir" in /*) ;; *) common_dir="$target/$common_dir" ;; esac
+claim="$common_dir/fm-slot-return-claims/${git_dir##*/}.claim"
+[ -f "$claim" ] || exit 20
+grep -Fx 'task=task-e12' "$claim" >/dev/null || exit 21
+grep -Fx 'lease_holder=task-e12' "$claim" >/dev/null || exit 22
 exit 17
 SH
   chmod +x "$fakebin/treehouse"
@@ -1163,8 +1171,11 @@ SH
   [ "$status" -ne 0 ] || fail "failed pool return unexpectedly completed"$'\n'"$out"
   assert_present "$WORLD/home/state/task-e12.meta" "failed pool return removed task metadata"
   stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
-    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
-  [ "$stamp" = task-e12 ] || fail "failed pool return cleared ownership evidence: $stamp"
+    && fm_slot_return_claim_record "$WT_DIR" \
+    && printf '%s' "$FM_SLOT_RETURN_CLAIM_TASK" || printf 'none' )
+  [ "$stamp" = task-e12 ] || fail "failed pool return cleared transition evidence: $stamp"
+  [ -L "$(git -C "$WT_DIR" rev-parse --absolute-git-dir)/fm-slot-owner" ] \
+    || fail "failed pool return did not leave mixed-version refusal evidence"
   [ "$(git -C "$WT_DIR" rev-parse --abbrev-ref HEAD)" = "$branch" ] \
     || fail "failed pool return changed the retry branch identity"
   assert_present "$WT_DIR/.claude/settings.local.json" "failed pool return removed the Claude hook"
@@ -1180,9 +1191,15 @@ test_successful_pool_return_never_mutates_reused_slot() {
   fakebin=$(fm_fakebin "$WORLD/fake")
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-target=${@: -1}
+target=${3:-}
 git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
 [ ! -e "$git_dir/fm-slot-owner" ] || exit 19
+common_dir=$(git -C "$target" rev-parse --git-common-dir)
+case "$common_dir" in /*) ;; *) common_dir="$target/$common_dir" ;; esac
+claim="$common_dir/fm-slot-return-claims/${git_dir##*/}.claim"
+[ -f "$claim" ] || exit 20
+grep -Fx 'task=task-reuse' "$claim" >/dev/null || exit 21
+grep -Fx 'lease_holder=task-reuse' "$claim" >/dev/null || exit 22
 git -C "$FM_REUSE_PROJECT" worktree remove --force "$target"
 git -C "$FM_REUSE_PROJECT" worktree add --quiet -b replacement-owner "$target"
 mkdir -p "$target/.claude" "$target/.opencode/plugins"

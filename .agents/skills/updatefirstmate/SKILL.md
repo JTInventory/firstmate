@@ -48,7 +48,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh --deliver-secondmate-nudge <window-target> <commit-from-the-matching-generation-line>
    ```
-   This operation holds the secondmate home's lifecycle lock while it revalidates the live endpoint generation, sends the nudge, records delivery, and acknowledges the matching reread generation. A failed or interrupted operation leaves the durable nudge obligation for the next updater retry.
+   This operation holds the secondmate home's lifecycle lock while it revalidates the complete provider endpoint generation, records a correlation-bound delivery transaction before sending, sends the nudge, and acknowledges the matching reread generation. A prepared or `Do not resend` transaction is never sent again; the next updater retry completes its acknowledgement without duplicating delivery. An undelivered failure leaves the durable nudge obligation for a later retry.
    The updater has already verified each watcher and follower listed on `restart-secondmate-watchers:`. If it stopped a legacy secondmate watcher, that secondmate must complete its normal harness-tracked re-arm before the updater retry can succeed. Updated homes without a running watcher need no restart because no legacy process remains; their next watcher starts from the updated code. The restart does not stop a secondmate's agent pane or project work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 

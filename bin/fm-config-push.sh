@@ -68,6 +68,34 @@ SECONDMATES_MD="$DATA/secondmates.md"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
+FM_CONFIG_PUSH_ADMISSION_LOCKS=()
+fm_ff_target_lock_acquire() {
+  local state_dir=$1 _label=${2:-target} target_home=${3:-} lock
+  FM_CONFIG_PUSH_ADMISSION_LOCKS=()
+  while IFS= read -r lock; do
+    [ -n "$lock" ] || continue
+    mkdir -p "$(dirname "$lock")" || return 1
+    if ! fm_lock_try_acquire "$lock"; then
+      fm_ff_target_lock_release
+      return 1
+    fi
+    FM_CONFIG_PUSH_ADMISSION_LOCKS+=("$lock")
+  done < <(fm_spawn_admission_lock_paths "$state_dir")
+  if fm_spawn_legacy_task_lock_busy "$state_dir" \
+    || ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir"; then
+    fm_ff_target_lock_release
+    return 1
+  fi
+}
+
+fm_ff_target_lock_release() {
+  local i
+  for ((i=${#FM_CONFIG_PUSH_ADMISSION_LOCKS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${FM_CONFIG_PUSH_ADMISSION_LOCKS[$i]}" || true
+  done
+  FM_CONFIG_PUSH_ADMISSION_LOCKS=()
+}
+
 print_item_report() {
   local report=$1 item status reason
   while IFS=$'\t' read -r item status reason; do
@@ -100,9 +128,85 @@ fi
 
 echo "config-push: $CONFIG -> live secondmate homes"
 
+config_push_locked() {
+  local id=$1 home_real=$2 window=$3 endpoint_generation=$4 provider_identity=$5
+  local home_lock report reread_out dirty rc=0
+  fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$home_real" "$window" \
+    "$endpoint_generation" "$provider_identity" || return 1
+  printf 'secondmate %s (%s):\n' "$id" "$home_real"
+  dirty=$(dirty_status "$home_real" yes || true)
+  if [ -n "$dirty" ]; then
+    echo "  home: dirty working tree - inheritance-only push continuing"
+  fi
+  [ -d "$home_real/state" ] || {
+    echo "  home: error - state directory is missing"
+    return 1
+  }
+  home_lock=$(fm_config_inherit_lock_path "$home_real") || {
+    echo "  home: error - could not resolve per-home lock"
+    return 1
+  }
+  fm_lock_acquire_wait "$home_lock" || {
+    echo "  home: error - could not acquire per-home lock"
+    return 1
+  }
+  if ! fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$home_real" "$window" \
+    "$endpoint_generation" "$provider_identity"; then
+    fm_lock_release "$home_lock" || true
+    return 1
+  fi
+  if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+    fm_config_reread_retry_pending "$id" "$home_real" || true
+    if ! fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$home_real" "$window" \
+      "$endpoint_generation" "$provider_identity" \
+      || fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+      echo "  home: error - config reread retry queue is full or lifecycle changed"
+      fm_lock_release "$home_lock" || true
+      return 1
+    fi
+  fi
+  report=$(mktemp "${TMPDIR:-/tmp}/fm-config-push-report.XXXXXX" 2>/dev/null) || {
+    echo "  home: error - could not create report file"
+    fm_lock_release "$home_lock" || true
+    return 1
+  }
+  reports="$reports $report"
+  if ! fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$home_real" "$window" \
+    "$endpoint_generation" "$provider_identity"; then
+    fm_lock_release "$home_lock" || true
+    return 1
+  fi
+  if FM_CONFIG_INHERIT_REPORT="$report" \
+    propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
+    print_item_report "$report"
+  else
+    rc=1
+    print_item_report "$report"
+  fi
+  if ! fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$home_real" "$window" \
+    "$endpoint_generation" "$provider_identity"; then
+    fm_lock_release "$home_lock" || true
+    return 1
+  fi
+  if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$STATE" \
+    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+    rc=1
+    if [ -n "$reread_out" ]; then
+      printf '%s\n' "$reread_out"
+    else
+      printf 'CONFIG_REREAD: secondmate %s: send failed: unknown error\n' "$id"
+    fi
+  elif [ -n "$reread_out" ]; then
+    printf '%s\n' "$reread_out"
+  fi
+  fm_lock_release "$home_lock" || true
+  return "$rc"
+}
+
 seen_homes=""
 errors=0
-while IFS='|' read -r id home _window meta _endpoint_generation; do
+while IFS='|' read -r id home window meta endpoint_generation provider_identity; do
   [ -n "$id" ] || continue
   if [ -z "$home" ]; then
     printf 'secondmate %s: skipped - no home= in %s and no registry home\n' "$id" "$meta"
@@ -121,63 +225,11 @@ while IFS='|' read -r id home _window meta _endpoint_generation; do
   esac
   seen_homes="$seen_homes $home_real"
 
-  printf 'secondmate %s (%s):\n' "$id" "$home_real"
-  dirty=$(dirty_status "$home_real" yes || true)
-  if [ -n "$dirty" ]; then
-    echo "  home: dirty working tree - inheritance-only push continuing"
-  fi
-
-  mkdir -p "$home_real/state" || {
-    echo "  home: error - could not create state directory"
-    errors=1
-    continue
-  }
-  home_lock=$(fm_config_inherit_lock_path "$home_real") || {
-    echo "  home: error - could not resolve per-home lock"
-    errors=1
-    continue
-  }
-  if ! fm_lock_acquire_wait "$home_lock"; then
-    echo "  home: error - could not acquire per-home lock"
-    errors=1
-    continue
-  fi
-  if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
-    fm_config_reread_retry_pending "$id" "$home_real" || true
-    if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
-      echo "  home: error - config reread retry queue is full"
+  fm_ff_locked_secondmate_action "$id" "$home_real" "secondmate $id" \
+    config_push_locked "$window" "$endpoint_generation" "$provider_identity" || {
+      echo "  home: error - lifecycle identity changed or lock is busy"
       errors=1
-      fm_lock_release "$home_lock" || true
-      continue
-    fi
-  fi
-  report=$(mktemp "${TMPDIR:-/tmp}/fm-config-push-report.XXXXXX" 2>/dev/null) || {
-    echo "  home: error - could not create report file"
-    errors=1
-    fm_lock_release "$home_lock" || true
-    continue
-  }
-  reports="$reports $report"
-  if FM_CONFIG_INHERIT_REPORT="$report" \
-    propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
-    print_item_report "$report"
-  else
-    errors=1
-    print_item_report "$report"
-  fi
-  if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    FM_STATE_OVERRIDE="$STATE" \
-    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
-    errors=1
-    if [ -n "$reread_out" ]; then
-      printf '%s\n' "$reread_out"
-    else
-      printf 'CONFIG_REREAD: secondmate %s: send failed: unknown error\n' "$id"
-    fi
-  elif [ -n "$reread_out" ]; then
-    printf '%s\n' "$reread_out"
-  fi
-  fm_lock_release "$home_lock" || true
+    }
 done < "$records"
 
 [ "$errors" -eq 0 ] || exit 1

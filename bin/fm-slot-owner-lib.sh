@@ -98,10 +98,12 @@ fm_slot_is_plain_checkout() {
 # fm_slot_stamp_write <worktree> <task-id> <home>: claim current ownership of
 # the slot without replacing another owner's evidence.
 fm_slot_stamp_write() {
-  local wt=$1 id=$2 home=$3 path
+  local wt=$1 id=$2 home=$3 path claim
   FM_SLOT_STAMP_CREATED=0
   [ -n "$id" ] && [ -n "$home" ] || return 1
   path=$(fm_slot_stamp_path "$wt") || return 1
+  claim=$(fm_slot_return_claim_path "$wt" 2>/dev/null || true)
+  [ -z "$claim" ] || { [ ! -e "$claim" ] && [ ! -L "$claim" ]; } || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
     fm_slot_stamp_record "$wt" \
       && [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
@@ -167,62 +169,104 @@ fm_slot_stamp_clear_exact() {  # <worktree> <task-id> <home>
   rm -f "$path"
 }
 
-fm_slot_return_backup_path() {
-  local state=$1 id=$2 dir
-  case "$id" in ''|*[!A-Za-z0-9._-]*|*/*) return 1 ;; esac
-  [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  dir="$state/.slot-return-stamps"
-  if [ -e "$dir" ] || [ -L "$dir" ]; then
-    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  else
-    mkdir "$dir" || return 1
+fm_slot_return_claim_path() {
+  local wt=$1 git_dir common_dir slot_key dir
+  git_dir=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  common_dir=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$wt/$common_dir" ;;
+  esac
+  git_dir=$(fm_agent_canonical_dir "$git_dir") || return 1
+  common_dir=$(fm_agent_canonical_dir "$common_dir") || return 1
+  [ "$git_dir" != "$common_dir" ] || return 1
+  slot_key=${git_dir##*/}
+  case "$slot_key" in ''|*[!A-Za-z0-9._-]*|*/*) return 1 ;; esac
+  dir="$common_dir/fm-slot-return-claims"
+  printf '%s/%s.claim' "$dir" "$slot_key"
+}
+
+fm_slot_return_claim_record() {
+  local wt=$1 claim task_count home_count holder_count line_count
+  FM_SLOT_RETURN_CLAIM_TASK=
+  FM_SLOT_RETURN_CLAIM_HOME=
+  FM_SLOT_RETURN_CLAIM_HOLDER=
+  claim=$(fm_slot_return_claim_path "$wt") || return 2
+  if [ ! -e "$claim" ] && [ ! -L "$claim" ]; then
+    return 1
   fi
-  printf '%s/%s.stamp' "$dir" "$id"
+  [ -f "$claim" ] && [ ! -L "$claim" ] && [ -r "$claim" ] || return 2
+  task_count=$(grep -c '^task=' "$claim" 2>/dev/null) || task_count=0
+  home_count=$(grep -c '^home=' "$claim" 2>/dev/null) || home_count=0
+  holder_count=$(grep -c '^lease_holder=' "$claim" 2>/dev/null) || holder_count=0
+  line_count=$(wc -l < "$claim" 2>/dev/null) || return 2
+  [ "$task_count" -eq 1 ] && [ "$home_count" -eq 1 ] \
+    && [ "$holder_count" -eq 1 ] && [ "$line_count" -eq 3 ] || return 2
+  FM_SLOT_RETURN_CLAIM_TASK=$(sed -n 's/^task=//p' "$claim")
+  FM_SLOT_RETURN_CLAIM_HOME=$(sed -n 's/^home=//p' "$claim")
+  FM_SLOT_RETURN_CLAIM_HOLDER=$(sed -n 's/^lease_holder=//p' "$claim")
+  [ -n "$FM_SLOT_RETURN_CLAIM_TASK" ] \
+    && [ -n "$FM_SLOT_RETURN_CLAIM_HOME" ] \
+    && [ -n "$FM_SLOT_RETURN_CLAIM_HOLDER" ] || return 2
 }
 
 fm_slot_stamp_stage_return() {
-  local wt=$1 id=$2 home=$3 state=$4 path backup tmp
+  local wt=$1 id=$2 home=$3 _state=$4 lease_holder=$5 path claim tmp
   FM_SLOT_RETURN_STAGED=0
-  FM_SLOT_RETURN_BACKUP=
+  FM_SLOT_RETURN_CLAIM=
+  [ -n "$lease_holder" ] || return 1
   path=$(fm_slot_stamp_path "$wt") || return 1
-  backup=$(fm_slot_return_backup_path "$state" "$id") || return 1
-  if [ -e "$backup" ] || [ -L "$backup" ]; then
-    fm_slot_owner_record_file "$backup" || return 1
-    [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
-      && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
+  claim=$(fm_slot_return_claim_path "$wt") || return 1
+  if [ -e "${claim%/*}" ] || [ -L "${claim%/*}" ]; then
+    [ -d "${claim%/*}" ] && [ ! -L "${claim%/*}" ] || return 1
+  else
+    mkdir "${claim%/*}" || return 1
+  fi
+  if [ -e "$claim" ] || [ -L "$claim" ]; then
+    fm_slot_return_claim_record "$wt" || return 1
+    [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$id" ] \
+      && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$home" \
+      && [ "$FM_SLOT_RETURN_CLAIM_HOLDER" = "$lease_holder" ] || return 1
   fi
   if [ -e "$path" ] || [ -L "$path" ]; then
-    fm_slot_owner_record_file "$path" || return 1
-    [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
-      && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
-    if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
-      tmp=$(mktemp "${backup}.XXXXXX") || return 1
+    if [ -L "$path" ] && [ "$(readlink "$path" 2>/dev/null || true)" = "$claim" ]; then
+      :
+    else
+      fm_slot_owner_record_file "$path" || return 1
+      [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+        && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
+    fi
+    if [ ! -e "$claim" ] && [ ! -L "$claim" ]; then
+      tmp=$(mktemp "${claim}.XXXXXX") || return 1
       chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-      printf 'task=%s\nhome=%s\n' "$id" "$home" > "$tmp" \
-        && mv "$tmp" "$backup" || { rm -f "$tmp"; return 1; }
+      printf 'task=%s\nhome=%s\nlease_holder=%s\n' "$id" "$home" "$lease_holder" > "$tmp" \
+        && mv "$tmp" "$claim" || { rm -f "$tmp"; return 1; }
     fi
     rm -f "$path" || return 1
-  elif [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+  elif [ ! -e "$claim" ] && [ ! -L "$claim" ]; then
     return 0
   fi
   FM_SLOT_RETURN_STAGED=1
-  FM_SLOT_RETURN_BACKUP=$backup
+  FM_SLOT_RETURN_CLAIM=$claim
 }
 
 fm_slot_stamp_restore_return() {
-  local wt=$1 id=$2 home=$3 backup=$4
-  [ -n "$backup" ] || return 0
-  fm_slot_owner_record_file "$backup" || return 1
-  [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
-    && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home" || return 1
-  fm_slot_stamp_write "$wt" "$id" "$home" || return 1
-  rm -f "$backup"
+  local wt=$1 id=$2 home=$3 claim=$4 lease_holder=$5 path
+  [ -n "$claim" ] || return 0
+  fm_slot_return_claim_record "$wt" || return 1
+  [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$id" ] \
+    && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$home" \
+    && [ "$FM_SLOT_RETURN_CLAIM_HOLDER" = "$lease_holder" ] || return 1
+  path=$(fm_slot_stamp_path "$wt") || return 1
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    ln -s "$claim" "$path" || return 1
+  fi
 }
 
 fm_slot_stamp_finalize_return() {
-  local backup=$1
-  [ -n "$backup" ] || return 0
-  rm -f "$backup"
+  local claim=$1
+  [ -n "$claim" ] || return 0
+  rm -f "$claim"
 }
 
 # fm_slot_meta_worktree <meta-file>: the recorded worktree path, or empty.
@@ -326,7 +370,7 @@ fm_slot_join_ids() {
 # Print exactly `dispose` or `retain: <reason>`.
 fm_slot_disposal_verdict() {
   local state=$1 self=$2 wt=$3 stamp_owner_home=$4 worker_home=$5 role=$6
-  local stamp_task stamp_home stamp_status refs occupants
+  local stamp_task stamp_home stamp_status claim_status refs occupants stamp_path claim_path
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     printf 'dispose'
     return 0
@@ -335,7 +379,34 @@ fm_slot_disposal_verdict() {
     printf '%s%s in this home' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"
     return 0
   fi
-  if fm_slot_stamp_record "$wt"; then
+  if fm_slot_return_claim_record "$wt"; then
+    claim_status=0
+  else
+    claim_status=$?
+  fi
+  if [ "$claim_status" -eq 2 ]; then
+    printf 'retain: slot return transition claim is malformed, partial, unreadable, or cannot be classified'
+    return 0
+  fi
+  if [ "$claim_status" -eq 0 ]; then
+    if [ "$FM_SLOT_RETURN_CLAIM_TASK" != "$self" ]; then
+      printf 'retain: slot return transition names task %s, not %s' \
+        "$FM_SLOT_RETURN_CLAIM_TASK" "$self"
+      return 0
+    fi
+    if [ -n "$stamp_owner_home" ] \
+      && ! fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$stamp_owner_home"; then
+      printf 'retain: slot return transition names home %s, not %s' \
+        "$FM_SLOT_RETURN_CLAIM_HOME" "$stamp_owner_home"
+      return 0
+    fi
+  fi
+  stamp_path=$(fm_slot_stamp_path "$wt" 2>/dev/null || true)
+  claim_path=$(fm_slot_return_claim_path "$wt" 2>/dev/null || true)
+  if [ "$claim_status" -eq 0 ] && [ -n "$stamp_path" ] && [ -L "$stamp_path" ] \
+    && [ "$(readlink "$stamp_path" 2>/dev/null || true)" = "$claim_path" ]; then
+    stamp_status=1
+  elif fm_slot_stamp_record "$wt"; then
     stamp_status=0
   else
     stamp_status=$?

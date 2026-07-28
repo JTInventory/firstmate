@@ -114,6 +114,7 @@ add_sm() {
   {
     printf 'window=main:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
     printf 'home=%s/%s\n' "$w" "$id"
     printf 'task=%s\n' "$id"
     printf 'endpoint_generation=endpoint-%s\n' "$id"
@@ -1182,6 +1183,109 @@ test_secondmate_delivery_refuses_recycled_endpoint_ack() {
   pass "T33 secondmate delivery refuses acknowledgement after endpoint reuse"
 }
 
+test_duplicate_provider_fields_refuse_lifecycle_mutation() {
+  local w before out
+  w=$(new_world t34)
+  add_sm "$w" sm1
+  before=$(git -C "$w/sm1" rev-parse HEAD)
+  bump_origin "$w" instr
+  {
+    printf 'backend=herdr\n'
+    printf 'backend=herdr\n'
+    printf 'herdr_session=session-a\n'
+    printf 'herdr_workspace_id=workspace-a\n'
+    printf 'herdr_tab_id=tab-a\n'
+    printf 'herdr_pane_id=pane-a\n'
+  } >> "$w/home/state/sm1.meta"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
+
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
+    || fail "duplicate provider fields authorized a secondmate update"
+  assert_contains "$out" "ambiguous lifecycle metadata" \
+    "duplicate provider fields did not produce a lifecycle refusal"
+  pass "T34 duplicate provider fields refuse lifecycle mutations"
+}
+
+test_prepared_delivery_transaction_is_never_resent() {
+  local w generation receipt correlation provider target fakebin out
+  w=$(new_world t35)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  target=main:fm-sm1
+  provider="tmux:$target"
+  mkdir -p "$w/sm1/state"
+  fm_update_obligation_write \
+    "$w/sm1/state/.watch-protocol-reread-required" "$generation"
+  receipt="$w/home/state/.secondmate-nudge-delivered/sm1/$generation"
+  mkdir -p "${receipt%/*}"
+  correlation=$(printf '%s\n' \
+    "sm1|$w/sm1|$target|endpoint-sm1|$generation|$provider" \
+    | git hash-object --stdin)
+  {
+    printf 'id=sm1\n'
+    printf 'home=%s/sm1\n' "$w"
+    printf 'target=%s\n' "$target"
+    printf 'endpoint_generation=endpoint-sm1\n'
+    printf 'generation=%s\n' "$generation"
+    printf 'provider_identity=%s\n' "$provider"
+    printf 'correlation=%s\n' "$correlation"
+    printf 'state=prepared\n'
+  } > "$receipt"
+  fakebin=$(make_fake_tmux "$w/prepared-fake")
+
+  out=$(cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/prepared-fake/tmux.log" \
+    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
+
+  assert_contains "$out" "delivered-secondmate-nudge: $target (prepared)" \
+    "prepared delivery transaction was not recovered"
+  [ ! -s "$w/prepared-fake/tmux.log" ] \
+    || fail "prepared delivery transaction was sent again"
+  fm_update_obligation_pending \
+    "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
+    && fail "prepared delivery recovery did not acknowledge the obligation"
+  pass "T35 prepared delivery transactions cannot duplicate a send"
+}
+
+test_do_not_resend_delivery_is_acknowledged_once() {
+  local w generation target fakebin out sends
+  w=$(new_world t36)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  target=main:fm-sm1
+  mkdir -p "$w/sm1/state"
+  fm_update_obligation_write \
+    "$w/sm1/state/.watch-protocol-reread-required" "$generation"
+  fakebin=$(make_fake_tmux "$w/do-not-resend-fake")
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ -f "$arg" ] || continue
+  grep -q '^confirmed=' "$arg" 2>/dev/null && exit 1
+done
+exec /bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  out=$(cd "$w" && env -u NO_MISTAKES_GATE PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/do-not-resend-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/do-not-resend-fake/pane.txt" FM_SEND_SETTLE=0 \
+    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
+
+  assert_contains "$out" "delivered-secondmate-nudge: $target (do-not-resend)" \
+    "confirmed delivery failure was not classified as do-not-resend"
+  sends=$(grep -Fc 'firstmate was updated to the latest' \
+    "$w/do-not-resend-fake/tmux.log" 2>/dev/null || true)
+  [ "$sends" -eq 1 ] || fail "do-not-resend delivery was typed $sends times"
+  fm_update_obligation_pending \
+    "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
+    && fail "do-not-resend delivery left a duplicate retry obligation"
+  pass "T36 do-not-resend delivery outcomes are acknowledged once"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -1213,5 +1317,8 @@ test_secondmate_acknowledgement_respects_lifecycle_lock
 test_ambiguous_lifecycle_metadata_refuses_update
 test_secondmate_delivery_is_one_locked_generation_transaction
 test_secondmate_delivery_refuses_recycled_endpoint_ack
+test_duplicate_provider_fields_refuse_lifecycle_mutation
+test_prepared_delivery_transaction_is_never_resent
+test_do_not_resend_delivery_is_acknowledged_once
 
 echo "# all fm-update tests passed"

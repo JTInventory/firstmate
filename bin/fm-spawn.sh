@@ -1441,7 +1441,7 @@ spawn_settle_path() {  # <target>
 }
 
 if [ "$KIND" != secondmate ]; then
-  fm_backend_send_text_line "$BACKEND" "$WID" 'treehouse get'
+  fm_backend_send_text_line "$BACKEND" "$WID" "treehouse get --lease-holder '$ID'"
 
   # Prefer the live process cwd through /proc. Provider pane cwd remains a hint
   # where no process id is available.

@@ -289,9 +289,9 @@ secondmate_sync() {
   }
 
   secondmate_locked_identity_matches() {
-    local id=$1 expected=$2 window=$3 endpoint_generation=$4
+    local id=$1 expected=$2 window=$3 endpoint_generation=$4 provider_identity=${5:-}
     fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$expected" \
-      "$window" "$endpoint_generation"
+      "$window" "$endpoint_generation" "$provider_identity"
   }
 
   secondmate_send_nudge() {
@@ -325,9 +325,9 @@ secondmate_sync() {
   }
 
   fm_ff_after_target_update() {
-    local id=$1 home=$2 window=$3 endpoint_generation=$4
+    local id=$1 home=$2 window=$3 endpoint_generation=$4 provider_identity=${5:-}
     secondmate_locked_identity_matches "$id" "$home" "$window" \
-      "$endpoint_generation" || return 1
+      "$endpoint_generation" "$provider_identity" || return 1
     if ! fm_watcher_protocol_restart_if_required "$home" "$home/state" "$home"; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: watcher protocol restart could not be verified"
       return 1
@@ -339,8 +339,9 @@ secondmate_sync() {
 
   fm_ff_after_instruction_update() {
     local id=$1 home=$2 window=$3 instr=$4 endpoint_generation=$5
+    local provider_identity=${6:-}
     secondmate_locked_identity_matches "$id" "$home" "$window" \
-      "$endpoint_generation" || return 1
+      "$endpoint_generation" "$provider_identity" || return 1
     secondmate_send_nudge "$id" "$home" "$window" "$endpoint_generation" \
       "$primary_head" "$instr"
   }
@@ -471,10 +472,11 @@ secondmate_sync() {
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
   secondmate_propagate_locked() {
-    local id=$1 home_real=$2 window=$3 endpoint_generation=$4 reread_skip_pending=$5
+    local id=$1 home_real=$2 window=$3 endpoint_generation=$4 provider_identity=$5
+    local reread_skip_pending=$6
     local home_lock report reread_out
     secondmate_locked_identity_matches "$id" "$home_real" "$window" \
-      "$endpoint_generation" || return 1
+      "$endpoint_generation" "$provider_identity" || return 1
     home_lock=$(fm_config_inherit_lock_path "$home_real") || {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
       return 1
@@ -484,7 +486,7 @@ secondmate_sync() {
       return 1
     }
     if ! secondmate_locked_identity_matches "$id" "$home_real" "$window" \
-      "$endpoint_generation"; then
+      "$endpoint_generation" "$provider_identity"; then
       fm_lock_release "$home_lock" || true
       return 1
     fi
@@ -509,7 +511,7 @@ secondmate_sync() {
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
     fi
     if ! secondmate_locked_identity_matches "$id" "$home_real" "$window" \
-      "$endpoint_generation"; then
+      "$endpoint_generation" "$provider_identity"; then
       rm -f "$report"
       fm_lock_release "$home_lock" || true
       return 1
@@ -530,10 +532,11 @@ secondmate_sync() {
     fm_lock_release "$home_lock" || true
   }
 
-  local id home window endpoint_generation home_real propagated_homes reread_skip_pending
+  local id home window endpoint_generation provider_identity home_real
+  local propagated_homes reread_skip_pending
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
-  while IFS='|' read -r id home window _meta endpoint_generation; do
+  while IFS='|' read -r id home window _meta endpoint_generation provider_identity; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in
@@ -549,7 +552,8 @@ secondmate_sync() {
       *" $id "*) reread_skip_pending=1 ;;
     esac
     fm_ff_locked_secondmate_action "$id" "$home_real" "secondmate $id" \
-      secondmate_propagate_locked "$window" "$endpoint_generation" "$reread_skip_pending" \
+      secondmate_propagate_locked "$window" "$endpoint_generation" \
+        "$provider_identity" "$reread_skip_pending" \
       || echo "SECONDMATE_SYNC: secondmate $id: skipped: lifecycle identity changed or lock is busy"
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   fm_ff_target_lock_release
@@ -571,17 +575,28 @@ secondmate_liveness_sweep() {
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
   local meta id window harness backend target agent_state out cause
+  local endpoint_generation provider_identity
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
     id=$(basename "$meta" .meta)
-    window=$(fm_meta_get "$meta" window)
-    [ -n "$window" ] || continue
-    harness=$(fm_meta_get "$meta" harness)
-    backend=$(fm_backend_of_meta "$meta")
-    target=$(fm_backend_target_of_meta "$meta")
-    [ -n "$target" ] || target="$window"
+    if ! fm_secondmate_lifecycle_meta_read "$meta" "$id"; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: refused: ${FM_SECONDMATE_META_ERROR:-ambiguous lifecycle metadata}"
+      continue
+    fi
+    window=$FM_SECONDMATE_META_WINDOW
+    harness=$FM_SECONDMATE_META_HARNESS
+    backend=$FM_SECONDMATE_META_BACKEND
+    target=$FM_SECONDMATE_META_TARGET
+    endpoint_generation=$FM_SECONDMATE_META_ENDPOINT_GENERATION
+    provider_identity=$FM_SECONDMATE_META_PROVIDER_IDENTITY
+    fm_secondmate_lifecycle_identity_matches "$STATE" "$id" \
+      "$FM_SECONDMATE_META_HOME" "$window" "$endpoint_generation" \
+      "$provider_identity" || {
+        echo "SECONDMATE_LIVENESS: secondmate $id: refused: lifecycle identity changed"
+        continue
+      }
     agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
       claude|codex|opencode|pi|grok) ;;
@@ -596,6 +611,12 @@ secondmate_liveness_sweep() {
         fi
         ;;
       dead|missing)
+        fm_secondmate_lifecycle_identity_matches "$STATE" "$id" \
+          "$FM_SECONDMATE_META_HOME" "$window" "$endpoint_generation" \
+          "$provider_identity" || {
+            echo "SECONDMATE_LIVENESS: secondmate $id: refused: lifecycle identity changed"
+            continue
+          }
         if [ "$agent_state" = dead ]; then
           cause="confirmed agent absence on existing endpoint"
           fm_backend_kill "$backend" "$target" 2>/dev/null || true

@@ -274,16 +274,18 @@ treehouse_return_is_index_lock_error() {
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_check=${4:-} state_scope=${5:-}
   local stamp_id=${6:-} stamp_home=${7:-} lease_holder=${8:-}
-  local out attempt=0 retries backup= staged=0 return_status
+  local out attempt=0 retries claim= staged=0 return_status
   retries=$TREEHOUSE_RETURN_LOCK_RETRIES
   case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
   if [ -n "$post_check" ]; then
     "$post_check" || return 1
   fi
   if [ -n "$state_scope" ] && [ -n "$stamp_id" ] && [ -n "$stamp_home" ]; then
-    fm_slot_stamp_stage_return "$dir" "$stamp_id" "$stamp_home" "$state_scope" || return 1
+    [ -n "$lease_holder" ] || lease_holder=$stamp_id
+    fm_slot_stamp_stage_return "$dir" "$stamp_id" "$stamp_home" "$state_scope" \
+      "$lease_holder" || return 1
     staged=${FM_SLOT_RETURN_STAGED:-0}
-    backup=${FM_SLOT_RETURN_BACKUP:-}
+    claim=${FM_SLOT_RETURN_CLAIM:-}
   fi
   while :; do
     if [ -n "$lease_holder" ]; then
@@ -295,13 +297,17 @@ teardown_treehouse_return() {
     fi
     if [ "$return_status" -eq 0 ]; then
       [ -n "$out" ] && printf '%s\n' "$out"
-      [ "$staged" -eq 0 ] || fm_slot_stamp_finalize_return "$backup" || true
+      if [ "$staged" -eq 1 ] && ! fm_slot_stamp_finalize_return "$claim"; then
+        echo "error: returned $label $dir but could not retire its transition claim" >&2
+        return 1
+      fi
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
     if ! treehouse_return_is_index_lock_error "$out" || [ "$attempt" -ge "$retries" ]; then
       if [ "$staged" -eq 1 ]; then
-        fm_slot_stamp_restore_return "$dir" "$stamp_id" "$stamp_home" "$backup" || {
+        fm_slot_stamp_restore_return "$dir" "$stamp_id" "$stamp_home" "$claim" \
+          "$lease_holder" || {
           echo "error: could not restore ownership evidence for $label $dir" >&2
         }
       fi
@@ -937,13 +943,19 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worke
 
 require_secondmate_slot_claim() {
   local wt=$1 id=$2 owner_home=$3 label=$4
-  fm_slot_stamp_record "$wt" || {
-    echo "REFUSED: $label $wt has no complete ownership stamp for lease holder $id" >&2
-    return 1
-  }
-  [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
-    && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$owner_home" || {
-      echo "REFUSED: $label $wt ownership stamp does not prove lease holder $id" >&2
+  if fm_slot_stamp_record "$wt"; then
+    [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+      && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$owner_home" || {
+        echo "REFUSED: $label $wt ownership stamp does not prove lease holder $id" >&2
+        return 1
+      }
+    return 0
+  fi
+  fm_slot_return_claim_record "$wt" \
+    && [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$id" ] \
+    && [ "$FM_SLOT_RETURN_CLAIM_HOLDER" = "$id" ] \
+    && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$owner_home" || {
+      echo "REFUSED: $label $wt has no complete ownership or return-transition claim for lease holder $id" >&2
       return 1
     }
 }
