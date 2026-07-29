@@ -79,6 +79,16 @@ UPDATE="$TMP_ROOT/fm-update-primary"
 chmod +x "$UPDATE"
 UPDATE_TEST_PIDS=""
 
+rewrite_with_sed() {
+  local expression=$1 file=$2 tmp
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  sed "$expression" "$file" > "$tmp" \
+    && mv "$tmp" "$file" || {
+      rm -f "$tmp"
+      return 1
+    }
+}
+
 cleanup_update_tests() {
   local pid
   for pid in $UPDATE_TEST_PIDS; do
@@ -641,13 +651,14 @@ test_herdr_target_acknowledges_exact_live_meta() {
   local w out generation fakebin endpoint
   w=$(new_world t15)
   add_sm "$w" sm1
-  sed -i 's/^window=.*/window=default:w1:p2/' "$w/home/state/sm1.meta"
+  rewrite_with_sed 's/^window=.*/window=default:w1:p2/' \
+    "$w/home/state/sm1.meta"
   printf '%s\n' 'backend=herdr' 'herdr_session=default' \
     'herdr_workspace_id=workspace-1' 'herdr_tab_id=tab-1' \
     'herdr_pane_id=w1:p2' >> "$w/home/state/sm1.meta"
   endpoint=$(printf '%s' 'default|workspace-1|tab-1|w1:p2' | cksum \
     | awk '{printf "herdr-%s-%s", $1, $2}')
-  sed -i "s/^endpoint_generation=.*/endpoint_generation=$endpoint/" \
+  rewrite_with_sed "s/^endpoint_generation=.*/endpoint_generation=$endpoint/" \
     "$w/home/state/sm1.meta"
   bump_origin "$w" instr
   fakebin=$(make_fake_tmux "$w/update-fake")
@@ -1365,7 +1376,8 @@ test_live_generation_preflight_preserves_primary() {
   add_sm "$w" sm1
   bump_origin "$w" instr
   before=$(git -C "$w/main" rev-parse HEAD)
-  sed -i 's/^endpoint_generation=.*/endpoint_generation=stale-endpoint/' \
+  rewrite_with_sed \
+    's/^endpoint_generation=.*/endpoint_generation=stale-endpoint/' \
     "$w/home/state/sm1.meta"
   out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "stale live endpoint generation passed update preflight"
@@ -1382,7 +1394,8 @@ test_corrupt_kind_preflight_preserves_primary() {
   add_sm "$w" sm1
   bump_origin "$w" instr
   before=$(git -C "$w/main" rev-parse HEAD)
-  sed -i 's/^kind=secondmate$/kind=corrupt/' "$w/home/state/sm1.meta"
+  rewrite_with_sed 's/^kind=secondmate$/kind=corrupt/' \
+    "$w/home/state/sm1.meta"
   out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "corrupt lifecycle kind passed update preflight"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
@@ -1429,7 +1442,7 @@ test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
   local committed_meta committed_fakebin committed_resolved committed_process
   w=$(new_world t32-exact-pane)
   add_sm "$w" sm1
-  sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
+  rewrite_with_sed 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
   printf 'tmux_pane_id=%%42\n' >> "$w/home/state/sm1.meta"
   generation=$(git -C "$w/sm1" rev-parse HEAD)
   fakebin=$(make_fake_tmux "$w/exact-pane-send-fake")
@@ -1473,8 +1486,9 @@ SH
   meta="$w/home/state/sm1.meta"
   FM_HOME="$w/home"
   export FM_HOME
-  sed -i '/^tmux_pane_id=/d;/^endpoint_generation=/d;/^task=/d' "$meta"
-  sed -i 's/^window=.*/window=firstmate:fm-sm1/' "$meta"
+  rewrite_with_sed \
+    '/^tmux_pane_id=/d;/^endpoint_generation=/d;/^task=/d' "$meta"
+  rewrite_with_sed 's/^window=.*/window=firstmate:fm-sm1/' "$meta"
   mkdir -p "$w/home/state/.locks"
   mkdir "$w/home/state/.locks/tmux-endpoint-42.migration.lock"
   touch -t 200001010000 \
@@ -1646,7 +1660,7 @@ SH
     || fail "interrupted generation bind did not retain recoverable evidence"
   crash_journal_snapshot="$w/crash-journal.snapshot"
   cp "$w/home/state/.tmux-endpoint-44.migration" "$crash_journal_snapshot"
-  sed -i 's/^task=crash$/task=worker-forged/' \
+  rewrite_with_sed 's/^task=crash$/task=worker-forged/' \
     "$w/home/state/.tmux-endpoint-44.migration"
   if (
     PATH="$crash_fakebin:$PATH"
@@ -1822,18 +1836,19 @@ SH
   ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
     >/dev/null 2>&1 \
     || fail "ordinary selector accepted duplicate tmux pane metadata"
-  sed -i '$d' "$meta"
-  sed -i 's/^tmux_pane_id=.*/tmux_pane_id=42/' "$meta"
+  rewrite_with_sed '$d' "$meta"
+  rewrite_with_sed 's/^tmux_pane_id=.*/tmux_pane_id=42/' "$meta"
   ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
     >/dev/null 2>&1 \
     || fail "ordinary selector accepted malformed tmux pane metadata"
-  sed -i 's/^tmux_pane_id=.*/tmux_pane_id=%42/' "$meta"
-  sed -i 's/^window=.*/window=@43/' "$meta"
+  rewrite_with_sed 's/^tmux_pane_id=.*/tmux_pane_id=%42/' "$meta"
+  rewrite_with_sed 's/^window=.*/window=@43/' "$meta"
   ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
     >/dev/null 2>&1 \
     || fail "ordinary selector accepted a pane outside the recorded window"
-  sed -i 's/^window=.*/window=@42/' "$meta"
-  sed -i 's/^endpoint_generation=.*/endpoint_generation=recycled/' "$meta"
+  rewrite_with_sed 's/^window=.*/window=@42/' "$meta"
+  rewrite_with_sed \
+    's/^endpoint_generation=.*/endpoint_generation=recycled/' "$meta"
   ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
     >/dev/null 2>&1 \
     || fail "ordinary selector accepted a recycled tmux pane generation"

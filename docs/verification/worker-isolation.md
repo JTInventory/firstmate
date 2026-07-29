@@ -57,19 +57,21 @@ custodian, after proving its own broker PID, start, executable identity, and
 script path. It gives the custodian a launch certificate bound to its exact PID
 and session and authenticated by both roots, plus a one-use signing channel on
 reserved FD 17. FD 17 must be unused and sibling-isolated. The custodian repairs
-a changed record, but the record and custodian are trusted only after a caller
-proves the inherited durable capability with the complete-record HMAC and a
-fresh root-bound challenge.
+a changed record. A caller retaining FD 18 authenticates that root against the
+existing custodian with both a fresh root HMAC and the custodian signing key
+before any replacement. Custodian validation and replacement run under one
+state-scoped transaction lock.
 After validating it, the custodian closes FDs 9, 18, and 17, clears the
-live-broker environment, and retains only the durable receipt root in shell
-memory. It never returns the durable root to a process that did not inherit that
-capability. A replacement that retains FD 18 validates the
-complete custodian record, rotates the separate live-broker key, and preserves
-durable journal and teardown provenance. A replacement that retains only FD 9,
-or neither protected descriptor, refuses. A restarted secondmate without its
-own scoped durable descriptor also refuses and must be enrolled again. This
-fail-closed boundary is required because files, argv, local sockets, ports, and
-processes are all replaceable by another process running as the same OS user.
+live-broker environment, and retains the durable receipt root plus its signing
+key in shell memory. After broker descriptor loss, an authorized replacement
+publishes a one-use RSA recovery key in its arguments. The custodian verifies
+the exact wrapper, original session identity, live process identity, and
+permitted primary or same-home secondmate ancestry before returning the root
+encrypted to that key. The response binds both endpoint identities and the
+ciphertext with the durable root. The wrapper then proves the recovered root
+against a fresh challenge signed by the same custodian before installing it on
+FD 18 and rotating the live key. A same-home secondmate that still has valid
+FD 18 keeps it during live-key rotation.
 The wrapper then
 creates an anonymous consumer key and publishes its public key and exact live
 process identity in `${enrollment}.consume`. The signer validates that request

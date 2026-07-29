@@ -1090,7 +1090,9 @@ test_durable_receipts_survive_live_key_rotation() {
 
 test_durable_custodian_is_root_bound_and_scoped() {
   local home state record first_pid second_pid owner record_tmp attack_state
-  local recovery_request recovery_response attempts
+  local recovery_request recovery_response attempts partial_before partial_after
+  local wrong_key replacement_one replacement_two replacement_pid
+  local replacement_one_pid replacement_two_pid
   if ! fm_session_descriptor_channel_isolated \
     "$FM_SESSION_AUTHORITY_DURABLE_FD"; then
     pass "skip: sibling process access to durable authority is not isolated"
@@ -1123,7 +1125,10 @@ test_durable_custodian_is_root_bound_and_scoped() {
   done
   [ ! -e "$recovery_request" ] && [ ! -e "$recovery_response" ] \
     || fail "custodian served an unauthorized durable-root request"
-  if (
+  partial_before=$(printf partial-descriptor-proof \
+    | fm_session_authority_durable_hmac) \
+    || fail "could not issue the descriptor-loss durable proof"
+  partial_after=$(
     exec 18<&-
     unset FM_SESSION_AUTHORITY_DURABLE_FD
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
@@ -1131,9 +1136,23 @@ test_durable_custodian_is_root_bound_and_scoped() {
         . "$1/bin/fm-session-lock-lib.sh"
         printf partial-descriptor-proof | fm_session_authority_durable_hmac
       ' _ "$ROOT"
+  ) || fail "live-only replacement could not recover the custodian root"
+  [ "$partial_after" = "$partial_before" ] \
+    || fail "live-only recovery changed the durable root"
+  wrong_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  if (
+    exec 18<&-
+    exec 18< <(while :; do printf '%s\n' "$wrong_key"; done)
+    FM_SESSION_AUTHORITY_DURABLE_FD=18
+    export FM_SESSION_AUTHORITY_DURABLE_FD
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$AUTHORITY_EXEC" true
   ) >/dev/null 2>&1; then
-    fail "live-only replacement recovered without durable capability"
+    fail "an unrelated FD 18 authenticated against the existing custodian"
   fi
+  fm_session_durable_custodian_validate "$record" \
+    && [ "$FM_SESSION_DURABLE_CUSTODIAN_PID" = "$first_pid" ] \
+    || fail "an unrelated FD 18 displaced the durable custodian"
   (
     exec 17</dev/null
     ! FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
@@ -1180,9 +1199,41 @@ test_durable_custodian_is_root_bound_and_scoped() {
   [ "$second_pid" = "$first_pid" ] \
     || fail "record tampering displaced the root-authenticated custodian"
   kill "$first_pid" 2>/dev/null || true
+  attempts=0
+  while [ "$attempts" -lt 100 ] && kill -0 "$first_pid" 2>/dev/null; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  replacement_one="$state/replacement-one"
+  replacement_two="$state/replacement-two"
+  (
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$AUTHORITY_EXEC" true
+  ) >"$replacement_one" 2>&1 &
+  replacement_one_pid=$!
+  BG_PIDS+=("$replacement_one_pid")
+  (
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$AUTHORITY_EXEC" true
+  ) >"$replacement_two" 2>&1 &
+  replacement_two_pid=$!
+  BG_PIDS+=("$replacement_two_pid")
+  wait "$replacement_one_pid" \
+    || fail "first serialized custodian replacement failed"
+  wait "$replacement_two_pid" \
+    || fail "second serialized custodian replacement failed"
+  fm_session_durable_custodian_validate "$record" \
+    || fail "serialized replacement did not publish a valid custodian"
+  replacement_pid=$FM_SESSION_DURABLE_CUSTODIAN_PID
+  [ "$replacement_pid" != "$first_pid" ] \
+    || fail "dead custodian was not replaced"
+  [ "$(pgrep -f "$ROOT/bin/fm-session-durable-authority.sh $state " \
+      | tr '\n' ' ' | awk '{ print NF }')" -eq 1 ] \
+    || fail "concurrent replacement launched competing custodians"
+  kill "$replacement_pid" 2>/dev/null || true
   sleep 0.05
   rm -f "$record"
-  pass "custodian recovery requires the inherited durable capability"
+  pass "custodian recovery preserves authenticated serialized durable authority"
 }
 
 test_authority_hmac_needs_only_openssl() {
