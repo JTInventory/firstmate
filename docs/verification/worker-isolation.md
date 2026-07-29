@@ -28,9 +28,10 @@ For a secondmate spawn, this declaration precedes
 `bin/fm-session-authority-exec.sh`; the authorized parent has already placed a
 one-use signed enrollment ticket in that home without exposing the issuer key.
 The signer binds its public-key digest to its live protected process. The
-generated pane command also carries a separate one-use claim that never appears
-in the ticket, and the signer accepts only its claim-bound token. Independent
-private-key descriptors avoid Darwin `/dev/fd` shared-offset reuse. Spawn waits
+ticket binds the exact live pane shell PID, start value, and executable
+identity, and the signer accepts only a consumer below that endpoint. The
+private signing key stays in shell memory and fresh anonymous pipes, with no
+filesystem pathname, environment export, or terminal command text. Spawn waits
 for the matching acceptance receipt before reporting success.
 
 The declaration refuses rather than emitting a partial prefix:

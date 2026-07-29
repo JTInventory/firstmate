@@ -262,100 +262,57 @@ fm_session_authority_broker_present() {
   [ "$caller_target" = "$broker_target" ]
 }
 
-fm_session_enrollment_claim_digest() {
-  local claim=$1 output digest
-  output=$(printf '%s' "$claim" | openssl dgst -sha256 2>/dev/null) || return 1
-  digest=${output##*= }
-  [ "${#digest}" -eq 64 ] || return 1
-  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
-  printf '%s\n' "$digest"
-}
-
-fm_session_enrollment_claim_token() {
-  local claim=$1 output digest
-  shift
-  output=$(
-    printf '%s\n' "$@"
-    printf '%s' "$claim"
-  ) || return 1
-  output=$(printf '%s' "$output" | openssl dgst -sha256 2>/dev/null) || return 1
-  digest=${output##*= }
-  [ "${#digest}" -eq 64 ] || return 1
-  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
-  printf '%s\n' "$digest"
-}
-
 fm_session_enrollment_signer_prepare() {
   local script=$1 private public output public_digest public_key
   shift
-  if ( : <&10 ) 2>/dev/null || ( : >&10 ) 2>/dev/null \
-    || ( : <&11 ) 2>/dev/null || ( : >&11 ) 2>/dev/null; then
+  if ( : <&10 ) 2>/dev/null || ( : >&10 ) 2>/dev/null; then
     return 1
   fi
-  private=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-private.XXXXXX") \
+  private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
-  public=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-public.XXXXXX") || {
-    rm -f "$private"
-    return 1
-  }
-  chmod 600 "$private" "$public" || {
-    rm -f "$private" "$public"
-    return 1
-  }
-  openssl ecparam -name prime256v1 -genkey -noout -out "$private" 2>/dev/null \
-    && openssl ec -in "$private" -pubout -out "$public" 2>/dev/null || {
-      rm -f "$private" "$public"
-      return 1
-    }
-  output=$(openssl dgst -sha256 "$public" 2>/dev/null) || {
-    rm -f "$private" "$public"
-    return 1
-  }
+  public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
+    || return 1
+  output=$(printf '%s\n' "$public" | openssl dgst -sha256 2>/dev/null) \
+    || return 1
   public_digest=${output##*= }
   [ "${#public_digest}" -eq 64 ] || return 1
   case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
-  public_key=$(openssl base64 -A < "$public") || {
-    rm -f "$private" "$public"
-    return 1
-  }
-  exec 10<"$private" && exec 11<"$private" || {
-    rm -f "$private" "$public"
-    return 1
-  }
-  rm -f "$private" "$public" || return 1
-  FM_SESSION_ENROLLMENT_TICKET_KEY_FD=10
-  FM_SESSION_ENROLLMENT_ACCEPT_KEY_FD=11
+  public_key=$(printf '%s\n' "$public" | openssl base64 -A) || return 1
+  exec 10< <(printf '%s\n' "$private") || return 1
+  unset private public
+  FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD=10
   FM_SESSION_ENROLLMENT_PUBLIC_KEY=$public_key
   FM_SESSION_ENROLLMENT_PUBLIC_SHA256=$public_digest
-  export FM_SESSION_ENROLLMENT_TICKET_KEY_FD FM_SESSION_ENROLLMENT_ACCEPT_KEY_FD
+  export FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD
   export FM_SESSION_ENROLLMENT_PUBLIC_KEY FM_SESSION_ENROLLMENT_PUBLIC_SHA256
   exec "$script" "$@"
 }
 
+fm_session_enrollment_sign_data() {
+  local private=$1 signature=$2 body=$3
+  printf '%s\n' "$private" \
+    | openssl dgst -sha256 -sign /dev/stdin -out "$signature" "$body" 2>/dev/null
+}
+
 fm_session_enrollment_signer_run() {
-  local file=$1 task=$2 home=$3 issuer=$4 home_real issuer_real marker
-  local authority lock binding authority_digest nonce claim claim_digest tmp body signature
+  local file=$1 task=$2 home=$3 issuer=$4 endpoint=$5 endpoint_start=$6
+  local endpoint_identity=$7 home_real issuer_real marker private
+  local authority lock binding authority_digest nonce tmp body signature
   local broker broker_start broker_identity broker_script descriptor signer_start signer_identity
-  local ticket_key_fd=${FM_SESSION_ENROLLMENT_TICKET_KEY_FD:-}
-  local accept_key_fd=${FM_SESSION_ENROLLMENT_ACCEPT_KEY_FD:-}
-  local claim_fd=${FM_SESSION_ENROLLMENT_CLAIM_FD:-}
+  local private_key_fd=${FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD:-}
   local public_key=${FM_SESSION_ENROLLMENT_PUBLIC_KEY:-}
   local public_digest=${FM_SESSION_ENROLLMENT_PUBLIC_SHA256:-}
-  local ticket_key_path accept_key_path
   local ready="${file}.ready" consume="${file}.consume" accepted="${file}.accepted"
-  local consumer consumer_start consumer_identity consume_task consume_home claim_path claim_token
+  local consumer consumer_start consumer_identity consume_task consume_home
   local expected_script env_role env_task env_home attempts=0
-  [ "$ticket_key_fd" = 10 ] && [ "$accept_key_fd" = 11 ] \
-    && [ "$claim_fd" = 12 ] || return 1
-  ticket_key_path="/dev/fd/$ticket_key_fd"
-  accept_key_path="/dev/fd/$accept_key_fd"
-  [ -r "$ticket_key_path" ] && [ -r "$accept_key_path" ] \
-    && [ -r "/dev/fd/$claim_fd" ] || return 1
-  claim=$(tr -d '\n' < "/dev/fd/$claim_fd" 2>/dev/null) || return 1
-  exec 12<&-
-  [ "${#claim}" -eq 96 ] || return 1
-  case "$claim" in *[!0-9a-f]*) return 1 ;; esac
-  claim_digest=$(fm_session_enrollment_claim_digest "$claim") || return 1
+  [ "$private_key_fd" = 10 ] && [ -r /dev/fd/10 ] || return 1
+  private=$(cat <&10) || return 1
+  exec 10<&-
+  case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$endpoint" -gt 1 ] \
+    && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
+    && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
+    || return 1
   [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] || return 1
   home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
   issuer_real=$(cd "$issuer" 2>/dev/null && pwd -P) || return 1
@@ -386,7 +343,7 @@ fm_session_enrollment_signer_run() {
   signer_identity=$(fm_session_process_identity "$$") || return 1
   authority_digest=$(fm_session_sha256_file "$authority") || return 1
   nonce=$(fm_session_random_hex 32) || return 1
-  case "$task:$home_real:$issuer_real:$broker_start:$broker_identity:$broker_script:$descriptor:$signer_start:$signer_identity:$public_digest:$claim_digest" in
+  case "$task:$home_real:$issuer_real:$broker_start:$broker_identity:$broker_script:$descriptor:$signer_start:$signer_identity:$public_digest:$endpoint_start:$endpoint_identity" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
   [ "${#public_digest}" -eq 64 ] || return 1
@@ -405,15 +362,16 @@ fm_session_enrollment_signer_run() {
     rm -f "$body" "$signature"
     return 1
   }
-  printf 'version=4\nrole=secondmate\ntask=%s\nhome=%s\nissuer-home=%s\nissuer-authority=%s\nnonce=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nbroker-script=%s\nauthority-fd=%s\nauthority-descriptor=%s\nsigner-pid=%s\nsigner-start=%s\nsigner-identity=%s\npublic-key=%s\npublic-key-sha256=%s\nclaim-sha256=%s\n' \
+  printf 'version=5\nrole=secondmate\ntask=%s\nhome=%s\nissuer-home=%s\nissuer-authority=%s\nnonce=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nbroker-script=%s\nauthority-fd=%s\nauthority-descriptor=%s\nsigner-pid=%s\nsigner-start=%s\nsigner-identity=%s\npublic-key=%s\npublic-key-sha256=%s\nendpoint-pid=%s\nendpoint-start=%s\nendpoint-identity=%s\n' \
     "$task" "$home_real" "$issuer_real" "$authority_digest" "$nonce" \
     "$broker" "$broker_start" "$broker_identity" "$broker_script" \
     "$FM_SESSION_AUTHORITY_FD" "$descriptor" "$$" "$signer_start" \
-    "$signer_identity" "$public_key" "$public_digest" "$claim_digest" > "$body" || {
+    "$signer_identity" "$public_key" "$public_digest" "$endpoint" \
+    "$endpoint_start" "$endpoint_identity" > "$body" || {
       rm -f "$body" "$signature"
       return 1
     }
-  openssl dgst -sha256 -sign "$ticket_key_path" -out "$signature" "$body" 2>/dev/null || {
+  fm_session_enrollment_sign_data "$private" "$signature" "$body" || {
     rm -f "$body" "$signature"
     return 1
   }
@@ -435,7 +393,7 @@ fm_session_enrollment_signer_run() {
   rm -f "$body" "$signature"
   while [ "$attempts" -lt 1500 ]; do
     if [ -f "$consume" ] && [ ! -L "$consume" ] \
-      && [ "$(wc -l < "$consume" | tr -d ' ')" -eq 8 ] \
+      && [ "$(wc -l < "$consume" | tr -d ' ')" -eq 7 ] \
       && [ "$(sed -n '1s/^signer-pid=//p' "$consume")" = "$$" ] \
       && [ "$(sed -n '2s/^nonce=//p' "$consume")" = "$nonce" ]; then
       consumer=$(sed -n '3s/^consumer-pid=//p' "$consume")
@@ -443,9 +401,7 @@ fm_session_enrollment_signer_run() {
       consumer_identity=$(sed -n '5s/^consumer-identity=//p' "$consume")
       consume_task=$(sed -n '6s/^task=//p' "$consume")
       consume_home=$(sed -n '7s/^home=//p' "$consume")
-      claim_token=$(sed -n '8s/^claim-token=//p' "$consume")
       case "$consumer" in ''|*[!0-9]*) return 1 ;; esac
-      claim_path="${file}.claim.${consumer}"
       expected_script="$broker_script"
       env_role=$(fm_session_process_environment_value \
         "$consumer" FM_AGENT_ROLE 2>/dev/null || true)
@@ -453,13 +409,12 @@ fm_session_enrollment_signer_run() {
         "$consumer" FM_AGENT_TASK 2>/dev/null || true)
       env_home=$(fm_session_process_environment_value \
         "$consumer" FM_AGENT_OWNER_HOME 2>/dev/null || true)
-      [ -f "$claim_path" ] && [ ! -L "$claim_path" ] \
-        && [ "$consume_task" = "$task" ] && [ "$consume_home" = "$home_real" ] \
-        && [ "$claim_token" = "$(fm_session_enrollment_claim_token \
-          "$claim" "$$" "$nonce" "$consumer" "$consumer_start" \
-          "$consumer_identity" "$task" "$home_real" 2>/dev/null)" ] \
+      [ "$consume_task" = "$task" ] && [ "$consume_home" = "$home_real" ] \
         && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
         && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
+        && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
+        && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
+        && fm_session_pid_is_ancestor_of "$endpoint" "$consumer" \
         && fm_session_process_runs_script "$consumer" "$expected_script" \
         && [ "$env_role" = secondmate ] && [ "$env_task" = "$task" ] \
         && [ "$env_home" = "$home_real" ] || return 1
@@ -470,8 +425,7 @@ fm_session_enrollment_signer_run() {
       chmod 600 "$body" "$signature" \
         && printf 'version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\n' \
           "$$" "$nonce" "$consumer" "$consumer_start" > "$body" \
-        && openssl dgst -sha256 -sign "$accept_key_path" \
-          -out "$signature" "$body" 2>/dev/null || {
+        && fm_session_enrollment_sign_data "$private" "$signature" "$body" || {
             rm -f "$body" "$signature"
             return 1
           }
@@ -496,11 +450,15 @@ fm_session_enrollment_signer_run() {
 }
 
 fm_session_enrollment_ticket_write() {
-  local file=$1 task=$2 home=$3 issuer=$4 signer ready nonce public_key public_digest
-  local claim claim_file
+  local file=$1 task=$2 home=$3 issuer=$4 endpoint=$5 endpoint_start=$6
+  local endpoint_identity=$7 signer ready nonce public_key public_digest
   local attempts=0
   local signer_script issuer_real authority broker_script
-  unset FM_SESSION_ENROLLMENT_CLAIM
+  case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$endpoint" -gt 1 ] \
+    && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
+    && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
+    || return 1
   issuer_real=$(cd "$issuer" 2>/dev/null && pwd -P) || return 1
   authority="$issuer_real/state/.session-authority"
   fm_session_authority_read "$authority" || return 1
@@ -512,25 +470,9 @@ fm_session_enrollment_ticket_write() {
   [ -x "$signer_script" ] && [ ! -L "$signer_script" ] || return 1
   ready="${file}.ready"
   [ ! -e "$ready" ] && [ ! -L "$ready" ] || return 1
-  if ( : <&12 ) 2>/dev/null || ( : >&12 ) 2>/dev/null; then
-    return 1
-  fi
-  claim=$(fm_session_random_hex 48) || return 1
-  claim_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-claim.XXXXXX") \
-    || return 1
-  chmod 600 "$claim_file" && printf '%s\n' "$claim" > "$claim_file" \
-    && exec 12<"$claim_file" || {
-      rm -f "$claim_file"
-      return 1
-    }
-  rm -f "$claim_file" || {
-    exec 12<&-
-    return 1
-  }
-  FM_SESSION_ENROLLMENT_CLAIM_FD=12 \
-    "$signer_script" "$file" "$task" "$home" "$issuer" >/dev/null 2>&1 &
+  "$signer_script" "$file" "$task" "$home" "$issuer" "$endpoint" \
+    "$endpoint_start" "$endpoint_identity" >/dev/null 2>&1 &
   signer=$!
-  exec 12<&-
   FM_SESSION_ENROLLMENT_SIGNER_PID=$signer
   export FM_SESSION_ENROLLMENT_SIGNER_PID
   while [ "$attempts" -lt 250 ]; do
@@ -545,7 +487,6 @@ fm_session_enrollment_ticket_write() {
       case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
       FM_SESSION_ENROLLMENT_PUBLIC_KEY=$public_key
       FM_SESSION_ENROLLMENT_PUBLIC_SHA256=$public_digest
-      FM_SESSION_ENROLLMENT_CLAIM=$claim
       export FM_SESSION_ENROLLMENT_NONCE FM_SESSION_ENROLLMENT_PUBLIC_KEY
       export FM_SESSION_ENROLLMENT_PUBLIC_SHA256
       return 0
@@ -596,23 +537,16 @@ fm_session_enrollment_acceptance_validate() {
 }
 
 fm_session_enrollment_consumption_request() {
-  local file=$1 task=$2 home=$3 tmp start identity claim token
+  local file=$1 task=$2 home=$3 tmp start identity
   local consume="${file}.consume"
   [ ! -e "$consume" ] && [ ! -L "$consume" ] || return 1
   start=$(fm_session_process_start "$$") || return 1
   identity=$(fm_session_process_identity "$$") || return 1
-  claim=${FM_SESSION_ENROLLMENT_CLAIM:-}
-  [ "${#claim}" -eq 96 ] || return 1
-  case "$claim" in *[!0-9a-f]*) return 1 ;; esac
-  token=$(fm_session_enrollment_claim_token \
-    "$claim" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
-    "$FM_SESSION_ENROLLMENT_NONCE" "$$" "$start" "$identity" "$task" "$home") \
-    || return 1
   tmp=$(mktemp "${consume}.XXXXXX") || return 1
   chmod 600 "$tmp" \
-    && printf 'signer-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nconsumer-identity=%s\ntask=%s\nhome=%s\nclaim-token=%s\n' \
+    && printf 'signer-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nconsumer-identity=%s\ntask=%s\nhome=%s\n' \
       "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
-      "$$" "$start" "$identity" "$task" "$home" "$token" > "$tmp" \
+      "$$" "$start" "$identity" "$task" "$home" > "$tmp" \
     && mv "$tmp" "$consume" || {
       rm -f "$tmp"
       return 1
@@ -621,19 +555,16 @@ fm_session_enrollment_consumption_request() {
 
 fm_session_enrollment_ticket_wait_accepted() {
   local file=$1 signer=$2 nonce=$3 public_key=$4 public_digest=$5
-  local attempts=${6:-1500} accepted="${file}.accepted" seen=0 claim
+  local attempts=${6:-1500} accepted="${file}.accepted" seen=0
   case "$signer:$attempts" in *[!0-9:]*) return 1 ;; esac
   [ "${#nonce}" -eq 64 ] || return 1
   case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
   while [ "$seen" -lt "$attempts" ]; do
-    claim=$(printf '%s\n' "${file}.claim."* | sed -n '1p')
     if fm_session_enrollment_acceptance_validate \
       "$accepted" "$signer" "$nonce" "$public_key" "$public_digest"; then
-      if [ "$claim" = "${file}.claim.*" ]; then
-        wait "$signer" 2>/dev/null || return 1
-        rm -f "$accepted" "${file}.ready" "${file}.consume"
-        return 0
-      fi
+      wait "$signer" 2>/dev/null || return 1
+      rm -f "$accepted" "${file}.ready" "${file}.consume"
+      return 0
     elif ! kill -0 "$signer" 2>/dev/null; then
       wait "$signer" 2>/dev/null || true
       return 1
@@ -646,13 +577,14 @@ fm_session_enrollment_ticket_wait_accepted() {
 
 fm_session_enrollment_ticket_validate() {
   local file=$1 task=$2 home=$3 home_real version role ticket_task ticket_home
-  local issuer authority_digest nonce body public_key public_digest claim_digest claim_value signature
+  local issuer authority_digest nonce body public_key public_digest signature
   local public_file signature_file body_file signer_public_digest
   local issuer_real authority lock binding current_digest status=1
   local broker broker_start broker_identity broker_script authority_fd descriptor
   local signer signer_start signer_identity signer_script current
+  local endpoint endpoint_start endpoint_identity
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  [ "$(wc -l < "$file" | tr -d ' ')" -eq 20 ] || return 1
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq 22 ] || return 1
   version=$(sed -n '1s/^version=//p' "$file")
   role=$(sed -n '2s/^role=//p' "$file")
   ticket_task=$(sed -n '3s/^task=//p' "$file")
@@ -671,27 +603,24 @@ fm_session_enrollment_ticket_validate() {
   signer_identity=$(sed -n '16s/^signer-identity=//p' "$file")
   public_key=$(sed -n '17s/^public-key=//p' "$file")
   public_digest=$(sed -n '18s/^public-key-sha256=//p' "$file")
-  claim_digest=$(sed -n '19s/^claim-sha256=//p' "$file")
-  signature=$(sed -n '20s/^signature=//p' "$file")
+  endpoint=$(sed -n '19s/^endpoint-pid=//p' "$file")
+  endpoint_start=$(sed -n '20s/^endpoint-start=//p' "$file")
+  endpoint_identity=$(sed -n '21s/^endpoint-identity=//p' "$file")
+  signature=$(sed -n '22s/^signature=//p' "$file")
   home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
-  [ "$version" = 4 ] && [ "$role" = secondmate ] \
+  [ "$version" = 5 ] && [ "$role" = secondmate ] \
     && [ "$ticket_task" = "$task" ] && [ "$ticket_home" = "$home_real" ] \
     && [ "${#authority_digest}" -eq 64 ] && [ "${#nonce}" -eq 64 ] \
     && [ -n "$broker_start" ] && [ -n "$broker_identity" ] \
     && [ -n "$broker_script" ] && [ -n "$descriptor" ] \
     && [ -n "$signer_start" ] && [ -n "$signer_identity" ] \
     && [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] \
-    && [ "${#claim_digest}" -eq 64 ] \
+    && [ -n "$endpoint_start" ] && [ -n "$endpoint_identity" ] \
     && [ -n "$signature" ] || return 1
-  case "$broker:$signer:$authority_fd" in *[!0-9:]*) return 1 ;; esac
-  case "$authority_digest:$nonce:$public_digest:$claim_digest" in
+  case "$broker:$signer:$authority_fd:$endpoint" in *[!0-9:]*) return 1 ;; esac
+  case "$authority_digest:$nonce:$public_digest" in
     *[!0-9a-f:]*) return 1 ;;
   esac
-  claim_value=${FM_SESSION_ENROLLMENT_CLAIM:-}
-  [ "${#claim_value}" -eq 96 ] || return 1
-  case "$claim_value" in *[!0-9a-f]*) return 1 ;; esac
-  [ "$claim_digest" = "$(fm_session_enrollment_claim_digest \
-    "$claim_value" 2>/dev/null)" ] || return 1
   issuer_real=$(cd "$issuer" 2>/dev/null && pwd -P) || return 1
   [ "$issuer_real" != "$home_real" ] || return 1
   public_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-public.XXXXXX") || return 1
@@ -703,7 +632,7 @@ fm_session_enrollment_ticket_validate() {
     rm -f "$public_file" "$signature_file"
     return 1
   }
-  body=$(sed -n '1,19p' "$file")$'\n'
+  body=$(sed -n '1,21p' "$file")$'\n'
   printf '%s' "$public_key" | openssl base64 -d -A > "$public_file" 2>/dev/null \
     && printf '%s' "$signature" | openssl base64 -d -A > "$signature_file" 2>/dev/null \
     && printf '%s' "$body" > "$body_file" || {
@@ -739,7 +668,10 @@ fm_session_enrollment_ticket_validate() {
       "$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh" ] \
     && [ "$(fm_session_process_start "$broker" 2>/dev/null)" = "$broker_start" ] \
     && [ "$(fm_session_process_identity "$broker" 2>/dev/null)" = "$broker_identity" ] \
-    && fm_session_process_runs_script "$broker" "$broker_script"; then
+    && fm_session_process_runs_script "$broker" "$broker_script" \
+    && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
+    && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
+    && fm_session_pid_is_ancestor_of "$endpoint" "$$"; then
     status=0
     FM_SESSION_ENROLLMENT_SIGNER_PID=$signer
     FM_SESSION_ENROLLMENT_NONCE=$nonce
@@ -839,8 +771,13 @@ fm_session_authority_is_current_ancestor() {
 }
 
 fm_session_pid_is_current_ancestor() {
-  local wanted=$1 pid=$$ ppid
-  case "$wanted" in ''|*[!0-9]*) return 1 ;; esac
+  fm_session_pid_is_ancestor_of "$1" "$$"
+}
+
+fm_session_pid_is_ancestor_of() {
+  local wanted=$1 pid=$2 ppid
+  case "$wanted:$pid" in *[!0-9:]*) return 1 ;; esac
+  [ "$wanted" -gt 1 ] || return 1
   while [ "$pid" -gt 1 ]; do
     [ "$pid" != "$wanted" ] || return 0
     ppid=$(fm_session_parent_pid "$pid") || return 1

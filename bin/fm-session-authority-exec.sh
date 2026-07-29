@@ -36,12 +36,12 @@ if fm_session_authority_read "$authority" \
   authorized=1
 elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   enrollment="$STATE/.session-authority-enrollment"
-  enrollment_claim="$enrollment.claim.$$"
+  enrollment_ticket="$enrollment.consumer.$$"
   if [ -f "$enrollment" ] && [ ! -L "$enrollment" ] \
-    && [ ! -e "$enrollment_claim" ] && [ ! -L "$enrollment_claim" ] \
-    && mv "$enrollment" "$enrollment_claim"; then
+    && [ ! -e "$enrollment_ticket" ] && [ ! -L "$enrollment_ticket" ] \
+    && mv "$enrollment" "$enrollment_ticket"; then
     if fm_session_enrollment_ticket_validate \
-      "$enrollment_claim" "$FM_AGENT_TASK" "$home_real" \
+      "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real" \
       && fm_session_enrollment_consumption_request \
         "$enrollment" "$FM_AGENT_TASK" "$home_real"; then
       enrollment_attempts=0
@@ -51,7 +51,7 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
           "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
           "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
           && [ "$(sed -n '4s/^consumer-pid=//p' "${enrollment}.accepted")" = "$$" ]; then
-          rm -f "$enrollment_claim" "${enrollment}.consume"
+          rm -f "$enrollment_ticket" "${enrollment}.consume"
           authorized=1
           break
         fi
@@ -60,10 +60,10 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
         enrollment_attempts=$((enrollment_attempts + 1))
       done
       if [ "$authorized" -ne 1 ]; then
-        rm -f "$enrollment_claim" "${enrollment}.consume" "${enrollment}.accepted"
+        rm -f "$enrollment_ticket" "${enrollment}.consume" "${enrollment}.accepted"
       fi
     else
-      rm -f "$enrollment_claim" "${enrollment}.consume"
+      rm -f "$enrollment_ticket" "${enrollment}.consume"
     fi
   fi
 elif fm_worker_primary_bootstrap_matches; then
@@ -85,8 +85,6 @@ fi
   echo "error: trusted session enrollment capability is missing or invalid" >&2
   exit 1
 }
-unset FM_SESSION_ENROLLMENT_CLAIM
-
 authority_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-authority.XXXXXX") || exit 1
 cleanup_authority_file() {
   rm -f -- "$authority_file"

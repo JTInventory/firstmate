@@ -1738,13 +1738,31 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
 }
 if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_ENROLLMENT="$PROJ_ABS/state/.session-authority-enrollment"
+  SPAWN_AUTHORITY_ENDPOINT_PID=$(fm_agent_backend_shell_pid "$BACKEND" "$WID") || {
+    echo "error: could not verify the endpoint process for secondmate $ID" >&2
+    exit 1
+  }
+  SPAWN_AUTHORITY_ENDPOINT_START=$(
+    fm_session_process_start "$SPAWN_AUTHORITY_ENDPOINT_PID"
+  ) || {
+    echo "error: could not verify the endpoint start for secondmate $ID" >&2
+    exit 1
+  }
+  SPAWN_AUTHORITY_ENDPOINT_IDENTITY=$(
+    fm_session_process_identity "$SPAWN_AUTHORITY_ENDPOINT_PID"
+  ) || {
+    echo "error: could not verify the endpoint identity for secondmate $ID" >&2
+    exit 1
+  }
   fm_session_enrollment_ticket_write \
-    "$SPAWN_AUTHORITY_ENROLLMENT" "$ID" "$PROJ_ABS" "$FM_HOME" || {
+    "$SPAWN_AUTHORITY_ENROLLMENT" "$ID" "$PROJ_ABS" "$FM_HOME" \
+    "$SPAWN_AUTHORITY_ENDPOINT_PID" "$SPAWN_AUTHORITY_ENDPOINT_START" \
+    "$SPAWN_AUTHORITY_ENDPOINT_IDENTITY" || {
       echo "error: could not issue trusted session enrollment for secondmate $ID" >&2
       exit 1
   }
   SPAWN_AUTHORITY_ENROLLMENT_SIGNER=$FM_SESSION_ENROLLMENT_SIGNER_PID
-  LAUNCH="${WORKER_ENV_PREFIX}FM_SESSION_ENROLLMENT_CLAIM=$(shell_quote "$FM_SESSION_ENROLLMENT_CLAIM") $(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
+  LAUNCH="${WORKER_ENV_PREFIX}$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 fi
@@ -1791,7 +1809,6 @@ if [ "$KIND" = secondmate ]; then
 fi
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
-unset FM_SESSION_ENROLLMENT_CLAIM
 
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_LOCK_HELD=0
