@@ -1327,7 +1327,8 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
 }
 
 test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
-  local w generation fakebin out runtime resolved meta legacy_meta
+  local w generation fakebin out runtime resolved meta legacy_meta foreign_meta
+  local ownership_meta ownership_fakebin
   w=$(new_world t32-exact-pane)
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
@@ -1374,15 +1375,82 @@ SH
   meta="$w/home/state/sm1.meta"
   sed -i '/^tmux_pane_id=/d;/^endpoint_generation=/d;/^task=/d' "$meta"
   sed -i 's/^window=.*/window=firstmate:fm-sm1/' "$meta"
-  resolved=$(fm_backend_resolve_selector_with_backend \
-    fm-sm1 "$w/home/state")
+  mkdir "$meta.endpoint-migration.lock"
+  touch -t 200001010000 "$meta.endpoint-migration.lock"
+  resolved=$(
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/sm1"; }
+    fm_agent_environ() {
+      printf 'FM_AGENT_TASK=sm1\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=secondmate\n' \
+        "$w/sm1"
+    }
+    fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state"
+  )
   [ "$resolved" = $'tmux\t%42' ] \
     || fail "pre-port tmux metadata did not migrate to its exact live pane"
+  [ ! -e "$meta.endpoint-migration.lock" ] \
+    && [ ! -L "$meta.endpoint-migration.lock" ] \
+    || fail "legacy tmux migration left its recovered lifecycle lock behind"
   [ "$(grep -c '^window=@42$' "$meta")" -eq 1 ] \
     && [ "$(grep -c '^tmux_pane_id=%42$' "$meta")" -eq 1 ] \
     && [ "$(grep -c '^endpoint_generation=fm-legacy-' "$meta")" -eq 1 ] \
     && [ "$(grep -c '^task=sm1$' "$meta")" -eq 1 ] \
     || fail "pre-port tmux metadata migration was incomplete or ambiguous"
+  foreign_meta="$w/home/state/foreign.meta"
+  mkdir -p "$w/foreign"
+  printf 'foreign\n' > "$w/foreign/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-foreign\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s/foreign\n' "$w"
+  } > "$foreign_meta"
+  if (
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/foreign"; }
+    fm_agent_environ() {
+      printf 'FM_AGENT_TASK=foreign\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=secondmate\n' \
+        "$w/foreign"
+    }
+    fm_backend_resolve_selector_with_backend fm-foreign "$w/home/state"
+  ) >/dev/null 2>&1; then
+    fail "legacy migration rebound a pane already owned by another task"
+  fi
+  [ "$(grep -c '^tmux_pane_id=' "$foreign_meta")" -eq 0 ] \
+    && [ "$(grep -c '^endpoint_generation=' "$foreign_meta")" -eq 0 ] \
+    || fail "foreign legacy metadata was partially rebound"
+  ownership_meta="$w/home/state/ownership.meta"
+  mkdir -p "$w/ownership"
+  printf 'ownership\n' > "$w/ownership/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-ownership\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s/ownership\n' "$w"
+  } > "$ownership_meta"
+  ownership_fakebin=$(make_fake_tmux "$w/ownership-fake")
+  if (
+    PATH="$ownership_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/ownership-fake/tmux.log"
+    export PATH FM_FAKE_TMUX_LOG
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/sm1"; }
+    fm_agent_environ() {
+      printf 'FM_AGENT_TASK=ownership\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=secondmate\n' \
+        "$w/ownership"
+    }
+    fm_backend_resolve_selector_with_backend fm-ownership "$w/home/state"
+  ) >/dev/null 2>&1; then
+    fail "legacy migration accepted a harness from another task home"
+  fi
+  [ ! -e "$w/ownership-fake/tmux.log.endpoint-generation" ] \
+    || fail "legacy ownership refusal mutated the pane generation"
+  [ "$(grep -c '^tmux_pane_id=' "$ownership_meta")" -eq 0 ] \
+    && [ "$(grep -c '^endpoint_generation=' "$ownership_meta")" -eq 0 ] \
+    || fail "unowned legacy metadata was partially migrated"
   legacy_meta="$w/home/state/legacy-ambiguous.meta"
   printf 'window=firstmate:fm-legacy-ambiguous\nkind=secondmate\n' \
     > "$legacy_meta"

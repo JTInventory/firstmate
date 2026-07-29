@@ -66,22 +66,25 @@ case "${1:-}" in
     ;;
   show-options)
     target=
+    verbose=0
     while [ $# -gt 0 ]; do
-      if [ "$1" = -t ]; then
-        shift
-        target=${1:-}
-        break
-      fi
+      [ "$1" != -v ] || verbose=1
+      if [ "$1" = -t ]; then shift; target=${1:-}; fi
       shift
     done
     id=${target##*:fm-}
     if grep -Fx "$target" "${FM_FAKE_TMUX_LOG}.closed" >/dev/null 2>&1; then
       exit 0
     fi
-    if [ -f "${FM_FAKE_TMUX_LOG}.endpoint-generation" ]; then
-      cat "${FM_FAKE_TMUX_LOG}.endpoint-generation"
-    else
-      printf '%s\n' "${FM_FAKE_ENDPOINT_GENERATION:-endpoint-$id}"
+    if [ "$verbose" -eq 1 ]; then
+      if [ -f "${FM_FAKE_TMUX_LOG}.endpoint-generation" ]; then
+        cat "${FM_FAKE_TMUX_LOG}.endpoint-generation"
+      else
+        printf '%s\n' "${FM_FAKE_ENDPOINT_GENERATION:-endpoint-$id}"
+      fi
+    elif [ -f "${FM_FAKE_TMUX_LOG}.endpoint-generation" ]; then
+      printf '@firstmate_endpoint_generation %s\n' \
+        "$(cat "${FM_FAKE_TMUX_LOG}.endpoint-generation")"
     fi
     exit 0
     ;;

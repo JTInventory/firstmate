@@ -259,6 +259,8 @@ fm_session_authority_key_path() {
 
 fm_session_authority_capability_present() {
   local key_path key
+  fm_session_descriptor_channel_isolated \
+    "${FM_SESSION_AUTHORITY_FD:-}" || return 1
   key_path=$(fm_session_authority_key_path) || return 1
   key=$(tr -d '\n' < "$key_path" 2>/dev/null) || return 1
   [ "${#key}" -ge 64 ] || return 1
@@ -456,6 +458,7 @@ fm_session_enrollment_signer_run() {
   local consumer_public_key consumer_public_digest
   local expected_script env_role env_task env_home attempts=0
   [ "$private_key_fd" = 10 ] && [ -r /dev/fd/10 ] || return 1
+  fm_session_descriptor_channel_isolated "$private_key_fd" || return 1
   private=$(cat <&10) || return 1
   exec 10<&-
   case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
@@ -754,6 +757,7 @@ fm_session_enrollment_ack_write() {
   local private_fd=${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD:-}
   local private consumer_start accepted_digest body signature tmp
   [ "$private_fd" = 8 ] && [ -r /dev/fd/8 ] || return 1
+  fm_session_descriptor_channel_isolated "$private_fd" || return 1
   [ ! -e "$acknowledged" ] && [ ! -L "$acknowledged" ] || return 1
   consumer_start=$(fm_session_process_start "$$") || return 1
   accepted_digest=$(fm_session_sha256_file "$accepted") || return 1

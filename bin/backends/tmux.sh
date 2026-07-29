@@ -93,6 +93,16 @@ fm_backend_tmux_bind_endpoint_generation() {
     @firstmate_endpoint_generation 2>/dev/null)" = "$generation" ]
 }
 
+fm_backend_tmux_pane_generation_unset() {
+  local pane=$1 options count
+  case "$pane" in %*) ;; *) return 1 ;; esac
+  case "${pane#%}" in ''|*[!0-9]*) return 1 ;; esac
+  options=$(tmux show-options -p -t "$pane" 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$options" \
+    | awk '$1 == "@firstmate_endpoint_generation" {count++} END {print count + 0}')
+  [ "$count" -eq 0 ]
+}
+
 fm_backend_tmux_endpoint_generation() {
   local target=$1 compatibility=${2:-} pane
   case "$target" in

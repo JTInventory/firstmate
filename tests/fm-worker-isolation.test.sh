@@ -1032,6 +1032,38 @@ test_authority_fds_require_sibling_proc_isolation() {
   pass "every authority descriptor proves sibling isolation before key creation"
 }
 
+test_authority_fds_reprove_isolation_after_exec() {
+  local original_fd authority_tmp
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  original_fd=$FM_SESSION_AUTHORITY_FD
+  authority_tmp=$(mktemp "$TMP_ROOT/post-exec-authority.XXXXXX")
+  printf '%064d\n' 0 > "$authority_tmp"
+  exec 9<"$authority_tmp"
+  rm -f "$authority_tmp"
+  FM_SESSION_AUTHORITY_FD=9
+  (
+    fm_session_descriptor_channel_isolated() { return 1; }
+    ! fm_session_authority_capability_present
+  ) || fail "post-exec authority use skipped descriptor isolation proof"
+  (
+    exec 10< <(printf 'private\n')
+    FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD=10
+    fm_session_descriptor_channel_isolated() { return 1; }
+    ! fm_session_enrollment_signer_run x x x x 2 x x
+    [ "$(cat <&10)" = private ]
+  ) || fail "post-exec signer consumed its key before isolation proof"
+  (
+    exec 8< <(printf 'private\n')
+    FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD=8
+    fm_session_descriptor_channel_isolated() { return 1; }
+    ! fm_session_enrollment_ack_write x y 2 z q
+    [ "$(cat <&8)" = private ]
+  ) || fail "post-exec consumer consumed its key before isolation proof"
+  exec 9<&-
+  FM_SESSION_AUTHORITY_FD=$original_fd
+  pass "authority keys reprove descriptor isolation after exec"
+}
+
 test_unrelated_process_cannot_consume_endpoint_enrollment() {
   local issuer home endpoint signer out status=0 launch
   . "$ROOT/bin/fm-session-lock-lib.sh"
@@ -3276,6 +3308,7 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_secondmate_child_receives_only_its_own_home
   test_authority_fds_require_sibling_proc_isolation
+  test_authority_fds_reprove_isolation_after_exec
   test_secondmate_authority_delegation_uses_no_node
   test_unrelated_process_cannot_consume_endpoint_enrollment
   test_backend_owned_launch_proof_covers_tmux_and_herdr

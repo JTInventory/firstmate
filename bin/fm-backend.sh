@@ -16,6 +16,22 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 FM_BACKEND_KNOWN="tmux herdr"
 
+if ! command -v fm_lock_try_acquire >/dev/null 2>&1; then
+  _FM_BACKEND_WAKE_READ_ONLY_SET=${FM_WAKE_LIB_READ_ONLY+x}
+  _FM_BACKEND_WAKE_READ_ONLY_VALUE=${FM_WAKE_LIB_READ_ONLY:-}
+  FM_WAKE_LIB_READ_ONLY=1
+  . "$FM_BACKEND_LIB_DIR/fm-wake-lib.sh"
+  if [ "$_FM_BACKEND_WAKE_READ_ONLY_SET" = x ]; then
+    FM_WAKE_LIB_READ_ONLY=$_FM_BACKEND_WAKE_READ_ONLY_VALUE
+  else
+    unset FM_WAKE_LIB_READ_ONLY
+  fi
+  unset _FM_BACKEND_WAKE_READ_ONLY_SET _FM_BACKEND_WAKE_READ_ONLY_VALUE
+fi
+if ! command -v fm_agent_proc_cwd >/dev/null 2>&1; then
+  . "$FM_BACKEND_LIB_DIR/fm-agent-cwd-lib.sh"
+fi
+
 fm_backend_list_contains() {  # <space-delimited-list> <name>
   local list=$1 name=$2
   case "$name" in *[[:space:]]*) return 1 ;; esac
@@ -176,38 +192,124 @@ fm_backend_tmux_meta_read() {  # <meta-file>
   FM_BACKEND_TMUX_META_GENERATION=$generation
 }
 
+fm_backend_meta_value_exact() {
+  local meta=$1 wanted=$2 required=${3:-required}
+  local line key value count=0 found=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) continue ;;
+    esac
+    if [ "$key" = "$wanted" ]; then
+      count=$((count + 1))
+      found=$value
+    fi
+  done < "$meta" || return 1
+  [ "$count" -le 1 ] || return 1
+  if [ "$required" = required ]; then
+    [ "$count" -eq 1 ] && [ -n "$found" ] || return 1
+  elif [ "$required" != optional ]; then
+    return 1
+  fi
+  printf '%s' "$found"
+}
+
+fm_backend_tmux_legacy_process_pid() {
+  local pane=$1 shell
+  shell=$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null \
+    | tr -d '[:space:]') || return 1
+  case "$shell" in ''|*[!0-9]*) return 1 ;; esac
+  fm_agent_harness_pid_below "$shell"
+}
+
+fm_backend_tmux_legacy_process_owned() {
+  local meta=$1 pane=$2 id=$3 home task kind harness home_real marker
+  local pid cwd env declared_task declared_home declared_home_real declared_role
+  home=$(fm_backend_meta_value_exact "$meta" home required) || return 1
+  task=$(fm_backend_meta_value_exact "$meta" task optional) || return 1
+  kind=$(fm_backend_meta_value_exact "$meta" kind required) || return 1
+  harness=$(fm_backend_meta_value_exact "$meta" harness required) || return 1
+  [ -z "$task" ] || [ "$task" = "$id" ] || return 1
+  [ "$kind" = secondmate ] || return 1
+  case "$harness" in claude|codex|opencode|grok|pi) ;; *) return 1 ;; esac
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  marker="$home_real/.fm-secondmate-home"
+  [ -f "$marker" ] && [ ! -L "$marker" ] \
+    && [ "$(cat "$marker" 2>/dev/null)" = "$id" ] || return 1
+  pid=$(fm_backend_tmux_legacy_process_pid "$pane") || return 1
+  fm_harness_pid_alive "$pid" || return 1
+  cwd=$(fm_agent_proc_cwd "$pid") || return 1
+  cwd=$(cd "$cwd" 2>/dev/null && pwd -P) || return 1
+  [ "$cwd" = "$home_real" ] || return 1
+  env=$(fm_agent_environ "$pid") || return 1
+  declared_task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p')
+  declared_home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p')
+  declared_role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p')
+  [ "$(printf '%s\n' "$declared_task" | sed '/^$/d' | wc -l | tr -d ' ')" -le 1 ] \
+    && [ "$(printf '%s\n' "$declared_home" | sed '/^$/d' | wc -l | tr -d ' ')" -le 1 ] \
+    && [ "$(printf '%s\n' "$declared_role" | sed '/^$/d' | wc -l | tr -d ' ')" -le 1 ] \
+    || return 1
+  if [ -n "$declared_task$declared_home$declared_role" ]; then
+    declared_home_real=$(cd "$declared_home" 2>/dev/null && pwd -P) || return 1
+    [ "$declared_task" = "$id" ] \
+      && [ "$declared_home_real" = "$home_real" ] \
+      && [ "$declared_role" = secondmate ] || return 1
+  fi
+}
+
+fm_backend_tmux_legacy_pane_unclaimed() {
+  local meta=$1 pane=$2 other count
+  fm_backend_tmux_pane_generation_unset "$pane" || return 1
+  for other in "$(dirname "$meta")"/*.meta; do
+    [ -e "$other" ] || continue
+    [ "$other" != "$meta" ] || continue
+    count=$(grep -c "^tmux_pane_id=$pane$" "$other" 2>/dev/null || true)
+    [ "$count" -eq 0 ] || return 1
+  done
+}
+
 fm_backend_tmux_meta_migrate_legacy() {  # <meta-file>
   local meta=$1 lock="${1}.endpoint-migration.lock" pane current generation
   local identity canonical tmp id task_count attempts=0 status=1
   fm_backend_tmux_meta_read "$meta" || return 1
   [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 1 ] || return 0
-  if ! mkdir "$lock" 2>/dev/null; then
-    while [ "$attempts" -lt 100 ]; do
-      sleep 0.02
-      fm_backend_tmux_meta_read "$meta" \
-        && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] \
-        && fm_backend_tmux_endpoint_matches \
-          "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
-          "$FM_BACKEND_TMUX_META_GENERATION" \
-        && return 0
-      attempts=$((attempts + 1))
-    done
+  while ! fm_lock_try_acquire "$lock"; do
+    fm_backend_tmux_meta_read "$meta" \
+      && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] \
+      && fm_backend_tmux_endpoint_matches \
+        "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
+        "$FM_BACKEND_TMUX_META_GENERATION" \
+      && return 0
+    [ "$attempts" -lt 100 ] || return 1
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  if ! fm_lifecycle_admission_lock_owned_by_process "$lock"; then
+    fm_lock_release "$lock"
     return 1
   fi
-  fm_backend_tmux_meta_read "$meta" || {
-    rmdir "$lock" 2>/dev/null || true
+  if ! fm_backend_tmux_meta_read "$meta"; then
+    fm_lock_release "$lock"
     return 1
-  }
+  fi
   if [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ]; then
-    rmdir "$lock" 2>/dev/null || true
+    fm_lock_release "$lock"
     return 0
   fi
-  fm_backend_source tmux || {
-    rmdir "$lock" 2>/dev/null || true
+  if ! fm_backend_source tmux; then
+    fm_lock_release "$lock"
     return 1
-  }
+  fi
   pane=$(fm_backend_tmux_single_pane_id \
     "$FM_BACKEND_TMUX_META_WINDOW" 2>/dev/null) || pane=
+  id=${meta##*/}
+  id=${id%.meta}
+  case "$id" in ''|*[!A-Za-z0-9._-]*) pane= ;; esac
+  if [ -n "$pane" ]; then
+    fm_backend_tmux_legacy_process_owned "$meta" "$pane" "$id" \
+      && fm_backend_tmux_legacy_pane_unclaimed "$meta" "$pane" || pane=
+  fi
   if [ -n "$pane" ]; then
     generation="fm-legacy-$(date +%s)-$$-$RANDOM-$RANDOM"
     fm_backend_tmux_bind_endpoint_generation "$pane" "$generation" \
@@ -222,13 +324,10 @@ fm_backend_tmux_meta_migrate_legacy() {  # <meta-file>
     [ "$identity" = "$canonical|$pane|$generation" ] \
       && [ "$current" = "$pane" ] || pane=
   fi
-  case "$canonical" in
+  case "${canonical:-}" in
     @*) case "${canonical#@}" in ''|*[!0-9]*) pane= ;; esac ;;
     *) pane= ;;
   esac
-  id=${meta##*/}
-  id=${id%.meta}
-  case "$id" in ''|*[!A-Za-z0-9._-]*) pane= ;; esac
   task_count=$(grep -c '^task=' "$meta" 2>/dev/null || true)
   [ "$task_count" -le 1 ] || pane=
   if [ -n "$pane" ]; then
@@ -252,7 +351,7 @@ fm_backend_tmux_meta_migrate_legacy() {  # <meta-file>
       [ -z "${tmp:-}" ] || rm -f "$tmp"
     fi
   fi
-  rmdir "$lock" 2>/dev/null || true
+  fm_lock_release "$lock"
   return "$status"
 }
 
