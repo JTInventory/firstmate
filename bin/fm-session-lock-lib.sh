@@ -601,8 +601,9 @@ fm_session_enrollment_signer_run() {
       signature=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-accepted-signature.XXXXXX") \
         || { rm -f "$body"; return 1; }
       chmod 600 "$body" "$signature" \
-        && printf 'version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\n' \
-          "$$" "$nonce" "$consumer" "$consumer_start" > "$body" \
+        && printf 'version=2\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nconsumer-public-key-sha256=%s\n' \
+          "$$" "$nonce" "$consumer" "$consumer_start" \
+          "$consumer_public_digest" > "$body" \
         && fm_session_enrollment_sign_data "$private" "$signature" "$body" || {
             rm -f "$body" "$signature"
             return 1
@@ -625,7 +626,10 @@ fm_session_enrollment_signer_run() {
           "$acknowledged" "$accepted_digest" "$$" "$nonce" "$consumer" \
           "$consumer_start" "$consumer_public_key" "$consumer_public_digest" \
           && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
-          && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ]; then
+          && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
+          && [ "$(fm_session_process_argument_value \
+            "$consumer" --enrollment-confirmed 2>/dev/null)" \
+            = "$accepted_digest" ]; then
           return 0
         fi
         kill -0 "$consumer" 2>/dev/null || return 1
@@ -699,13 +703,18 @@ fm_session_enrollment_ticket_write() {
 
 fm_session_enrollment_acceptance_validate() {
   local accepted=$1 signer=$2 nonce=$3 public_key=$4 public_digest=$5
+  local consumer_public_digest=${6:-}
   local public_file signature_file body_file signature status
   [ -f "$accepted" ] && [ ! -L "$accepted" ] || return 1
-  [ "$(wc -l < "$accepted" | tr -d ' ')" -eq 6 ] || return 1
-  [ "$(sed -n '1p' "$accepted")" = version=1 ] || return 1
+  [ "$(wc -l < "$accepted" | tr -d ' ')" -eq 7 ] || return 1
+  [ "$(sed -n '1p' "$accepted")" = version=2 ] || return 1
   [ "$(sed -n '2s/^signer-pid=//p' "$accepted")" = "$signer" ] || return 1
   [ "$(sed -n '3s/^nonce=//p' "$accepted")" = "$nonce" ] || return 1
-  signature=$(sed -n '6s/^signature=//p' "$accepted")
+  if [ -n "$consumer_public_digest" ]; then
+    [ "$(sed -n '6s/^consumer-public-key-sha256=//p' "$accepted")" \
+      = "$consumer_public_digest" ] || return 1
+  fi
+  signature=$(sed -n '7s/^signature=//p' "$accepted")
   [ -n "$signature" ] && [ "${#public_digest}" -eq 64 ] || return 1
   public_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-accepted-public.XXXXXX") \
     || return 1
@@ -717,7 +726,7 @@ fm_session_enrollment_acceptance_validate() {
   }
   printf '%s' "$public_key" | openssl base64 -d -A > "$public_file" 2>/dev/null \
     && printf '%s' "$signature" | openssl base64 -d -A > "$signature_file" 2>/dev/null \
-    && sed -n '1,5p' "$accepted" > "$body_file" || {
+    && sed -n '1,6p' "$accepted" > "$body_file" || {
       rm -f "$public_file" "$signature_file" "$body_file"
       return 1
     }

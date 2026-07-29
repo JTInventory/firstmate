@@ -335,16 +335,17 @@ same-credential child open attempt that procfs cannot expose any
 authority-bearing descriptor before creating its secret. Readable or
 unrecognized isolation refuses startup. Darwin has no corresponding procfs
 descriptor path. The wrapper signs an acknowledgment
-bound to the matching acceptance digest. The signer binds the public key to
-that exact launched process and verifies the consumer signature before spawn
-releases lifecycle locks or reports success. New tmux task metadata keeps the
+bound to the matching acceptance digest, then the exact PID re-execs through validation into a
+confirmed stage carrying that digest and the public signed records. The signer requires that process stage
+after verifying the consumer signature, before spawn releases lifecycle locks
+or reports success. New tmux task metadata keeps the
 exact pane and pane-scoped generation. Lifecycle operations and ordinary
 `fm-<id>` selectors share one strict parser that rejects duplicate or malformed
 pane data and proves the live pane still belongs to the recorded window and
-generation before transport. A pre-port tmux record without endpoint fields is
-migrated only after its recorded window resolves twice to one stable pane; the
-migration binds a fresh pane generation and atomically records the canonical
-window, pane, generation, and task. Ambiguity refuses. Older window-scoped
+generation before transport. A legacy tmux record without endpoint fields is
+migrated only when its live process has the complete secondmate declaration;
+pre-port processes without that declaration require a coordinated primary and
+secondmate restart. Ambiguity refuses. Older window-scoped
 records that already have a generation remain usable only while the recorded
 window has one stable pane. On macOS, `getsid(2)` must identify a live session
 leader in the caller's ancestry; leaderless or unreadable sessions refuse.

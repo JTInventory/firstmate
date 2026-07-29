@@ -8,6 +8,34 @@ set -eu
 enrollment_launch=
 enrollment_consumer_key=
 enrollment_consumer_digest=
+enrollment_authorized=
+enrollment_confirmed=
+enrollment_ticket_data=
+enrollment_acceptance_data=
+if [ "${1:-}" = --enrollment-confirmed ]; then
+  [ "$#" -gt 2 ] || exit 2
+  enrollment_confirmed=$2
+  shift 2
+  [ "${#enrollment_confirmed}" -eq 64 ] || exit 1
+  case "$enrollment_confirmed" in *[!0-9a-f]*) exit 1 ;; esac
+fi
+if [ "${1:-}" = --enrollment-ticket-data ]; then
+  [ "$#" -gt 2 ] || exit 2
+  enrollment_ticket_data=$2
+  shift 2
+fi
+if [ "${1:-}" = --enrollment-acceptance-data ]; then
+  [ "$#" -gt 2 ] || exit 2
+  enrollment_acceptance_data=$2
+  shift 2
+fi
+if [ "${1:-}" = --enrollment-authorized ]; then
+  [ "$#" -gt 2 ] || exit 2
+  enrollment_authorized=$2
+  shift 2
+  [ "${#enrollment_authorized}" -eq 64 ] || exit 1
+  case "$enrollment_authorized" in *[!0-9a-f]*) exit 1 ;; esac
+fi
 if [ "${1:-}" = --enrollment-launch ]; then
   [ "$#" -gt 2 ] || exit 2
   enrollment_launch=$2
@@ -62,53 +90,113 @@ if fm_session_authority_read "$authority" \
   && fm_session_authority_is_current_ancestor "$authority"; then
   authorized=1
 elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
-  if [ -z "$enrollment_consumer_key" ]; then
+  enrollment="$STATE/.session-authority-enrollment"
+  enrollment_ticket="$enrollment.consumer.$$"
+  if [ -n "$enrollment_confirmed" ]; then
+    confirmed_ticket=$(mktemp "${TMPDIR:-/tmp}/fm-enrollment-ticket.XXXXXX") \
+      || exit 1
+    confirmed_acceptance=$(
+      mktemp "${TMPDIR:-/tmp}/fm-enrollment-acceptance.XXXXXX"
+    ) || {
+      rm -f "$confirmed_ticket"
+      exit 1
+    }
+    if chmod 600 "$confirmed_ticket" "$confirmed_acceptance" \
+      && printf '%s' "$enrollment_ticket_data" \
+        | openssl base64 -d -A > "$confirmed_ticket" 2>/dev/null \
+      && printf '%s' "$enrollment_acceptance_data" \
+        | openssl base64 -d -A > "$confirmed_acceptance" 2>/dev/null \
+      && fm_session_enrollment_ticket_validate \
+        "$confirmed_ticket" "$FM_AGENT_TASK" "$home_real" \
+      && [ "$(fm_session_sha256_file "$confirmed_acceptance" 2>/dev/null)" \
+        = "$enrollment_confirmed" ] \
+      && fm_session_enrollment_acceptance_validate \
+        "$confirmed_acceptance" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+        "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+        "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
+        "$(sed -n '6s/^consumer-public-key-sha256=//p' \
+          "$confirmed_acceptance")" \
+      && [ "$(sed -n '4s/^consumer-pid=//p' \
+        "$confirmed_acceptance")" = "$$" ]; then
+      authorized=1
+    fi
+    rm -f "$confirmed_ticket" "$confirmed_acceptance"
+  elif [ -n "$enrollment_authorized" ]; then
+    if fm_session_enrollment_ticket_validate \
+      "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real" \
+      && [ "$(fm_session_sha256_file "${enrollment}.accepted" 2>/dev/null)" \
+        = "$enrollment_authorized" ] \
+      && fm_session_enrollment_acceptance_validate \
+        "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+        "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+        "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
+        "$(sed -n '6s/^consumer-public-key-sha256=//p' \
+          "${enrollment}.accepted")" \
+      && [ "$(sed -n '4s/^consumer-pid=//p' \
+        "${enrollment}.accepted")" = "$$" ]; then
+      enrollment_ticket_data=$(openssl base64 -A < "$enrollment_ticket") \
+        || exit 1
+      enrollment_acceptance_data=$(
+        openssl base64 -A < "${enrollment}.accepted"
+      ) || exit 1
+      exec "$SCRIPT_DIR/fm-session-authority-exec.sh" \
+        --enrollment-confirmed "$enrollment_authorized" \
+        --enrollment-ticket-data "$enrollment_ticket_data" \
+        --enrollment-acceptance-data "$enrollment_acceptance_data" \
+        --enrollment-launch "$enrollment_launch" "$@"
+    fi
+  elif [ -z "$enrollment_consumer_key" ]; then
     fm_session_enrollment_consumer_prepare || exit 1
     enrollment_consumer_key=$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY
     enrollment_consumer_digest=$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256
   fi
-  fm_session_enrollment_consumer_key_validate \
-    "$enrollment_consumer_key" "$enrollment_consumer_digest" || exit 1
-  enrollment="$STATE/.session-authority-enrollment"
-  enrollment_ticket="$enrollment.consumer.$$"
-  enrollment_attempts=0
-  while [ "$enrollment_attempts" -lt 500 ] \
-    && { [ ! -f "$enrollment" ] || [ -L "$enrollment" ]; }; do
-    sleep 0.02
-    enrollment_attempts=$((enrollment_attempts + 1))
-  done
-  if [ -f "$enrollment" ] && [ ! -L "$enrollment" ] \
-    && [ ! -e "$enrollment_ticket" ] && [ ! -L "$enrollment_ticket" ] \
-    && mv "$enrollment" "$enrollment_ticket"; then
-    if fm_session_enrollment_ticket_validate \
-      "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real" \
-      && fm_session_enrollment_consumption_request \
-        "$enrollment" "$FM_AGENT_TASK" "$home_real"; then
-      enrollment_attempts=0
-      while [ "$enrollment_attempts" -lt 250 ]; do
-        if fm_session_enrollment_acceptance_validate \
-          "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
-          "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
-          "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
-          && [ "$(sed -n '4s/^consumer-pid=//p' "${enrollment}.accepted")" = "$$" ] \
-          && fm_session_enrollment_ack_write \
-            "${enrollment}.accepted.ack" "${enrollment}.accepted" \
-            "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
-            "$FM_SESSION_ENROLLMENT_NONCE" "$enrollment_consumer_digest"; then
-          rm -f "$enrollment_ticket" "${enrollment}.consume"
-          authorized=1
-          break
+  if [ -z "$enrollment_authorized" ] && [ -z "$enrollment_confirmed" ]; then
+    fm_session_enrollment_consumer_key_validate \
+      "$enrollment_consumer_key" "$enrollment_consumer_digest" || exit 1
+    enrollment_attempts=0
+    while [ "$enrollment_attempts" -lt 500 ] \
+      && { [ ! -f "$enrollment" ] || [ -L "$enrollment" ]; }; do
+      sleep 0.02
+      enrollment_attempts=$((enrollment_attempts + 1))
+    done
+    if [ -f "$enrollment" ] && [ ! -L "$enrollment" ] \
+      && [ ! -e "$enrollment_ticket" ] && [ ! -L "$enrollment_ticket" ] \
+      && mv "$enrollment" "$enrollment_ticket"; then
+      if fm_session_enrollment_ticket_validate \
+        "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real" \
+        && fm_session_enrollment_consumption_request \
+          "$enrollment" "$FM_AGENT_TASK" "$home_real"; then
+        enrollment_attempts=0
+        while [ "$enrollment_attempts" -lt 250 ]; do
+          if fm_session_enrollment_acceptance_validate \
+            "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+            "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+            "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
+            "$enrollment_consumer_digest" \
+            && [ "$(sed -n '4s/^consumer-pid=//p' \
+              "${enrollment}.accepted")" = "$$" ] \
+            && fm_session_enrollment_ack_write \
+              "${enrollment}.accepted.ack" "${enrollment}.accepted" \
+              "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+              "$FM_SESSION_ENROLLMENT_NONCE" "$enrollment_consumer_digest"; then
+            enrollment_authorized=$(
+              fm_session_sha256_file "${enrollment}.accepted"
+            ) || exit 1
+            exec "$SCRIPT_DIR/fm-session-authority-exec.sh" \
+              --enrollment-authorized "$enrollment_authorized" \
+              --enrollment-launch "$enrollment_launch" "$@"
+          fi
+          kill -0 "$FM_SESSION_ENROLLMENT_SIGNER_PID" 2>/dev/null || break
+          sleep 0.02
+          enrollment_attempts=$((enrollment_attempts + 1))
+        done
+        if [ "$authorized" -ne 1 ]; then
+          rm -f "$enrollment_ticket" "${enrollment}.consume" \
+            "${enrollment}.accepted" "${enrollment}.accepted.ack"
         fi
-        kill -0 "$FM_SESSION_ENROLLMENT_SIGNER_PID" 2>/dev/null || break
-        sleep 0.02
-        enrollment_attempts=$((enrollment_attempts + 1))
-      done
-      if [ "$authorized" -ne 1 ]; then
-        rm -f "$enrollment_ticket" "${enrollment}.consume" \
-          "${enrollment}.accepted" "${enrollment}.accepted.ack"
+      else
+        rm -f "$enrollment_ticket" "${enrollment}.consume"
       fi
-    else
-      rm -f "$enrollment_ticket" "${enrollment}.consume"
     fi
   fi
 elif fm_worker_primary_bootstrap_matches; then

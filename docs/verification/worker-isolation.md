@@ -34,9 +34,10 @@ or Herdr's direct agent-start response and pane process-info. The normalized
 launcher `PATH` is carried into that direct process launch. Both backends compare
 their complete live endpoint identity with the recorded endpoint before ticket
 issue and again after authenticated acceptance. New tmux metadata persists the
-exact pane. A pre-port record without endpoint fields is accepted only when its
-window resolves twice to one stable pane; migration then binds a fresh pane
-generation and atomically records the canonical endpoint. Ambiguity refuses.
+exact pane. A legacy record without endpoint fields is accepted for migration
+only when its live process already has the complete secondmate declaration.
+Pre-port processes without that declaration fail closed and require a
+coordinated primary and secondmate restart. Ambiguity refuses.
 Older window-scoped records that already have a generation are accepted only
 with one stable pane.
 The ticket

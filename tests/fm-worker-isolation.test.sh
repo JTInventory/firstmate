@@ -1353,11 +1353,18 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
   ack="${accepted}.ack"
   body="$dir/accepted-body"
   signature="$dir/accepted-signature"
-  printf 'version=1\nsigner-pid=42\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\n' \
-    "$nonce" > "$body"
+  printf 'version=2\nsigner-pid=42\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nconsumer-public-key-sha256=%s\n' \
+    "$nonce" "$consumer_digest" > "$body"
   openssl dgst -sha256 -sign "$private" -out "$signature" "$body" 2>/dev/null
   cat "$body" > "$accepted"
   printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$accepted"
+  fm_session_enrollment_acceptance_validate \
+    "$accepted" 42 "$nonce" "$public_key" "$public_digest" "$consumer_digest" \
+    || fail "consumer-bound signer acceptance fixture was rejected"
+  ! fm_session_enrollment_acceptance_validate \
+    "$accepted" 42 "$nonce" "$public_key" "$public_digest" \
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    || fail "signer acceptance authorized a substituted consumer key"
   cp "$accepted" "$ack"
   accepted_digest=$(fm_session_sha256_file "$accepted")
   ! fm_session_enrollment_ack_validate "$ack" "$accepted_digest" 42 "$nonce" 42 \
@@ -1385,8 +1392,8 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
     ack="$accepted.ack"
     ack_body="$1.ack-body"
     ack_signature="$1.ack-signature"
-    printf "version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\n" \
-      "$$" "$2" > "$accepted_body"
+    printf "version=2\nsigner-pid=%s\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nconsumer-public-key-sha256=%s\n" \
+      "$$" "$2" "$5" > "$accepted_body"
     openssl dgst -sha256 -sign "$3" -out "$accepted_signature" \
       "$accepted_body" 2>/dev/null
     cat "$accepted_body" > "$accepted"

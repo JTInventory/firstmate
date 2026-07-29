@@ -259,19 +259,15 @@ fm_backend_tmux_legacy_process_owned() {
   task_count=$(printf '%s\n' "$env" | grep -c '^FM_AGENT_TASK=' || true)
   home_count=$(printf '%s\n' "$env" | grep -c '^FM_AGENT_OWNER_HOME=' || true)
   role_count=$(printf '%s\n' "$env" | grep -c '^FM_AGENT_ROLE=' || true)
-  [ "$task_count" -le 1 ] && [ "$home_count" -le 1 ] \
-    && [ "$role_count" -le 1 ] || return 1
-  if [ "$((task_count + home_count + role_count))" -ne 0 ]; then
-    [ "$task_count" -eq 1 ] && [ "$home_count" -eq 1 ] \
-      && [ "$role_count" -eq 1 ] \
-      && [ -n "$declared_task" ] \
-      && [ -n "$declared_home" ] \
-      && [ -n "$declared_role" ] || return 1
-    declared_home_real=$(cd "$declared_home" 2>/dev/null && pwd -P) || return 1
-    [ "$declared_task" = "$id" ] \
-      && [ "$declared_home_real" = "$home_real" ] \
-      && [ "$declared_role" = secondmate ] || return 1
-  fi
+  [ "$task_count" -eq 1 ] && [ "$home_count" -eq 1 ] \
+    && [ "$role_count" -eq 1 ] \
+    && [ -n "$declared_task" ] \
+    && [ -n "$declared_home" ] \
+    && [ -n "$declared_role" ] || return 1
+  declared_home_real=$(cd "$declared_home" 2>/dev/null && pwd -P) || return 1
+  [ "$declared_task" = "$id" ] \
+    && [ "$declared_home_real" = "$home_real" ] \
+    && [ "$declared_role" = secondmate ] || return 1
   [ "$(fm_backend_tmux_legacy_process_pid "$pane" 2>/dev/null)" = "$pid" ] \
     && [ "$(fm_session_process_start "$pid" 2>/dev/null)" = "$start" ] \
     && [ "$(fm_session_process_identity "$pid" 2>/dev/null)" = "$identity" ] \
@@ -327,10 +323,46 @@ fm_backend_tmux_migration_hmac() {
   printf '%s' "$1" | fm_session_hmac_sha256_key_file "$2"
 }
 
+fm_backend_tmux_migration_key_binding_write() {
+  local journal=$1 key=$2 binding=$3 digest body hmac tmp
+  digest=$(fm_session_sha256_file "$key") || return 1
+  body=$(printf 'version=1\njournal=%s\nkey-sha256=%s\n' \
+    "$journal" "$digest") || return 1
+  body="${body}"$'\n'
+  hmac=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
+  tmp=$(mktemp "${binding}.XXXXXX") || return 1
+  chmod 600 "$tmp" \
+    && printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
+    && mv "$tmp" "$binding" || {
+      rm -f "$tmp"
+      return 1
+    }
+}
+
+fm_backend_tmux_migration_key_binding_valid() {
+  local journal=$1 key="${1}.key" binding="${1}.key.binding"
+  local digest body expected actual
+  [ -f "$key" ] && [ ! -L "$key" ] \
+    && [ -f "$binding" ] && [ ! -L "$binding" ] || return 1
+  [ "$(wc -l < "$binding" | tr -d ' ')" -eq 4 ] \
+    && [ "$(sed -n '1p' "$binding")" = version=1 ] \
+    && [ "$(sed -n '2s/^journal=//p' "$binding")" = "$journal" ] \
+    || return 1
+  digest=$(fm_session_sha256_file "$key") || return 1
+  [ "$(sed -n '3s/^key-sha256=//p' "$binding")" = "$digest" ] || return 1
+  actual=$(sed -n '4s/^authority-hmac=//p' "$binding")
+  [ "${#actual}" -eq 64 ] || return 1
+  case "$actual" in *[!0-9a-f]*) return 1 ;; esac
+  body=$(sed -n '1,3p' "$binding")$'\n'
+  expected=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
+  [ "$actual" = "$expected" ]
+}
+
 fm_backend_tmux_migration_write() {
   local journal=$1 meta=$2 meta_sha=$3 id=$4 pane=$5 window=$6
   local generation=$7 state=$8 process=$9 process_start=${10}
   local process_identity=${11} body hmac tmp key="${journal}.key" key_tmp=
+  local binding="${journal}.key.binding"
   case "$meta:$meta_sha:$id:$pane:$window:$generation:$state:$process:$process_start:$process_identity" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
@@ -340,17 +372,19 @@ fm_backend_tmux_migration_write() {
     || return 1
   body="${body}"$'\n'
   if [ ! -e "$journal" ] && [ ! -L "$journal" ]; then
-    if [ -e "$key" ] || [ -L "$key" ]; then
-      [ -f "$key" ] && [ ! -L "$key" ] || return 1
-      rm -f "$key" || return 1
-    fi
+    for tmp in "$key" "$binding"; do
+      if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+        [ -f "$tmp" ] && [ ! -L "$tmp" ] || return 1
+        rm -f "$tmp" || return 1
+      fi
+    done
     key_tmp=$(mktemp "${key}.XXXXXX") || return 1
     fm_session_random_hex 48 > "$key_tmp" && chmod 600 "$key_tmp" || {
       rm -f "$key_tmp"
       return 1
     }
   else
-    [ -f "$key" ] && [ ! -L "$key" ] || return 1
+    fm_backend_tmux_migration_key_binding_valid "$journal" || return 1
   fi
   hmac=$(fm_backend_tmux_migration_hmac "$body" "${key_tmp:-$key}") || {
     [ -z "$key_tmp" ] || rm -f "$key_tmp"
@@ -362,6 +396,9 @@ fm_backend_tmux_migration_write() {
   }
   chmod 600 "$tmp" && printf '%shmac=%s\n' "$body" "$hmac" > "$tmp" \
     && { [ -z "$key_tmp" ] || mv "$key_tmp" "$key"; } \
+    && { [ -z "$key_tmp" ] \
+      || fm_backend_tmux_migration_key_binding_write \
+        "$journal" "$key" "$binding"; } \
     && mv "$tmp" "$journal" || {
       rm -f "$tmp"
       [ -z "$key_tmp" ] || rm -f "$key_tmp"
@@ -372,7 +409,7 @@ fm_backend_tmux_migration_write() {
 fm_backend_tmux_migration_read() {
   local journal=$1 body expected actual key="${1}.key"
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
-  [ -f "$key" ] && [ ! -L "$key" ] || return 1
+  fm_backend_tmux_migration_key_binding_valid "$journal" || return 1
   [ "$(wc -l < "$journal" | tr -d ' ')" -eq 12 ] || return 1
   [ "$(sed -n '1p' "$journal")" = version=2 ] || return 1
   FM_BACKEND_TMUX_MIGRATION_META=$(sed -n '2s/^meta=//p' "$journal")
@@ -456,7 +493,7 @@ fm_backend_tmux_migration_recover() {
         = "$FM_BACKEND_TMUX_MIGRATION_GENERATION" ] \
       && fm_backend_tmux_endpoint_matches "$canonical" "$pane" \
         "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
-    rm -f "$journal" "${journal}.key"
+    rm -f "$journal" "${journal}.key" "${journal}.key.binding"
     return 0
   fi
   fm_backend_tmux_legacy_process_snapshot \
@@ -488,7 +525,7 @@ fm_backend_tmux_migration_recover() {
     "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
   fm_backend_tmux_endpoint_matches "$canonical" "$pane" \
     "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
-  rm -f "$journal" "${journal}.key"
+  rm -f "$journal" "${journal}.key" "${journal}.key.binding"
 }
 
 fm_backend_tmux_migration_retire_committed() {
