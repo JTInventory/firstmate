@@ -1195,6 +1195,8 @@ test_darwin_session_identity_uses_supported_fields() {
 
 test_secondmate_spawn_waits_for_enrollment_acceptance() {
   local dir ticket nonce signer private public public_key public_digest
+  local consumer_private consumer_public consumer_key consumer_digest
+  local accepted ack body signature accepted_digest
   dir="$TMP_ROOT/enrollment-acceptance"
   ticket="$dir/.session-authority-enrollment"
   nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -1207,18 +1209,69 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
   public_key=$(openssl base64 -A < "$public")
   public_digest=$(openssl dgst -sha256 "$public" 2>/dev/null)
   public_digest=${public_digest##*= }
+  consumer_private="$dir/consumer-private"
+  consumer_public="$dir/consumer-public"
+  openssl ecparam -name prime256v1 -genkey -noout \
+    -out "$consumer_private" 2>/dev/null \
+    && openssl ec -in "$consumer_private" -pubout \
+      -out "$consumer_public" 2>/dev/null \
+    || fail "could not create consumer acknowledgment fixture"
+  consumer_key=$(openssl base64 -A < "$consumer_public")
+  consumer_digest=$(openssl dgst -sha256 "$consumer_public" 2>/dev/null)
+  consumer_digest=${consumer_digest##*= }
+  accepted="${ticket}.accepted"
+  ack="${accepted}.ack"
+  body="$dir/accepted-body"
+  signature="$dir/accepted-signature"
+  printf 'version=1\nsigner-pid=42\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\n' \
+    "$nonce" > "$body"
+  openssl dgst -sha256 -sign "$private" -out "$signature" "$body" 2>/dev/null
+  cat "$body" > "$accepted"
+  printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$accepted"
+  cp "$accepted" "$ack"
+  accepted_digest=$(fm_session_sha256_file "$accepted")
+  ! fm_session_enrollment_ack_validate "$ack" "$accepted_digest" 42 "$nonce" 42 \
+    fixture "$consumer_key" "$consumer_digest" \
+    || fail "renaming a signer receipt forged a consumer acknowledgment"
+  rm -f "$ack"
+  body="$dir/ack-body"
+  signature="$dir/ack-signature"
+  printf 'version=1\nsigner-pid=42\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
+    "$nonce" "$accepted_digest" "$consumer_digest" > "$body"
+  openssl dgst -sha256 -sign "$consumer_private" \
+    -out "$signature" "$body" 2>/dev/null
+  cat "$body" > "$ack"
+  printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$ack"
+  fm_session_enrollment_ack_validate "$ack" "$accepted_digest" 42 "$nonce" 42 \
+    fixture "$consumer_key" "$consumer_digest" \
+    || fail "consumer-signed acknowledgment fixture was rejected"
+  rm -f "$accepted" "$ack"
   bash -c '
+    set -eu
     sleep 0.05
-    body="$1.body"
-    signature="$1.signature"
+    accepted="$1.accepted"
+    accepted_body="$1.accepted-body"
+    accepted_signature="$1.accepted-signature"
+    ack="$accepted.ack"
+    ack_body="$1.ack-body"
+    ack_signature="$1.ack-signature"
     printf "version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\n" \
-      "$$" "$2" > "$body"
-    openssl dgst -sha256 -sign "$3" -out "$signature" "$body" 2>/dev/null
-    cat "$body" > "$1"
-    printf "signature=%s\n" "$(openssl base64 -A < "$signature")" >> "$1"
-    sleep 0.05
-    mv "$1" "$1.ack"
-  ' _ "${ticket}.accepted" "$nonce" "$private" &
+      "$$" "$2" > "$accepted_body"
+    openssl dgst -sha256 -sign "$3" -out "$accepted_signature" \
+      "$accepted_body" 2>/dev/null
+    cat "$accepted_body" > "$accepted"
+    printf "signature=%s\n" \
+      "$(openssl base64 -A < "$accepted_signature")" >> "$accepted"
+    accepted_digest=$(openssl dgst -sha256 "$accepted" 2>/dev/null)
+    accepted_digest=${accepted_digest##*= }
+    printf "version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n" \
+      "$$" "$2" "$accepted_digest" "$5" > "$ack_body"
+    openssl dgst -sha256 -sign "$4" -out "$ack_signature" \
+      "$ack_body" 2>/dev/null
+    cat "$ack_body" > "$ack"
+    printf "signature=%s\n" \
+      "$(openssl base64 -A < "$ack_signature")" >> "$ack"
+  ' _ "$ticket" "$nonce" "$private" "$consumer_private" "$consumer_digest" &
   signer=$!
   BG_PIDS+=("$signer")
   fm_session_enrollment_ticket_wait_accepted \
@@ -1227,7 +1280,7 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
   assert_absent "${ticket}.accepted" "accepted enrollment receipt was not retired"
   assert_absent "${ticket}.accepted.ack" \
     "consumer-acknowledged enrollment receipt was not retired"
-  pass "secondmate spawn waits for consumer-acknowledged enrollment"
+  pass "secondmate spawn requires a consumer-signed enrollment acknowledgment"
 }
 
 test_forged_key_cannot_issue_secondmate_enrollment() {

@@ -330,10 +330,12 @@ generated terminal command, or in a sibling-readable environment. A rolling laun
 derives the verified broker script from the authority checkout when an older
 live broker lacks that export. The secondmate declaration and home are applied
 before its wrapper consumes the ticket and creates its own broker descriptor.
-The wrapper atomically acknowledges the matching signed acceptance, and its
-signer verifies that consumer-bound acknowledgment before spawn releases
-lifecycle locks or reports success. New tmux task metadata keeps the exact pane
-and pane-scoped generation. Older window-scoped records remain usable only
+The wrapper keeps a private consumer key in an anonymous descriptor and signs
+an acknowledgment bound to the matching acceptance digest. The signer binds
+the public key to that exact launched process and verifies the consumer
+signature before spawn releases lifecycle locks or reports success. New tmux
+task metadata keeps the exact pane and pane-scoped generation, and delivery
+binds `fm-send` to that pane instead of resolving the active pane. Older window-scoped records remain usable only
 while the recorded window has one stable pane. On macOS, `getsid(2)` must identify a live session
 leader in the caller's ancestry; leaderless or unreadable sessions refuse.
 

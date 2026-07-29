@@ -40,9 +40,12 @@ binds the wrapper's start value and executable identity, and the signer accepts
 only that exact process. The
 private signing key stays in shell memory and fresh anonymous pipes, with no
 filesystem pathname, environment export, or terminal command text. The wrapper
-atomically acknowledges the signed, consumer-bound acceptance, and the signer
-verifies that acknowledgment. Spawn waits for it and the final identity recheck
-before reporting success.
+also creates an anonymous consumer key, publishes only its public key through
+its immutable exact-process arguments, and signs an acknowledgment bound to
+the accepted receipt. A rename or copied signer receipt is not an
+acknowledgment. Spawn waits for the signer to verify that consumer signature
+and for the final identity recheck before reporting success. Tmux delivery
+uses the persisted exact pane throughout send and confirmation.
 
 The declaration refuses rather than emitting a partial prefix:
 

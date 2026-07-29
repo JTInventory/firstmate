@@ -6,12 +6,21 @@ set -eu
   exit 2
 }
 enrollment_launch=
+enrollment_consumer_key=
+enrollment_consumer_digest=
 if [ "${1:-}" = --enrollment-launch ]; then
   [ "$#" -gt 2 ] || exit 2
   enrollment_launch=$2
   shift 2
   [ "${#enrollment_launch}" -eq 64 ] || exit 1
   case "$enrollment_launch" in *[!0-9a-f]*) exit 1 ;; esac
+fi
+if [ "${1:-}" = --enrollment-consumer-key ]; then
+  [ "$#" -gt 4 ] || exit 2
+  enrollment_consumer_key=$2
+  [ "$3" = --enrollment-consumer-key-sha256 ] || exit 2
+  enrollment_consumer_digest=$4
+  shift 4
 fi
 case "${FM_AGENT_ROLE:-}" in
   ""|primary)
@@ -47,6 +56,12 @@ if fm_session_authority_read "$authority" \
   && fm_session_authority_is_current_ancestor "$authority"; then
   authorized=1
 elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
+  if [ -z "$enrollment_consumer_key" ]; then
+    fm_session_enrollment_consumer_prepare \
+      "$SCRIPT_DIR/fm-session-authority-exec.sh" "$enrollment_launch" "$@"
+  fi
+  fm_session_enrollment_consumer_key_validate \
+    "$enrollment_consumer_key" "$enrollment_consumer_digest" || exit 1
   enrollment="$STATE/.session-authority-enrollment"
   enrollment_ticket="$enrollment.consumer.$$"
   enrollment_attempts=0
@@ -69,13 +84,10 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
           "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
           "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
           && [ "$(sed -n '4s/^consumer-pid=//p' "${enrollment}.accepted")" = "$$" ] \
-          && [ ! -e "${enrollment}.accepted.ack" ] \
-          && [ ! -L "${enrollment}.accepted.ack" ] \
-          && mv "${enrollment}.accepted" "${enrollment}.accepted.ack" \
-          && fm_session_enrollment_acceptance_validate \
-            "${enrollment}.accepted.ack" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
-            "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
-            "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256"; then
+          && fm_session_enrollment_ack_write \
+            "${enrollment}.accepted.ack" "${enrollment}.accepted" \
+            "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+            "$FM_SESSION_ENROLLMENT_NONCE" "$enrollment_consumer_digest"; then
           rm -f "$enrollment_ticket" "${enrollment}.consume"
           authorized=1
           break

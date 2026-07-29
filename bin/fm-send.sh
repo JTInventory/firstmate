@@ -77,6 +77,15 @@ esac
 TARGET_RESOLUTION=$(fm_backend_resolve_selector_with_backend "$1" "$STATE")
 TARGET_BACKEND=${TARGET_RESOLUTION%%$'\t'*}
 T=${TARGET_RESOLUTION#*$'\t'}
+if [ -n "${FM_SEND_BOUND_TARGET:-}" ] || [ -n "${FM_SEND_BOUND_BACKEND:-}" ]; then
+  [ -n "${FM_SEND_BOUND_TARGET:-}" ] \
+    && [ -n "${FM_SEND_BOUND_BACKEND:-}" ] \
+    && [ "$T" = "$FM_SEND_BOUND_TARGET" ] \
+    && [ "$TARGET_BACKEND" = "$FM_SEND_BOUND_BACKEND" ] || {
+      echo "error: bound delivery endpoint changed before send" >&2
+      exit 1
+    }
+fi
 shift
 
 # Mark a from-firstmate -> secondmate request. Only a bare `fm-<id>` target,

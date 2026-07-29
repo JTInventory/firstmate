@@ -1326,6 +1326,48 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
   pass "T32 secondmate delivery sends and acknowledges under one lifecycle lock"
 }
 
+test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
+  local w generation fakebin out runtime resolved
+  w=$(new_world t32-exact-pane)
+  add_sm "$w" sm1
+  sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
+  printf 'tmux_pane_id=%%42\n' >> "$w/home/state/sm1.meta"
+  generation=$(git -C "$w/sm1" rev-parse HEAD)
+  fakebin=$(make_fake_tmux "$w/exact-pane-send-fake")
+  runtime="$w/exact-pane-send-runtime"
+  mkdir -p "$runtime"
+  cat > "$runtime/fm-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' \
+  "${FM_SEND_BOUND_BACKEND:-}" "${FM_SEND_BOUND_TARGET:-}" "$1" \
+  > "$FM_TEST_SEND_LOG"
+. "$FM_TEST_PENDING_LIB"
+fm_pending_reply_confirm_delivery \
+  "$FM_STATE_OVERRIDE" "$FM_PENDING_REPLY_EXISTING_CORR"
+SH
+  chmod +x "$runtime/fm-send.sh"
+
+  out=$(cd "$w/main" && PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_FAKE_TMUX_LOG="$w/exact-pane-send-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/exact-pane-send-fake/pane.txt" \
+    FM_FAKE_ENDPOINT_GENERATION=endpoint-sm1 \
+    FM_TEST_SEND_LOG="$w/exact-pane-send.log" \
+    FM_TEST_PENDING_LIB="$ROOT/bin/fm-pending-reply-lib.sh" \
+    _FM_SECONDMATE_DELIVERY_LIB_DIR="$runtime" \
+    fm_secondmate_delivery_send_locked \
+      "$w/home/state" "$w/home" sm1 "$w/sm1" @42 endpoint-sm1 "" \
+      update-nudge "$generation" "exact pane delivery")
+  [ -z "$out" ] || fail "exact-pane delivery emitted unexpected output: $out"
+  [ "$(cat "$w/exact-pane-send.log")" = 'tmux|%42|fm-sm1' ] \
+    || fail "secondmate delivery did not bind fm-send to the recorded exact pane"
+  resolved=$(fm_backend_resolve_selector_with_backend \
+    fm-sm1 "$w/home/state")
+  [ "$resolved" = $'tmux\t%42' ] \
+    || fail "fm-send selector resolution did not retain the exact tmux pane"
+  pass "T32a secondmate delivery stays bound to its exact tmux pane"
+}
+
 test_secondmate_delivery_refuses_recycled_endpoint_ack() {
   local w generation fakebin lock rc=0
   w=$(new_world t33)
@@ -1599,6 +1641,12 @@ test_confirmed_receipt_reconciles_after_obligation_cleanup_crash() {
   pass "update reconciles confirmed receipts after obligation cleanup crashes"
 }
 
+if [ "${FM_UPDATE_FOCUS:-}" = exact-pane-delivery ]; then
+  test_secondmate_delivery_uses_recorded_exact_tmux_pane
+  echo "# focused exact-pane delivery tests passed"
+  exit 0
+fi
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -1634,6 +1682,7 @@ test_live_endpoint_generation_mismatch_refuses_lifecycle_identity
 test_live_generation_preflight_preserves_primary
 test_corrupt_kind_preflight_preserves_primary
 test_secondmate_delivery_is_one_locked_generation_transaction
+test_secondmate_delivery_uses_recorded_exact_tmux_pane
 test_secondmate_delivery_refuses_recycled_endpoint_ack
 test_duplicate_provider_fields_refuse_lifecycle_mutation
 test_prepared_delivery_transaction_is_never_resent

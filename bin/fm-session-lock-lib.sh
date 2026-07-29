@@ -312,6 +312,53 @@ fm_session_enrollment_signer_prepare() {
   exec "$script" "$@"
 }
 
+fm_session_enrollment_consumer_prepare() {
+  local script=$1 launch=$2 private public output public_digest public_key
+  shift 2
+  if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
+    return 1
+  fi
+  private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
+    || return 1
+  public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
+    || return 1
+  output=$(printf '%s\n' "$public" | openssl dgst -sha256 2>/dev/null) \
+    || return 1
+  public_digest=${output##*= }
+  [ "${#public_digest}" -eq 64 ] || return 1
+  case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
+  public_key=$(printf '%s\n' "$public" | openssl base64 -A) || return 1
+  exec 8< <(printf '%s\n' "$private") || return 1
+  unset private public
+  FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD=8
+  export FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD
+  exec "$script" --enrollment-launch "$launch" \
+    --enrollment-consumer-key "$public_key" \
+    --enrollment-consumer-key-sha256 "$public_digest" "$@"
+}
+
+fm_session_enrollment_public_key_validate() {
+  local public_key=$1 public_digest=$2 public_file status=1
+  [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] || return 1
+  case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
+  public_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-consumer-public.XXXXXX") \
+    || return 1
+  if printf '%s' "$public_key" | openssl base64 -d -A \
+      > "$public_file" 2>/dev/null \
+    && [ "$(fm_session_sha256_file "$public_file" 2>/dev/null)" \
+      = "$public_digest" ]; then
+    status=0
+  fi
+  rm -f "$public_file"
+  return "$status"
+}
+
+fm_session_enrollment_consumer_key_validate() {
+  [ "${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD:-}" = 8 ] \
+    && [ -r /dev/fd/8 ] \
+    && fm_session_enrollment_public_key_validate "$1" "$2"
+}
+
 fm_session_enrollment_sign_data() {
   local private=$1 signature=$2 body=$3
   printf '%s\n' "$private" \
@@ -322,6 +369,7 @@ fm_session_enrollment_signer_run() {
   local file=$1 task=$2 home=$3 issuer=$4 endpoint=$5 endpoint_start=$6
   local endpoint_identity=$7 home_real issuer_real marker private
   local authority lock binding authority_digest nonce tmp body signature
+  local accepted_digest
   local broker broker_start broker_identity broker_script descriptor signer_start signer_identity
   local private_key_fd=${FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD:-}
   local public_key=${FM_SESSION_ENROLLMENT_PUBLIC_KEY:-}
@@ -329,6 +377,7 @@ fm_session_enrollment_signer_run() {
   local ready="${file}.ready" consume="${file}.consume" accepted="${file}.accepted"
   local acknowledged="${file}.accepted.ack"
   local consumer consumer_start consumer_identity consume_task consume_home
+  local consumer_public_key consumer_public_digest
   local expected_script env_role env_task env_home attempts=0
   [ "$private_key_fd" = 10 ] && [ -r /dev/fd/10 ] || return 1
   private=$(cat <&10) || return 1
@@ -434,6 +483,10 @@ fm_session_enrollment_signer_run() {
         "$consumer" FM_AGENT_TASK 2>/dev/null || true)
       env_home=$(fm_session_process_environment_value \
         "$consumer" FM_AGENT_OWNER_HOME 2>/dev/null || true)
+      consumer_public_key=$(fm_session_process_argument_value \
+        "$consumer" --enrollment-consumer-key 2>/dev/null || true)
+      consumer_public_digest=$(fm_session_process_argument_value \
+        "$consumer" --enrollment-consumer-key-sha256 2>/dev/null || true)
       [ "$consume_task" = "$task" ] && [ "$consume_home" = "$home_real" ] \
         && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
         && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
@@ -442,7 +495,9 @@ fm_session_enrollment_signer_run() {
         && [ "$consumer" = "$endpoint" ] \
         && fm_session_process_runs_script "$consumer" "$expected_script" \
         && [ "$env_role" = secondmate ] && [ "$env_task" = "$task" ] \
-        && [ "$env_home" = "$home_real" ] || return 1
+        && [ "$env_home" = "$home_real" ] \
+        && fm_session_enrollment_public_key_validate \
+          "$consumer_public_key" "$consumer_public_digest" || return 1
       body=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-accepted.XXXXXX") \
         || return 1
       signature=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-accepted-signature.XXXXXX") \
@@ -464,13 +519,13 @@ fm_session_enrollment_signer_run() {
           rm -f "$tmp" "$body" "$signature"
           return 1
         }
+      accepted_digest=$(fm_session_sha256_file "$accepted") || return 1
       rm -f "$body" "$signature" "$consume" "$ready"
       attempts=0
       while [ "$attempts" -lt 1500 ]; do
-        if fm_session_enrollment_acceptance_validate \
-          "$acknowledged" "$$" "$nonce" "$public_key" "$public_digest" \
-          && [ "$(sed -n '4s/^consumer-pid=//p' "$acknowledged")" = "$consumer" ] \
-          && [ "$(sed -n '5s/^consumer-start=//p' "$acknowledged")" = "$consumer_start" ] \
+        if fm_session_enrollment_ack_validate \
+          "$acknowledged" "$accepted_digest" "$$" "$nonce" "$consumer" \
+          "$consumer_start" "$consumer_public_key" "$consumer_public_digest" \
           && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
           && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ]; then
           return 0
@@ -576,6 +631,84 @@ fm_session_enrollment_acceptance_validate() {
   return "$status"
 }
 
+fm_session_enrollment_ack_validate() {
+  local acknowledged=$1 accepted_digest=$2 signer=$3 nonce=$4 consumer=$5
+  local consumer_start=$6 public_key=$7 public_digest=$8
+  local public_file signature_file body_file signature status
+  [ -f "$acknowledged" ] && [ ! -L "$acknowledged" ] || return 1
+  [ "${#accepted_digest}" -eq 64 ] || return 1
+  case "$accepted_digest" in *[!0-9a-f]*) return 1 ;; esac
+  [ "$(wc -l < "$acknowledged" | tr -d ' ')" -eq 8 ] || return 1
+  [ "$(sed -n '1p' "$acknowledged")" = version=1 ] \
+    && [ "$(sed -n '2s/^signer-pid=//p' "$acknowledged")" = "$signer" ] \
+    && [ "$(sed -n '3s/^nonce=//p' "$acknowledged")" = "$nonce" ] \
+    && [ "$(sed -n '4s/^consumer-pid=//p' "$acknowledged")" = "$consumer" ] \
+    && [ "$(sed -n '5s/^consumer-start=//p' "$acknowledged")" = "$consumer_start" ] \
+    && [ "$(sed -n '7s/^consumer-public-key-sha256=//p' "$acknowledged")" \
+      = "$public_digest" ] || return 1
+  [ "$(sed -n '6s/^acceptance-sha256=//p' "$acknowledged")" \
+    = "$accepted_digest" ] || return 1
+  signature=$(sed -n '8s/^signature=//p' "$acknowledged")
+  [ -n "$signature" ] && [ "${#public_digest}" -eq 64 ] || return 1
+  public_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-ack-public.XXXXXX") \
+    || return 1
+  signature_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-ack-signature.XXXXXX") \
+    || { rm -f "$public_file"; return 1; }
+  body_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-ack-body.XXXXXX") || {
+    rm -f "$public_file" "$signature_file"
+    return 1
+  }
+  printf '%s' "$public_key" | openssl base64 -d -A > "$public_file" 2>/dev/null \
+    && printf '%s' "$signature" | openssl base64 -d -A \
+      > "$signature_file" 2>/dev/null \
+    && sed -n '1,7p' "$acknowledged" > "$body_file" || {
+      rm -f "$public_file" "$signature_file" "$body_file"
+      return 1
+    }
+  [ "$(fm_session_sha256_file "$public_file" 2>/dev/null)" = "$public_digest" ] \
+    && openssl dgst -sha256 -verify "$public_file" -signature "$signature_file" \
+      "$body_file" >/dev/null 2>&1
+  status=$?
+  rm -f "$public_file" "$signature_file" "$body_file"
+  return "$status"
+}
+
+fm_session_enrollment_ack_write() {
+  local acknowledged=$1 accepted=$2 signer=$3 nonce=$4 public_digest=$5
+  local private_fd=${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD:-}
+  local private consumer_start accepted_digest body signature tmp
+  [ "$private_fd" = 8 ] && [ -r /dev/fd/8 ] || return 1
+  [ ! -e "$acknowledged" ] && [ ! -L "$acknowledged" ] || return 1
+  consumer_start=$(fm_session_process_start "$$") || return 1
+  accepted_digest=$(fm_session_sha256_file "$accepted") || return 1
+  private=$(cat <&8) || return 1
+  exec 8<&-
+  body=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-ack.XXXXXX") \
+    || return 1
+  signature=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-ack-signature.XXXXXX") \
+    || { rm -f "$body"; return 1; }
+  chmod 600 "$body" "$signature" \
+    && printf 'version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
+      "$signer" "$nonce" "$$" "$consumer_start" "$accepted_digest" \
+      "$public_digest" > "$body" \
+    && fm_session_enrollment_sign_data "$private" "$signature" "$body" || {
+      rm -f "$body" "$signature"
+      return 1
+    }
+  unset private
+  tmp=$(mktemp "${acknowledged}.XXXXXX") || {
+    rm -f "$body" "$signature"
+    return 1
+  }
+  chmod 600 "$tmp" && cat "$body" > "$tmp" \
+    && printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$tmp" \
+    && mv "$tmp" "$acknowledged" || {
+      rm -f "$tmp" "$body" "$signature"
+      return 1
+    }
+  rm -f "$body" "$signature"
+}
+
 fm_session_enrollment_consumption_request() {
   local file=$1 task=$2 home=$3 tmp start identity
   local consume="${file}.consume"
@@ -595,15 +728,17 @@ fm_session_enrollment_consumption_request() {
 
 fm_session_enrollment_ticket_wait_accepted() {
   local file=$1 signer=$2 nonce=$3 public_key=$4 public_digest=$5
-  local attempts=${6:-1500} accepted="${file}.accepted.ack" seen=0
+  local attempts=${6:-1500} accepted="${file}.accepted" ack="${file}.accepted.ack"
+  local seen=0
   case "$signer:$attempts" in *[!0-9:]*) return 1 ;; esac
   [ "${#nonce}" -eq 64 ] || return 1
   case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
   while [ "$seen" -lt "$attempts" ]; do
-    if fm_session_enrollment_acceptance_validate \
-      "$accepted" "$signer" "$nonce" "$public_key" "$public_digest"; then
+    if [ -f "$ack" ] && [ ! -L "$ack" ] \
+      && fm_session_enrollment_acceptance_validate \
+        "$accepted" "$signer" "$nonce" "$public_key" "$public_digest"; then
       wait "$signer" 2>/dev/null || return 1
-      rm -f "$accepted" "${file}.accepted" "${file}.ready" "${file}.consume"
+      rm -f "$accepted" "$ack" "${file}.ready" "${file}.consume"
       return 0
     elif ! kill -0 "$signer" 2>/dev/null; then
       wait "$signer" 2>/dev/null || true

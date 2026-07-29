@@ -119,8 +119,11 @@ fm_secondmate_delivery_send_locked() {
   local state=$1 parent_home=$2 id=$3 home=$4 target=$5 endpoint_generation=$6
   local provider_identity=$7 namespace=$8 generation=$9 message=${10}
   local receipt message_signature transaction_signature corr out rc delivery_state rec marker binding_status
+  local delivery_backend delivery_target
   fm_secondmate_lifecycle_identity_matches "$state" "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" || return 1
+  delivery_backend=$FM_SECONDMATE_META_BACKEND
+  delivery_target=$FM_SECONDMATE_META_TARGET
   message_signature=$(printf '%s' "$message" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
   transaction_signature=$(printf '%s' \
     "$namespace|$id|$home|$target|$endpoint_generation|$provider_identity|$generation|$message_signature" \
@@ -184,6 +187,8 @@ fm_secondmate_delivery_send_locked() {
     "$endpoint_generation" "$provider_identity" || return 1
   out=$(FM_HOME="$parent_home" FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-${FM_ROOT:-}}" \
     FM_STATE_OVERRIDE="$state" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+    FM_SEND_BOUND_BACKEND="$delivery_backend" \
+    FM_SEND_BOUND_TARGET="$delivery_target" \
     "$_FM_SECONDMATE_DELIVERY_LIB_DIR/fm-send.sh" "fm-$id" "$message" 2>&1) \
     && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then

@@ -114,13 +114,19 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend session pane window
+  local meta=$1 backend session pane window tmux_pane
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = herdr ]; then
     session=$(fm_meta_get "$meta" herdr_session)
     pane=$(fm_meta_get "$meta" herdr_pane_id)
     if [ -n "$session" ] && [ -n "$pane" ]; then
       printf '%s:%s' "$session" "$pane"
+      return 0
+    fi
+  elif [ "$backend" = tmux ]; then
+    tmux_pane=$(fm_meta_get "$meta" tmux_pane_id)
+    if [ -n "$tmux_pane" ]; then
+      printf '%s' "$tmux_pane"
       return 0
     fi
   fi
