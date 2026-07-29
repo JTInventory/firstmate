@@ -5,6 +5,14 @@ set -eu
   echo "usage: fm-session-authority-exec.sh command [args...]" >&2
   exit 2
 }
+enrollment_launch=
+if [ "${1:-}" = --enrollment-launch ]; then
+  [ "$#" -gt 2 ] || exit 2
+  enrollment_launch=$2
+  shift 2
+  [ "${#enrollment_launch}" -eq 64 ] || exit 1
+  case "$enrollment_launch" in *[!0-9a-f]*) exit 1 ;; esac
+fi
 case "${FM_AGENT_ROLE:-}" in
   ""|primary)
     [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || {
@@ -15,6 +23,10 @@ case "${FM_AGENT_ROLE:-}" in
   secondmate)
     [ -n "${FM_AGENT_TASK:-}" ] && [ -n "${FM_AGENT_OWNER_HOME:-}" ] || {
       echo "error: incomplete secondmate identity cannot create session authority" >&2
+      exit 1
+    }
+    [ -n "$enrollment_launch" ] || {
+      echo "error: secondmate enrollment launch identity is missing" >&2
       exit 1
     }
     ;;
@@ -37,6 +49,12 @@ if fm_session_authority_read "$authority" \
 elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   enrollment="$STATE/.session-authority-enrollment"
   enrollment_ticket="$enrollment.consumer.$$"
+  enrollment_attempts=0
+  while [ "$enrollment_attempts" -lt 500 ] \
+    && { [ ! -f "$enrollment" ] || [ -L "$enrollment" ]; }; do
+    sleep 0.02
+    enrollment_attempts=$((enrollment_attempts + 1))
+  done
   if [ -f "$enrollment" ] && [ ! -L "$enrollment" ] \
     && [ ! -e "$enrollment_ticket" ] && [ ! -L "$enrollment_ticket" ] \
     && mv "$enrollment" "$enrollment_ticket"; then

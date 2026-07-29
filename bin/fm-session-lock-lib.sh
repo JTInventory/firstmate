@@ -188,6 +188,30 @@ fm_session_process_environment_value() {
   printf '%s\n' "$value"
 }
 
+fm_session_process_argument_value() {
+  local pid=$1 wanted=$2 item previous=
+  if [ -r "/proc/$pid/cmdline" ]; then
+    while IFS= read -r -d '' item; do
+      if [ "$previous" = "$wanted" ]; then
+        printf '%s\n' "$item"
+        return
+      fi
+      previous=$item
+    done < "/proc/$pid/cmdline"
+    return 1
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+  fm_procargs2_read "$pid" || return 1
+  for item in "${FM_PROCARGS_ARGV[@]}"; do
+    if [ "$previous" = "$wanted" ]; then
+      printf '%s\n' "$item"
+      return
+    fi
+    previous=$item
+  done
+  return 1
+}
+
 fm_session_random_hex() {
   local bytes=${1:-48} value
   case "$bytes" in ''|*[!0-9]*|0) return 1 ;; esac
@@ -414,7 +438,7 @@ fm_session_enrollment_signer_run() {
         && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
         && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
         && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
-        && fm_session_pid_is_ancestor_of "$endpoint" "$consumer" \
+        && [ "$consumer" = "$endpoint" ] \
         && fm_session_process_runs_script "$consumer" "$expected_script" \
         && [ "$env_role" = secondmate ] && [ "$env_task" = "$task" ] \
         && [ "$env_home" = "$home_real" ] || return 1
@@ -671,7 +695,7 @@ fm_session_enrollment_ticket_validate() {
     && fm_session_process_runs_script "$broker" "$broker_script" \
     && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
     && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
-    && fm_session_pid_is_ancestor_of "$endpoint" "$$"; then
+    && [ "$endpoint" = "$$" ]; then
     status=0
     FM_SESSION_ENROLLMENT_SIGNER_PID=$signer
     FM_SESSION_ENROLLMENT_NONCE=$nonce

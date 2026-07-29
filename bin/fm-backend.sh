@@ -541,6 +541,36 @@ fm_backend_endpoint_generation() {
   esac
 }
 
+fm_backend_foreground_process_pid() {
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_foreground_process_pid "$@" ;;
+    herdr) fm_backend_herdr_foreground_process_pid "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_launch_trusted_process() {
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_launch_trusted_process "$@" ;;
+    herdr) fm_backend_herdr_launch_trusted_process "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_launch_process_is_current() {
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_launch_process_is_current "$@" ;;
+    herdr) fm_backend_herdr_launch_process_is_current "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_rename_task() {  # <backend> <target> <name>
   local backend=$1; shift
   fm_backend_source "$backend" || return 1

@@ -67,6 +67,40 @@ fm_backend_tmux_endpoint_generation() {
   tmux show-options -w -v -t "$1" @firstmate_endpoint_generation 2>/dev/null
 }
 
+fm_backend_tmux_foreground_process_pid() {
+  local target=$1 shell foreground current
+  shell=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
+    | tr -d '[:space:]') || return 1
+  case "$shell" in ''|*[!0-9]*) return 1 ;; esac
+  foreground=$(ps -o tpgid= -p "$shell" 2>/dev/null | tr -d '[:space:]') \
+    || return 1
+  case "$foreground" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$foreground" -gt 1 ] && [ "$foreground" != "$shell" ] || return 1
+  current=$(ps -o pgid= -p "$foreground" 2>/dev/null | tr -d '[:space:]') \
+    || return 1
+  [ "$current" = "$foreground" ] || return 1
+  printf '%s' "$foreground"
+}
+
+fm_backend_tmux_launch_trusted_process() {
+  local target=$1 name=$2 cwd=$3 command=$4 pid current
+  pid=$(tmux respawn-pane -k -t "$target" -c "$cwd" "exec $command" \; \
+    display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
+    | tr -d '[:space:]') || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  current=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
+    | tr -d '[:space:]') || return 1
+  [ "$current" = "$pid" ] || return 1
+  printf '%s' "$pid"
+}
+
+fm_backend_tmux_launch_process_is_current() {
+  local target=$1 expected=$2 current
+  current=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
+    | tr -d '[:space:]') || return 1
+  [ "$current" = "$expected" ]
+}
+
 fm_backend_tmux_rename_task() {  # <target> <name>
   tmux rename-window -t "$1" "$2"
 }

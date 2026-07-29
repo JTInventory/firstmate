@@ -317,17 +317,19 @@ process start, executable identity, and `CODEX_THREAD_ID`. Firstmate closes the
 descriptor and clears the broker before launching a crewmate. An authorized
 home issues a one-use asymmetric enrollment ticket for a fresh secondmate
 without copying the live authority key. The signer's live protected descriptor
-and process environment bind the ticket's public-key digest. The ticket also
-binds the exact live pane shell PID, start value, and executable identity, and
-only a descendant of that endpoint can consume it. The signing key exists only
+and process environment bind the ticket's public-key digest. Spawn submits a
+randomly tagged wrapper through a backend-owned launch. A serialized tmux
+respawn returns the exact pane PID; Herdr's direct agent-start response and
+exact pane process-info identify that wrapper PID. The ticket
+binds that exact live PID, start value, and executable identity, and only that
+process can consume it. The signing key exists only
 in shell memory and anonymous pipes, never at a filesystem pathname, in the
 generated terminal command, or in a sibling-readable environment. A rolling launcher
 derives the verified broker script from the authority checkout when an older
 live broker lacks that export. The secondmate declaration and home are applied
 before its wrapper consumes the ticket and creates its own broker descriptor.
 Spawn waits for the matching acceptance receipt before releasing lifecycle
-locks or reporting success. A backend that cannot prove a per-pane shell PID
-refuses secondmate enrollment. On macOS, `getsid(2)` must identify a live session
+locks or reporting success. On macOS, `getsid(2)` must identify a live session
 leader in the caller's ancestry; leaderless or unreadable sessions refuse.
 
 The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose

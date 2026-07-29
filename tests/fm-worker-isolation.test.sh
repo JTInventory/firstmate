@@ -270,7 +270,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
 }
 
 test_secondmate_child_receives_only_its_own_home() {
-  local expected endpoint_line ticket_line wrapper_line wait_line clear_line release_line spawned_line
+  local expected launch_line ticket_line wrapper_line wait_line clear_line release_line spawned_line
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
     "FM_HOME='/homes/dom' "*) : ;;
@@ -278,17 +278,25 @@ test_secondmate_child_receives_only_its_own_home() {
   esac
   assert_not_contains "$expected" "FM_ROOT_OVERRIDE='" \
     "secondmate declaration passed an inherited root override through"
-  endpoint_line=$(grep -n 'SPAWN_AUTHORITY_ENDPOINT_PID=$(fm_agent_backend_shell_pid' \
+  launch_line=$(grep -n 'fm_backend_launch_trusted_process' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   ticket_line=$(grep -n 'fm_session_enrollment_ticket_write' "$SPAWN" | tail -1 | cut -d: -f1)
-  wrapper_line=$(grep -n 'LAUNCH="${WORKER_ENV_PREFIX}$(shell_quote' \
+  wrapper_line=$(grep -n 'LAUNCH="GOTMPDIR=.*fm-session-authority-exec.sh' \
     "$SPAWN" | tail -1 | cut -d: -f1)
-  [ -n "$endpoint_line" ] && [ -n "$ticket_line" ] && [ -n "$wrapper_line" ] \
-    && [ "$endpoint_line" -lt "$ticket_line" ] && [ "$ticket_line" -lt "$wrapper_line" ] \
-    || fail "secondmate launch did not issue enrollment before applying role and home to the wrapper"
+  [ -n "$wrapper_line" ] && [ -n "$launch_line" ] && [ -n "$ticket_line" ] \
+    && [ "$wrapper_line" -lt "$launch_line" ] \
+    && [ "$launch_line" -lt "$ticket_line" ] \
+    || fail "secondmate enrollment was not bound to its backend-owned launch"
   assert_not_contains "$(sed -n "${wrapper_line}p" "$SPAWN")" \
     "FM_SESSION_ENROLLMENT_CLAIM" \
     "secondmate launch exposed a bearer claim in terminal command text"
+  assert_not_contains "$(sed -n "${launch_line}p" "$SPAWN")" \
+    "fm_agent_backend_shell_pid" \
+    "secondmate enrollment retained the tmux-only shell-pid proof"
+  assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" "respawn-pane -k" \
+    "tmux secondmate launch was not serialized with its returned pane pid"
+  assert_contains "$(cat "$ROOT/bin/backends/herdr.sh")" "agent start" \
+    "Herdr secondmate launch did not use the authoritative agent API"
   wait_line=$(grep -n 'fm_session_enrollment_ticket_wait_accepted' "$SPAWN" | tail -1 | cut -d: -f1)
   clear_line=$(grep -n '^SPAWN_AUTHORITY_ENROLLMENT=$' "$SPAWN" | tail -1 | cut -d: -f1)
   release_line=$(grep -n 'fm_lock_release "$SPAWN_TASK_LOCK"' "$SPAWN" | tail -1 | cut -d: -f1)
@@ -851,7 +859,7 @@ issue_secondmate_enrollment() {
 }
 
 test_secondmate_authority_delegation_uses_no_node() {
-  local issuer home fakebin out status=0 ticket
+  local issuer home fakebin out status=0 ticket launch consumer attempts=0
   local forged private public body signature digest
   issuer=$(make_primary_home "$TMP_ROOT/secondmate-authority-issuer")
   home="$TMP_ROOT/secondmate-authority-delegation"
@@ -859,15 +867,41 @@ test_secondmate_authority_delegation_uses_no_node() {
   fm_git_init_commit "$home"
   git -C "$home" branch -M main
   printf '%s\n' domain > "$home/.fm-secondmate-home"
-  issue_secondmate_enrollment "$issuer" "$home" domain \
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fakebin="$TMP_ROOT/no-node"
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
+  chmod +x "$fakebin/node"
+  launch=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  (
+    cd "$home" || exit 1
+    exec env -u FM_SESSION_AUTHORITY_FD \
+      -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
+      -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
+      PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+      "$AUTHORITY_EXEC" --enrollment-launch "$launch" "$LOCK"
+  ) > "$home/consumer.out" 2>&1 &
+  consumer=$!
+  BG_PIDS+=("$consumer")
+  while [ "$attempts" -lt 100 ]; do
+    fm_session_process_runs_script "$consumer" "$AUTHORITY_EXEC" 2>/dev/null \
+      && break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  fm_session_process_runs_script "$consumer" "$AUTHORITY_EXEC" 2>/dev/null \
+    || fail "secondmate enrollment consumer did not start"
+  kill -STOP "$consumer" || fail "could not pause enrollment consumer fixture"
+  issue_secondmate_enrollment "$issuer" "$home" domain "$consumer" \
     || fail "could not issue fresh secondmate enrollment"
   ticket="$home/state/.session-authority-enrollment"
   ! grep -q '^key=' "$ticket" \
     || fail "secondmate enrollment exposed the issuer authority key"
   assert_contains "$(cat "$ticket")" "signature=" \
     "secondmate enrollment did not carry a scoped signature"
-  assert_contains "$(cat "$ticket")" "endpoint-pid=$$" \
-    "secondmate enrollment was not bound to its endpoint process"
+  assert_contains "$(cat "$ticket")" "endpoint-pid=$consumer" \
+    "secondmate enrollment was not bound to its exact launch process"
   forged="$ticket.forged"
   private="$TMP_ROOT/forged-enrollment-private"
   public="$TMP_ROOT/forged-enrollment-public"
@@ -897,17 +931,9 @@ test_secondmate_authority_delegation_uses_no_node() {
     || fail "enrollment signing key was exposed through a named file"
   ! grep -q 'FM_SESSION_ENROLLMENT_CLAIM' "$ROOT/bin/fm-session-lock-lib.sh" \
     || fail "enrollment retained a same-user bearer claim"
-  fakebin="$TMP_ROOT/no-node"
-  mkdir -p "$fakebin"
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
-  chmod +x "$fakebin/node"
-  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
-    -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
-    -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
-    PATH="$fakebin:$PATH" \
-    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_AGENT_ROLE=secondmate \
-    FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
-    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+  kill -CONT "$consumer" || fail "could not resume enrollment consumer fixture"
+  wait "$consumer" || status=$?
+  out=$(cat "$home/consumer.out")
   expect_code 0 "$status" \
     "a declared secondmate must acquire its session lock"$'\n'"$out"
   assert_contains "$out" "lock acquired" \
@@ -923,7 +949,7 @@ test_secondmate_authority_delegation_uses_no_node() {
 }
 
 test_unrelated_process_cannot_consume_endpoint_enrollment() {
-  local issuer home endpoint signer out status=0
+  local issuer home endpoint signer out status=0 launch
   issuer=$(make_primary_home "$TMP_ROOT/endpoint-bound-issuer")
   home="$TMP_ROOT/endpoint-bound-secondmate"
   mkdir -p "$home/state"
@@ -937,12 +963,13 @@ test_unrelated_process_cannot_consume_endpoint_enrollment() {
     || fail "could not issue endpoint-bound secondmate enrollment"
   signer=$(sed -n '14s/^signer-pid=//p' \
     "$home/state/.session-authority-enrollment")
+  launch=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
     -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
     -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_AGENT_ROLE=secondmate \
     FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
-    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+    "$AUTHORITY_EXEC" --enrollment-launch "$launch" "$LOCK" 2>&1) || status=$?
   expect_code 1 "$status" \
     "an unrelated same-user process consumed endpoint-bound enrollment"
   assert_absent "$home/state/.lock" \
@@ -953,7 +980,58 @@ test_unrelated_process_cannot_consume_endpoint_enrollment() {
   : > "$home/state/.session-authority-enrollment.release"
   wait "$ENROLLMENT_ISSUER_PID" 2>/dev/null || true
   kill "$endpoint" 2>/dev/null || true
-  pass "secondmate enrollment accepts only descendants of the bound endpoint"
+  pass "secondmate enrollment accepts only the exact bound launch process"
+}
+
+test_backend_owned_launch_proof_covers_tmux_and_herdr() {
+  local out
+  out=$(bash -c '
+    . "$1/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"pane get"*)
+          printf "%s\n" \
+            "{\"result\":{\"pane\":{\"pane_id\":\"w1:p2\",\"tab_id\":\"w1:t2\"}}}"
+          ;;
+        *"agent start"*)
+          printf "%s\n" \
+            "{\"result\":{\"type\":\"agent_started\",\"panes\":[{\"pane_id\":\"w1:p2\"}]}}"
+          ;;
+        *"pane process-info"*)
+          printf "%s\n" \
+            "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w1:p2\",\"foreground_process_group_id\":4242,\"foreground_processes\":[{\"pid\":4242}]}}}"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_launch_trusted_process default:w1:p2 domain /work "wrapper"
+  ' _ "$ROOT") || fail "Herdr direct launch proof rejected its response pane"
+  [ "$out" = 4242 ] || fail "Herdr direct launch proof returned $out"
+  out=$(bash -c '
+    FM_BACKEND_LIB_DIR="$1/bin"
+    . "$1/bin/backends/tmux.sh"
+    tmux() {
+      case "$1" in
+        respawn-pane|display-message) printf "4242\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_tmux_launch_trusted_process @7 domain /work "wrapper"
+  ' _ "$ROOT") || fail "tmux serialized launch proof rejected its returned pane pid"
+  [ "$out" = 4242 ] || fail "tmux serialized launch proof returned $out"
+  out=$(bash -c '
+    FM_BACKEND_LIB_DIR="$1/bin"
+    . "$1/bin/backends/tmux.sh"
+    tmux() {
+      case "$1" in
+        respawn-pane) printf "4242\n" ;;
+        display-message) printf "4343\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    ! fm_backend_tmux_launch_trusted_process @7 domain /work "wrapper"
+  ' _ "$ROOT") || fail "tmux accepted a pane replaced after its serialized launch"
+  pass "tmux and Herdr bind enrollment to backend-owned launch processes"
 }
 
 test_darwin_session_identity_uses_supported_fields() {
@@ -2944,6 +3022,7 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_secondmate_child_receives_only_its_own_home
   test_secondmate_authority_delegation_uses_no_node
   test_unrelated_process_cannot_consume_endpoint_enrollment
+  test_backend_owned_launch_proof_covers_tmux_and_herdr
   test_darwin_session_identity_uses_supported_fields
   test_secondmate_spawn_waits_for_enrollment_acceptance
   echo "# focused session-authority tests passed"
@@ -2977,6 +3056,7 @@ test_session_authority_recovery_precedes_current_tuple_validation
 test_fresh_enrollment_requires_external_capability
 test_secondmate_authority_delegation_uses_no_node
 test_unrelated_process_cannot_consume_endpoint_enrollment
+test_backend_owned_launch_proof_covers_tmux_and_herdr
 test_darwin_session_identity_uses_supported_fields
 test_secondmate_spawn_waits_for_enrollment_acceptance
 test_forged_key_cannot_issue_secondmate_enrollment

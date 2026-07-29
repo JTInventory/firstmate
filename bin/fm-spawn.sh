@@ -1738,31 +1738,8 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
 }
 if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_ENROLLMENT="$PROJ_ABS/state/.session-authority-enrollment"
-  SPAWN_AUTHORITY_ENDPOINT_PID=$(fm_agent_backend_shell_pid "$BACKEND" "$WID") || {
-    echo "error: could not verify the endpoint process for secondmate $ID" >&2
-    exit 1
-  }
-  SPAWN_AUTHORITY_ENDPOINT_START=$(
-    fm_session_process_start "$SPAWN_AUTHORITY_ENDPOINT_PID"
-  ) || {
-    echo "error: could not verify the endpoint start for secondmate $ID" >&2
-    exit 1
-  }
-  SPAWN_AUTHORITY_ENDPOINT_IDENTITY=$(
-    fm_session_process_identity "$SPAWN_AUTHORITY_ENDPOINT_PID"
-  ) || {
-    echo "error: could not verify the endpoint identity for secondmate $ID" >&2
-    exit 1
-  }
-  fm_session_enrollment_ticket_write \
-    "$SPAWN_AUTHORITY_ENROLLMENT" "$ID" "$PROJ_ABS" "$FM_HOME" \
-    "$SPAWN_AUTHORITY_ENDPOINT_PID" "$SPAWN_AUTHORITY_ENDPOINT_START" \
-    "$SPAWN_AUTHORITY_ENDPOINT_IDENTITY" || {
-      echo "error: could not issue trusted session enrollment for secondmate $ID" >&2
-      exit 1
-  }
-  SPAWN_AUTHORITY_ENROLLMENT_SIGNER=$FM_SESSION_ENROLLMENT_SIGNER_PID
-  LAUNCH="${WORKER_ENV_PREFIX}$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
+  SPAWN_AUTHORITY_LAUNCH=$(fm_session_random_hex 32) || exit 1
+  LAUNCH="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") ${WORKER_ENV_PREFIX}$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 fi
@@ -1790,15 +1767,59 @@ if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
   sleep 0.2
   LAUNCH="${cbm_prefix}${LAUNCH}"
 fi
-fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
+if [ "$KIND" != secondmate ]; then
+  fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
 HERDR_FLAT_ABORT_CLEANUP=0
-fm_backend_send_key "$BACKEND" "$WID" Enter
 if [ "$KIND" = secondmate ]; then
+  SPAWN_AUTHORITY_ENDPOINT_PID=$(
+    fm_backend_launch_trusted_process \
+      "$BACKEND" "$WID" "$ID" "$PROJ_ABS" "$LAUNCH" 2>/dev/null
+  ) || SPAWN_AUTHORITY_ENDPOINT_PID=
+  [ -n "$SPAWN_AUTHORITY_ENDPOINT_PID" ] || {
+    echo "error: could not verify the exact launch process for secondmate $ID" >&2
+    exit 1
+  }
+  SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS=0
+  while [ "$SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS" -lt 250 ]; do
+    if fm_backend_launch_process_is_current \
+      "$BACKEND" "$WID" "$SPAWN_AUTHORITY_ENDPOINT_PID" \
+      && fm_session_process_runs_script \
+        "$SPAWN_AUTHORITY_ENDPOINT_PID" \
+        "$PROJ_ABS/bin/fm-session-authority-exec.sh" \
+      && [ "$(fm_session_process_argument_value \
+        "$SPAWN_AUTHORITY_ENDPOINT_PID" --enrollment-launch 2>/dev/null)" \
+        = "$SPAWN_AUTHORITY_LAUNCH" ] \
+      && [ "$(fm_backend_endpoint_generation "$BACKEND" "$WID" 2>/dev/null)" \
+        = "$ENDPOINT_GENERATION" ]; then
+      break
+    fi
+    sleep 0.02
+    SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS=$((SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS + 1))
+  done
+  [ "$SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS" -lt 250 ] || {
+    echo "error: trusted launch identity changed for secondmate $ID" >&2
+    exit 1
+  }
+  SPAWN_AUTHORITY_ENDPOINT_START=$(
+    fm_session_process_start "$SPAWN_AUTHORITY_ENDPOINT_PID"
+  ) || exit 1
+  SPAWN_AUTHORITY_ENDPOINT_IDENTITY=$(
+    fm_session_process_identity "$SPAWN_AUTHORITY_ENDPOINT_PID"
+  ) || exit 1
+  fm_session_enrollment_ticket_write \
+    "$SPAWN_AUTHORITY_ENROLLMENT" "$ID" "$PROJ_ABS" "$FM_HOME" \
+    "$SPAWN_AUTHORITY_ENDPOINT_PID" "$SPAWN_AUTHORITY_ENDPOINT_START" \
+    "$SPAWN_AUTHORITY_ENDPOINT_IDENTITY" || {
+      echo "error: could not issue trusted session enrollment for secondmate $ID" >&2
+      exit 1
+  }
+  SPAWN_AUTHORITY_ENROLLMENT_SIGNER=$FM_SESSION_ENROLLMENT_SIGNER_PID
   fm_session_enrollment_ticket_wait_accepted \
     "$SPAWN_AUTHORITY_ENROLLMENT" "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" \
     "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
@@ -1806,6 +1827,8 @@ if [ "$KIND" = secondmate ]; then
       echo "error: secondmate $ID did not consume trusted session enrollment" >&2
       exit 1
     }
+else
+  fm_backend_send_key "$BACKEND" "$WID" Enter
 fi
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=

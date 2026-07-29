@@ -27,9 +27,12 @@ A crewmate carries no home at all; a secondmate carries only its own.
 For a secondmate spawn, this declaration precedes
 `bin/fm-session-authority-exec.sh`; the authorized parent has already placed a
 one-use signed enrollment ticket in that home without exposing the issuer key.
-The signer binds its public-key digest to its live protected process. The
-ticket binds the exact live pane shell PID, start value, and executable
-identity, and the signer accepts only a consumer below that endpoint. The
+The signer binds its public-key digest to its live protected process. Spawn
+launches a randomly tagged wrapper through a backend-owned operation and
+resolves that exact PID through tmux's serialized respawn response or Herdr's direct agent-start
+response and pane process-info. The ticket
+binds the wrapper's start value and executable identity, and the signer accepts
+only that exact process. The
 private signing key stays in shell memory and fresh anonymous pipes, with no
 filesystem pathname, environment export, or terminal command text. Spawn waits
 for the matching acceptance receipt before reporting success.
