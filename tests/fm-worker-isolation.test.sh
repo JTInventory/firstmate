@@ -101,7 +101,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; exec $FM_SESSION_AUTHORITY_DURABLE_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -983,10 +983,8 @@ test_secondmate_authority_delegation_uses_no_node() {
 }
 
 test_authority_fds_require_sibling_proc_isolation() {
-  local parent=$$ sibling_can_open=0 fd original_fd original_durable_fd
+  local parent=$$ sibling_can_open=0 fd
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  original_fd=$FM_SESSION_AUTHORITY_FD
-  original_durable_fd=$FM_SESSION_AUTHORITY_DURABLE_FD
   case "$(uname -s 2>/dev/null)" in
     Linux)
       exec 8</dev/null
@@ -994,7 +992,7 @@ test_authority_fds_require_sibling_proc_isolation() {
         sibling_can_open=1
       fi
       exec 8<&-
-      for fd in 7 8 9 10 "$FM_SESSION_AUTHORITY_FD"; do
+      for fd in 7 8 9 10 18 "$FM_SESSION_AUTHORITY_FD"; do
         if [ "$sibling_can_open" -eq 1 ]; then
           ! fm_session_descriptor_channel_isolated "$fd" \
             || fail "authority descriptor $fd remained usable through sibling procfs"
@@ -1004,37 +1002,38 @@ test_authority_fds_require_sibling_proc_isolation() {
         fi
       done
       if [ "$sibling_can_open" -eq 1 ]; then
-        ! fm_session_authority_descriptor_create \
-          || fail "primary authority creation ignored readable sibling procfs"
-        ! ( : <&9 ) 2>/dev/null \
-          || fail "refused primary authority creation left descriptor 9 open"
+        (
+          exec 9<&-
+          exec 18<&-
+          unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+          ! fm_session_authority_descriptor_create \
+            && ! ( : <&9 ) 2>/dev/null
+        ) || fail "primary authority creation ignored readable sibling procfs"
       else
-        fm_session_authority_descriptor_create \
-          || fail "primary authority creation rejected isolated descriptors"
-        fm_session_authority_capability_present \
-          || fail "protected primary authority descriptor was unreadable"
-        exec 9<&-
-        exec 7<&-
-        FM_SESSION_AUTHORITY_FD=$original_fd
-        FM_SESSION_AUTHORITY_DURABLE_FD=$original_durable_fd
+        (
+          exec 9<&-
+          exec 18<&-
+          unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+          fm_session_authority_descriptor_create \
+            && fm_session_authority_capability_present
+        ) || fail "primary authority creation rejected isolated descriptors"
       fi
       ;;
     Darwin)
-      for fd in 7 8 9 10 "$FM_SESSION_AUTHORITY_FD"; do
+      for fd in 7 8 9 10 18 "$FM_SESSION_AUTHORITY_FD"; do
         fm_session_descriptor_channel_isolated "$fd" \
           || fail "authority descriptor $fd rejected the procfs-free Darwin boundary"
       done
-      fm_session_authority_descriptor_create \
-        || fail "primary authority creation rejected Darwin descriptors"
-      fm_session_authority_capability_present \
-        || fail "Darwin primary authority descriptor was unreadable"
-      exec 9<&-
-      exec 7<&-
-      FM_SESSION_AUTHORITY_FD=$original_fd
-      FM_SESSION_AUTHORITY_DURABLE_FD=$original_durable_fd
+      (
+        exec 9<&-
+        exec 18<&-
+        unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+        fm_session_authority_descriptor_create \
+          && fm_session_authority_capability_present
+      ) || fail "primary authority creation rejected Darwin descriptors"
       ;;
     *)
-      for fd in 7 8 9 10 "$FM_SESSION_AUTHORITY_FD"; do
+      for fd in 7 8 9 10 18 "$FM_SESSION_AUTHORITY_FD"; do
         ! fm_session_descriptor_channel_isolated "$fd" \
           || fail "authority descriptor $fd trusted an unrecognized isolation boundary"
       done
@@ -1044,7 +1043,7 @@ test_authority_fds_require_sibling_proc_isolation() {
 }
 
 test_durable_receipts_survive_live_key_rotation() {
-  local txn before after old_fd status=0
+  local txn before after old_fd registration status=0
   local ID META TEARDOWN_TXN_DIR
   txn="$TMP_ROOT/durable-receipt-rotation"
   if ! fm_session_descriptor_channel_isolated \
@@ -1067,6 +1066,14 @@ test_durable_receipts_survive_live_key_rotation() {
   ' "$ROOT/bin/fm-teardown.sh")"
   before=$(teardown_transaction_receipt_binding endpoint-proof) \
     || fail "durable teardown receipt could not be issued"
+  registration="$txn/pr-registration"
+  printf 'invalid\n' > "$registration"
+  . "$ROOT/bin/fm-pr-lib.sh"
+  fm_pr_poll_registration_parse "$registration" >/dev/null 2>&1 || true
+  after=$(teardown_transaction_receipt_binding endpoint-proof) \
+    || fail "PR registration parsing destroyed durable receipt authority"
+  [ "$after" = "$before" ] \
+    || fail "PR registration parsing changed durable receipt authority"
   old_fd=$FM_SESSION_AUTHORITY_FD
   exec 20< <(while :; do
     printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -1081,15 +1088,27 @@ test_durable_receipts_survive_live_key_rotation() {
   pass "durable teardown receipts survive live authority key rotation"
 }
 
+test_authority_hmac_needs_only_openssl() {
+  local actual
+  actual=$(printf 'Hi There' \
+    | fm_session_hmac_sha256_key \
+      0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b) \
+    || fail "shell/OpenSSL HMAC failed"
+  [ "$actual" = \
+    b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7 ] \
+    || fail "shell/OpenSSL HMAC did not match the known SHA-256 vector"
+  pass "authority HMAC uses the declared OpenSSL dependency"
+}
+
 test_authority_fds_reprove_isolation_after_exec() {
   local original_fd authority_tmp consume
   . "$ROOT/bin/fm-session-lock-lib.sh"
   original_fd=$FM_SESSION_AUTHORITY_FD
   authority_tmp=$(mktemp "$TMP_ROOT/post-exec-authority.XXXXXX")
   printf '%064d\n' 0 > "$authority_tmp"
-  exec 9<"$authority_tmp"
+  exec 17<"$authority_tmp"
   rm -f "$authority_tmp"
-  FM_SESSION_AUTHORITY_FD=9
+  FM_SESSION_AUTHORITY_FD=17
   (
     fm_session_descriptor_channel_isolated() { return 1; }
     ! fm_session_authority_capability_present
@@ -1137,7 +1156,7 @@ test_authority_fds_reprove_isolation_after_exec() {
     ! fm_session_enrollment_ack_write x y 2 z q
     [ "$(cat <&8)" = private ]
   ) || fail "post-exec consumer consumed its key before isolation proof"
-  exec 9<&-
+  exec 17<&-
   FM_SESSION_AUTHORITY_FD=$original_fd
   pass "authority secrets never cross unproven exec isolation"
 }
@@ -3410,6 +3429,7 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_darwin_session_identity_uses_supported_fields
   test_secondmate_spawn_waits_for_enrollment_acceptance
   test_durable_receipts_survive_live_key_rotation
+  test_authority_hmac_needs_only_openssl
   echo "# focused session-authority tests passed"
   exit 0
 fi

@@ -88,16 +88,18 @@ fm_test_tmproot() {
 }
 
 fm_test_session_authority_fd() {
-  local dir=$1 key
+  local dir=$1 key durable_key
   mkdir -p "$dir"
   key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  if ( : <&19 ) 2>/dev/null; then
-    echo "test setup: descriptor 19 is already in use" >&2
+  if ( : <&9 ) 2>/dev/null || ( : <&18 ) 2>/dev/null; then
+    echo "test setup: authority descriptors are already in use" >&2
     return 1
   fi
-  exec 19< <(while :; do printf '%s\n' "$key"; done)
-  FM_SESSION_AUTHORITY_FD=19
-  FM_SESSION_AUTHORITY_DURABLE_FD=19
+  durable_key=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+  exec 9< <(while :; do printf '%s\n' "$key"; done)
+  exec 18< <(while :; do printf '%s\n' "$durable_key"; done)
+  FM_SESSION_AUTHORITY_FD=9
+  FM_SESSION_AUTHORITY_DURABLE_FD=18
   export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
 }
 

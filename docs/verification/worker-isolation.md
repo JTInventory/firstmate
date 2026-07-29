@@ -51,15 +51,24 @@ the broker, signer, and wrapper each use a real same-credential child open
 attempt to prove that procfs cannot expose any authority-bearing descriptor
 before creating its secret; readable or unrecognized isolation refuses
 startup. Darwin has no corresponding procfs descriptor path. The wrapper then
+keeps live-broker HMAC and durable-receipt HMAC on distinct protected
+descriptors. A detached custodian retains only the durable receipt root. A
+replacement wrapper that no longer inherited that descriptor re-execs with a
+one-use RSA public key in immutable arguments; the custodian checks the exact
+wrapper, original kernel session, live process identity, and declaration-free
+ancestry before returning the root encrypted to that key. The wrapper rotates
+the separate live-broker key after recovery. The wrapper then
 creates an anonymous consumer key and publishes its public key and exact live
 process identity in `${enrollment}.consume`. The signer validates that request
 and publishes a signed `${enrollment}.accepted` record. The wrapper validates
 it, signs `${enrollment}.accepted.ack`, captures the ticket and acceptance,
-removes its private consumer ticket, and re-execs into the confirmed stage.
+removes its private consumer ticket, and re-execs into the confirmed stage
+while preserving the private consumer key only on protected FD 8.
 That stage validates both captured records and publishes the final
 consumer-signed `${enrollment}.accepted.final` receipt with a distinct
 `stage=final` signature domain. A copied `stage=ack` receipt is not final
-acceptance. Spawn waits for the signer to validate
+acceptance. The confirmed stage closes FD 8 after the final write succeeds.
+Spawn waits for the signer to validate
 the final receipt and rechecks the backend endpoint before reporting success. Tmux
 lifecycle operations and ordinary `fm-<id>` selectors share one strict parser
 that rejects duplicate or malformed pane data and proves the persisted exact

@@ -343,9 +343,11 @@ exact pane and pane-scoped generation. Lifecycle operations and ordinary
 `fm-<id>` selectors share one strict parser that rejects duplicate or malformed
 pane data and proves the live pane still belongs to the recorded window and
 generation before transport. A legacy tmux record without endpoint fields is
-migrated only when its live process has the complete secondmate declaration;
-pre-port processes without that declaration require a coordinated primary and
-secondmate restart. Ambiguity refuses. Older window-scoped
+  migrated only when its live process has the complete secondmate declaration
+  and a matching durable primary-authenticated launch receipt. A declaration,
+  marker, cwd, or pane alone is insufficient. Pre-port processes without that
+  receipt require a coordinated primary and secondmate restart. Ambiguity
+  refuses. Older window-scoped
 records that already have a generation remain usable only while the recorded
 window has one stable pane. On macOS, `getsid(2)` must identify a live session
 leader in the caller's ancestry; leaderless or unreadable sessions refuse.

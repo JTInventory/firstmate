@@ -232,24 +232,50 @@ fm_session_sha256_file() {
   printf '%s\n' "$digest"
 }
 
-fm_session_hmac_sha256_key_file() {
-  local key_file=$1 digest
-  [ -r "$key_file" ] || return 1
-  command -v perl >/dev/null 2>&1 || return 1
-  digest=$(perl -MDigest::SHA=hmac_sha256_hex -e '
-    my $path = shift;
-    open my $key_fh, "<", $path or exit 1;
-    my $key = <$key_fh>;
-    defined $key or exit 1;
-    chomp $key;
-    $key =~ /\A[0-9a-f]{64,}\z/ or exit 1;
-    local $/;
-    my $body = <STDIN>;
-    print hmac_sha256_hex(defined($body) ? $body : "", $key), "\n";
-  ' "$key_file") || return 1
+fm_session_hmac_pad() {
+  local key=$1 pad=$2 index=0 byte value octal
+  while [ "$index" -lt 64 ]; do
+    if [ $((index * 2)) -lt "${#key}" ]; then
+      byte=${key:$((index * 2)):2}
+      value=$((16#$byte))
+    else
+      value=0
+    fi
+    octal=$(printf '%03o' $((value ^ pad))) || return 1
+    printf "\\$octal" || return 1
+    index=$((index + 1))
+  done
+}
+
+fm_session_hmac_sha256_key() {
+  local key=$1 inner output digest
+  [ "${#key}" -ge 2 ] && [ "${#key}" -le 128 ] \
+    && [ $(( ${#key} % 2 )) -eq 0 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  command -v openssl >/dev/null 2>&1 || return 1
+  inner=$(
+    {
+      fm_session_hmac_pad "$key" 54
+      cat
+    } | openssl dgst -sha256 -binary 2>/dev/null | openssl base64 -A
+  ) || return 1
+  output=$(
+    {
+      fm_session_hmac_pad "$key" 92
+      printf '%s' "$inner" | openssl base64 -d -A
+    } | openssl dgst -sha256 2>/dev/null
+  ) || return 1
+  digest=${output##*= }
   [ "${#digest}" -eq 64 ] || return 1
   case "$digest" in *[!0-9a-f]*) return 1 ;; esac
   printf '%s\n' "$digest"
+}
+
+fm_session_hmac_sha256_key_file() {
+  local key_file=$1 key
+  [ -r "$key_file" ] || return 1
+  IFS= read -r key < "$key_file" || return 1
+  fm_session_hmac_sha256_key "$key"
 }
 
 fm_session_authority_key_path() {
@@ -309,6 +335,8 @@ fm_session_descriptor_channel_isolated() {
           8) exec 8</dev/null ;;
           9) exec 9</dev/null ;;
           10) exec 10</dev/null ;;
+          16) exec 16</dev/null ;;
+          18) exec 18</dev/null ;;
           *) return 1 ;;
         esac
         opened=1
@@ -323,6 +351,8 @@ fm_session_descriptor_channel_isolated() {
           8) exec 8<&- ;;
           9) exec 9<&- ;;
           10) exec 10<&- ;;
+          16) exec 16<&- ;;
+          18) exec 18<&- ;;
         esac
       fi
       return "$status"
@@ -355,22 +385,22 @@ fm_session_exec_descriptor_isolation_durable() {
 fm_session_authority_descriptor_create() {
   local key durable_key
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null \
-    || ( : <&7 ) 2>/dev/null || ( : >&7 ) 2>/dev/null; then
+    || ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
     return 1
   fi
   fm_session_descriptor_channel_isolated 9 \
-    && fm_session_descriptor_channel_isolated 7 \
+    && fm_session_descriptor_channel_isolated 18 \
     && fm_session_exec_descriptor_isolation_durable || return 1
   key=$(fm_session_random_hex 48) || return 1
   durable_key=$(fm_session_random_hex 48) || return 1
   exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
-  exec 7< <(while :; do printf '%s\n' "$durable_key"; done) || {
+  exec 18< <(while :; do printf '%s\n' "$durable_key"; done) || {
     exec 9<&-
     return 1
   }
   unset key durable_key
   FM_SESSION_AUTHORITY_FD=9
-  FM_SESSION_AUTHORITY_DURABLE_FD=7
+  FM_SESSION_AUTHORITY_DURABLE_FD=18
 }
 
 fm_session_authority_live_descriptor_rotate() {
@@ -390,18 +420,192 @@ fm_session_authority_live_descriptor_rotate() {
 fm_session_authority_durable_descriptor_adopt() {
   local key
   [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] || return 1
-  if ( : <&7 ) 2>/dev/null || ( : >&7 ) 2>/dev/null; then
+  if ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
     return 1
   fi
   fm_session_authority_capability_present \
-    && fm_session_descriptor_channel_isolated 7 \
+    && fm_session_descriptor_channel_isolated 18 \
     && fm_session_exec_descriptor_isolation_durable || return 1
   IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
   [ "${#key}" -ge 64 ] || return 1
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
-  exec 7< <(while :; do printf '%s\n' "$key"; done) || return 1
+  exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
   unset key
-  FM_SESSION_AUTHORITY_DURABLE_FD=7
+  FM_SESSION_AUTHORITY_DURABLE_FD=18
+}
+
+fm_session_durable_consumer_prepare() {
+  local private public output digest
+  if ( : <&16 ) 2>/dev/null || ( : >&16 ) 2>/dev/null; then
+    return 1
+  fi
+  fm_session_descriptor_channel_isolated 16 \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  private=$(openssl genpkey -algorithm RSA \
+    -pkeyopt rsa_keygen_bits:2048 2>/dev/null) || return 1
+  public=$(printf '%s\n' "$private" | openssl pkey -pubout 2>/dev/null) \
+    || return 1
+  output=$(printf '%s\n' "$public" | openssl dgst -sha256 2>/dev/null) \
+    || return 1
+  digest=${output##*= }
+  [ "${#digest}" -eq 64 ] || return 1
+  exec 16< <(printf '%s\n' "$private") || return 1
+  unset private
+  FM_SESSION_DURABLE_CONSUMER_PRIVATE_FD=16
+  FM_SESSION_DURABLE_CONSUMER_PUBLIC=$(printf '%s\n' "$public" \
+    | openssl base64 -A) || return 1
+  FM_SESSION_DURABLE_CONSUMER_SHA256=$digest
+  FM_SESSION_DURABLE_RECOVERY_NONCE=$(fm_session_random_hex 32) || return 1
+  export FM_SESSION_DURABLE_CONSUMER_PRIVATE_FD
+  export FM_SESSION_DURABLE_CONSUMER_PUBLIC
+  export FM_SESSION_DURABLE_CONSUMER_SHA256
+  export FM_SESSION_DURABLE_RECOVERY_NONCE
+}
+
+fm_session_durable_custodian_read() {
+  local file=$1 current
+  [ -f "$file" ] && [ ! -L "$file" ] \
+    && [ "$(wc -l < "$file" | tr -d ' ')" -eq 8 ] \
+    && [ "$(sed -n '1p' "$file")" = version=1 ] || return 1
+  FM_SESSION_DURABLE_CUSTODIAN_PID=$(sed -n '2s/^pid=//p' "$file")
+  FM_SESSION_DURABLE_CUSTODIAN_START=$(sed -n '3s/^start=//p' "$file")
+  FM_SESSION_DURABLE_CUSTODIAN_IDENTITY=$(sed -n '4s/^identity=//p' "$file")
+  FM_SESSION_DURABLE_CUSTODIAN_SESSION=$(sed -n '5s/^session-pid=//p' "$file")
+  FM_SESSION_DURABLE_CUSTODIAN_SESSION_START=$(
+    sed -n '6s/^session-start=//p' "$file"
+  )
+  FM_SESSION_DURABLE_CUSTODIAN_HOME=$(sed -n '7s/^home=//p' "$file")
+  FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT=$(sed -n '8s/^checkout=//p' "$file")
+  case "$FM_SESSION_DURABLE_CUSTODIAN_PID:$FM_SESSION_DURABLE_CUSTODIAN_SESSION" in
+    *[!0-9:]*|:) return 1 ;;
+  esac
+  case "$FM_SESSION_DURABLE_CUSTODIAN_START:$FM_SESSION_DURABLE_CUSTODIAN_IDENTITY:$FM_SESSION_DURABLE_CUSTODIAN_SESSION_START:$FM_SESSION_DURABLE_CUSTODIAN_HOME:$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  [ -n "$FM_SESSION_DURABLE_CUSTODIAN_START" ] \
+    && [ -n "$FM_SESSION_DURABLE_CUSTODIAN_IDENTITY" ] \
+    && [ -n "$FM_SESSION_DURABLE_CUSTODIAN_SESSION_START" ] \
+    && [ -n "$FM_SESSION_DURABLE_CUSTODIAN_HOME" ] \
+    && [ -n "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" ] || return 1
+  current=$(fm_session_process_start \
+    "$FM_SESSION_DURABLE_CUSTODIAN_PID") || return 1
+  [ "$current" = "$FM_SESSION_DURABLE_CUSTODIAN_START" ] \
+    && [ "$(fm_session_process_identity \
+      "$FM_SESSION_DURABLE_CUSTODIAN_PID" 2>/dev/null)" \
+      = "$FM_SESSION_DURABLE_CUSTODIAN_IDENTITY" ] \
+    && [ "$(fm_session_process_start \
+      "$FM_SESSION_DURABLE_CUSTODIAN_SESSION" 2>/dev/null)" \
+      = "$FM_SESSION_DURABLE_CUSTODIAN_SESSION_START" ]
+}
+
+fm_session_durable_custodian_ensure() {
+  local state=$1 home=$2 checkout=$3 record script session session_start pid
+  local attempts=0 log
+  record="$state/.session-durable-authority"
+  script="$checkout/bin/fm-session-durable-authority.sh"
+  if fm_session_durable_custodian_read "$record" \
+    && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home" ] \
+    && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$checkout" ] \
+    && fm_session_process_runs_script \
+      "$FM_SESSION_DURABLE_CUSTODIAN_PID" "$script"; then
+    return 0
+  fi
+  [ ! -e "$record" ] && [ ! -L "$record" ] || return 1
+  fm_session_authority_durable_capability_present || return 1
+  session=$(fm_session_process_session_id "$$") || return 1
+  session_start=$(fm_session_process_start "$session") || return 1
+  log="$state/.session-durable-authority.log"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
+      </dev/null >>"$log" 2>&1 &
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
+      "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
+      </dev/null >>"$log" 2>&1 &
+  else
+    return 1
+  fi
+  pid=$!
+  while [ "$attempts" -lt 100 ]; do
+    if fm_session_durable_custodian_read "$record" \
+      && [ "$FM_SESSION_DURABLE_CUSTODIAN_PID" = "$pid" ] \
+      && fm_session_process_runs_script "$pid" "$script"; then
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+fm_session_durable_authority_recover() {
+  local state=$1 home=$2 checkout=$3 nonce=$4 public=$5 digest=$6
+  local record requests request response start identity tmp attempts=0
+  local private_path encrypted_file ciphertext key
+  record="$state/.session-durable-authority"
+  fm_session_durable_custodian_read "$record" \
+    && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home" ] \
+    && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$checkout" ] \
+    && fm_session_process_runs_script \
+      "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
+      "$checkout/bin/fm-session-durable-authority.sh" || return 1
+  [ "${FM_SESSION_DURABLE_CONSUMER_PRIVATE_FD:-}" = 16 ] \
+    && fm_session_descriptor_channel_isolated 16 || return 1
+  start=$(fm_session_process_start "$$") || return 1
+  identity=$(fm_session_process_identity "$$") || return 1
+  requests="$state/.session-durable-authority-requests"
+  request="$requests/$nonce.request"
+  response="$requests/$nonce.response"
+  [ ! -e "$request" ] && [ ! -L "$request" ] \
+    && [ ! -e "$response" ] && [ ! -L "$response" ] || return 1
+  tmp=$(mktemp "${request}.XXXXXX") || return 1
+  printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nnonce=%s\npublic-key=%s\npublic-key-sha256=%s\n' \
+    "$$" "$start" "$identity" "$nonce" "$public" "$digest" > "$tmp" \
+    && chmod 600 "$tmp" && mv "$tmp" "$request" || {
+      rm -f "$tmp"
+      return 1
+    }
+  while [ "$attempts" -lt 200 ]; do
+    [ ! -f "$response" ] || break
+    kill -0 "$FM_SESSION_DURABLE_CUSTODIAN_PID" 2>/dev/null || {
+      rm -f "$request" "$response"
+      return 1
+    }
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$response" ] && [ ! -L "$response" ] \
+    && [ "$(sed -n '1p' "$response")" = version=1 ] \
+    && [ "$(sed -n '2s/^nonce=//p' "$response")" = "$nonce" ] || {
+      rm -f "$request" "$response"
+      return 1
+    }
+  ciphertext=$(sed -n '3s/^ciphertext=//p' "$response")
+  private_path=/dev/fd/16
+  [ -r "$private_path" ] || private_path=/proc/self/fd/16
+  [ -r "$private_path" ] || {
+    rm -f "$request" "$response"
+    return 1
+  }
+  encrypted_file=$(mktemp "${TMPDIR:-/tmp}/fm-durable-ciphertext.XXXXXX") || {
+    rm -f "$request" "$response"
+    return 1
+  }
+  printf '%s' "$ciphertext" | openssl base64 -d -A \
+      > "$encrypted_file" 2>/dev/null \
+    && key=$(openssl pkeyutl -decrypt -inkey "$private_path" \
+      -in "$encrypted_file" 2>/dev/null) || {
+        rm -f "$encrypted_file" "$request" "$response"
+        return 1
+      }
+  rm -f "$encrypted_file" "$request" "$response"
+  exec 16<&-
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
+  unset key
+  FM_SESSION_AUTHORITY_DURABLE_FD=18
 }
 
 fm_session_enrollment_signer_prepare() {
@@ -1020,23 +1224,10 @@ fm_session_enrollment_ticket_validate() {
 }
 
 fm_session_hmac_from_descriptor() {
-  local fd=$1 digest
+  local fd=$1 key
   case "$fd" in ''|*[!0-9]*) return 1 ;; esac
-  command -v perl >/dev/null 2>&1 || return 1
-  digest=$(perl -MDigest::SHA=hmac_sha256_hex -e '
-    my $fd = shift;
-    open my $key_fh, "<&=$fd" or exit 1;
-    my $key = <$key_fh>;
-    defined $key or exit 1;
-    chomp $key;
-    $key =~ /\A[0-9a-f]{64,}\z/ or exit 1;
-    local $/;
-    my $body = <STDIN>;
-    print hmac_sha256_hex(defined($body) ? $body : "", $key), "\n";
-  ' "$fd") || return 1
-  [ "${#digest}" -eq 64 ] || return 1
-  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
-  printf '%s\n' "$digest"
+  IFS= read -r key <&"$fd" || return 1
+  fm_session_hmac_sha256_key "$key"
 }
 
 fm_session_authority_hmac() {

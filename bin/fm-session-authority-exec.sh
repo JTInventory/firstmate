@@ -13,10 +13,27 @@ enrollment_confirmed=
 enrollment_ticket_data=
 enrollment_acceptance_data=
 enrollment_ticket=
+durable_recovery=
+durable_consumer_key=
+durable_consumer_digest=
 cleanup_enrollment_ticket() {
   [ -z "$enrollment_ticket" ] || rm -f -- "$enrollment_ticket"
 }
 trap cleanup_enrollment_ticket EXIT
+if [ "${1:-}" = --durable-recovery ]; then
+  [ "$#" -gt 6 ] || exit 2
+  durable_recovery=$2
+  [ "$3" = --durable-consumer-key ] || exit 2
+  durable_consumer_key=$4
+  [ "$5" = --durable-consumer-key-sha256 ] || exit 2
+  durable_consumer_digest=$6
+  shift 6
+  [ "${#durable_recovery}" -eq 64 ] \
+    && [ "${#durable_consumer_digest}" -eq 64 ] || exit 1
+  case "$durable_recovery:$durable_consumer_digest" in
+    *[!0-9a-f:]*) exit 1 ;;
+  esac
+fi
 if [ "${1:-}" = --enrollment-confirmed ]; then
   [ "$#" -gt 2 ] || exit 2
   enrollment_confirmed=$2
@@ -243,8 +260,8 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   elif [ -n "$enrollment_fd" ]; then
     eval "exec ${enrollment_fd}<&-"
   fi
-  if [ "$durable_fd" = 7 ]; then
-    exec 7<&-
+  if [ "$durable_fd" = 18 ]; then
+    exec 18<&-
   elif [ -n "$durable_fd" ]; then
     eval "exec ${durable_fd}<&-"
   fi
@@ -274,17 +291,46 @@ else
   elif [ -n "$enrollment_fd" ]; then
     eval "exec ${enrollment_fd}<&-"
   fi
-  if [ "$durable_fd" = 7 ]; then
-    exec 7<&-
+  if [ "$durable_fd" = 18 ]; then
+    exec 18<&-
   elif [ -n "$durable_fd" ]; then
     eval "exec ${durable_fd}<&-"
   fi
   unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
-  fm_session_authority_descriptor_create || {
-    echo "error: protected session authority descriptor is unavailable" >&2
+  if [ -f "$STATE/.session-durable-authority" ] \
+    && [ ! -L "$STATE/.session-durable-authority" ]; then
+    if [ -z "$durable_recovery" ]; then
+      fm_session_durable_consumer_prepare || {
+        echo "error: durable session authority recovery key is unavailable" >&2
+        exit 1
+      }
+      exec "$SCRIPT_DIR/fm-session-authority-exec.sh" \
+        --durable-recovery "$FM_SESSION_DURABLE_RECOVERY_NONCE" \
+        --durable-consumer-key "$FM_SESSION_DURABLE_CONSUMER_PUBLIC" \
+        --durable-consumer-key-sha256 "$FM_SESSION_DURABLE_CONSUMER_SHA256" \
+        "$@"
+    fi
+    fm_session_durable_authority_recover \
+      "$STATE" "$home_real" "$FM_ROOT" "$durable_recovery" \
+      "$durable_consumer_key" "$durable_consumer_digest" \
+      && fm_session_authority_live_descriptor_rotate || {
+        echo "error: durable session authority recovery failed" >&2
+        exit 1
+      }
+  elif [ -e "$authority" ] || [ -L "$authority" ]; then
+    echo "error: durable session authority custodian is unavailable" >&2
     exit 1
-  }
+  else
+    fm_session_authority_descriptor_create || {
+      echo "error: protected session authority descriptor is unavailable" >&2
+      exit 1
+    }
+  fi
 fi
+fm_session_durable_custodian_ensure "$STATE" "$home_real" "$FM_ROOT" || {
+  echo "error: durable session authority custodian is unavailable" >&2
+  exit 1
+}
 FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1

@@ -42,9 +42,9 @@ if [ "${FM_UPDATE_FOCUS:-}" = exact-pane-delivery ] \
   authority_key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   durable_key=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
   exec 9< <(while :; do printf '%s\n' "$authority_key"; done)
-  exec 7< <(while :; do printf '%s\n' "$durable_key"; done)
+  exec 18< <(while :; do printf '%s\n' "$durable_key"; done)
   FM_SESSION_AUTHORITY_FD=9
-  FM_SESSION_AUTHORITY_DURABLE_FD=7
+  FM_SESSION_AUTHORITY_DURABLE_FD=18
   export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
   . "$ROOT/bin/fm-session-lock-lib.sh"
   if ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
