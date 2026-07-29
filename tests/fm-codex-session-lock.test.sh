@@ -9,10 +9,16 @@ LOCK="$ROOT/bin/fm-lock.sh"
 HOOK="$ROOT/bin/fm-codex-session-lock-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-codex-session-lock-tests)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+FM_SESSION_AUTHORITY_CAPABILITY=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+export FM_SESSION_AUTHORITY_CAPABILITY
 
 make_home() {
   local home="$TMP_ROOT/$1"
+  mkdir -p "$home"
+  fm_git_init_commit "$home"
+  git -C "$home" branch -M main
   mkdir -p "$home/state"
+  printf '%s\n' "$home" > "$home/state/.primary-checkout"
   printf '%s\n' "$home"
 }
 
@@ -89,16 +95,17 @@ SH
 
 run_lock() {
   local home=$1 thread=$2 fakebin=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    FM_HOME="$home" CODEX_THREAD_ID="$thread" PATH="$fakebin:$BASE_PATH" \
-    bash "$LOCK"
+  ( cd "$home" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" CODEX_THREAD_ID="$thread" \
+    PATH="$fakebin:$BASE_PATH" bash "$LOCK" )
 }
 
 run_hook() {
   local home=$1 event=$2 session=$3
-  printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s"}\n' \
-    "$event" "$session" "$ROOT" \
-    | FM_HOME="$home" CODEX_THREAD_ID="$session" bash "$HOOK"
+  ( cd "$home" && printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s"}\n' \
+    "$event" "$session" "$home" \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+      CODEX_THREAD_ID="$session" bash "$HOOK" )
 }
 
 test_hook_registration_preserves_jt_pretool() {
@@ -126,11 +133,13 @@ test_hooks_work_when_jq_fails() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 127' > "$fakebin/jq"
   chmod +x "$fakebin/jq"
   ln -s "$(command -v node)" "$fakebin/node"
-  printf '{"hook_event_name":"SessionStart","session_id":"thread-no-jq"}\n' \
-    | FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq PATH="$fakebin:$BASE_PATH" bash "$HOOK"
+  ( cd "$home" && printf '{"hook_event_name":"SessionStart","session_id":"thread-no-jq"}\n' \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq \
+      PATH="$fakebin:$BASE_PATH" bash "$HOOK" )
   [ -f "$home/state/.lock" ] || fail "SessionStart did not acquire without jq"
-  printf '{"hook_event_name":"SessionEnd","session_id":"thread-no-jq"}\n' \
-    | FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq PATH="$fakebin:$BASE_PATH" bash "$HOOK"
+  ( cd "$home" && printf '{"hook_event_name":"SessionEnd","session_id":"thread-no-jq"}\n' \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" CODEX_THREAD_ID=thread-no-jq \
+      PATH="$fakebin:$BASE_PATH" bash "$HOOK" )
   [ ! -e "$home/state/.lock" ] || fail "SessionEnd did not release without jq"
   pass "Codex lifecycle hooks do not depend on jq"
 }
@@ -138,7 +147,7 @@ test_hooks_work_when_jq_fails() {
 test_matching_session_end_only_releases_regular_exact_owner() {
   local home owner
   home=$(make_home exact-release)
-  printf '%s\n' '999999|codex:thread-clean|fallback' > "$home/state/.lock"
+  run_hook "$home" SessionStart thread-clean
   run_hook "$home" SessionEnd thread-clean
   [ ! -e "$home/state/.lock" ] || fail "matching SessionEnd left the lock behind"
 
@@ -165,21 +174,25 @@ test_session_start_retains_verified_harness_owner() {
   fakecodex="$home/codex"
   ln -s /bin/bash "$fakecodex"
   # shellcheck disable=SC2016
-  FM_HOOK_PATH="$HOOK" FM_HOME="$home" CODEX_THREAD_ID=thread-start \
-    "$fakecodex" -c 'printf '\''{"hook_event_name":"SessionStart","session_id":"thread-start"}\n'\'' | bash "$FM_HOOK_PATH"'
+  ( cd "$home" && FM_HOOK_PATH="$HOOK" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    CODEX_THREAD_ID=thread-start "$fakecodex" -c \
+    'printf '\''{"hook_event_name":"SessionStart","session_id":"thread-start"}\n'\'' | bash "$FM_HOOK_PATH"' )
   owner=$(cat "$home/state/.lock")
-  case "$owner" in *'|codex:thread-start|harness') ;; *) fail "unexpected SessionStart owner: $owner" ;; esac
-  pass "SessionStart retains a visible Codex harness PID"
+  case "$owner" in *'|codex:thread-start|capability') ;; *) fail "unexpected SessionStart owner: $owner" ;; esac
+  pass "SessionStart publishes transferable keyed Codex authority"
 }
 
 test_same_thread_marker_cannot_adopt_unbound_owner() {
-  local home fakebin before out status=0
+  local home fakebin before out status=0 sleeper
   home=$(make_home same-thread)
   fakebin="$home/fakebin"
   make_hidden_ps "$fakebin"
-  before='8123|codex:thread-same|fallback'
+  sleep 60 & sleeper=$!
+  before="$sleeper|codex:thread-same|fallback"
   printf '%s\n' "$before" > "$home/state/.lock"
   out=$(run_lock "$home" thread-same "$fakebin" 2>&1) || status=$?
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
   expect_code 1 "$status" "a matching caller marker must not adopt an unbound owner"
   [ "$(cat "$home/state/.lock")" = "$before" ] || fail "same thread replaced the stable owner"
   pass "a Codex thread marker alone cannot adopt session ownership"
@@ -193,7 +206,7 @@ test_dead_verified_owner_is_reclaimed() {
   printf '%s\n' '99999999|codex:thread-dead|harness' > "$home/state/.lock"
   run_lock "$home" thread-new "$fakebin" >/dev/null || fail "dead verified owner was not reclaimed"
   owner=$(cat "$home/state/.lock")
-  case "$owner" in *'|codex:thread-new|fallback') ;; *) fail "unexpected reclaimed owner: $owner" ;; esac
+  case "$owner" in *'|codex:thread-new|capability') ;; *) fail "unexpected reclaimed owner: $owner" ;; esac
   pass "provably dead verified Codex owners are reclaimed"
 }
 
@@ -213,15 +226,7 @@ test_different_threads_remain_excluded() {
   assert_contains "$out" "primary identity is not bound" \
     "live owner without exact authority did not fail closed"
 
-  make_hidden_ps "$fakebin"
-  owner='17|codex:thread-hidden|fallback'
-  printf '%s\n' "$owner" > "$home/state/.lock"
-  status=0
-  out=$(run_lock "$home" thread-other "$fakebin" 2>&1) || status=$?
-  expect_code 1 "$status" "different thread must not reclaim a fallback owner"
-  assert_contains "$out" "primary identity is not bound" \
-    "unbound fallback owner did not fail closed"
-  pass "different Codex threads stay excluded for live and fallback owners"
+  pass "different Codex threads stay excluded from live legacy owners"
 }
 
 test_grok_precedence_and_primary_lock_protection() {
@@ -233,8 +238,9 @@ test_grok_precedence_and_primary_lock_protection() {
   home=$(make_home grok-owner-format)
   grokbin="$home/grokbin"
   make_any_grok_ps "$grokbin"
-  env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 CODEX_THREAD_ID=inherited-thread \
-    FM_HOME="$home" PATH="$grokbin:$BASE_PATH" bash "$LOCK" >/dev/null
+  ( cd "$home" && env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 \
+    CODEX_THREAD_ID=inherited-thread FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    PATH="$grokbin:$BASE_PATH" bash "$LOCK" >/dev/null )
   owner=$(cat "$home/state/.lock")
   case "$owner" in ''|*[!0-9]*) fail "Grok owner was incorrectly structured as Codex: $owner" ;; esac
 
@@ -275,9 +281,9 @@ test_two_homes_release_only_their_own_lock() {
   local home_a home_b owner_b
   home_a=$(make_home home-a)
   home_b=$(make_home home-b)
-  printf '%s\n' '1001|codex:shared-thread|fallback' > "$home_a/state/.lock"
-  owner_b='1002|codex:shared-thread|fallback'
-  printf '%s\n' "$owner_b" > "$home_b/state/.lock"
+  run_hook "$home_a" SessionStart shared-thread
+  run_hook "$home_b" SessionStart shared-thread
+  owner_b=$(cat "$home_b/state/.lock")
   run_hook "$home_a" SessionEnd shared-thread
   [ ! -e "$home_a/state/.lock" ] || fail "home A matching lock was not released"
   [ "$(cat "$home_b/state/.lock")" = "$owner_b" ] || fail "home A release crossed into home B"
@@ -314,6 +320,44 @@ test_numeric_legacy_lock_contract() {
   pass "numeric legacy locks preserve live exclusion and stale recovery"
 }
 
+test_wrong_capability_cannot_forge_or_release_authority() {
+  local home fakebin before out status=0 wrong
+  home=$(make_home keyed-authority)
+  fakebin="$home/fakebin"
+  make_hidden_ps "$fakebin"
+  run_lock "$home" thread-keyed "$fakebin" >/dev/null \
+    || fail "could not create keyed authority fixture"
+  before=$(cat "$home/state/.lock")
+  wrong=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  out=$(FM_SESSION_AUTHORITY_CAPABILITY="$wrong" \
+    run_lock "$home" thread-forged "$fakebin" 2>&1) || status=$?
+  expect_code 1 "$status" "a foreign capability must not replace keyed authority"
+  [ "$(cat "$home/state/.lock")" = "$before" ] \
+    || fail "foreign capability replaced the keyed lock owner"
+  ( cd "$home" && printf '{"hook_event_name":"SessionEnd","session_id":"thread-keyed"}\n' \
+    | FM_SESSION_AUTHORITY_CAPABILITY="$wrong" FM_ROOT_OVERRIDE="$home" \
+      FM_HOME="$home" CODEX_THREAD_ID=thread-keyed bash "$HOOK" )
+  [ "$(cat "$home/state/.lock")" = "$before" ] \
+    || fail "foreign capability released keyed authority"
+  pass "keyed authority cannot be forged or released with another capability"
+}
+
+test_exact_live_legacy_owner_migrates_under_lock() {
+  local home fakebin owner
+  home=$(make_home legacy-migration)
+  fakebin="$home/fakebin"
+  make_hidden_ps "$fakebin"
+  owner="$$|codex:thread-legacy|fallback"
+  printf '%s\n' "$owner" > "$home/state/.lock"
+  run_lock "$home" thread-legacy "$fakebin" >/dev/null \
+    || fail "exact live legacy owner did not migrate"
+  [ "$(cat "$home/state/.lock")" = "$owner" ] \
+    || fail "legacy migration changed the exact live owner"
+  [ -f "$home/state/.session-authority" ] \
+    || fail "legacy migration did not publish keyed authority"
+  pass "exact live legacy owners migrate to keyed authority under lock"
+}
+
 test_hook_registration_preserves_jt_pretool
 test_hooks_work_when_jq_fails
 test_matching_session_end_only_releases_regular_exact_owner
@@ -325,3 +369,5 @@ test_grok_precedence_and_primary_lock_protection
 test_non_codex_markers_precede_inherited_thread
 test_two_homes_release_only_their_own_lock
 test_numeric_legacy_lock_contract
+test_wrong_capability_cannot_forge_or_release_authority
+test_exact_live_legacy_owner_migrates_under_lock

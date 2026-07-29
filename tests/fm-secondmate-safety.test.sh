@@ -12,7 +12,8 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 CODEX_THREAD_ID=fm-secondmate-safety-fixture
-export CODEX_THREAD_ID
+FM_SESSION_AUTHORITY_CAPABILITY=23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01
+export CODEX_THREAD_ID FM_SESSION_AUTHORITY_CAPABILITY
 
 hold_test_task_lock() {
   local state=$1 id=$2 ready=$3

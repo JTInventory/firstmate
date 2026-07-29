@@ -227,10 +227,12 @@ teardown_transaction_receipt_binding() {
 }
 
 teardown_receipt_endpoint_stage_matches() {
-  local backend=$1 target=$2 generation=$3 key record
+  local backend=$1 target=$2 generation=$3 key record stage_dir
   key=$(printf '%s' "$backend|$target|$generation" \
     | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
-  record="$TEARDOWN_TXN_DIR/closing-endpoints/$key"
+  stage_dir="$TEARDOWN_TXN_DIR/closing-endpoints"
+  [ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] || return 1
+  record="$stage_dir/$key"
   [ -f "$record" ] && [ ! -L "$record" ] \
     && [ "$(sed -n '1p' "$record")" = "$backend" ] \
     && [ "$(sed -n '2p' "$record")" = "$target" ] \
@@ -239,9 +241,11 @@ teardown_receipt_endpoint_stage_matches() {
 }
 
 teardown_receipt_return_stage_matches() {
-  local claim=$1 legacy=$2 key record
+  local claim=$1 legacy=$2 key record stage_dir
   key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
-  record="$TEARDOWN_TXN_DIR/return-claims/$key"
+  stage_dir="$TEARDOWN_TXN_DIR/return-claims"
+  [ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] || return 1
+  record="$stage_dir/$key"
   [ -f "$record" ] && [ ! -L "$record" ] \
     && [ "$(sed -n '1p' "$record")" = "$claim" ] \
     && [ "$(sed -n '2p' "$record")" = "$legacy" ] \
@@ -454,6 +458,9 @@ teardown_recover_interrupted_transaction() {
      && [ ! -L "$TEARDOWN_TXN_DIR/committed" ] \
      && [ "$(sed -n '1p' "$TEARDOWN_TXN_DIR/committed")" = "$ID" ] \
      && [ "$committed_checksum" = "$checksum" ]; then
+    teardown_transaction_crossed_irreversible_boundary
+    boundary_status=$?
+    [ "$boundary_status" -eq 0 ] || [ "$boundary_status" -eq 1 ] || return 1
     rm -rf -- "$TEARDOWN_TXN_DIR"
     echo "teardown $ID complete (recovered committed transaction)"
     exit 0

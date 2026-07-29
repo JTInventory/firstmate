@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# Shared session-lock harness identity.
-#
-# ONE owner of the "which verified-harness session holds this home's session
-# lock, and does the current process belong to that same session?" decision.
-# Codex owners use one of these formats:
-#   <pid>|codex:<thread-id>|harness
-#   <pid>|codex:<thread-id>|fallback
-# `harness` means the PID was verified from ancestry and can prove liveness.
-# `fallback` means PID isolation hid the harness, so only the thread marker can
-# prove same-session ownership. Legacy two-field Codex owners remain readable
-# and fail closed.
+# Shared session-lock authority.
 # This file is sourced by scripts and has no side effects on source.
 
 FM_HARNESS_RE='claude|codex|opencode|grok|^pi$'
@@ -56,15 +46,33 @@ fm_session_parent_pid() {
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
   fi
   case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$ppid" -gt 1 ] || return 1
+  [ "$ppid" -ge 1 ] || return 1
   printf '%s\n' "$ppid"
+}
+
+fm_session_authority_capability_present() {
+  local capability=${FM_SESSION_AUTHORITY_CAPABILITY:-}
+  [ "${#capability}" -ge 32 ] || return 1
+  case "$capability" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ "$(printenv FM_SESSION_AUTHORITY_CAPABILITY 2>/dev/null)" = "$capability" ]
 }
 
 fm_session_authority_token() {
   local pid=$1 start=$2 identity=$3 owner=$4 home=$5 checkout=$6
+  fm_session_authority_capability_present || return 1
+  command -v node >/dev/null 2>&1 || return 1
   printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$pid" "$start" "$identity" "$owner" "$home" "$checkout" \
-    | cksum | awk '{printf "%s-%s\n", $1, $2}'
+    | node -e '
+const crypto = require("crypto");
+let data = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => data += chunk);
+process.stdin.on("end", () => {
+  const key = process.env.FM_SESSION_AUTHORITY_CAPABILITY;
+  if (typeof key !== "string" || key.length < 32) process.exit(1);
+  process.stdout.write(crypto.createHmac("sha256", key).update(data).digest("hex") + "\n");
+});'
 }
 
 fm_session_authority_write_file() {
@@ -76,7 +84,7 @@ fm_session_authority_write_file() {
   case "$owner:$home:$checkout:$start:$identity:$token" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
-  printf 'version=1\npid=%s\nstart=%s\nidentity=%s\ntoken=%s\nowner=%s\nhome=%s\ncheckout=%s\n' \
+  printf 'version=2\npid=%s\nstart=%s\nidentity=%s\ntoken=%s\nowner=%s\nhome=%s\ncheckout=%s\n' \
     "$pid" "$start" "$identity" "$token" "$owner" "$home" "$checkout" > "$file"
 }
 
@@ -84,7 +92,7 @@ fm_session_authority_read() {
   local file=$1 expected
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(wc -l < "$file" | tr -d ' ')" -eq 8 ] || return 1
-  [ "$(sed -n '1p' "$file")" = version=1 ] || return 1
+  [ "$(sed -n '1p' "$file")" = version=2 ] || return 1
   FM_SESSION_AUTHORITY_PID=$(sed -n '2s/^pid=//p' "$file")
   FM_SESSION_AUTHORITY_START=$(sed -n '3s/^start=//p' "$file")
   FM_SESSION_AUTHORITY_IDENTITY=$(sed -n '4s/^identity=//p' "$file")
@@ -93,7 +101,8 @@ fm_session_authority_read() {
   FM_SESSION_AUTHORITY_HOME=$(sed -n '7s/^home=//p' "$file")
   FM_SESSION_AUTHORITY_CHECKOUT=$(sed -n '8s/^checkout=//p' "$file")
   case "$FM_SESSION_AUTHORITY_PID" in ''|*[!0-9]*) return 1 ;; esac
-  case "$FM_SESSION_AUTHORITY_TOKEN" in ''|*[!0-9-]*) return 1 ;; esac
+  [ "${#FM_SESSION_AUTHORITY_TOKEN}" -eq 64 ] || return 1
+  case "$FM_SESSION_AUTHORITY_TOKEN" in *[!0-9a-f]*) return 1 ;; esac
   [ -n "$FM_SESSION_AUTHORITY_START" ] \
     && [ -n "$FM_SESSION_AUTHORITY_IDENTITY" ] \
     && [ -n "$FM_SESSION_AUTHORITY_OWNER" ] \
@@ -134,6 +143,18 @@ fm_session_authority_is_current_ancestor() {
   return 1
 }
 
+fm_session_pid_is_current_ancestor() {
+  local wanted=$1 pid=$$ ppid
+  case "$wanted" in ''|*[!0-9]*) return 1 ;; esac
+  while [ "$pid" -gt 1 ]; do
+    [ "$pid" != "$wanted" ] || return 0
+    ppid=$(fm_session_parent_pid "$pid") || return 1
+    [ "$ppid" != "$pid" ] || return 1
+    pid=$ppid
+  done
+  return 1
+}
+
 fm_verified_harness_ancestry_pid() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -153,19 +174,6 @@ fm_verified_harness_ancestry_pid() {
   return 1
 }
 
-fm_session_authority_candidate_pid() {
-  local pid
-  if pid=$(fm_verified_harness_ancestry_pid); then
-    printf '%s\n' "$pid"
-    return
-  fi
-  fm_codex_thread_active || return 1
-  pid=$(fm_session_parent_pid "$$") || return 1
-  fm_session_process_start "$pid" >/dev/null || return 1
-  fm_session_process_identity "$pid" >/dev/null || return 1
-  printf '%s\n' "$pid"
-}
-
 # Compatibility name for existing callers in older JT worktrees.
 fm_harness_ancestry_pid() {
   fm_verified_harness_ancestry_pid
@@ -179,18 +187,15 @@ fm_codex_thread_active() {
 }
 
 fm_session_lock_owner() {
-  local pid
+  local pid=$$
+  fm_session_authority_capability_present || return 1
+  fm_session_process_start "$pid" >/dev/null || return 1
+  fm_session_process_identity "$pid" >/dev/null || return 1
   if fm_codex_thread_active; then
-    if pid=$(fm_verified_harness_ancestry_pid); then
-      printf '%s|codex:%s|harness\n' "$pid" "$CODEX_THREAD_ID"
-    elif pid=$(fm_session_authority_candidate_pid); then
-      printf '%s|codex:%s|fallback\n' "$pid" "$CODEX_THREAD_ID"
-    else
-      return 1
-    fi
-    return 0
+    printf '%s|codex:%s|capability\n' "$pid" "$CODEX_THREAD_ID"
+    return
   fi
-  fm_verified_harness_ancestry_pid
+  printf '%s\n' "$pid"
 }
 
 fm_harness_pid_alive() {
@@ -210,7 +215,7 @@ fm_codex_owner_marker() {
   case "$marker" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   if [ "$rest" != "$marker" ]; then
     suffix=${rest#*|}
-    case "$suffix" in harness|fallback) ;; *) return 1 ;; esac
+    case "$suffix" in harness|fallback|capability) ;; *) return 1 ;; esac
   fi
   printf '%s\n' "$marker"
 }
@@ -265,4 +270,16 @@ fm_session_lock_owned_by_self() {
   case "$owner" in ''|*[!0-9]*) return 1 ;; esac
   my_pid=$(fm_verified_harness_ancestry_pid) || return 1
   [ "$my_pid" = "$owner" ]
+}
+
+fm_session_legacy_owner_is_current() {
+  local owner=$1 pid marker
+  pid=${owner%%|*}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_session_pid_is_current_ancestor "$pid" || return 1
+  if marker=$(fm_codex_owner_marker "$owner" 2>/dev/null); then
+    fm_codex_thread_active && [ "$CODEX_THREAD_ID" = "$marker" ]
+  else
+    [ "$owner" = "$pid" ]
+  fi
 }

@@ -23,6 +23,8 @@ set -u
 # This suite supplies harness identity per case. Ambient Codex identity must not
 # turn direct lock cases into same-thread acquisitions.
 unset CODEX_THREAD_ID 2>/dev/null || true
+FM_SESSION_AUTHORITY_CAPABILITY=3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef012
+export FM_SESSION_AUTHORITY_CAPABILITY
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

@@ -2,11 +2,9 @@
 # Codex SessionStart/SessionEnd adapter for the per-home session lock.
 # Usage: <Codex hook JSON> | fm-codex-session-lock-hook.sh
 #
-# SessionStart claims the lock before the first model turn so a visible Codex
-# ancestry PID is retained when available. A later PID-isolated tool call from
-# the same thread preserves that owner instead of replacing it with a transient
-# fallback PID. Failure to claim stays silent because fm-session-start.sh owns
-# the complete read-only diagnostic.
+# SessionStart claims the lock before the first model turn with the externally
+# provisioned session capability. Later PID-isolated calls transfer that keyed
+# authority without binding ownership to this short-lived hook process.
 #
 # SessionEnd removes only a regular lock whose Codex thread marker exactly
 # matches the ending session. The comparison and removal run under the same
@@ -81,5 +79,8 @@ if [ -e "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then
   [ -f "$AUTHORITY" ] && [ ! -L "$AUTHORITY" ] || exit 0
   fm_session_authority_read "$AUTHORITY" || exit 0
   [ "$FM_SESSION_AUTHORITY_OWNER" = "$OWNER" ] || exit 0
+else
+  fm_session_authority_capability_present || exit 0
+  fm_session_legacy_owner_is_current "$OWNER" || exit 0
 fi
 rm -f "$AUTHORITY" "$LOCK" 2>/dev/null || true

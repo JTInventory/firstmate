@@ -30,7 +30,8 @@ TMP_ROOT=$(fm_test_tmproot fm-worker-isolation)
 unset NO_MISTAKES_GATE
 unset CLAUDECODE PI_CODING_AGENT GROK_AGENT
 CODEX_THREAD_ID=fm-worker-isolation-fixture
-export CODEX_THREAD_ID
+FM_SESSION_AUTHORITY_CAPABILITY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+export CODEX_THREAD_ID FM_SESSION_AUTHORITY_CAPABILITY
 
 # Fixture agents are real long-lived processes, and the code under test finds
 # them by scanning /proc for a declaration marker. Two hygiene rules follow.
@@ -99,7 +100,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -108,7 +109,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
 }
@@ -400,6 +401,7 @@ test_caller_marker_cannot_replace_exact_session_authority() {
     "$sleeper" "$owner" "$primary_home" "$primary_home" \
     || fail "could not create foreign live authority fixture"
   out=$(cd "$primary_home" && CODEX_THREAD_ID=forged-thread \
+    FM_SESSION_AUTHORITY_CAPABILITY=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
     FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
     bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1) || status=$?
@@ -615,6 +617,50 @@ SH
   assert_contains "$out" "recovery could not be verified" \
     "unverified session-authority recovery was not actionable"
   pass "session-authority recovery retains backups until byte verification"
+}
+
+test_session_authority_recovery_precedes_current_tuple_validation() {
+  local home txn out status=0
+  home=$(make_primary_home "$TMP_ROOT/session-authority-mixed-recovery")
+  txn="$home/state/.session-authority-transaction"
+  mkdir "$txn"
+  cp "$home/state/.lock" "$txn/old-lock"
+  cp "$home/state/.primary-checkout" "$txn/old-binding"
+  cp "$home/state/.session-authority" "$txn/old-authority"
+  printf '%s\n' ready > "$txn/ready"
+  printf '%s\n' '999999|codex:foreign|fallback' > "$home/state/.lock"
+  printf '%s\n' 'invalid-authority' > "$home/state/.session-authority"
+  out=$(cd "$home" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" "$LOCK" 2>&1) \
+    || status=$?
+  expect_code 0 "$status" "mixed authority state must recover before authority validation"
+  assert_absent "$txn" "verified authority recovery left its transaction behind"
+  assert_contains "$out" "lock acquired" "recovered authority did not complete acquisition"
+  pass "session authority transaction recovery precedes current tuple validation"
+}
+
+test_fresh_enrollment_requires_external_capability() {
+  local home out status=0
+  home=$(make_primary_home "$TMP_ROOT/fresh-capability-required")
+  rm -rf "$home/state"
+  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_CAPABILITY \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" "$LOCK" 2>&1) || status=$?
+  expect_code 1 "$status" "fresh enrollment without an external capability must fail"
+  assert_absent "$home/state/.lock" "capability-free enrollment published a lock"
+  assert_contains "$out" "capability is missing or invalid" \
+    "capability-free enrollment refusal lost its reason"
+  pass "fresh enrollment requires independently supplied authority capability"
+}
+
+test_non_git_cross_home_enrollment_is_refused() {
+  local root home out status=0
+  root=$(make_primary_home "$TMP_ROOT/non-git-cross-root")
+  home="$TMP_ROOT/non-git-cross-home"
+  mkdir -p "$home"
+  out=$(cd "$root" && FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$LOCK" 2>&1) \
+    || status=$?
+  expect_code 1 "$status" "a non-Git cross-home path must not enroll"
+  assert_absent "$home/state/.lock" "non-Git cross-home enrollment published a lock"
+  pass "fresh cross-home enrollment requires authoritative Git topology"
 }
 
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
@@ -2076,6 +2122,43 @@ SH
   pass "only a post-provider receipt proves endpoint closure"
 }
 
+test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling() {
+  local txn outside key binding receipt status=0 ID META TEARDOWN_TXN_DIR
+  txn="$TMP_ROOT/receipt-validation"
+  outside="$TMP_ROOT/receipt-stage-outside"
+  ID=task-receipt
+  META="$txn/task-receipt.meta"
+  TEARDOWN_TXN_DIR="$txn"
+  mkdir -p "$txn/closed-endpoints" "$outside"
+  printf 'meta\n' > "$META"
+  printf 'task=%s\nmeta=%s\nchecksum=1 1\ngeneration=endpoint-proof\nhome=%s\n' \
+    "$ID" "$META" "$TMP_ROOT" > "$txn/identity"
+  key=$(printf '%s' 'tmux|firstmate:fm-task-receipt|endpoint-proof' \
+    | cksum | awk '{printf "%s-%s", $1, $2}')
+  printf '%s\n%s\n%s\n' tmux firstmate:fm-task-receipt endpoint-proof > "$outside/$key"
+  ln -s "$outside" "$txn/closing-endpoints"
+  binding=$(cksum "$txn/identity" | awk '{print $1 " " $2}')
+  receipt="$txn/closed-endpoints/$key"
+  printf '%s\n%s\n%s\ntransaction=%s\n' \
+    tmux firstmate:fm-task-receipt endpoint-proof "$binding" > "$receipt"
+  eval "$(awk '
+    /^teardown_transaction_receipt_binding\(\)/ { emit=1 }
+    /^META=/ { emit=0 }
+    emit { print }
+  ' "$ROOT/bin/fm-teardown.sh")"
+  fm_backend_validate() { [ "$1" = tmux ]; }
+  teardown_transaction_crossed_irreversible_boundary || status=$?
+  expect_code 2 "$status" "a symlinked staging parent must invalidate its receipt"
+  rm "$txn/closing-endpoints"
+  mkdir "$txn/closing-endpoints"
+  cp "$outside/$key" "$txn/closing-endpoints/$key"
+  printf '%s\n' malformed > "$txn/closed-endpoints/malformed-sibling"
+  status=0
+  teardown_transaction_crossed_irreversible_boundary || status=$?
+  expect_code 2 "$status" "a malformed receipt sibling must invalidate the complete set"
+  pass "receipt validation rejects symlinked stages and malformed siblings"
+}
+
 test_teardown_finishes_fallible_cleanup_before_provider_boundaries() {
   local rec fakebin log out status stamp
   rec=$(make_slot_world teardown-live-transaction)
@@ -2452,6 +2535,9 @@ test_unregistered_cross_home_primary_is_refused
 test_binding_failure_never_installs_new_session_owner
 test_procargs2_parser_separates_argv_and_environment
 test_session_authority_recovery_retains_unverified_backup
+test_session_authority_recovery_precedes_current_tuple_validation
+test_fresh_enrollment_requires_external_capability
+test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
@@ -2499,6 +2585,7 @@ test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_teardown_refuses_duplicate_core_metadata_before_mutation
 test_teardown_refuses_stale_endpoint_generation_before_mutation
 test_staged_endpoint_close_is_not_provider_proof
+test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling
 test_teardown_finishes_fallible_cleanup_before_provider_boundaries
 test_verification_capture_includes_lifecycle_clears
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
