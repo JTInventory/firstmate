@@ -42,6 +42,10 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+CODEX_THREAD_ID=fm-teardown-fixture
+export CODEX_THREAD_ID
+mkdir -p "$ROOT/state"
+printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$ROOT/state/.lock"
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -819,26 +823,40 @@ test_forced_secondmate_teardown_propagates_child_close_failure() {
   case_dir=$(make_case forced-child-close-failure)
   home="$case_dir/home"
   child="$case_dir/wt"
+  git clone -q "$(git -C "$ROOT" remote get-url origin)" "$home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
     "worktree=$home" \
     "project=$case_dir/project" \
     "home=$home" \
     "kind=secondmate" \
+    "task=task-x1" \
+    "endpoint_generation=endpoint-task-x1" \
     "mode=no-mistakes"
   fm_write_meta "$home/state/child-x1.meta" \
     "window=firstmate:fm-child-x1" \
     "worktree=$child" \
     "project=$case_dir/project" \
+    "home=$home" \
     "kind=ship" \
+    "task=child-x1" \
+    "endpoint_generation=endpoint-child-x1" \
     "mode=no-mistakes"
 
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   "kill-window -t firstmate:fm-child-x1") exit 1 ;;
+  "show-options -w -v -t firstmate:fm-task-x1 @firstmate_endpoint_generation")
+    printf '%s\n' endpoint-task-x1
+    exit 0
+    ;;
+  "show-options -w -v -t firstmate:fm-child-x1 @firstmate_endpoint_generation")
+    printf '%s\n' endpoint-child-x1
+    exit 0
+    ;;
   "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
     printf '%s\n' '@2|firstmate:fm-child-x1'
     exit 0
@@ -855,14 +873,14 @@ SH
 
   expect_code 1 "$rc" "forced-child-close-failure: parent teardown must fail closed"
   assert_present "$case_dir/state/task-x1.meta" \
-    "forced-child-close-failure: parent metadata must survive child close refusal"
+    "forced-child-close-failure: retryable metadata must restore after child close refusal"
   assert_present "$home/state/child-x1.meta" \
     "forced-child-close-failure: child metadata must survive child close refusal"
   [ -d "$home" ] || fail "forced-child-close-failure: parent home was removed after child close refusal"
-  grep -q "child cleanup failed" "$case_dir/stderr" \
-    || fail "forced-child-close-failure: refusal did not identify child cleanup"
-  grep -Fq 'cleanup_firstmate_home_children "$child_home" || return 1' "$TEARDOWN" \
-    || fail "recursive secondmate cleanup does not propagate nested child failure"
+  grep -q "child disposal failed after hierarchy finalization" "$case_dir/stderr" \
+    || fail "forced-child-close-failure: refusal did not identify child disposal"
+  grep -Fq 'stage_firstmate_home_children "$child_home" || return 1' "$TEARDOWN" \
+    || fail "recursive secondmate staging does not propagate nested child failure"
   pass "forced and recursive secondmate teardown propagate child close failures"
 }
 

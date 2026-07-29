@@ -345,17 +345,38 @@ test_real_primary_needs_no_ambient_role() {
   pass "real primary authority is proven by process and checkout identity"
 }
 
-test_fresh_primary_needs_no_procfs_or_preexisting_state() {
+test_fresh_primary_requires_live_harness_ancestry() {
   local primary_home out status=0
   primary_home=$(make_primary_home "$TMP_ROOT/fresh-primary")
   rm -rf "$primary_home/state"
   out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    bash -c '
+      . "$1/bin/fm-worker-isolation-lib.sh"
+      ps() {
+        case "$*" in *"-o comm="*"-p $$"*) printf "codex\n" ;; *) command ps "$@" ;; esac
+      }
+      fm_worker_refuse_primary_operation lock
+    ' \
     _ "$ROOT" 2>&1) || status=$?
-  expect_code 0 "$status" "a fresh primary must not require procfs or preexisting state"
+  expect_code 0 "$status" "a fresh primary must prove live harness ancestry"
   [ -z "$out" ] || fail "fresh primary authority emitted unexpected output: $out"
-  pass "fresh primary authority is portable and topology-bound"
+  pass "fresh primary authority is kernel-process-bound without preexisting state"
+}
+
+test_reparented_markerless_process_has_no_fresh_primary_authority() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
+  rm -rf "$primary_home/state"
+  out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    bash -c '
+      . "$1/bin/fm-worker-isolation-lib.sh"
+      ps() { return 1; }
+      fm_worker_refuse_primary_operation lock
+    ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "a reparented markerless process must not create primary authority"
+  pass "fresh primary authority cannot be forged by clearing worker markers"
 }
 
 test_foreign_session_lock_defeats_primary_topology() {
@@ -383,7 +404,13 @@ test_linked_main_worktree_can_prove_primary_authority() {
   printf '# agents\n' > "$primary/AGENTS.md"
   out=$(cd "$primary" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
-    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    bash -c '
+      . "$1/bin/fm-worker-isolation-lib.sh"
+      ps() {
+        case "$*" in *"-o comm="*"-p $$"*) printf "codex\n" ;; *) command ps "$@" ;; esac
+      }
+      fm_worker_refuse_primary_operation lock
+    ' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 0 "$status" "a linked main worktree must prove primary authority"
   [ -z "$out" ] || fail "linked primary authority emitted unexpected output: $out"
@@ -422,11 +449,22 @@ test_primary_authority_refuses_unreadable_ancestry() {
 }
 
 test_stale_session_lock_reaches_verified_recovery() {
-  local primary_home out status=0
+  local primary_home fakebin out status=0
   primary_home=$(make_primary_home "$TMP_ROOT/stale-primary-lock")
   printf '99999999\n' > "$primary_home/state/.lock"
-  out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    "$LOCK" 2>&1) || status=$?
+  fakebin="$TMP_ROOT/stale-primary-fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"-o comm="*"-p $FM_FAKE_HARNESS_PID"*) printf 'codex\n'; exit 0 ;;
+esac
+exec /bin/ps "$@"
+SH
+  chmod +x "$fakebin/ps"
+  out=$(cd "$primary_home" && PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1"' _ "$LOCK" 2>&1) || status=$?
   expect_code 0 "$status" "a provably stale session lock must reach verified recovery"
   assert_contains "$out" "lock acquired" "stale session-lock recovery did not complete"
   pass "primary authority permits only verified stale session-lock recovery"
@@ -458,9 +496,11 @@ test_binding_failure_never_installs_new_session_owner() {
 }
 
 test_procargs2_parser_separates_argv_and_environment() {
-  local valid malformed out status=0
+  local valid malformed calls out status=0
   valid="$TMP_ROOT/procargs-valid.bin"
   malformed="$TMP_ROOT/procargs-malformed.bin"
+  calls="$TMP_ROOT/procargs-calls"
+  : > "$calls"
   printf '\003\000\000\000/bin/bash\000\000bash\000\000\000FM_AGENT_ROLE=crewmate\000X=1\000' \
     > "$valid"
   printf '\001\000\000\000/bin/bash\000bash\000not-an-environment-record\000' \
@@ -468,14 +508,17 @@ test_procargs2_parser_separates_argv_and_environment() {
   out=$(bash -c '
     . "$1/bin/fm-procargs-lib.sh"
     DUMP=$2
-    fm_procargs2_dump() { command cat "$DUMP"; }
+    CALLS=$3
+    fm_procargs2_dump() { printf "call\n" >> "$CALLS"; command cat "$DUMP"; }
     fm_procargs2_read 1
     printf "%s|%s|%s\n" "${FM_PROCARGS_ARGV[*]}" \
       "${FM_PROCARGS_ENV[0]}" "${FM_PROCARGS_ENV[1]}"
-  ' _ "$ROOT" "$valid") || status=$?
+  ' _ "$ROOT" "$valid" "$calls") || status=$?
   expect_code 0 "$status" "valid procargs2 fixture must parse"
   [ "$out" = "bash  |FM_AGENT_ROLE=crewmate|X=1" ] \
     || fail "procargs2 argv/environment boundary was wrong: $out"
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ] \
+    || fail "procargs2 parser read more than one process snapshot"
   if bash -c '
     . "$1/bin/fm-procargs-lib.sh"
     DUMP=$2
@@ -484,7 +527,33 @@ test_procargs2_parser_separates_argv_and_environment() {
   ' _ "$ROOT" "$malformed"; then
     fail "malformed procargs2 record was accepted"
   fi
-  pass "one procargs2 parser handles valid and malformed records"
+  pass "one procargs2 snapshot handles valid and malformed records"
+}
+
+test_session_authority_recovery_retains_unverified_backup() {
+  local home fakebin out status=0
+  home=$(make_primary_home "$TMP_ROOT/session-authority-recovery")
+  printf '%s\n' "$home" > "$home/state/.primary-checkout"
+  mkdir "$home/state/.session-authority-transaction"
+  cp "$home/state/.lock" "$home/state/.session-authority-transaction/old-lock"
+  cp "$home/state/.primary-checkout" \
+    "$home/state/.session-authority-transaction/old-binding"
+  printf 'ready\n' > "$home/state/.session-authority-transaction/ready"
+  fakebin="$TMP_ROOT/session-authority-fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+printf 'corrupt\n' > "${@: -1}"
+SH
+  chmod +x "$fakebin/cp"
+  out=$(cd "$home" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    "$LOCK" 2>&1) || status=$?
+  expect_code 1 "$status" "unverified session-authority recovery must fail closed"
+  [ -d "$home/state/.session-authority-transaction" ] \
+    || fail "unverified session-authority recovery destroyed its backup"
+  assert_contains "$out" "recovery could not be verified" \
+    "unverified session-authority recovery was not actionable"
+  pass "session-authority recovery retains backups until byte verification"
 }
 
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
@@ -845,6 +914,24 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
     *) fail "an empty shared index was treated as no index at all: $out" ;;
   esac
   pass "one /proc walk answers every task in a sweep, and an empty index is a real answer"
+}
+
+test_unreadable_agent_candidate_is_indexed_as_unproven() {
+  local out
+  out=$(bash -c '
+    . "$1/bin/fm-agent-cwd-lib.sh"
+    fm_agent_environ() { return 1; }
+    ps() {
+      case " $* " in
+        *" -p $$ "*) printf "codex\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_agent_task_pid_index
+  ' _ "$ROOT" 2>/dev/null || true)
+  assert_contains "$out" $'__FM_UNPROVEN__\t__FM_UNPROVEN__\tunreadable' \
+    "an unreadable candidate agent disappeared from the process census"
+  pass "unreadable candidate agents remain visible as unproven"
 }
 
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
@@ -1620,6 +1707,27 @@ test_committed_return_claim_reconciles_after_cleanup_crash() {
   pass "committed return claims reconcile before pooled-slot reuse"
 }
 
+test_malformed_committed_return_marker_blocks_reuse() {
+  local rec
+  rec=$(make_slot_world malformed-committed-return)
+  read_slot_world "$rec"
+  (
+    local claim legacy marker
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
+    fm_slot_stamp_stage_return \
+      "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
+    claim=$FM_SLOT_RETURN_CLAIM
+    legacy=$FM_SLOT_RETURN_LEGACY
+    marker=$(fm_slot_stamp_committed_return_path "$claim")
+    printf 'malformed\n' > "$marker"
+    rm -f "$claim"
+    ! fm_slot_stamp_write "$WT_DIR" new-task "$WORLD/home"
+    [ -f "$marker" ] && [ -f "$legacy" ]
+  ) || fail "malformed committed-return evidence was reconciled or erased"
+  pass "pooled-slot reuse validates committed-return schema before reconciliation"
+}
+
 test_foreign_transition_holder_retains_before_mutation() {
   local rec claim verdict
   rec=$(make_slot_world slot-foreign-transition-holder)
@@ -2209,7 +2317,8 @@ test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
 test_unbound_identity_has_no_primary_mutation_authority
 test_real_primary_needs_no_ambient_role
-test_fresh_primary_needs_no_procfs_or_preexisting_state
+test_fresh_primary_requires_live_harness_ancestry
+test_reparented_markerless_process_has_no_fresh_primary_authority
 test_foreign_session_lock_defeats_primary_topology
 test_linked_main_worktree_can_prove_primary_authority
 test_primary_role_cannot_override_worker_ancestry
@@ -2218,6 +2327,7 @@ test_stale_session_lock_reaches_verified_recovery
 test_unregistered_cross_home_primary_is_refused
 test_binding_failure_never_installs_new_session_owner
 test_procargs2_parser_separates_argv_and_environment
+test_session_authority_recovery_retains_unverified_backup
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
@@ -2229,6 +2339,7 @@ test_provider_process_id_matrix_is_explicit
 test_tmux_pane_pid_comes_from_the_stable_window_id
 test_a_lost_window_name_never_answers_with_firstmates_own_pane
 test_one_proc_walk_answers_every_task_in_a_sweep
+test_unreadable_agent_candidate_is_indexed_as_unproven
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_exact_stamp_clear_accepts_canonical_home_alias
@@ -2254,6 +2365,7 @@ test_return_transition_never_uses_a_worktree_path
 test_successful_pool_return_never_mutates_reused_slot
 test_failed_pool_return_never_restores_over_a_reused_slot
 test_committed_return_claim_reconciles_after_cleanup_crash
+test_malformed_committed_return_marker_blocks_reuse
 test_foreign_transition_holder_retains_before_mutation
 test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation

@@ -107,6 +107,39 @@ new_protocol_migration_world() {
     mv "$w/seed/bin/fm-watcher-protocol-lib.sh.tmp" \
       "$w/seed/bin/fm-watcher-protocol-lib.sh"
   fi
+  cat > "$w/seed/bin/fm-update.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+ROOT=${FM_ROOT_OVERRIDE:?}
+STATE=${FM_STATE_OVERRIDE:?}
+HOME_DIR=${FM_HOME:?}
+FM_WAKE_LIB_READ_ONLY=1
+export FM_WAKE_LIB_READ_ONLY
+. "$ROOT/bin/fm-wake-lib.sh"
+locks=()
+release_predecessor_locks() {
+  local lock
+  for lock in "${locks[@]}"; do
+    fm_lock_release "$lock" || true
+  done
+}
+trap release_predecessor_locks EXIT
+while IFS= read -r lock; do
+  mkdir -p "$(dirname "$lock")"
+  fm_lock_try_acquire "$lock"
+  locks+=("$lock")
+done < <(fm_spawn_admission_lock_paths "$STATE")
+git -C "$ROOT" fetch -q origin main
+git -C "$ROOT" merge -q --ff-only origin/main
+installed="$ROOT/bin/fm-update.sh"
+for lock in "${locks[@]}"; do
+  fm_lifecycle_admission_authorize_reexec "$lock" "$installed"
+done
+printf 'predecessor-installed-before-exec\n'
+export FM_UPDATE_REEXECED=1
+exec "$installed"
+SH
+  chmod +x "$w/seed/bin/fm-update.sh"
   printf 'v1\n' > "$w/seed/AGENTS.md"
   printf 'state/\ndata/\nconfig/\nprojects/\n' > "$w/seed/.gitignore"
   git -C "$w/seed" add -A
@@ -464,26 +497,19 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
     || fail "migration fixture did not attach a v1 follower"
 
   rc=0
-  # A v2 updater completed the install before the v3 updater learned to re-exec.
   out=$(cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" \
-    FM_ROOT_OVERRIDE="$w/main" FM_UPDATE_REEXECED=1 \
+    FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "predecessor updater did not install the new updater"
-  assert_contains "$out" "firstmate: updated " "predecessor updater installed v3"
-
-  rc=0
-  (cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" \
-    FM_ROOT_OVERRIDE="$w/main" FM_STATE_OVERRIDE="$w/home/state" \
-    "$w/main/bin/fm-update.sh") >"$w/second-pass.out" 2>&1 || rc=$?
-  out=$(cat "$w/second-pass.out")
   [ "$rc" -ne 0 ] || fail "installed updater accepted the predecessor watcher"
+  assert_contains "$out" "predecessor-installed-before-exec" \
+    "predecessor did not install before its locked exec"
   assert_contains "$out" "watcher protocol restart could not be verified" \
-    "installed updater enforces the required second pass"
+    "installed updater did not run its live preflight after predecessor exec"
   [ "$(cat "$w/home/state/.watch-protocol-required" 2>/dev/null || true)" = pending-reply-ticket-v3 ] \
     || fail "first protocol upgrade did not publish the v3 fence"
   wait "$watcher" 2>/dev/null || true
   wait "$arm" 2>/dev/null || true
-  pass "T13 real predecessor requires the installed updater pass"
+  pass "T13 predecessor install re-execs through the installed updater preflight"
 }
 
 test_acknowledgements_are_generation_bound() {

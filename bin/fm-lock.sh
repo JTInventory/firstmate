@@ -82,6 +82,28 @@ trap 'exit 1' HUP INT TERM
 fm_lock_acquire_wait "$CLAIM_LOCK"
 CLAIM_LOCK_HELD=1
 AUTH_TXN="$STATE/.session-authority-transaction"
+restore_session_authority_file() {
+  local backup=$1 destination=$2 tmp
+  if [ -e "$backup" ] || [ -L "$backup" ]; then
+    [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
+    tmp=$(mktemp "$STATE/.session-authority-restore.XXXXXX") || return 1
+    cp -p "$backup" "$tmp" && mv "$tmp" "$destination" || {
+      rm -f "$tmp"
+      return 1
+    }
+    [ -f "$destination" ] && [ ! -L "$destination" ] \
+      && cmp -s "$backup" "$destination"
+    return
+  fi
+  rm -f "$destination" || return 1
+  [ ! -e "$destination" ] && [ ! -L "$destination" ]
+}
+
+restore_session_authority_from_transaction() {
+  restore_session_authority_file "$AUTH_TXN/old-binding" "$STATE/.primary-checkout" \
+    && restore_session_authority_file "$AUTH_TXN/old-lock" "$LOCK"
+}
+
 if [ -d "$AUTH_TXN" ] && [ ! -L "$AUTH_TXN" ]; then
   [ -f "$AUTH_TXN/ready" ] && [ ! -L "$AUTH_TXN/ready" ] || {
     echo "error: session authority transaction is incomplete; operate read-only until resolved" >&2
@@ -90,16 +112,10 @@ if [ -d "$AUTH_TXN" ] && [ ! -L "$AUTH_TXN" ]; then
   if [ -f "$AUTH_TXN/committed" ] && [ ! -L "$AUTH_TXN/committed" ]; then
     rm -rf -- "$AUTH_TXN"
   else
-    if [ -f "$AUTH_TXN/old-lock" ]; then
-      cp -p "$AUTH_TXN/old-lock" "$LOCK"
-    else
-      rm -f "$LOCK"
-    fi
-    if [ -f "$AUTH_TXN/old-binding" ]; then
-      cp -p "$AUTH_TXN/old-binding" "$STATE/.primary-checkout"
-    else
-      rm -f "$STATE/.primary-checkout"
-    fi
+    restore_session_authority_from_transaction || {
+      echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
+      exit 1
+    }
     rm -rf -- "$AUTH_TXN"
   fi
 elif [ -e "$AUTH_TXN" ] || [ -L "$AUTH_TXN" ]; then
@@ -157,21 +173,7 @@ if [ -e "$BINDING" ] || [ -L "$BINDING" ]; then
   OLD_BINDING_PRESENT=1
 fi
 restore_session_authority() {
-  local tmp
-  if [ "$OLD_BINDING_PRESENT" -eq 1 ]; then
-    tmp=$(mktemp "$STATE/.primary-checkout.restore.XXXXXX") || return 1
-    printf '%s\n' "$OLD_BINDING" > "$tmp" && chmod 600 "$tmp" \
-      && mv "$tmp" "$BINDING" || { rm -f "$tmp"; return 1; }
-  else
-    rm -f "$BINDING" || return 1
-  fi
-  if [ "$OLD_LOCK_PRESENT" -eq 1 ]; then
-    tmp=$(mktemp "$STATE/.lock.restore.XXXXXX") || return 1
-    printf '%s\n' "$OLD_LOCK" > "$tmp" && chmod 600 "$tmp" \
-      && mv "$tmp" "$LOCK" || { rm -f "$tmp"; return 1; }
-  else
-    rm -f "$LOCK" || return 1
-  fi
+  restore_session_authority_from_transaction
 }
 BINDING_TMP=$(mktemp "$STATE/.primary-checkout.XXXXXX" 2>/dev/null) || exit 1
 LOCK_TMP=$(mktemp "$STATE/.lock.XXXXXX" 2>/dev/null) || {

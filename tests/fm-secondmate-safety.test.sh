@@ -11,6 +11,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
+CODEX_THREAD_ID=fm-secondmate-safety-fixture
+export CODEX_THREAD_ID
 
 hold_test_task_lock() {
   local state=$1 id=$2 ready=$3
@@ -1865,13 +1867,15 @@ test_secondmate_force_teardown_refuses_ambiguous_child_metadata() {
 }
 
 test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
-  local home subhome childproj childwt fakebin log err
+  local home subhome childproj childwt fakebin log err pending_path sentinel receipt_dir key before
   home="$TMP_ROOT/child-hook-return-home"
   subhome="$TMP_ROOT/child-hook-return-subhome"
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/child-hook-return-worktree"
   err="$TMP_ROOT/child-hook-return.err"
   mkdir -p "$home/state" "$home/data"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
+  printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
   git clone -q "$ROOT" "$subhome"
   git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
   mkdir -p "$subhome/state"
@@ -1884,10 +1888,15 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   fm_write_meta "$home/state/domain.meta" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "home=$subhome" "projects=alpha"
+    "home=$subhome" "projects=alpha" "task=domain" \
+    "endpoint_generation=endpoint-domain"
   fm_write_meta "$subhome/state/child.meta" \
     "window=firstmate:fm-child" "worktree=$childwt" "project=$childproj" \
-    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off" "task=child" \
+    "home=$subhome" "endpoint_generation=endpoint-child"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$childwt" child "$subhome" ) \
+    || fail "child return failure fixture could not stamp child ownership"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-hook-return-fake")
   log="$TMP_ROOT/child-hook-return-fake/tmux.log"
@@ -1902,13 +1911,47 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
     && [ -e "$childwt/.fm-grok-turnend" ] \
     || fail "child hook state was removed before treehouse return succeeded"
   [ -e "$subhome/state/child.meta" ] && [ -e "$home/state/domain.meta" ] \
-    || fail "child return failure removed lifecycle metadata"
-  grep -F 'child cleanup failed for secondmate domain' "$err" >/dev/null \
+    || fail "child return failure did not restore retryable lifecycle metadata"
+  grep -F 'child disposal failed after hierarchy finalization' "$err" >/dev/null \
     || fail "child return failure was not reported"
-  pass "child hook and lifecycle state survive failed treehouse return"
+  pending_path=$(find "$home/state/.teardown-transactions/domain/evidence" \
+    -type f -name '*.pending-path' -print -quit)
+  [ -n "$pending_path" ] || fail "teardown did not retain pending evidence for recovery"
+  sentinel="$TMP_ROOT/concurrent-pending-sentinel"
+  printf 'concurrent\n' > "$sentinel"
+  printf '%s\n' "$sentinel" > "$pending_path"
+  rm -rf "$home/state/.teardown-transactions/domain/closed-endpoints"
+  rm -f "$home/state/domain.meta"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-hook-return-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" || true
+  [ "$(cat "$sentinel")" = concurrent ] \
+    || fail "pending rollback followed transaction-provided paths into concurrent state"
+
+  rm -f "$home/state/domain.meta"
+  receipt_dir="$home/state/.teardown-transactions/domain/closed-endpoints"
+  mkdir -p "$receipt_dir"
+  key=$(printf '%s' 'tmux|firstmate:fm-safe|endpoint-safe' \
+    | cksum | awk '{printf "%s-%s", $1, $2}')
+  printf '%s\n%s\n%s\n' tmux firstmate:fm-safe endpoint-safe > "$receipt_dir/$key"
+  ln -s "$sentinel" "$receipt_dir/malformed-sibling"
+  before=$(wc -l < "$log")
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-hook-return-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "teardown accepted a valid receipt beside a malformed sibling"
+  fi
+  [ "$(wc -l < "$log")" -eq "$before" ] \
+    || fail "malformed receipt directory authorized provider disposal"
+  grep -F 'interrupted teardown evidence could not be recovered' "$err" >/dev/null \
+    || fail "malformed receipt directory did not reject the transaction"
+  pass "failed child disposal preserves hooks and rejects unsafe recovery evidence"
 }
 
-test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed() {
+test_secondmate_force_teardown_finalizes_state_before_child_disposal() {
   local home subhome project_a project_b child_a child_b fakebin log err lease_dir claim
   home="$TMP_ROOT/staged-hierarchy-home"
   subhome="$TMP_ROOT/staged-hierarchy-subhome"
@@ -1919,6 +1962,8 @@ test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
   lease_dir="$TMP_ROOT/staged-hierarchy-leases"
   err="$TMP_ROOT/staged-hierarchy.err"
   mkdir -p "$home/state" "$home/data" "$lease_dir"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
+  printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
   git clone -q "$ROOT" "$subhome"
   git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
   mkdir -p "$subhome/state"
@@ -1928,13 +1973,16 @@ test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
   fm_write_meta "$home/state/domain.meta" \
     "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "home=$subhome" "projects=alpha,beta"
+    "home=$subhome" "projects=alpha,beta" "task=domain" \
+    "endpoint_generation=endpoint-domain"
   fm_write_meta "$subhome/state/child-a.meta" \
     "window=firstmate:fm-child-a" "worktree=$child_a" "project=$project_a" \
-    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off" "task=child-a" \
+    "home=$subhome" "endpoint_generation=endpoint-child-a"
   fm_write_meta "$subhome/state/child-b.meta" \
     "window=firstmate:fm-child-b" "worktree=$child_b" "project=$project_b" \
-    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off" "task=child-b" \
+    "home=$subhome" "endpoint_generation=endpoint-child-b"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha, beta; added 2026-06-22)' \
     > "$home/data/secondmates.md"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
@@ -1954,12 +2002,12 @@ test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
     fail "force teardown succeeded after a late sibling return failed"
   fi
-  [ -e "$home/state/domain.meta" ] \
+  [ ! -e "$home/state/domain.meta" ] \
     && [ -e "$subhome/state/child-a.meta" ] \
     && [ -e "$subhome/state/child-b.meta" ] \
-    || fail "late sibling failure partially retired hierarchy metadata"
-  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
-    || fail "late sibling failure removed the parent route"
+    || fail "late sibling failure did not preserve finalized hierarchy boundaries"
+  ! grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
+    || fail "child disposal began before the parent registry finalized"
   [ -f "$claim" ] || fail "late sibling failure discarded the earlier return claim"
   grep -F 'task=child-a' "$claim" >/dev/null \
     || fail "earlier child return claim lost its owner"
@@ -1978,7 +2026,7 @@ test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
   [ ! -e "$home/state/domain.meta" ] && [ ! -e "$claim" ] \
     && [ ! -e "$home/state/.teardown-transactions/domain" ] \
     || fail "staged hierarchy retry left retirement evidence wedged"
-  pass "nested force teardown retains hierarchy evidence until all returns succeed"
+  pass "nested force teardown finalizes hierarchy state before child disposal"
 }
 
 test_secondmate_force_teardown_discards_child_work() {
@@ -2880,7 +2928,7 @@ test_secondmate_teardown_resolves_relative_origin_identity
 test_secondmate_force_teardown_preflights_unregistered_nested_home
 test_secondmate_force_teardown_refuses_ambiguous_child_metadata
 test_secondmate_force_teardown_preserves_child_hooks_on_return_failure
-test_secondmate_force_teardown_stages_all_child_retirement_until_returns_succeed
+test_secondmate_force_teardown_finalizes_state_before_child_disposal
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_preserves_linked_child_without_treehouse
 test_secondmate_force_teardown_recursively_preserves_without_treehouse

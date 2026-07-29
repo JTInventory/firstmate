@@ -58,7 +58,7 @@ Three enforcement points consume the declaration.
 `bin/fm-primary-scope-lib.sh` reports a declared worker as non-primary whatever root and state it was handed, which keeps every tracked project-local startup and turn-end adapter inert for workers.
 `bin/fm-spawn.sh` and `bin/fm-teardown.sh` refuse outright, because a worker acting on an inherited home would create or destroy direct reports the real primary never recorded.
 
-An undeclared primary is accepted only from the default-branch checkout with no worker ancestor. When `FM_ROOT` and `FM_HOME` differ, `bin/fm-lock.sh` binds them in `state/.primary-checkout`; later mutations require that exact binding and the matching session-lock owner. The lock-acquisition path may create the first binding for a fresh home, but an inherited role or an existing conflicting binding still refuses.
+An undeclared primary is accepted only from the default-branch checkout when a verified live harness exists in its kernel process ancestry and every process through that harness has readable, worker-free identity. A detached or re-parented process cannot create fresh authority by clearing its environment. When `FM_ROOT` and `FM_HOME` differ, `bin/fm-lock.sh` binds them in `state/.primary-checkout`; later mutations require that exact binding and the matching session-lock owner. The lock-acquisition path may create the first binding only for that process-bound primary authority; an inherited role, unreadable ancestry, or an existing conflicting binding refuses.
 
 ### The method of record for an agent's working directory
 
@@ -129,7 +129,7 @@ A slot leaked before that rule existed has no record left to release it: no meta
 Reclaim it by hand, in this order, and stop at the first step that fails.
 
 1. Confirm nothing records the slot: `grep -l "worktree=<slot>" <home>/state/*.meta` across every home, including secondmate homes, must find nothing.
-2. Confirm nothing lives in it: no process under `/proc`, declared or undeclared, may have that slot as its `cwd`, and `git -C <slot> status` must show no work worth keeping.
+2. Confirm nothing lives in it with the portable authority reader: `. <firstmate>/bin/fm-slot-owner-lib.sh; fm_slot_live_occupant_tasks <slot> __manual-reclaim__ <home> crewmate`. Any printed process is a refusal. Exit 2 means process identity or cwd could not be read through procfs or the `ps` plus `lsof` fallback; stop without reclaiming. Only exit 1 proves no live occupant. Then require `git -C <slot> status` to show no work worth keeping.
 3. Read the stamp at `$(git -C <slot> rev-parse --absolute-git-dir)/fm-slot-owner` and confirm the task it names is gone from every home's state directory.
 4. Delete that stamp file, then return the slot from its project with `cd <project> && treehouse return --force <slot>`.
 

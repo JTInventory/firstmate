@@ -114,6 +114,18 @@ TEARDOWN_RELINQUISH_WTS=()
 TEARDOWN_RELINQUISH_IDS=()
 TEARDOWN_RELINQUISH_HOMES=()
 TEARDOWN_RELINQUISH_VERDICTS=()
+TEARDOWN_CHILD_BACKENDS=()
+TEARDOWN_CHILD_TARGETS=()
+TEARDOWN_CHILD_GENERATIONS=()
+TEARDOWN_CHILD_ENDPOINT_STATES=()
+TEARDOWN_CHILD_METAS=()
+TEARDOWN_CHILD_KINDS=()
+TEARDOWN_CHILD_HOMES=()
+TEARDOWN_CHILD_WORKTREES=()
+TEARDOWN_CHILD_PROJECTS=()
+TEARDOWN_CHILD_STATES=()
+TEARDOWN_CHILD_OWNER_HOMES=()
+TEARDOWN_CHILD_DISPOSITIONS=()
 TEARDOWN_RELEASE_KEYS=()
 TEARDOWN_RELEASE_RESULTS=()
 TEARDOWN_RELEASE_VERDICTS=()
@@ -156,12 +168,27 @@ teardown_admission_lock_acquire() {
 }
 
 teardown_locks_release() {
-  local status=$? i
+  local status=$? i boundary_status
   if [ "$TEARDOWN_TXN_ACTIVE" -eq 1 ] && [ "$TEARDOWN_TXN_COMMITTED" -ne 1 ]; then
-    if ! teardown_transaction_crossed_irreversible_boundary; then
-      teardown_restore_transaction_evidence >/dev/null 2>&1 || true
-    elif ! teardown_transaction_has_committed_return; then
-      teardown_restore_transaction_evidence >/dev/null 2>&1 || true
+    if teardown_transaction_crossed_irreversible_boundary; then
+      boundary_status=0
+      if teardown_transaction_has_committed_return; then
+        :
+      else
+        boundary_status=$?
+        if [ "$boundary_status" -eq 1 ]; then
+          teardown_restore_transaction_evidence >/dev/null 2>&1 || true
+        else
+          status=1
+        fi
+      fi
+    else
+      boundary_status=$?
+      if [ "$boundary_status" -eq 1 ]; then
+        teardown_restore_transaction_evidence >/dev/null 2>&1 || true
+      else
+        status=1
+      fi
     fi
   fi
   for ((i=${#TEARDOWN_LOCKS[@]} - 1; i >= 0; i--)); do
@@ -174,37 +201,63 @@ teardown_locks_release() {
 }
 
 teardown_transaction_crossed_irreversible_boundary() {
-  local item backend target generation claim legacy key
-  for item in "$TEARDOWN_TXN_DIR/closed-endpoints/"*; do
-    [ -f "$item" ] && [ ! -L "$item" ] || continue
-    [ "$(wc -l < "$item" | tr -d ' ')" -eq 3 ] || return 1
+  local item backend target generation claim legacy key found=0
+  local -a items=()
+  for receipt_dir in "$TEARDOWN_TXN_DIR/closed-endpoints" \
+    "$TEARDOWN_TXN_DIR/committed-return-claims"; do
+    [ ! -e "$receipt_dir" ] && [ ! -L "$receipt_dir" ] && continue
+    [ -d "$receipt_dir" ] && [ ! -L "$receipt_dir" ] || return 2
+  done
+  if [ -d "$TEARDOWN_TXN_DIR/closed-endpoints" ]; then
+    items=("$TEARDOWN_TXN_DIR/closed-endpoints/"* \
+      "$TEARDOWN_TXN_DIR/closed-endpoints/".[!.]* \
+      "$TEARDOWN_TXN_DIR/closed-endpoints/"..?*)
+  fi
+  for item in "${items[@]}"; do
+    [ -e "$item" ] || [ -L "$item" ] || continue
+    [ -f "$item" ] && [ ! -L "$item" ] || return 2
+    [ "$(wc -l < "$item" | tr -d ' ')" -eq 3 ] || return 2
     backend=$(sed -n '1p' "$item")
     target=$(sed -n '2p' "$item")
     generation=$(sed -n '3p' "$item")
+    fm_backend_validate "$backend" >/dev/null 2>&1 || return 2
+    [ -n "$target" ] || return 2
+    case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 2 ;; esac
     key=$(printf '%s' "$backend|$target|$generation" \
-      | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
-    [ "$item" = "$TEARDOWN_TXN_DIR/closed-endpoints/$key" ] || return 1
-    return 0
+      | cksum | awk '{printf "%s-%s", $1, $2}') || return 2
+    [ "$item" = "$TEARDOWN_TXN_DIR/closed-endpoints/$key" ] || return 2
+    found=1
   done
-  for item in "$TEARDOWN_TXN_DIR/committed-return-claims/"*; do
-    [ -f "$item" ] && [ ! -L "$item" ] || continue
-    [ "$(wc -l < "$item" | tr -d ' ')" -eq 2 ] || return 1
+  items=()
+  if [ -d "$TEARDOWN_TXN_DIR/committed-return-claims" ]; then
+    items=("$TEARDOWN_TXN_DIR/committed-return-claims/"* \
+      "$TEARDOWN_TXN_DIR/committed-return-claims/".[!.]* \
+      "$TEARDOWN_TXN_DIR/committed-return-claims/"..?*)
+  fi
+  for item in "${items[@]}"; do
+    [ -e "$item" ] || [ -L "$item" ] || continue
+    [ -f "$item" ] && [ ! -L "$item" ] || return 2
+    [ "$(wc -l < "$item" | tr -d ' ')" -eq 2 ] || return 2
     claim=$(sed -n '1p' "$item")
     legacy=$(sed -n '2p' "$item")
-    case "$claim:$legacy" in /*:/*) ;; *) return 1 ;; esac
-    key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
-    [ "$item" = "$TEARDOWN_TXN_DIR/committed-return-claims/$key" ] || return 1
-    return 0
+    case "$claim:$legacy" in /*:/*) ;; *) return 2 ;; esac
+    [ "$legacy" = "${claim}.owner" ] || return 2
+    key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 2
+    [ "$item" = "$TEARDOWN_TXN_DIR/committed-return-claims/$key" ] || return 2
+    found=1
   done
-  return 1
+  [ "$found" -eq 1 ]
 }
 
 teardown_transaction_has_committed_return() {
-  local item
-  for item in "$TEARDOWN_TXN_DIR/committed-return-claims/"*; do
-    [ -f "$item" ] && [ ! -L "$item" ] && return 0
-  done
-  return 1
+  local status
+  teardown_transaction_crossed_irreversible_boundary
+  status=$?
+  [ "$status" -eq 0 ] || return "$status"
+  [ -d "$TEARDOWN_TXN_DIR/committed-return-claims" ] \
+    && find "$TEARDOWN_TXN_DIR/committed-return-claims" \
+      -mindepth 1 -maxdepth 1 -type f ! -type l -print -quit 2>/dev/null \
+      | grep -q .
 }
 
 META="$STATE/$ID.meta"
@@ -305,23 +358,6 @@ teardown_restore_transaction_evidence() {
     mkdir -p "$(dirname "$path")" || return 1
     [ -e "$path" ] || [ -L "$path" ] || cp -p "$value" "$path" || return 1
   done
-  for item in "$TEARDOWN_TXN_DIR/evidence/pending/"*.path; do
-    [ -f "$item" ] || continue
-    path=$(cat "$item") || return 1
-    value="${item%.path}.value"
-    rm -rf -- "$path" || return 1
-    [ -e "$value" ] || [ -L "$value" ] || continue
-    mkdir -p "$(dirname "$path")" || return 1
-    cp -a "$value" "$path" || return 1
-  done
-  while IFS= read -r item; do
-    path=$(cat "$item") || return 1
-    value="${item%.pending-path}.pending-value"
-    rm -rf -- "$path" || return 1
-    [ -e "$value" ] || [ -L "$value" ] || continue
-    mkdir -p "$(dirname "$path")" || return 1
-    cp -a "$value" "$path" || return 1
-  done < <(find "$TEARDOWN_TXN_DIR/evidence" -type f -name '*.pending-path' -print 2>/dev/null)
   git_dir=$(cat "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" 2>/dev/null || true)
   if [ -n "$git_dir" ]; then
     for item in "$TEARDOWN_TXN_DIR/evidence/direct-refs/"[0-9]*; do
@@ -345,7 +381,7 @@ teardown_restore_transaction_evidence() {
 }
 
 teardown_recover_interrupted_transaction() {
-  local identity task meta checksum backup current tmp active committed_checksum
+  local identity task meta checksum backup current tmp active committed_checksum boundary_status
   [ -d "$TEARDOWN_TXN_DIR" ] && [ ! -L "$TEARDOWN_TXN_DIR" ] || return 0
   identity="$TEARDOWN_TXN_DIR/identity"
   [ -f "$identity" ] && [ ! -L "$identity" ] || return 0
@@ -381,7 +417,10 @@ teardown_recover_interrupted_transaction() {
   TEARDOWN_TXN_ACTIVE=1
   if teardown_transaction_crossed_irreversible_boundary; then
     return 0
+  else
+    boundary_status=$?
   fi
+  [ "$boundary_status" -eq 1 ] || return 1
   teardown_restore_transaction_evidence
 }
 
@@ -745,14 +784,29 @@ teardown_unstage_return_claim_record() {
 }
 
 teardown_load_staged_return_claims() {
-  local record claim legacy seen existing
+  local record claim legacy seen existing key receipt_status
+  local -a records=()
+  if teardown_transaction_crossed_irreversible_boundary; then
+    receipt_status=0
+  else
+    receipt_status=$?
+  fi
+  [ "$receipt_status" -ne 2 ] || return 1
   [ -d "$TEARDOWN_TXN_DIR/return-claims" ] || return 0
-  for record in "$TEARDOWN_TXN_DIR/return-claims"/*; do
-    [ -f "$record" ] && [ ! -L "$record" ] || continue
+  [ ! -L "$TEARDOWN_TXN_DIR/return-claims" ] || return 1
+  records=("$TEARDOWN_TXN_DIR/return-claims/"* \
+    "$TEARDOWN_TXN_DIR/return-claims/".[!.]* \
+    "$TEARDOWN_TXN_DIR/return-claims/"..?*)
+  for record in "${records[@]}"; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
     [ "$(wc -l < "$record" | tr -d ' ')" -eq 2 ] || return 1
     claim=$(sed -n '1p' "$record")
     legacy=$(sed -n '2p' "$record")
     case "$claim:$legacy" in /*:/*) ;; *) return 1 ;; esac
+    [ "$legacy" = "${claim}.owner" ] || return 1
+    key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    [ "$record" = "$TEARDOWN_TXN_DIR/return-claims/$key" ] || return 1
     teardown_return_transaction_is_committed "$claim" "$legacy" || return 1
     seen=0
     for existing in "${TEARDOWN_RETURN_CLAIMS[@]}"; do
@@ -808,6 +862,16 @@ teardown_treehouse_return() {
   fi
   if [ -n "$state_scope" ] && [ -n "$stamp_id" ] && [ -n "$stamp_home" ]; then
     [ -n "$lease_holder" ] || lease_holder=$stamp_id
+    if [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
+      claim=$(fm_slot_return_claim_path "$dir") || return 1
+      legacy=$(fm_slot_return_legacy_path "$dir") || return 1
+      if teardown_return_transaction_is_committed "$claim" "$legacy"; then
+        fm_slot_stamp_reconcile_committed_return "$claim" || return 1
+        TEARDOWN_RETURN_CLAIMS+=("$claim")
+        TEARDOWN_RETURN_LEGACIES+=("$legacy")
+        return 0
+      fi
+    fi
     fm_slot_stamp_stage_return "$dir" "$stamp_id" "$stamp_home" "$state_scope" \
       "$lease_holder" || return 1
     staged=${FM_SLOT_RETURN_STAGED:-0}
@@ -816,11 +880,6 @@ teardown_treehouse_return() {
     stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
     if [ "$staged" -eq 1 ] && [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
       teardown_stage_return_claim_record "$claim" "$legacy" || return 1
-      if teardown_return_transaction_is_committed "$claim" "$legacy"; then
-        TEARDOWN_RETURN_CLAIMS+=("$claim")
-        TEARDOWN_RETURN_LEGACIES+=("$legacy")
-        return 0
-      fi
     fi
   fi
   while :; do
@@ -1936,10 +1995,10 @@ validate_child_backend() {
   printf '%s\n' "$child_backend"
 }
 
-cleanup_firstmate_home_children() {
+stage_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
-  local child_endpoint_state
+  local child_endpoint_state child_dispose
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1955,6 +2014,8 @@ cleanup_firstmate_home_children() {
     child_retire_source=
     child_resolved_handoff=0
     child_slot_retain_verdict=
+    child_home=
+    child_dispose=0
     if [ "$child_kind" = secondmate ]; then
       child_retire_source=$(fm_pending_reply_source_identity "$sub_state") || return 1
       if fm_pending_reply_task_has_open "$sub_state" "$child_id"; then
@@ -1981,19 +2042,14 @@ cleanup_firstmate_home_children() {
       echo "REFUSED: child $child_id endpoint generation changed before cleanup" >&2
       return 1
     }
-    if [ "$child_endpoint_state" = live ]; then
-      teardown_close_endpoint_transactional "$child_backend" "$child_t" \
-        "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" || return 1
-    elif [ "$child_endpoint_state" != closed ]; then
+    if [ "$child_endpoint_state" != live ] && [ "$child_endpoint_state" != closed ]; then
       return 1
     fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$TEARDOWN_CHILD_HOME
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home" || return 1
-        teardown_commit_staged_returns || return 1
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" \
-          "$sub_state" "$home" || return 1
+        stage_firstmate_home_children "$child_home" || return 1
+        child_dispose=1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "$home" \
@@ -2003,8 +2059,7 @@ cleanup_firstmate_home_children() {
           echo "REFUSED: treehouse command not found; preserving child worktree $child_wt and its metadata" >&2
           return 1
         }
-        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
-          "" "$sub_state" "$child_id" "$home" || return 1
+        child_dispose=1
       else
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
@@ -2015,6 +2070,18 @@ cleanup_firstmate_home_children() {
       TEARDOWN_RELINQUISH_HOMES+=("$home")
       TEARDOWN_RELINQUISH_VERDICTS+=("$child_slot_retain_verdict")
     fi
+    TEARDOWN_CHILD_BACKENDS+=("$child_backend")
+    TEARDOWN_CHILD_TARGETS+=("$child_t")
+    TEARDOWN_CHILD_GENERATIONS+=("$TEARDOWN_CHILD_ENDPOINT_GENERATION")
+    TEARDOWN_CHILD_ENDPOINT_STATES+=("$child_endpoint_state")
+    TEARDOWN_CHILD_METAS+=("$child_meta")
+    TEARDOWN_CHILD_KINDS+=("$child_kind")
+    TEARDOWN_CHILD_HOMES+=("${child_home:-}")
+    TEARDOWN_CHILD_WORKTREES+=("$child_wt")
+    TEARDOWN_CHILD_PROJECTS+=("$child_proj")
+    TEARDOWN_CHILD_STATES+=("$sub_state")
+    TEARDOWN_CHILD_OWNER_HOMES+=("$home")
+    TEARDOWN_CHILD_DISPOSITIONS+=("$child_dispose")
   done
 }
 
@@ -2030,6 +2097,34 @@ teardown_finalize_hierarchy_state() {
       "${TEARDOWN_RELINQUISH_WTS[$i]}" "${TEARDOWN_RELINQUISH_IDS[$i]}" \
       "${TEARDOWN_RELINQUISH_HOMES[$i]}" "${TEARDOWN_RELINQUISH_VERDICTS[$i]}" \
       || return 1
+  done
+}
+
+teardown_dispose_staged_children() {
+  local i
+  for ((i=0; i<${#TEARDOWN_CHILD_KINDS[@]}; i++)); do
+    if [ "${TEARDOWN_CHILD_ENDPOINT_STATES[$i]}" = live ]; then
+      teardown_close_endpoint_transactional \
+        "${TEARDOWN_CHILD_BACKENDS[$i]}" "${TEARDOWN_CHILD_TARGETS[$i]}" \
+        "${TEARDOWN_CHILD_GENERATIONS[$i]}" "${TEARDOWN_CHILD_METAS[$i]}" || return 1
+    fi
+    if [ "${TEARDOWN_CHILD_DISPOSITIONS[$i]}" -ne 1 ]; then
+      continue
+    fi
+    if [ "${TEARDOWN_CHILD_KINDS[$i]}" = secondmate ]; then
+      if [ -n "${TEARDOWN_CHILD_HOMES[$i]}" ] && [ -d "${TEARDOWN_CHILD_HOMES[$i]}" ]; then
+        remove_firstmate_home "${TEARDOWN_CHILD_HOMES[$i]}" "child firstmate home" \
+          "$(basename "${TEARDOWN_CHILD_METAS[$i]}" .meta)" \
+          "${TEARDOWN_CHILD_STATES[$i]}" "${TEARDOWN_CHILD_OWNER_HOMES[$i]}" || return 1
+      fi
+    elif [ -n "${TEARDOWN_CHILD_WORKTREES[$i]}" ] \
+      && [ -d "${TEARDOWN_CHILD_WORKTREES[$i]}" ]; then
+      teardown_treehouse_return "${TEARDOWN_CHILD_WORKTREES[$i]}" \
+        "${TEARDOWN_CHILD_PROJECTS[$i]}" "child worktree" "" \
+        "${TEARDOWN_CHILD_STATES[$i]}" \
+        "$(basename "${TEARDOWN_CHILD_METAS[$i]}" .meta)" \
+        "${TEARDOWN_CHILD_OWNER_HOMES[$i]}" || return 1
+    fi
   done
 }
 
@@ -2238,14 +2333,10 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  if ! cleanup_firstmate_home_children "$HOME_PATH"; then
-    echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent transaction evidence" >&2
+  if ! stage_firstmate_home_children "$HOME_PATH"; then
+    echo "REFUSED: child retirement staging failed for secondmate $ID; preserving parent transaction evidence" >&2
     exit 1
   fi
-  teardown_commit_staged_returns || {
-    echo "error: child retirement commit could not be recorded" >&2
-    exit 1
-  }
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -2260,6 +2351,14 @@ if [ "$KIND" = secondmate ]; then
     exit 1
   fi
   remove_secondmate_registry_entry "$ID" || exit 1
+  teardown_dispose_staged_children || {
+    echo "error: child disposal failed after hierarchy finalization; preserving transaction evidence" >&2
+    exit 1
+  }
+  teardown_commit_staged_returns || {
+    echo "error: child retirement commit could not be recorded" >&2
+    exit 1
+  }
 fi
 
 TOP_SLOT_ACTION=none

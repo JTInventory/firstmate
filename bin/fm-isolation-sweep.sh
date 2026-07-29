@@ -56,11 +56,18 @@ ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 # sweep exists for had 17 concurrent tasks. An empty index is a real answer (no
 # live process declares a task), not a missing one.
 PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
+UNREADABLE_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
+  '$1 == "__FM_UNPROVEN__" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')
 ISOLATION_FAILED=0
 
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   id=$(basename "$meta" .meta)
+  if [ -n "$UNREADABLE_CANDIDATES" ]; then
+    echo "ISOLATION: task $id is unproven: candidate agent process environment is unreadable for pid(s) $UNREADABLE_CANDIDATES; stop or make those candidates authoritative before any mutation"
+    ISOLATION_FAILED=1
+    continue
+  fi
   recorded_count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
   recorded=$(fm_meta_get "$meta" worktree)
   case "$recorded" in

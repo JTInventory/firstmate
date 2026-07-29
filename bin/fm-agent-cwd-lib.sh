@@ -133,14 +133,22 @@ fm_agent_proc_env() {
 # exists for had 17 concurrent tasks.
 # Returns 1 when procfs is unavailable or no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid task home role env found=1 pids
+  local entry pid task home role env found=1 pids comm args
   if [ -d /proc ]; then
     pids=$(printf '%s\n' /proc/[0-9]* | sed 's#.*/##')
   else
     pids=$(LC_ALL=C ps -A -o pid= 2>/dev/null) || return 1
   fi
   for pid in $pids; do
-    env=$(fm_agent_environ "$pid") || continue
+    if ! env=$(fm_agent_environ "$pid"); then
+      comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+      if printf '%s %s' "${comm##*/}" "$args" | grep -qE "$FM_HARNESS_RE"; then
+        printf '__FM_UNPROVEN__\t__FM_UNPROVEN__\tunreadable\t%s\n' "$pid"
+        found=0
+      fi
+      continue
+    fi
     task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
     home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
     role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)

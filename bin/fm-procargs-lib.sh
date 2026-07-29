@@ -5,19 +5,27 @@ fm_procargs2_dump() {
 }
 
 fm_procargs2_read() {
-  local pid=$1 argc token saw_exec=0 argv_started=0 argv_count=0
+  local pid=$1 argc token saw_exec=0 argv_started=0 argv_count=0 snapshot
   local -a tokens=()
   FM_PROCARGS_ARGV=()
   FM_PROCARGS_ENV=()
   command -v od >/dev/null 2>&1 || return 1
   command -v dd >/dev/null 2>&1 || return 1
-  argc=$(fm_procargs2_dump "$pid" 2>/dev/null \
-    | od -An -tu4 -N4 2>/dev/null | tr -d '[:space:]') || return 1
-  case "$argc" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$argc" -gt 0 ] || return 1
+  snapshot=$(mktemp "${TMPDIR:-/tmp}/fm-procargs2.XXXXXX") || return 1
+  fm_procargs2_dump "$pid" > "$snapshot" 2>/dev/null || {
+    rm -f "$snapshot"
+    return 1
+  }
+  argc=$(od -An -tu4 -N4 "$snapshot" 2>/dev/null | tr -d '[:space:]') || {
+    rm -f "$snapshot"
+    return 1
+  }
+  case "$argc" in ''|*[!0-9]*) rm -f "$snapshot"; return 1 ;; esac
+  [ "$argc" -gt 0 ] || { rm -f "$snapshot"; return 1; }
   while IFS= read -r -d '' token; do
     tokens+=("$token")
-  done < <(fm_procargs2_dump "$pid" 2>/dev/null | dd bs=4 skip=1 2>/dev/null)
+  done < <(dd if="$snapshot" bs=4 skip=1 2>/dev/null)
+  rm -f "$snapshot"
   for token in "${tokens[@]}"; do
     if [ "$saw_exec" -eq 0 ]; then
       [ -n "$token" ] || continue

@@ -368,9 +368,14 @@ fm_slot_stamp_reconcile_committed_return() {
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   legacy="${claim}.owner"
+  fm_slot_return_claim_record_file "$marker" || return 1
   if [ -e "$claim" ] || [ -L "$claim" ]; then
     [ -f "$claim" ] && [ ! -L "$claim" ] && cmp -s "$claim" "$marker" || return 1
   fi
+  fm_slot_owner_record_file "$legacy" || return 1
+  [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$FM_SLOT_STAMP_TASK" ] \
+    && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$FM_SLOT_STAMP_HOME" \
+    || return 1
   rm -f "$legacy" "$claim" "$marker"
 }
 
@@ -430,20 +435,23 @@ fm_slot_meta_referencing_tasks() {
 # live agent process is running inside the slot right now, newline separated
 # and deduplicated. Missing process capability returns an unknown result.
 fm_slot_live_occupant_tasks() {
-  local wt=$1 self=$2 self_home=$3 self_role=$4 wt_real entry pid task home role cwd raw_cwd env hits state
+  local wt=$1 self=$2 self_home=$3 self_role=$4 wt_real entry pid task home role cwd raw_cwd env hits state pids
   wt_real=$(fm_agent_canonical_dir "$wt") || return 1
-  [ -d /proc ] || return 2
+  if [ -d /proc ]; then
+    pids=$(printf '%s\n' /proc/[0-9]* | sed 's#.*/##')
+  else
+    pids=$(LC_ALL=C ps -A -o pid= 2>/dev/null) || return 2
+  fi
   hits=
-  for entry in /proc/[0-9]*; do
-    [ -d "$entry" ] || continue
-    pid=${entry#/proc/}
+  for pid in $pids; do
+    entry="/proc/$pid"
     if ! cwd=$(fm_agent_proc_cwd "$pid"); then
-      [ ! -d "$entry" ] && continue
+      ps -p "$pid" -o pid= 2>/dev/null | grep -q '[0-9]' || continue
       state=$(sed -n 's/^State:[[:space:]]*\([^[:space:]]\).*/\1/p' "$entry/status" 2>/dev/null || true)
       case "$state" in Z|X|x) continue ;; esac
       grep -Eq '^Kthread:[[:space:]]*1$' "$entry/status" 2>/dev/null && continue
       if ! cwd=$(fm_agent_proc_cwd "$pid"); then
-        [ ! -d "$entry" ] && continue
+        ps -p "$pid" -o pid= 2>/dev/null | grep -q '[0-9]' || continue
         state=$(sed -n 's/^State:[[:space:]]*\([^[:space:]]\).*/\1/p' "$entry/status" 2>/dev/null || true)
         case "$state" in Z|X|x) continue ;; esac
         return 2
