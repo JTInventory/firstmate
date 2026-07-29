@@ -51,12 +51,29 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 FM_UPDATE_ADMISSION_LOCKS=()
+FM_UPDATE_FLEET_LOCKS=()
+
+fm_update_lock_is_held() {
+  local candidate=$1 held
+  for held in "${FM_UPDATE_FLEET_LOCKS[@]}" "${FM_UPDATE_ADMISSION_LOCKS[@]}"; do
+    [ "$held" != "$candidate" ] || return 0
+  done
+  return 1
+}
+
+fm_update_lock_owned_by_process() {
+  local lock=$1 current
+  current=${BASHPID:-$$}
+  [ -d "$lock" ] && [ ! -L "$lock" ] \
+    && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$current" ]
+}
 
 fm_ff_target_lock_acquire() {
   local state_dir=$1 _label=${2:-target} target_home=${3:-} lock
   FM_UPDATE_ADMISSION_LOCKS=()
   while IFS= read -r lock; do
     [ -n "$lock" ] || continue
+    fm_update_lock_is_held "$lock" && continue
     mkdir -p "$(dirname "$lock")" || return 1
     if ! fm_lock_try_acquire "$lock"; then
       fm_ff_target_lock_release
@@ -74,6 +91,46 @@ fm_ff_target_lock_acquire() {
   fi
 }
 
+fm_update_fleet_lock_acquire() {
+  local meta home state_dir lock line
+  local candidates=""
+  candidates="$STATE|$FM_HOME"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    home=$(sed -n 's/^home=//p' "$meta" 2>/dev/null)
+    case "$home" in
+      /*) [ -d "$home/state" ] && candidates="${candidates}
+$home/state|$home" ;;
+    esac
+  done
+  if [ -f "$SECONDMATES_MD" ] && [ ! -L "$SECONDMATES_MD" ]; then
+    while IFS= read -r line; do
+      home=$(printf '%s\n' "$line" | sed -n 's/.*(home: \([^;)]*\).*/\1/p')
+      case "$home" in
+        /*) [ -d "$home/state" ] && candidates="${candidates}
+$home/state|$home" ;;
+      esac
+    done < "$SECONDMATES_MD"
+  fi
+  while IFS='|' read -r state_dir home; do
+    [ -n "$state_dir" ] || continue
+    while IFS= read -r lock; do
+      [ -n "$lock" ] || continue
+      fm_update_lock_is_held "$lock" && continue
+      mkdir -p "$(dirname "$lock")" || return 1
+      if fm_update_lock_owned_by_process "$lock"; then
+        FM_UPDATE_FLEET_LOCKS+=("$lock")
+      elif ! fm_lock_try_acquire "$lock"; then
+        return 1
+      else
+        FM_UPDATE_FLEET_LOCKS+=("$lock")
+      fi
+    done < <(fm_spawn_admission_lock_paths "$state_dir")
+    fm_spawn_legacy_task_lock_busy "$state_dir" && return 1
+    fm_spawn_legacy_lifecycle_quiescent "$home" "$state_dir" || return 1
+  done < <(printf '%s\n' "$candidates" | awk 'NF && !seen[$0]++' | sort)
+}
+
 fm_ff_target_lock_release() {
   local i
   for ((i=${#FM_UPDATE_ADMISSION_LOCKS[@]} - 1; i >= 0; i--)); do
@@ -82,7 +139,17 @@ fm_ff_target_lock_release() {
   FM_UPDATE_ADMISSION_LOCKS=()
 }
 
-trap fm_ff_target_lock_release EXIT
+fm_update_locks_release() {
+  local status=$? i
+  fm_ff_target_lock_release
+  for ((i=${#FM_UPDATE_FLEET_LOCKS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${FM_UPDATE_FLEET_LOCKS[$i]}" || true
+  done
+  FM_UPDATE_FLEET_LOCKS=()
+  return "$status"
+}
+
+trap fm_update_locks_release EXIT
 
 usage() {
   echo "usage: fm-update.sh [--help|--ack-reread-firstmate <generation>|--ack-secondmate-nudge <target> <generation>|--deliver-secondmate-nudge <target> <generation>]" >&2
@@ -92,11 +159,6 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
-
-fm_secondmate_lifecycle_preflight "$STATE" "$SECONDMATES_MD" || {
-  echo "REFUSED: secondmate lifecycle preflight failed; update made no changes" >&2
-  exit 1
-}
 
 update_live_secondmate_identity_matches() {
   local id=$1 expected=$2 target=$3 endpoint_generation=$4 provider_identity=${5:-}
@@ -226,6 +288,15 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+
+fm_update_fleet_lock_acquire || {
+  echo "REFUSED: fleet lifecycle serialization is busy; update made no changes" >&2
+  exit 1
+}
+fm_secondmate_lifecycle_preflight "$STATE" "$SECONDMATES_MD" || {
+  echo "REFUSED: secondmate lifecycle preflight failed; update made no changes" >&2
+  exit 1
+}
 
 # --- main firstmate repo ---------------------------------------------------
 

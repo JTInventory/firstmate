@@ -515,15 +515,48 @@ live_secondmate_meta_records() {
 }
 
 fm_secondmate_lifecycle_preflight() {
-  local state=$1 registry=${2:-} meta id line home seen="" status=0
+  local state=$1 registry=${2:-} meta id line home seen="" status=0 kind_count kind
+  local live_generation registry_home
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
-    if grep -q '^kind=secondmate$' "$meta" 2>/dev/null \
-      || { [ -n "$registry" ] && grep -qE "^- ${id}([[:space:]]|$)" "$registry" 2>/dev/null; }; then
+    kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null) || kind_count=0
+    kind=$(sed -n 's/^kind=//p' "$meta" 2>/dev/null)
+    if [ "$kind_count" -ne 1 ]; then
+      echo "task $id: refused: ambiguous lifecycle kind metadata" >&2
+      status=1
+      continue
+    fi
+    case "$kind" in
+      ship|scout|secondmate) ;;
+      *)
+        echo "task $id: refused: invalid lifecycle kind metadata" >&2
+        status=1
+        continue
+        ;;
+    esac
+    if [ "$kind" = secondmate ] \
+      || { [ -n "$registry" ] && grep -qE "^- ${id}([[:space:]]|$)" "$registry" 2>/dev/null; } \
+      || grep -q '^projects=' "$meta" 2>/dev/null; then
       if ! fm_secondmate_lifecycle_meta_read "$meta" "$id"; then
         echo "secondmate $id: refused: ${FM_SECONDMATE_META_ERROR:-ambiguous lifecycle metadata}" >&2
+        status=1
+        continue
+      fi
+      if ! validate_secondmate_home "$id" "$FM_SECONDMATE_META_HOME"; then
+        echo "secondmate $id: refused: unsafe home: $VALIDATION_ERROR" >&2
+        status=1
+        continue
+      fi
+      live_generation=$(fm_backend_endpoint_generation \
+        "$FM_SECONDMATE_META_BACKEND" "$FM_SECONDMATE_META_TARGET" 2>/dev/null) || {
+        echo "secondmate $id: refused: live endpoint generation is unverifiable" >&2
+        status=1
+        continue
+      }
+      if [ "$live_generation" != "$FM_SECONDMATE_META_ENDPOINT_GENERATION" ]; then
+        echo "secondmate $id: refused: live endpoint generation changed" >&2
         status=1
       fi
     fi
@@ -542,6 +575,14 @@ fm_secondmate_lifecycle_preflight() {
     if [ ! -e "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ]; then
       echo "secondmate $id: refused: registry entry has no strict live lifecycle metadata" >&2
       status=1
+      continue
+    fi
+    if fm_secondmate_lifecycle_meta_read "$state/$id.meta" "$id"; then
+      registry_home=$(resolve_path "$home")
+      if [ "$registry_home" != "$(resolve_path "$FM_SECONDMATE_META_HOME")" ]; then
+        echo "secondmate $id: refused: registry and live metadata homes differ" >&2
+        status=1
+      fi
     fi
   done < "$registry"
   return "$status"

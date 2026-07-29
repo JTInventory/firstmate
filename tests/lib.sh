@@ -29,9 +29,7 @@ FM_TEST_LIB_SOURCED=1
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export FM_AGENT_ROLE=primary
-export FM_TEST_PROCESS=1
-unset FM_AGENT_TASK FM_AGENT_OWNER_HOME
+unset FM_AGENT_ROLE FM_AGENT_TASK FM_AGENT_OWNER_HOME
 
 # --- ambient Herdr isolation ------------------------------------------------
 #

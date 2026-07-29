@@ -237,7 +237,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
     id="declared-$harness-b1"
     rec=$(make_launch_case "launch-$harness" "$id")
     read_launch_record "$rec"
-    out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
+    out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
       FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -278,6 +278,7 @@ make_primary_home() {
   local dir=$1
   mkdir -p "$dir/bin" "$dir/state" "$dir/data" "$dir/config"
   fm_git_init_commit "$dir"
+  git -C "$dir" branch -M main
   printf '# agents\n' > "$dir/AGENTS.md"
   printf '%s\n' "$dir"
 }
@@ -287,7 +288,8 @@ test_declared_worker_is_never_a_primary_scope_match() {
   # local, and reusing the name here makes shellcheck read the two as one.
   local primary_home out
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
-  out=$( . "$ROOT/bin/fm-primary-scope-lib.sh" \
+  out=$( cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = primary ] || fail "the fixture is not recognized as a genuine primary at all"
   out=$( export FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
@@ -311,16 +313,46 @@ test_declared_worker_is_never_a_primary_scope_match() {
   pass "primary scope rejects crewmates, unknown identities, partial identities, and mismatched secondmates"
 }
 
-test_undeclared_identity_has_no_primary_mutation_authority() {
+test_unbound_identity_has_no_primary_mutation_authority() {
   local out status
   status=0
-  out=$(env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME bash -c \
+  out=$(cd "$TMP_ROOT" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME bash -c \
     '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1) || status=$?
-  expect_code 1 "$status" "undeclared identity must refuse primary mutation"
-  assert_contains "$out" "primary identity is undeclared" \
-    "undeclared primary refusal was not actionable"
-  pass "undeclared and legacy identities never inherit primary mutation authority"
+  expect_code 1 "$status" "an identity outside the primary checkout must refuse mutation"
+  assert_contains "$out" "primary identity is not bound" \
+    "unbound primary refusal was not actionable"
+  pass "an undeclared process outside the primary checkout has no mutation authority"
+}
+
+test_real_primary_needs_no_ambient_role() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/real-primary")
+  out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a real primary checkout must work without an ambient role"
+  [ -z "$out" ] || fail "real primary authority emitted unexpected output: $out"
+  pass "real primary authority is proven by process and checkout identity"
+}
+
+test_linked_main_worktree_can_prove_primary_authority() {
+  local repo primary out status=0
+  repo="$TMP_ROOT/linked-primary-repo"
+  primary="$TMP_ROOT/linked-primary"
+  fm_git_init_commit "$repo"
+  git -C "$repo" branch -M seed
+  git -C "$repo" worktree add -q -b main "$primary"
+  mkdir -p "$primary/state" "$primary/bin"
+  printf '# agents\n' > "$primary/AGENTS.md"
+  out=$(cd "$primary" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
+    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a linked main worktree must prove primary authority"
+  [ -z "$out" ] || fail "linked primary authority emitted unexpected output: $out"
+  pass "a linked main worktree can prove primary authority"
 }
 
 test_primary_role_cannot_override_worker_ancestry() {
@@ -707,7 +739,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   fm_git_init_commit "$lying"
   pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
 
-  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -1377,7 +1409,7 @@ SH
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-reuse "$WORLD/home" )
   set +e
-  out=$(cd "$WORLD" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+  out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
     FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
     FM_CONFIG_OVERRIDE="$WORLD/home/config" FM_REUSE_PROJECT="$PROJ_DIR" \
     FM_REUSE_HOME="$WORLD/replacement-home" PATH="$fakebin:$PATH" \
@@ -1419,7 +1451,7 @@ SH
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-failed-reuse "$WORLD/home" )
   set +e
-  out=$(cd "$WORLD" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+  out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
     FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
     FM_CONFIG_OVERRIDE="$WORLD/home/config" FM_REUSE_PROJECT="$PROJ_DIR" \
     FM_REUSE_HOME="$WORLD/replacement-home" PATH="$fakebin:$PATH" \
@@ -1804,7 +1836,7 @@ SH
   chmod +x "$FAKEBIN_DIR/mktemp"
   : > "$CASE_DIR/kill.log"
   set +e
-  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
@@ -1824,7 +1856,7 @@ SH
     || fail "could not install the preexisting exact claim fixture"
   : > "$CASE_DIR/kill.log"
   set +e
-  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
@@ -1849,7 +1881,7 @@ test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
     || fail "could not install foreign claim fixture"
   : > "$CASE_DIR/kill.log"
   set +e
-  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
@@ -1942,7 +1974,9 @@ test_declaration_refuses_rather_than_emitting_a_partial_prefix
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
-test_undeclared_identity_has_no_primary_mutation_authority
+test_unbound_identity_has_no_primary_mutation_authority
+test_real_primary_needs_no_ambient_role
+test_linked_main_worktree_can_prove_primary_authority
 test_primary_role_cannot_override_worker_ancestry
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record

@@ -3061,6 +3061,119 @@ SH
   pass "ordinary teardown rolls back refs and state after late cleanup failure"
 }
 
+test_teardown_rollback_preserves_reissued_refs() {
+  local dir state meta txn rc before foreign checksum
+  dir=$(make_case teardown-rollback-cas)
+  state="$dir/home/state"
+  meta="$state/task-a.meta"
+  git init -q -b main "$dir/project"
+  printf 'seed\n' > "$dir/project/file"
+  git -C "$dir/project" add file
+  git -C "$dir/project" commit -qm seed
+  before=$(git -C "$dir/project" rev-parse HEAD)
+  printf 'foreign\n' >> "$dir/project/file"
+  git -C "$dir/project" add file
+  git -C "$dir/project" commit -qm foreign
+  foreign=$(git -C "$dir/project" rev-parse HEAD)
+  git -C "$dir/project" update-ref refs/firstmate/direct-pr/task-a/base "$foreign"
+  git -C "$dir/project" update-ref refs/firstmate/direct-pr/task-a/feature "$foreign"
+  fm_write_meta "$meta" \
+    'window=orca:task-a' "worktree=$dir/missing-worktree" \
+    "project=$dir/project" 'harness=codex' 'kind=ship' 'task=task-a' \
+    'task=other-task' \
+    "home=$dir/home" 'mode=direct-PR' 'backend=orca' \
+    'endpoint_generation=orca-task-a' 'yolo=off'
+  checksum=$(cksum "$meta" | awk '{print $1 " " $2}')
+  txn="$state/.teardown-transactions/task-a"
+  mkdir -p "$txn/evidence/top" "$txn/evidence/direct-refs"
+  printf '%s\n' "$meta" > "$txn/evidence/top/source"
+  cp -p "$meta" "$txn/evidence/top/task-a.meta"
+  printf 'task=task-a\nmeta=%s\nchecksum=%s\ngeneration=orca-task-a\nhome=%s\n' \
+    "$meta" "$checksum" "$dir/home" > "$txn/identity"
+  printf 'task-a\n%s\n' "$checksum" > "$txn/active"
+  printf '%s\n' "$(git -C "$dir/project" rev-parse --absolute-git-dir)" \
+    > "$txn/evidence/direct-refs/git-dir"
+  printf 'refs/firstmate/direct-pr/task-a/base\n%s\n' "$before" \
+    > "$txn/evidence/direct-refs/0"
+  printf 'refs/firstmate/direct-pr/task-a/feature\n%s\n' "$before" \
+    > "$txn/evidence/direct-refs/1"
+  rm -f "$meta"
+  touch "$state/.last-watcher-beat"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force >/dev/null 2>"$dir/teardown.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "ambiguous recovered transaction returned success"
+  [ "$(git -C "$dir/project" rev-parse refs/firstmate/direct-pr/task-a/base)" = "$foreign" ] \
+    && [ "$(git -C "$dir/project" rev-parse refs/firstmate/direct-pr/task-a/feature)" = "$foreign" ] \
+    || fail "rollback overwrote refs reissued after teardown cleanup"
+  pass "teardown rollback never overwrites reissued direct-PR ownership"
+}
+
+test_teardown_recovers_missing_meta_from_active_transaction() {
+  local dir state meta checksum txn rc=0
+  dir=$(make_case teardown-crash-recovery)
+  state="$dir/home/state"
+  meta="$state/task-a.meta"
+  mkdir -p "$dir/project"
+  fm_write_meta "$meta" \
+    'window=main:fm-task-a' "worktree=$dir/missing-worktree" \
+    "project=$dir/project" 'harness=codex' 'kind=ship' 'task=task-a' \
+    "home=$dir/home" 'mode=local-only' 'backend=tmux' \
+    'endpoint_generation=endpoint-task-a' 'yolo=off'
+  checksum=$(cksum "$meta" | awk '{print $1 " " $2}')
+  txn="$state/.teardown-transactions/task-a"
+  mkdir -p "$txn/evidence/top"
+  printf '%s\n' "$meta" > "$txn/evidence/top/source"
+  cp -p "$meta" "$txn/evidence/top/task-a.meta"
+  printf 'task=task-a\nmeta=%s\nchecksum=%s\ngeneration=endpoint-task-a\nhome=%s\n' \
+    "$meta" "$checksum" "$dir/home" > "$txn/identity"
+  printf 'task-a\n%s\n' "$checksum" > "$txn/active"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  show-options) printf 'endpoint-task-a\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  rm -f "$meta"
+  touch "$state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force >/dev/null 2>"$dir/teardown.err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "active transaction could not recover missing metadata: $(cat "$dir/teardown.err")"
+  [ ! -e "$meta" ] && [ ! -e "$txn" ] \
+    || fail "recovered teardown left metadata or transaction evidence wedged"
+  pass "teardown retries recover the final missing-metadata crash boundary"
+}
+
+test_stale_teardown_transaction_cannot_mutate_preflight_refusal() {
+  local dir state meta txn rc=0
+  dir=$(make_case teardown-stale-transaction)
+  state="$dir/home/state"
+  meta="$state/task-a.meta"
+  fm_write_meta "$meta" \
+    'window=orca:task-a' "worktree=$dir/missing-worktree" \
+    "project=$dir/project" 'harness=codex' 'kind=ship' 'task=task-a' \
+    'task=other-task' "home=$dir/home" 'mode=local-only' 'backend=orca' \
+    'endpoint_generation=orca-task-a' 'yolo=off'
+  printf 'current state\n' > "$state/task-a.status"
+  txn="$state/.teardown-transactions/task-a"
+  mkdir -p "$txn/evidence/top"
+  printf '%s\n' "$meta" > "$txn/evidence/top/source"
+  printf 'stale state\n' > "$txn/evidence/top/task-a.status"
+  printf 'task=task-a\nmeta=%s\nchecksum=stale\ngeneration=stale\nhome=%s\n' \
+    "$meta" "$dir/home" > "$txn/identity"
+  printf 'task-a\nstale\n' > "$txn/active"
+  touch "$state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force >/dev/null 2>"$dir/teardown.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "ambiguous metadata passed teardown preflight"
+  [ "$(cat "$state/task-a.status")" = 'current state' ] \
+    || fail "stale transaction changed state during preflight refusal"
+  pass "stale teardown evidence is inert during preflight refusal"
+}
+
 # The GitLab watch must follow a merge request exactly as the GitHub watch
 # follows a pull request, on any instance, and must never turn an unreadable
 # merge request into a merge. Its evidence against the public fixture project
@@ -3724,6 +3837,9 @@ test_guarded_check_recovers_retirement_before_classification
 test_legacy_custom_check_registration_boundaries
 test_teardown_removes_poll_artifacts
 test_teardown_restores_refs_and_state_after_late_cleanup_failure
+test_teardown_rollback_preserves_reissued_refs
+test_teardown_recovers_missing_meta_from_active_transaction
+test_stale_teardown_transaction_cannot_mutate_preflight_refusal
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only

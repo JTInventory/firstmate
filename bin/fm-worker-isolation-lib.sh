@@ -158,8 +158,8 @@ fm_worker_secondmate_effective_scope_matches() {
 }
 
 fm_worker_primary_authority_matches() {
-  local root home root_real home_real pid ppid env role task harness_pid= cwd
-  [ "${FM_AGENT_ROLE:-}" = primary ] || return 1
+  local root home root_real home_real pid ppid env role task cwd
+  case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   home=${FM_HOME:-$root}
@@ -176,27 +176,15 @@ fm_worker_primary_authority_matches() {
       case "$role" in crewmate|secondmate) return 1 ;; esac
       [ -z "$task" ] || return 1
     fi
-    if [ -z "$harness_pid" ]; then
-      case "$(cat "/proc/$pid/comm" 2>/dev/null || true) $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)" in
-        *claude*|*codex*|*opencode*|*grok*|*" pi "*) harness_pid=$pid ;;
-      esac
-    fi
     ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null) || return 1
     case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
     pid=$ppid
   done
-  pid=${harness_pid:-$$}
-  cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null) || return 1
-  if [ "$cwd" != "$root_real" ]; then
-    [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
-    case "$home_real" in /tmp/*) ;; *) return 1 ;; esac
-  fi
+  cwd=$(readlink -f "/proc/$$/cwd" 2>/dev/null) || return 1
+  [ "$cwd" = "$root_real" ] || return 1
   git -C "$root_real" rev-parse --git-dir >/dev/null 2>&1 || return 1
-  if [ "$(git -C "$root_real" rev-parse --git-dir 2>/dev/null)" != \
-    "$(git -C "$root_real" rev-parse --git-common-dir 2>/dev/null)" ]; then
-    [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
-    case "$home_real" in /tmp/*) ;; *) return 1 ;; esac
-  fi
+  [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
+    || return 1
 }
 
 # fm_worker_refuse_primary_operation <operation>
@@ -206,10 +194,8 @@ fm_worker_primary_authority_matches() {
 fm_worker_refuse_primary_operation() {
   local operation=$1
   case "${FM_AGENT_ROLE:-}" in
-    primary)
-      if fm_worker_primary_authority_matches; then
-        return 0
-      fi
+    primary|"")
+      fm_worker_primary_authority_matches && return 0
       echo "error: $operation refused: primary identity is not bound to this process and checkout" >&2
       return 1
       ;;
@@ -220,10 +206,6 @@ fm_worker_refuse_primary_operation() {
     secondmate)
       fm_worker_secondmate_effective_scope_matches && return 0
       echo "error: $operation refused: secondmate '${FM_AGENT_TASK:-unnamed}' is not operating in its declared home ${FM_AGENT_OWNER_HOME:-<missing>}" >&2
-      return 1
-      ;;
-    "")
-      echo "error: $operation refused: primary identity is undeclared" >&2
       return 1
       ;;
     *)

@@ -116,6 +116,8 @@ TEARDOWN_RELINQUISH_HOMES=()
 TEARDOWN_RELINQUISH_VERDICTS=()
 TEARDOWN_TXN_DIR="$STATE/.teardown-transactions/$ID"
 TEARDOWN_TXN_COMMITTED=0
+TEARDOWN_TXN_ACTIVE=0
+TEARDOWN_TXN_REUSED=0
 PARENT_PENDING_OPEN=0
 TOP_HOME_ALREADY_RETURNED=0
 
@@ -168,7 +170,7 @@ teardown_admission_lock_acquire() {
 
 teardown_locks_release() {
   local status=$? i
-  if [ "$TEARDOWN_TXN_COMMITTED" -ne 1 ]; then
+  if [ "$TEARDOWN_TXN_ACTIVE" -eq 1 ] && [ "$TEARDOWN_TXN_COMMITTED" -ne 1 ]; then
     teardown_restore_transaction_evidence >/dev/null 2>&1 || true
   fi
   for ((i=${#TEARDOWN_LOCKS[@]} - 1; i >= 0; i--)); do
@@ -181,6 +183,143 @@ teardown_locks_release() {
 }
 
 META="$STATE/$ID.meta"
+
+teardown_file_identity() {
+  cksum "$1" 2>/dev/null | awk '{print $1 " " $2}'
+}
+
+teardown_stored_identity_value() {
+  printf '%s\n' "$1" | awk '{print $1 " " $2}'
+}
+
+teardown_restore_owned_evidence() {
+  local value=$1 path=$2 saved_task saved_home current_task current_home tmp
+  mkdir -p "$(dirname "$path")" || return 1
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    cp -a "$value" "$path"
+    return
+  fi
+  if [ -L "$value" ] || [ -L "$path" ]; then
+    return 0
+  fi
+  [ -f "$value" ] && [ -f "$path" ] || return 0
+  saved_task=$(sed -n 's/^task=//p' "$value")
+  saved_home=$(sed -n 's/^home=//p' "$value")
+  current_task=$(sed -n 's/^task=//p' "$path")
+  current_home=$(sed -n 's/^home=//p' "$path")
+  [ -n "$saved_task" ] && [ -n "$saved_home" ] \
+    && [ "$current_task" = "$saved_task" ] && [ "$current_home" = "$saved_home" ] \
+    || return 0
+  tmp=$(mktemp "$(dirname "$path")/.restore.XXXXXX") || return 1
+  cp -p "$value" "$tmp" && mv "$tmp" "$path" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
+teardown_restore_transaction_evidence() {
+  local evidence source item path value git_dir ref oid owner_path registry original expected
+  [ -d "$TEARDOWN_TXN_DIR/evidence" ] || return 0
+  while IFS= read -r evidence; do
+    source=$(cat "$evidence/source" 2>/dev/null || true)
+    [ -n "$source" ] || continue
+    mkdir -p "$(dirname "$source")" || return 1
+    for item in "$evidence"/*; do
+      [ -f "$item" ] || continue
+      case "$(basename "$item")" in
+        source|meta|identity|*.path|firstmate-owner|firstmate-owner.returning) continue ;;
+      esac
+      path="$(dirname "$source")/$(basename "$item")"
+      [ -e "$path" ] || [ -L "$path" ] || cp -p "$item" "$path" || return 1
+    done
+    for item in firstmate-owner firstmate-owner.returning; do
+      [ -f "$evidence/$item" ] || continue
+      owner_path=$(cat "$evidence/$item.path" 2>/dev/null || true)
+      [ -n "$owner_path" ] || continue
+      teardown_restore_owned_evidence "$evidence/$item" "$owner_path" || return 1
+    done
+  done < <(find "$TEARDOWN_TXN_DIR/evidence" -type f -name source -print 2>/dev/null \
+    | sed 's#/source$##')
+  for item in "$TEARDOWN_TXN_DIR/evidence/ownership/"*.path; do
+    [ -f "$item" ] || continue
+    path=$(cat "$item") || return 1
+    value="${item%.path}.value"
+    teardown_restore_owned_evidence "$value" "$path" || return 1
+  done
+  for item in "$TEARDOWN_TXN_DIR/evidence/quarantine/"*.path; do
+    [ -f "$item" ] || continue
+    path=$(cat "$item") || return 1
+    value="${item%.path}.value"
+    mkdir -p "$(dirname "$path")" || return 1
+    [ -e "$path" ] || [ -L "$path" ] || cp -p "$value" "$path" || return 1
+  done
+  git_dir=$(cat "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" 2>/dev/null || true)
+  if [ -n "$git_dir" ]; then
+    for item in "$TEARDOWN_TXN_DIR/evidence/direct-refs/"[0-9]*; do
+      [ -f "$item" ] || continue
+      ref=$(sed -n '1p' "$item")
+      oid=$(sed -n '2p' "$item")
+      git --git-dir="$git_dir" update-ref "$ref" "$oid" \
+        0000000000000000000000000000000000000000 2>/dev/null || true
+    done
+  fi
+  registry=$(cat "$TEARDOWN_TXN_DIR/evidence/registry/path" 2>/dev/null || true)
+  original="$TEARDOWN_TXN_DIR/evidence/registry/original"
+  if [ -n "$registry" ] && [ -f "$original" ]; then
+    expected="$TEARDOWN_TXN_DIR/evidence/registry/retired"
+    grep -vE "^- ${ID}([[:space:]]|$)" "$original" > "$expected" || true
+    if [ ! -e "$registry" ] || cmp -s "$registry" "$expected"; then
+      mkdir -p "$(dirname "$registry")" || return 1
+      cp -p "$original" "$registry" || return 1
+    fi
+  fi
+}
+
+teardown_recover_interrupted_transaction() {
+  local identity task meta checksum backup current tmp active committed_checksum
+  [ -d "$TEARDOWN_TXN_DIR" ] && [ ! -L "$TEARDOWN_TXN_DIR" ] || return 0
+  identity="$TEARDOWN_TXN_DIR/identity"
+  [ -f "$identity" ] && [ ! -L "$identity" ] || return 0
+  task=$(sed -n 's/^task=//p' "$identity")
+  meta=$(sed -n 's/^meta=//p' "$identity")
+  checksum=$(sed -n 's/^checksum=//p' "$identity")
+  [ "$task" = "$ID" ] && [ "$meta" = "$META" ] && [ -n "$checksum" ] || return 0
+  committed_checksum=$(sed -n '2p' "$TEARDOWN_TXN_DIR/committed" 2>/dev/null || true)
+  if [ ! -e "$META" ] && [ ! -L "$META" ] \
+     && [ -f "$TEARDOWN_TXN_DIR/committed" ] \
+     && [ ! -L "$TEARDOWN_TXN_DIR/committed" ] \
+     && [ "$(sed -n '1p' "$TEARDOWN_TXN_DIR/committed")" = "$ID" ] \
+     && [ "$committed_checksum" = "$checksum" ]; then
+    rm -rf -- "$TEARDOWN_TXN_DIR"
+    echo "teardown $ID complete (recovered committed transaction)"
+    exit 0
+  fi
+  active="$TEARDOWN_TXN_DIR/active"
+  [ -f "$active" ] && [ ! -L "$active" ] \
+    && [ "$(sed -n '1p' "$active")" = "$ID" ] || return 0
+  [ ! -e "$META" ] && [ ! -L "$META" ] || return 0
+  backup="$TEARDOWN_TXN_DIR/evidence/top/$ID.meta"
+  [ -f "$backup" ] && [ ! -L "$backup" ] || backup="$TEARDOWN_TXN_DIR/evidence/top/meta"
+  [ -f "$backup" ] && [ ! -L "$backup" ] || return 0
+  current=$(teardown_file_identity "$backup") || return 0
+  [ "$current" = "$(teardown_stored_identity_value "$checksum")" ] || return 0
+  mkdir -p "$(dirname "$META")" || return 1
+  tmp=$(mktemp "$(dirname "$META")/.${ID}.meta.XXXXXX") || return 1
+  cp -p "$backup" "$tmp" && mv "$tmp" "$META" || {
+    rm -f "$tmp"
+    return 1
+  }
+  TEARDOWN_TXN_ACTIVE=1
+  teardown_restore_transaction_evidence
+}
+
+trap teardown_locks_release EXIT
+teardown_admission_lock_acquire "$STATE" "$FM_HOME" || exit 1
+teardown_task_lock_acquire "$STATE" "$ID" || exit 1
+teardown_recover_interrupted_transaction || {
+  echo "REFUSED: interrupted teardown evidence could not be recovered" >&2
+  exit 1
+}
 [ -f "$META" ] && [ ! -L "$META" ] && [ -r "$META" ] \
   || { echo "REFUSED: task metadata is missing, unreadable, or not a regular file: $META" >&2; exit 1; }
 
@@ -325,7 +464,7 @@ teardown_stage_home_removal() {
 }
 
 teardown_endpoint_generation_matches() {
-  local backend=$1 target=$2 generation=$3 meta=$4 actual session workspace tab pane expected
+  local backend=$1 target=$2 generation=$3 meta=$4 actual session workspace tab pane
   TEARDOWN_ENDPOINT_ALREADY_CLOSED=0
   case "$backend" in
     tmux)
@@ -342,11 +481,10 @@ teardown_endpoint_generation_matches() {
       workspace=$(teardown_meta_value_exact "$meta" herdr_workspace_id required) || return 1
       tab=$(teardown_meta_value_exact "$meta" herdr_tab_id required) || return 1
       pane=$(teardown_meta_value_exact "$meta" herdr_pane_id required) || return 1
-      expected=$(printf '%s' "$session|$workspace|$tab|$pane" \
-        | cksum | awk '{printf "herdr-%s-%s", $1, $2}') || return 1
-      [ "$target" = "$session:$pane" ] && [ "$generation" = "$expected" ] || return 1
-      if fm_backend_pane_readable herdr "$target"; then
-        :
+      [ "$target" = "$session:$pane" ] || return 1
+      actual=$(fm_backend_endpoint_generation herdr "$target" 2>/dev/null || true)
+      if [ -n "$actual" ]; then
+        [ "$actual" = "$generation" ]
       else
         teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
           && TEARDOWN_ENDPOINT_ALREADY_CLOSED=1
@@ -356,12 +494,8 @@ teardown_endpoint_generation_matches() {
   esac
 }
 
-META_IDENTITY=$(cksum "$META") || exit 1
-
-trap teardown_locks_release EXIT
-teardown_admission_lock_acquire "$STATE" "$FM_HOME" || exit 1
-teardown_task_lock_acquire "$STATE" "$ID" || exit 1
-[ "$(cksum "$META" 2>/dev/null || true)" = "$META_IDENTITY" ] || {
+META_IDENTITY=$(teardown_file_identity "$META") || exit 1
+[ "$(teardown_file_identity "$META" 2>/dev/null || true)" = "$META_IDENTITY" ] || {
   echo "REFUSED: task metadata changed while teardown acquired lifecycle locks" >&2
   exit 1
 }
@@ -1341,11 +1475,14 @@ teardown_stage_evidence_home() {
     done
     if [ -f "$home/.firstmate-owner" ] && [ ! -L "$home/.firstmate-owner" ]; then
       cp -p "$home/.firstmate-owner" "$dest/firstmate-owner" || return 1
+      printf '%s\n' "$home/.firstmate-owner" > "$dest/firstmate-owner.path" || return 1
     fi
     if [ -f "$home/.firstmate-owner.returning" ] \
        && [ ! -L "$home/.firstmate-owner.returning" ]; then
       cp -p "$home/.firstmate-owner.returning" \
         "$dest/firstmate-owner.returning" || return 1
+      printf '%s\n' "$home/.firstmate-owner.returning" \
+        > "$dest/firstmate-owner.returning.path" || return 1
     fi
     child_kind=$(teardown_meta_value_exact "$meta" kind required) || return 1
     if [ "$child_kind" = secondmate ]; then
@@ -1356,10 +1493,28 @@ teardown_stage_evidence_home() {
   done
 }
 
+teardown_transaction_identity_matches() {
+  local identity task meta checksum generation home
+  identity="$TEARDOWN_TXN_DIR/identity"
+  [ -f "$identity" ] && [ ! -L "$identity" ] || return 1
+  task=$(sed -n 's/^task=//p' "$identity")
+  meta=$(sed -n 's/^meta=//p' "$identity")
+  checksum=$(sed -n 's/^checksum=//p' "$identity")
+  generation=$(sed -n 's/^generation=//p' "$identity")
+  home=$(sed -n 's/^home=//p' "$identity")
+  [ "$task" = "$ID" ] && [ "$meta" = "$META" ] \
+    && [ "$(teardown_stored_identity_value "$checksum")" = "$META_IDENTITY" ] \
+    && [ "$generation" = "$ENDPOINT_GENERATION" ] \
+    && [ "$home" = "$HOME_PATH" ] \
+    && [ "$(teardown_file_identity "$META" 2>/dev/null || true)" = "$META_IDENTITY" ]
+}
+
 teardown_stage_hierarchy_evidence() {
-  local parent tmp state_entry
+  local parent tmp state_entry identity
   if [ -d "$TEARDOWN_TXN_DIR" ] && [ ! -L "$TEARDOWN_TXN_DIR" ]; then
-    return 0
+    teardown_transaction_identity_matches || return 1
+    TEARDOWN_TXN_REUSED=1
+    return
   fi
   [ ! -e "$TEARDOWN_TXN_DIR" ] && [ ! -L "$TEARDOWN_TXN_DIR" ] || return 1
   parent=${TEARDOWN_TXN_DIR%/*}
@@ -1377,17 +1532,30 @@ teardown_stage_hierarchy_evidence() {
      && [ ! -L "$HOME_PATH/.firstmate-owner" ]; then
     cp -p "$HOME_PATH/.firstmate-owner" \
       "$TEARDOWN_TXN_DIR/evidence/top/firstmate-owner" || return 1
+    printf '%s\n' "$HOME_PATH/.firstmate-owner" \
+      > "$TEARDOWN_TXN_DIR/evidence/top/firstmate-owner.path" || return 1
   fi
   if [ "$KIND" = secondmate ]; then
     teardown_stage_evidence_home "$HOME_PATH" home || return 1
   fi
+  identity="$TEARDOWN_TXN_DIR/identity"
+  printf 'task=%s\nmeta=%s\nchecksum=%s\ngeneration=%s\nhome=%s\n' \
+    "$ID" "$META" "$META_IDENTITY" "$ENDPOINT_GENERATION" "$HOME_PATH" \
+    > "$identity" || return 1
+  chmod 600 "$identity" || return 1
   mv "$TEARDOWN_TXN_DIR" "$parent/$ID" || return 1
   TEARDOWN_TXN_DIR="$parent/$ID"
 }
 
 teardown_stage_transaction_evidence() {
-  local path index=0 ref oid
+  local path index=0 ref oid item active_tmp
   teardown_stage_hierarchy_evidence || return 1
+  if [ "$TEARDOWN_TXN_REUSED" -eq 1 ]; then
+    [ -f "$TEARDOWN_TXN_DIR/active" ] && [ ! -L "$TEARDOWN_TXN_DIR/active" ] \
+      && [ "$(sed -n '1p' "$TEARDOWN_TXN_DIR/active")" = "$ID" ] || return 1
+    TEARDOWN_TXN_ACTIVE=1
+    return 0
+  fi
   mkdir -p "$TEARDOWN_TXN_DIR/evidence/ownership" \
     "$TEARDOWN_TXN_DIR/evidence/direct-refs" || return 1
   for path in \
@@ -1400,46 +1568,37 @@ teardown_stage_transaction_evidence() {
     cp -a "$path" "$TEARDOWN_TXN_DIR/evidence/ownership/$index.value" || return 1
     index=$((index + 1))
   done
-  [ -n "$DIRECT_PR_REF_GIT_DIR" ] || return 0
-  for ref in "refs/firstmate/direct-pr/$ID/base" "refs/firstmate/direct-pr/$ID/feature"; do
-    oid=$(git --git-dir="$DIRECT_PR_REF_GIT_DIR" rev-parse --verify "$ref" 2>/dev/null || true)
-    [ -n "$oid" ] || continue
-    printf '%s\n%s\n' "$ref" "$oid" \
-      > "$TEARDOWN_TXN_DIR/evidence/direct-refs/$index" || return 1
+  if [ -n "$DIRECT_PR_REF_GIT_DIR" ]; then
+    for ref in "refs/firstmate/direct-pr/$ID/base" "refs/firstmate/direct-pr/$ID/feature"; do
+      oid=$(git --git-dir="$DIRECT_PR_REF_GIT_DIR" rev-parse --verify "$ref" 2>/dev/null || true)
+      [ -n "$oid" ] || continue
+      printf '%s\n%s\n' "$ref" "$oid" \
+        > "$TEARDOWN_TXN_DIR/evidence/direct-refs/$index" || return 1
+      index=$((index + 1))
+    done
+    printf '%s\n' "$DIRECT_PR_REF_GIT_DIR" \
+      > "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" || return 1
+  fi
+  mkdir -p "$TEARDOWN_TXN_DIR/evidence/quarantine" \
+    "$TEARDOWN_TXN_DIR/evidence/registry" || return 1
+  for item in "$STATE/.pr-check-quarantine/$ID".*; do
+    [ -f "$item" ] && [ ! -L "$item" ] || continue
+    printf '%s\n' "$item" > "$TEARDOWN_TXN_DIR/evidence/quarantine/$index.path" || return 1
+    cp -p "$item" "$TEARDOWN_TXN_DIR/evidence/quarantine/$index.value" || return 1
     index=$((index + 1))
   done
-  printf '%s\n' "$DIRECT_PR_REF_GIT_DIR" \
-    > "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" || return 1
-}
-
-teardown_restore_transaction_evidence() {
-  local top source item path value git_dir ref oid
-  [ -d "$TEARDOWN_TXN_DIR/evidence" ] || return 0
-  top="$TEARDOWN_TXN_DIR/evidence/top"
-  source=$(cat "$top/source" 2>/dev/null || true)
-  if [ -n "$source" ]; then
-    mkdir -p "$(dirname "$source")" || return 1
-    for item in "$top"/"$ID".*; do
-      [ -f "$item" ] || continue
-      cp -p "$item" "$(dirname "$source")/$(basename "$item")" || return 1
-    done
+  if [ -f "$SECONDMATE_REG" ] && [ ! -L "$SECONDMATE_REG" ]; then
+    printf '%s\n' "$SECONDMATE_REG" > "$TEARDOWN_TXN_DIR/evidence/registry/path" || return 1
+    cp -p "$SECONDMATE_REG" "$TEARDOWN_TXN_DIR/evidence/registry/original" || return 1
   fi
-  for item in "$TEARDOWN_TXN_DIR/evidence/ownership/"*.path; do
-    [ -f "$item" ] || continue
-    path=$(cat "$item") || return 1
-    value="${item%.path}.value"
-    mkdir -p "$(dirname "$path")" || return 1
-    rm -f "$path" || return 1
-    cp -a "$value" "$path" || return 1
-  done
-  git_dir=$(cat "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" 2>/dev/null || true)
-  [ -n "$git_dir" ] || return 0
-  for item in "$TEARDOWN_TXN_DIR/evidence/direct-refs/"[0-9]*; do
-    [ -f "$item" ] || continue
-    ref=$(sed -n '1p' "$item")
-    oid=$(sed -n '2p' "$item")
-    git --git-dir="$git_dir" update-ref "$ref" "$oid" || return 1
-  done
+  active_tmp=$(mktemp "$TEARDOWN_TXN_DIR/.active.XXXXXX") || return 1
+  printf '%s\n%s\n' "$ID" "$META_IDENTITY" > "$active_tmp" \
+    && chmod 600 "$active_tmp" \
+    && mv "$active_tmp" "$TEARDOWN_TXN_DIR/active" || {
+    rm -f "$active_tmp"
+    return 1
+  }
+  TEARDOWN_TXN_ACTIVE=1
 }
 
 validate_firstmate_home_children_removal() {
@@ -1949,6 +2108,13 @@ if [ -n "${TOP_SLOT_RETAIN_VERDICT:-}" ]; then
   fm_slot_stamp_relinquish "$WT" "$ID" "$FM_HOME" "$TOP_SLOT_RETAIN_VERDICT" || exit 1
 fi
 teardown_reconcile_staged_returns
+TEARDOWN_COMMIT_TMP=$(mktemp "$TEARDOWN_TXN_DIR/.committed.XXXXXX") || exit 1
+printf '%s\n%s\n' "$ID" "$META_IDENTITY" > "$TEARDOWN_COMMIT_TMP" \
+  && chmod 600 "$TEARDOWN_COMMIT_TMP" \
+  && mv "$TEARDOWN_COMMIT_TMP" "$TEARDOWN_TXN_DIR/committed" || {
+  rm -f "$TEARDOWN_COMMIT_TMP"
+  exit 1
+}
 TEARDOWN_TXN_COMMITTED=1
 rm -rf -- "$TEARDOWN_TXN_DIR"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

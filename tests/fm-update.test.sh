@@ -24,7 +24,7 @@ set -u
 # shellcheck source=tests/secondmate-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
-UPDATE="$ROOT/bin/fm-update.sh"
+UPDATE_IMPL="$ROOT/bin/fm-update.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -36,6 +36,14 @@ UPDATE="$ROOT/bin/fm-update.sh"
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-update-tests)
+mkdir -p "$TMP_ROOT"
+UPDATE="$TMP_ROOT/fm-update-primary"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'cd "$FM_ROOT_OVERRIDE" || exit 1\n'
+  printf 'exec %q "$@"\n' "$UPDATE_IMPL"
+} > "$UPDATE"
+chmod +x "$UPDATE"
 UPDATE_TEST_PIDS=""
 
 cleanup_update_tests() {
@@ -149,7 +157,7 @@ run_update() {
   : >"$w/update-fake/tmux.log.closed"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$w/update-fake/pane.txt" \
-    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1
 }
 
 ack_firstmate_reread() {
@@ -359,25 +367,28 @@ test_firstmate_detached_head_skipped() {
 }
 
 test_unsafe_secondmate_home_skipped_before_git_update() {
-  local w out bad before
+  local w out bad before before_main
   w=$(new_world t11)
   bad="$w/home/projects/bad"
   mkdir -p "$w/home/projects"
   git clone -q "$w/origin.git" "$bad"
   printf 'bad\n' > "$bad/.fm-secondmate-home"
   before=$(git -C "$bad" rev-parse HEAD)
+  before_main=$(git -C "$w/main" rev-parse HEAD)
   printf -- '- bad - bad home (home: %s; scope: x; projects: p; added 2026-06-23)\n' \
     "$bad" > "$w/home/data/secondmates.md"
   bump_origin "$w" instr
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate bad: skipped: unsafe home: secondmate home cannot be inside the active firstmate home" \
-    "unsafe project-like home skipped"
-  assert_contains "$out" "nudge-secondmates: none" "unsafe home is not nudged"
+  assert_contains "$out" "registry entry has no strict live lifecycle metadata" \
+    "unsafe registry-only home refused"
+  assert_contains "$out" "update made no changes" "unsafe home refusal was not fail-closed"
   [ "$(git -C "$bad" rev-parse HEAD)" = "$before" ] \
     || fail "unsafe secondmate home HEAD moved"
-  pass "T11 unsafe secondmate home is not fast-forwarded"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before_main" ] \
+    || fail "primary advanced before unsafe registry-only identity was refused"
+  pass "T11 unsafe registry-only home refuses every update mutation"
 }
 
 test_replays_interrupted_reread_and_nudge_obligations() {
@@ -679,7 +690,7 @@ test_update_waits_for_legacy_admission_and_task_locks() {
     UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $holder"
     while [ ! -e "$w/lock-ready" ]; do sleep 0.05; done
     out=$(run_update "$w")
-    assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+    assert_contains "$out" "fleet lifecycle serialization is busy" \
       "update ignored a mixed-version lifecycle lock"
     [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
       || fail "update advanced while a mixed-version lifecycle lock was active"
@@ -701,7 +712,7 @@ SH
     sleep 0.05
   done
   out=$(run_update "$w")
-  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+  assert_contains "$out" "fleet lifecycle serialization is busy" \
     "update ignored a legacy lifecycle process without an admission lock"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "update advanced while a lockless legacy lifecycle process was active"
@@ -768,7 +779,7 @@ SH
     sleep 0.02
   done
   [ -e "$w/legacy-late.ready" ] || fail "late legacy lifecycle process did not start"
-  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+  assert_contains "$out" "fleet lifecycle serialization is busy" \
     "update crossed a legacy lifecycle process that started after admission"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "update advanced after the late legacy lifecycle start"
@@ -832,7 +843,7 @@ SH
   out=$(run_update "$w")
   kill "$holder"
   wait "$holder" 2>/dev/null || true
-  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+  assert_contains "$out" "fleet lifecycle serialization is busy" \
     "shell or env options hid exact lifecycle work from the process bridge"
 
   FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" \
@@ -842,7 +853,7 @@ SH
   out=$(run_update "$w")
   kill "$holder"
   wait "$holder" 2>/dev/null || true
-  assert_contains "$out" "firstmate: skipped: spawn or teardown is active" \
+  assert_contains "$out" "fleet lifecycle serialization is busy" \
     "rewritten argv0 hid exact lifecycle work from executable identity"
 
   (
@@ -1174,6 +1185,39 @@ test_live_endpoint_generation_mismatch_refuses_lifecycle_identity() {
   ) || rc=$?
   [ "$rc" -ne 0 ] || fail "recycled live endpoint generation matched stale metadata"
   pass "live endpoint generation mismatches refuse lifecycle identity"
+}
+
+test_live_generation_preflight_preserves_primary() {
+  local w before out rc=0
+  w=$(new_world t31-live-preflight)
+  add_sm "$w" sm1
+  bump_origin "$w" instr
+  before=$(git -C "$w/main" rev-parse HEAD)
+  sed -i 's/^endpoint_generation=.*/endpoint_generation=stale-endpoint/' \
+    "$w/home/state/sm1.meta"
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale live endpoint generation passed update preflight"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "primary advanced before stale endpoint generation was refused"
+  assert_contains "$out" "live endpoint generation" \
+    "stale endpoint preflight did not report the lifecycle mismatch"
+  pass "live endpoint generation is proven before any update mutation"
+}
+
+test_corrupt_kind_preflight_preserves_primary() {
+  local w before out rc=0
+  w=$(new_world t31-corrupt-kind)
+  add_sm "$w" sm1
+  bump_origin "$w" instr
+  before=$(git -C "$w/main" rev-parse HEAD)
+  sed -i 's/^kind=secondmate$/kind=corrupt/' "$w/home/state/sm1.meta"
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "corrupt lifecycle kind passed update preflight"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "primary advanced before corrupt lifecycle kind was refused"
+  assert_contains "$out" "invalid lifecycle kind metadata" \
+    "corrupt lifecycle kind refusal was not reported"
+  pass "corrupt lifecycle records are refused before any update mutation"
 }
 
 test_secondmate_delivery_is_one_locked_generation_transaction() {
@@ -1508,6 +1552,8 @@ test_locked_secondmate_action_revalidates_after_acquire
 test_secondmate_acknowledgement_respects_lifecycle_lock
 test_ambiguous_lifecycle_metadata_refuses_update
 test_live_endpoint_generation_mismatch_refuses_lifecycle_identity
+test_live_generation_preflight_preserves_primary
+test_corrupt_kind_preflight_preserves_primary
 test_secondmate_delivery_is_one_locked_generation_transaction
 test_secondmate_delivery_refuses_recycled_endpoint_ack
 test_duplicate_provider_fields_refuse_lifecycle_mutation

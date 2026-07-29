@@ -100,7 +100,7 @@ The stamp is written by `bin/fm-spawn.sh` into the worktree's private git direct
 Writing is refused for anything that is not a linked worktree, so a primary checkout can never be marked as a disposable slot.
 
 Two boundaries are deliberate.
-Absence of evidence is not evidence: a slot with no stamp and no conflicting reference disposes normally, which is what keeps every task spawned before stamping existed working unchanged.
+Absence of ownership proof is ambiguity: a slot with no readable, exact stamp is retained until its ownership can be proven.
 `--force` does not waive the gate: it is the captain's authority to discard *this* task's work, never authority to release another task's slot.
 
 Retaining means the lease is retired rather than returned.
@@ -116,6 +116,8 @@ Each call site therefore states which of the two it is, so a new caller cannot s
 The live-occupant check stays a blocking condition and is never weakened to compensate.
 If authoritative cwd or process-identity capability is unavailable, the slot is retained.
 Once a process is proven inside the slot, unreadable, partial, undeclared, or mixed-version identity is contested ownership rather than absence of an occupant.
+
+The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode and refuses every later mutation until the sweep is clean.
 
 #### Reclaiming an already-leaked slot
 
