@@ -125,10 +125,30 @@ test_classifier_primitives() {
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
   status_is_captain_relevant "paused: waiting on vendor" && fail "paused: wrongly recognized as captain-relevant"
+  status_is_captain_relevant "working: setup complete; rebased onto merged #76; checks green" \
+    && fail "working: legacy terminal prose wrongly recognized as captain-relevant"
+  status_is_captain_relevant "done: PR https://x/pull/76 checks green" \
+    || fail "genuine done: checks green not captain-relevant"
+  status_is_terminal_verb "done: PR https://x/pull/76 checks green" \
+    || fail "done: not a terminal verb"
+  status_is_terminal_verb "working: rebased onto merged #76" \
+    && fail "working: wrongly classed as terminal verb"
+  status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
+  status_is_captain_relevant "PR ready https://x/pull/2" \
+    || fail "legacy bare PR ready free-text not captain-relevant"
   [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
-  FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
-  FM_CAPTAIN_RE='paused:' status_is_captain_relevant "paused: waiting on vendor" || fail "FM_CAPTAIN_RE override could not opt paused into captain relevance"
+  FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "merged" \
+    || fail "FM_CAPTAIN_RE override suppressed legacy bare merged"
+  local terminal
+  for terminal in "done" needs-decision blocked failed; do
+    FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "$terminal: x" \
+      || fail "FM_CAPTAIN_RE override suppressed $terminal:"
+  done
+  FM_CAPTAIN_RE='merged|custom-verb:' status_is_captain_relevant "working: rebased onto merged #76" \
+    && fail "FM_CAPTAIN_RE override bypassed working: suppression"
+  FM_CAPTAIN_RE='checks green|custom-verb:' status_is_captain_relevant "paused: checks green pending approval" \
+    && fail "FM_CAPTAIN_RE override bypassed paused: suppression"
   pass "classifier primitives: last line, captain-relevance, window->task, FM_CAPTAIN_RE override"
 }
 

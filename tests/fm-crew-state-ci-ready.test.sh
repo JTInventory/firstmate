@@ -12,6 +12,8 @@ mkdir -p "$CASE/state" "$CASE/fakebin" "$CASE/wt"
 git -C "$CASE/wt" init -q
 git -C "$CASE/wt" commit -q --allow-empty -m init
 git -C "$CASE/wt" checkout -q -b fm/green-ci
+FM_FAKE_RUN_HEAD=$(git -C "$CASE/wt" rev-parse HEAD)
+export FM_FAKE_RUN_HEAD
 
 cat > "$CASE/fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
@@ -19,11 +21,12 @@ set -u
 [ "${1:-}" = axi ] || exit 0
 shift
 case "${1:-}" in
-  status) cat <<'TOON'
+  status) cat <<TOON
 run:
   id: "01GREEN"
   branch: fm/green-ci
   status: running
+  head: "${FM_FAKE_RUN_HEAD}"
   pr: "https://github.com/JTInventory/firstmate/pull/49"
   findings: none
   steps[1]{step,status,findings,duration_ms}:

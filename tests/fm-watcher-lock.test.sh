@@ -511,11 +511,17 @@ test_watcher_preserves_matching_expired_legacy_watcher_lock() {
   wpid=$!
   i=0
   while [ "$i" -lt 60 ]; do
-    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && break
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && is_live_non_zombie "$wpid" \
+      && break
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    && is_live_non_zombie "$wpid" \
+    || fail "seed watcher did not establish a live singleton"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 if [ "${LC_ALL:-}" = legacy_TEST ]; then
