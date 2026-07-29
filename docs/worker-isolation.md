@@ -58,7 +58,7 @@ Three enforcement points consume the declaration.
 `bin/fm-primary-scope-lib.sh` reports a declared worker as non-primary whatever root and state it was handed, which keeps every tracked project-local startup and turn-end adapter inert for workers.
 `bin/fm-spawn.sh` and `bin/fm-teardown.sh` refuse outright, because a worker acting on an inherited home would create or destroy direct reports the real primary never recorded.
 
-An undeclared primary is accepted only from the default-branch checkout when a verified live harness exists in its kernel process ancestry and every process through that harness has readable, worker-free identity. A detached or re-parented process cannot create fresh authority by clearing its environment. When `FM_ROOT` and `FM_HOME` differ, `bin/fm-lock.sh` binds them in `state/.primary-checkout`; later mutations require that exact binding and the matching session-lock owner. The lock-acquisition path may create the first binding only for that process-bound primary authority; an inherited role, unreadable ancestry, or an existing conflicting binding refuses.
+An undeclared primary is accepted only from the default-branch checkout when `state/.primary-checkout` names that exact checkout and `state/.lock` is owned by the current session. A process-name or argv match never creates fresh authority. The lock-acquisition path may replace only a provably stale session owner under the same durable checkout binding, with readable, worker-free ancestry through the replacement harness. A missing binding, missing lock, inherited worker role, unreadable ancestry, or conflicting owner refuses.
 
 ### The method of record for an agent's working directory
 
@@ -129,7 +129,7 @@ A slot leaked before that rule existed has no record left to release it: no meta
 Reclaim it by hand, in this order, and stop at the first step that fails.
 
 1. Confirm nothing records the slot: `grep -l "worktree=<slot>" <home>/state/*.meta` across every home, including secondmate homes, must find nothing.
-2. Confirm nothing lives in it with the portable authority reader: `. <firstmate>/bin/fm-slot-owner-lib.sh; fm_slot_live_occupant_tasks <slot> __manual-reclaim__ <home> crewmate`. Any printed process is a refusal. Exit 2 means process identity or cwd could not be read through procfs or the `ps` plus `lsof` fallback; stop without reclaiming. Only exit 1 proves no live occupant. Then require `git -C <slot> status` to show no work worth keeping.
+2. Confirm nothing lives in it with the portable authority reader: `. <firstmate>/bin/fm-slot-owner-lib.sh; fm_slot_manual_reclaim_occupants <slot>`. This manual form has no self-task exemption, so even a live task named `__manual-reclaim__` is reported. Any printed process is a refusal. Exit 2 means process identity or cwd could not be read through procfs or the `ps` plus `lsof` fallback; stop without reclaiming. Only exit 1 proves no live occupant. Then require `git -C <slot> status` to show no work worth keeping.
 3. Read the stamp at `$(git -C <slot> rev-parse --absolute-git-dir)/fm-slot-owner` and confirm the task it names is gone from every home's state directory.
 4. Delete that stamp file, then return the slot from its project with `cd <project> && treehouse return --force <slot>`.
 
@@ -154,12 +154,11 @@ A sweep that cries wolf on a normal fleet is worse than no sweep, because the `b
 
 - A new operational-home variable belongs in `FM_WORKER_ISOLATION_HOME_VARS` in `bin/fm-worker-isolation-lib.sh`, not at a call site, or task children will inherit it.
 - A new runtime provider that exposes a per-pane process id belongs in `fm_agent_backend_shell_pid` and in the matrix above; one that does not needs no change, because the declaration marker already covers it.
-- A new verified harness needs no isolation-specific work, because the declaration is prepended to whatever launch command the adapter builds; the regression suite asserts that for every verified harness so an adapter cannot quietly opt out.
+- A new verified harness must be added to `FM_HARNESS_RE` in `bin/fm-session-lock-lib.sh` and to the launch-declaration matrix in `tests/fm-worker-isolation.test.sh`; otherwise its process identity and isolation coverage fail closed.
 
 ## Regression coverage
 
-`tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every verified harness, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, the stable-window-id resolution and its refusal to answer from a lost window name, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, the contested-then-released and still-blocked stamp sequences, and the sweep outcomes including a healthy secondmate staying silent.
-Kimi's launch declaration is asserted in `tests/fm-kimi-harness.test.sh`, which owns that adapter's readiness and delivery gates.
+`tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every harness in `FM_HARNESS_RE`, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, the stable-window-id resolution and its refusal to answer from a lost window name, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, the contested-then-released and still-blocked stamp sequences, and the sweep outcomes including a healthy secondmate staying silent.
 
 ## Maintaining this file
 

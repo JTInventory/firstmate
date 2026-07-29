@@ -187,7 +187,7 @@ fm_worker_linked_primary_topology_matches() {
 fm_worker_primary_authority_matches() {
   local operation=${1:-} root home root_real home_real cwd branch default ref
   local pid ppid env binding old holder_status stop_pid=1 harness_pid= harness_seen=0
-  local process_bound=0
+  local session_bound=0
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -211,24 +211,23 @@ fm_worker_primary_authority_matches() {
   [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
     || return 1
   . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
-  if [ -e "$home_real/state/.lock" ] || [ -L "$home_real/state/.lock" ]; then
-    [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
-    old=$(cat "$home_real/state/.lock" 2>/dev/null) || return 1
-    if fm_session_lock_owned_by_self "$home_real/state"; then
-      process_bound=1
-      stop_pid=${old%%|*}
-      case "$stop_pid" in ''|*[!0-9]*) return 1 ;; esac
+  binding="$home_real/state/.primary-checkout"
+  [ -f "$binding" ] && [ ! -L "$binding" ] || return 1
+  [ "$(cat "$binding" 2>/dev/null || true)" = "$root_real" ] || return 1
+  [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
+  old=$(cat "$home_real/state/.lock" 2>/dev/null) || return 1
+  if fm_session_lock_owned_by_self "$home_real/state"; then
+    session_bound=1
+    stop_pid=${old%%|*}
+    case "$stop_pid" in ''|*[!0-9]*) return 1 ;; esac
+  else
+    [ "$operation" = "session lock acquisition" ] || return 1
+    if fm_session_lock_holder_state "$old"; then
+      holder_status=0
     else
-      [ "$operation" = "session lock acquisition" ] || return 1
-      if fm_session_lock_holder_state "$old"; then
-        holder_status=0
-      else
-        holder_status=$?
-      fi
-      [ "$holder_status" -eq 1 ] || return 1
+      holder_status=$?
     fi
-  fi
-  if [ "$process_bound" -eq 0 ]; then
+    [ "$holder_status" -eq 1 ] || return 1
     harness_pid=$(fm_verified_harness_ancestry_pid) || return 1
   fi
   pid=$$
@@ -248,18 +247,7 @@ fm_worker_primary_authority_matches() {
     [ "$ppid" != "$pid" ] || return 1
     pid=$ppid
   done
-  [ "$process_bound" -eq 1 ] || [ "$harness_seen" -eq 1 ] || return 1
-  if [ "$root_real" != "$home_real" ]; then
-    binding="$home_real/state/.primary-checkout"
-    if [ "$operation" = "session lock acquisition" ] \
-       && [ ! -e "$binding" ] && [ ! -L "$binding" ]; then
-      fm_worker_linked_primary_topology_matches "$root_real" "$home_real" || return 1
-    else
-      [ -f "$binding" ] && [ ! -L "$binding" ] || return 1
-      [ "$(cat "$binding" 2>/dev/null || true)" = "$root_real" ] || return 1
-      [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
-    fi
-  fi
+  [ "$session_bound" -eq 1 ] || [ "$harness_seen" -eq 1 ] || return 1
   [ "$cwd" = "$root_real" ]
 }
 

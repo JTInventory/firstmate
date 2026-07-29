@@ -363,20 +363,30 @@ fm_slot_stamp_unmark_return_committed() {
 }
 
 fm_slot_stamp_reconcile_committed_return() {
-  local claim=$1 marker legacy
+  local claim=$1 marker legacy marker_task marker_home marker_holder
   marker=$(fm_slot_stamp_committed_return_path "$claim") || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   legacy="${claim}.owner"
   fm_slot_return_claim_record_file "$marker" || return 1
+  marker_task=$FM_SLOT_RETURN_CLAIM_TASK
+  marker_home=$FM_SLOT_RETURN_CLAIM_HOME
+  marker_holder=$FM_SLOT_RETURN_CLAIM_HOLDER
+  [ "$marker_holder" = "$marker_task" ] || return 1
   if [ -e "$claim" ] || [ -L "$claim" ]; then
     [ -f "$claim" ] && [ ! -L "$claim" ] && cmp -s "$claim" "$marker" || return 1
   fi
-  fm_slot_owner_record_file "$legacy" || return 1
-  [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$FM_SLOT_STAMP_TASK" ] \
-    && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$FM_SLOT_STAMP_HOME" \
-    || return 1
-  rm -f "$legacy" "$claim" "$marker"
+  if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+    fm_slot_owner_record_file "$legacy" || return 1
+    [ "$marker_task" = "$FM_SLOT_STAMP_TASK" ] \
+      && fm_slot_same_path "$marker_home" "$FM_SLOT_STAMP_HOME" || return 1
+  fi
+  rm -f "$legacy" || return 1
+  [ ! -e "$legacy" ] && [ ! -L "$legacy" ] || return 1
+  rm -f "$claim" || return 1
+  [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
+  rm -f "$marker" || return 1
+  [ ! -e "$marker" ] && [ ! -L "$marker" ]
 }
 
 # fm_slot_meta_worktree <meta-file>: the one recorded absolute worktree path.
@@ -486,6 +496,10 @@ fm_slot_live_occupant_tasks() {
   done
   [ -n "$hits" ] || return 1
   printf '%s' "$hits" | LC_ALL=C sort -u
+}
+
+fm_slot_manual_reclaim_occupants() {
+  fm_slot_live_occupant_tasks "$1" "" "" manual-reclaim
 }
 
 # fm_slot_join_ids <newline-separated>: comma-joined single line.

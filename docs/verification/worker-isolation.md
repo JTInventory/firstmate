@@ -54,7 +54,7 @@ grok:     FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PRO
 ```
 
 The declaration precedes each adapter's own environment and flags, so an adapter cannot opt out of it.
-Kimi is launched bare and then sent a readiness-gated pointer, so its declaration is asserted in `tests/fm-kimi-harness.test.sh` alongside that adapter's delivery gates rather than here.
+These five adapters are the harnesses currently listed in `FM_HARNESS_RE`; adding another requires updating both that shared identity expression and this launch matrix.
 
 ## Provider axis: per-pane process id
 
@@ -126,4 +126,4 @@ bin/fm-agent-cwd-lib.sh: line 114: /proc/462/environ: Permission denied
 Redirections are applied left to right, so a trailing `2>/dev/null` on the same command is established only after the input redirect has already failed and written to stderr.
 The group form is what suppresses it, and `fm_agent_environ` is the single reader that applies it.
 
-Regression: `tests/fm-worker-isolation.test.sh`'s isolated-worker sweep case captures the sweep with stderr folded into stdout and requires it to be completely empty, so an unreadable `/proc` entry anywhere on the host fails the suite.
+Regression: `tests/fm-worker-isolation.test.sh` captures the sweep with stderr folded into stdout. An unreadable live candidate whose command matches `FM_HARNESS_RE` is emitted as unproven and fails closed; unrelated unreadable kernel or non-harness processes are ignored.

@@ -15,9 +15,7 @@
 #   - a pane cwd field named the wrong process and reported an isolated worker
 #     as living in the primary checkout.
 #
-# Kimi's launch declaration is asserted in tests/fm-kimi-harness.test.sh, which
-# owns that adapter's readiness and delivery gates; the five adapters that need
-# no readiness gate are driven end to end here.
+# Every harness in FM_HARNESS_RE is driven end to end here.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -286,6 +284,7 @@ make_primary_home() {
   git -C "$dir" branch -M main
   printf '# agents\n' > "$dir/AGENTS.md"
   printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$dir/state/.lock"
+  printf '%s\n' "$dir" > "$dir/state/.primary-checkout"
   printf '%s\n' "$dir"
 }
 
@@ -345,7 +344,7 @@ test_real_primary_needs_no_ambient_role() {
   pass "real primary authority is proven by process and checkout identity"
 }
 
-test_fresh_primary_requires_live_harness_ancestry() {
+test_fresh_primary_requires_durable_session_binding() {
   local primary_home out status=0
   primary_home=$(make_primary_home "$TMP_ROOT/fresh-primary")
   rm -rf "$primary_home/state"
@@ -359,9 +358,10 @@ test_fresh_primary_requires_live_harness_ancestry() {
       fm_worker_refuse_primary_operation lock
     ' \
     _ "$ROOT" 2>&1) || status=$?
-  expect_code 0 "$status" "a fresh primary must prove live harness ancestry"
-  [ -z "$out" ] || fail "fresh primary authority emitted unexpected output: $out"
-  pass "fresh primary authority is kernel-process-bound without preexisting state"
+  expect_code 1 "$status" "a process-name match must not create fresh primary authority"
+  assert_contains "$out" "primary identity is not bound" \
+    "fresh primary refusal lost its durable-binding reason"
+  pass "fresh primary authority requires a durable session and checkout binding"
 }
 
 test_reparented_markerless_process_has_no_fresh_primary_authority() {
@@ -402,6 +402,8 @@ test_linked_main_worktree_can_prove_primary_authority() {
   git -C "$repo" worktree add -q -b main "$primary"
   mkdir -p "$primary/state" "$primary/bin"
   printf '# agents\n' > "$primary/AGENTS.md"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$primary/state/.lock"
+  printf '%s\n' "$primary" > "$primary/state/.primary-checkout"
   out=$(cd "$primary" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
     bash -c '
@@ -496,16 +498,18 @@ test_binding_failure_never_installs_new_session_owner() {
 }
 
 test_procargs2_parser_separates_argv_and_environment() {
-  local valid malformed calls out status=0
+  local valid malformed calls snapshots out status=0
   valid="$TMP_ROOT/procargs-valid.bin"
   malformed="$TMP_ROOT/procargs-malformed.bin"
   calls="$TMP_ROOT/procargs-calls"
+  snapshots="$TMP_ROOT/procargs-snapshots"
+  mkdir -p "$snapshots"
   : > "$calls"
   printf '\003\000\000\000/bin/bash\000\000bash\000\000\000FM_AGENT_ROLE=crewmate\000X=1\000' \
     > "$valid"
   printf '\001\000\000\000/bin/bash\000bash\000not-an-environment-record\000' \
     > "$malformed"
-  out=$(bash -c '
+  out=$(TMPDIR="$snapshots" bash -c '
     . "$1/bin/fm-procargs-lib.sh"
     DUMP=$2
     CALLS=$3
@@ -519,7 +523,9 @@ test_procargs2_parser_separates_argv_and_environment() {
     || fail "procargs2 argv/environment boundary was wrong: $out"
   [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ] \
     || fail "procargs2 parser read more than one process snapshot"
-  if bash -c '
+  [ -z "$(find "$snapshots" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || fail "procargs2 parser left a named process snapshot on disk"
+  if TMPDIR="$snapshots" bash -c '
     . "$1/bin/fm-procargs-lib.sh"
     DUMP=$2
     fm_procargs2_dump() { command cat "$DUMP"; }
@@ -1707,6 +1713,63 @@ test_committed_return_claim_reconciles_after_cleanup_crash() {
   pass "committed return claims reconcile before pooled-slot reuse"
 }
 
+test_committed_return_cleanup_retries_after_legacy_unlink() {
+  local rec
+  rec=$(make_slot_world committed-return-retry)
+  read_slot_world "$rec"
+  (
+    local claim legacy marker
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
+    fm_slot_stamp_stage_return \
+      "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
+    claim=$FM_SLOT_RETURN_CLAIM
+    legacy=$FM_SLOT_RETURN_LEGACY
+    fm_slot_stamp_mark_return_committed "$claim" "$legacy"
+    marker=$(fm_slot_stamp_committed_return_path "$claim")
+    rm -f "$legacy"
+    fm_slot_stamp_write "$WT_DIR" new-task "$WORLD/home"
+    [ ! -e "$claim" ] && [ ! -e "$marker" ]
+    [ "$(fm_slot_stamp_field "$WT_DIR" task)" = new-task ]
+  ) || fail "committed return cleanup could not resume after legacy removal"
+  pass "committed return cleanup is restart-safe"
+}
+
+test_foreign_committed_return_holder_blocks_reuse() {
+  local rec
+  rec=$(make_slot_world foreign-committed-holder)
+  read_slot_world "$rec"
+  (
+    local claim legacy marker
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
+    fm_slot_stamp_stage_return \
+      "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
+    claim=$FM_SLOT_RETURN_CLAIM
+    legacy=$FM_SLOT_RETURN_LEGACY
+    marker=$(fm_slot_stamp_committed_return_path "$claim")
+    printf 'task=old-task\nhome=%s\nlease_holder=foreign-task\n' \
+      "$WORLD/home" > "$marker"
+    rm -f "$claim"
+    ! fm_slot_stamp_write "$WT_DIR" new-task "$WORLD/home"
+    [ -f "$marker" ] && [ -f "$legacy" ]
+  ) || fail "foreign committed-return holder was erased during reconciliation"
+  pass "foreign committed-return holders block pooled-slot reuse"
+}
+
+test_manual_reclaim_has_no_task_identity_exemption() {
+  local rec pid occupants
+  rec=$(make_slot_world manual-reclaim-occupant)
+  read_slot_world "$rec"
+  pid=$(start_declared_agent "$WT_DIR" __manual-reclaim__ "$WORLD/home")
+  occupants=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_manual_reclaim_occupants "$WT_DIR" )
+  assert_contains "$occupants" "__manual-reclaim__" \
+    "manual reclaim excluded a live task that matched its old sentinel identity"
+  kill "$pid" 2>/dev/null || true
+  pass "manual reclaim never exempts a live task identity"
+}
+
 test_malformed_committed_return_marker_blocks_reuse() {
   local rec
   rec=$(make_slot_world malformed-committed-return)
@@ -2317,7 +2380,7 @@ test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
 test_unbound_identity_has_no_primary_mutation_authority
 test_real_primary_needs_no_ambient_role
-test_fresh_primary_requires_live_harness_ancestry
+test_fresh_primary_requires_durable_session_binding
 test_reparented_markerless_process_has_no_fresh_primary_authority
 test_foreign_session_lock_defeats_primary_topology
 test_linked_main_worktree_can_prove_primary_authority
@@ -2365,7 +2428,10 @@ test_return_transition_never_uses_a_worktree_path
 test_successful_pool_return_never_mutates_reused_slot
 test_failed_pool_return_never_restores_over_a_reused_slot
 test_committed_return_claim_reconciles_after_cleanup_crash
+test_committed_return_cleanup_retries_after_legacy_unlink
+test_foreign_committed_return_holder_blocks_reuse
 test_malformed_committed_return_marker_blocks_reuse
+test_manual_reclaim_has_no_task_identity_exemption
 test_foreign_transition_holder_retains_before_mutation
 test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation

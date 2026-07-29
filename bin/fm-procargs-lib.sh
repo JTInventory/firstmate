@@ -12,20 +12,25 @@ fm_procargs2_read() {
   command -v od >/dev/null 2>&1 || return 1
   command -v dd >/dev/null 2>&1 || return 1
   snapshot=$(mktemp "${TMPDIR:-/tmp}/fm-procargs2.XXXXXX") || return 1
-  fm_procargs2_dump "$pid" > "$snapshot" 2>/dev/null || {
-    rm -f "$snapshot"
+  exec 8< "$snapshot" || { rm -f "$snapshot"; return 1; }
+  exec 9> "$snapshot" || { exec 8<&-; rm -f "$snapshot"; return 1; }
+  rm -f "$snapshot" || { exec 8<&- 9>&-; return 1; }
+  fm_procargs2_dump "$pid" >&9 2>/dev/null || {
+    exec 8<&- 9>&-
     return 1
   }
-  argc=$(od -An -tu4 -N4 "$snapshot" 2>/dev/null | tr -d '[:space:]') || {
-    rm -f "$snapshot"
+  exec 9>&-
+  argc=$(dd bs=4 count=1 <&8 2>/dev/null | od -An -tu4 2>/dev/null \
+    | tr -d '[:space:]') || {
+    exec 8<&-
     return 1
   }
-  case "$argc" in ''|*[!0-9]*) rm -f "$snapshot"; return 1 ;; esac
-  [ "$argc" -gt 0 ] || { rm -f "$snapshot"; return 1; }
+  case "$argc" in ''|*[!0-9]*) exec 8<&-; return 1 ;; esac
+  [ "$argc" -gt 0 ] || { exec 8<&-; return 1; }
   while IFS= read -r -d '' token; do
     tokens+=("$token")
-  done < <(dd if="$snapshot" bs=4 skip=1 2>/dev/null)
-  rm -f "$snapshot"
+  done < <(dd bs=1 <&8 2>/dev/null)
+  exec 8<&-
   for token in "${tokens[@]}"; do
     if [ "$saw_exec" -eq 0 ]; then
       [ -n "$token" ] || continue

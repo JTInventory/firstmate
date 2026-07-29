@@ -1867,7 +1867,7 @@ test_secondmate_force_teardown_refuses_ambiguous_child_metadata() {
 }
 
 test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
-  local home subhome childproj childwt fakebin log err pending_path sentinel receipt_dir key before
+  local home subhome childproj childwt fakebin log err pending_path sentinel receipt_dir key before binding
   home="$TMP_ROOT/child-hook-return-home"
   subhome="$TMP_ROOT/child-hook-return-subhome"
   childproj="$subhome/projects/alpha"
@@ -1935,7 +1935,25 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   mkdir -p "$receipt_dir"
   key=$(printf '%s' 'tmux|firstmate:fm-safe|endpoint-safe' \
     | cksum | awk '{printf "%s-%s", $1, $2}')
-  printf '%s\n%s\n%s\n' tmux firstmate:fm-safe endpoint-safe > "$receipt_dir/$key"
+  printf '%s\n%s\n%s\n%s\n' tmux firstmate:fm-safe endpoint-safe \
+    'transaction=foreign-transaction' > "$receipt_dir/$key"
+  before=$(wc -l < "$log")
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-hook-return-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "teardown accepted a foreign well-formed endpoint receipt"
+  fi
+  [ "$(wc -l < "$log")" -eq "$before" ] \
+    || fail "foreign endpoint receipt authorized provider disposal"
+  grep -F 'interrupted teardown evidence could not be recovered' "$err" >/dev/null \
+    || fail "foreign endpoint receipt did not reject the transaction"
+
+  rm -f "$home/state/domain.meta"
+  binding=$(cksum "$home/state/.teardown-transactions/domain/identity" \
+    | awk '{print $1 " " $2}')
+  printf '%s\n%s\n%s\ntransaction=%s\n' \
+    tmux firstmate:fm-safe endpoint-safe "$binding" > "$receipt_dir/$key"
   ln -s "$sentinel" "$receipt_dir/malformed-sibling"
   before=$(wc -l < "$log")
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
