@@ -110,7 +110,9 @@ status_is_captain_relevant() {
       return 1
       ;;
   esac
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  printf '%s' "$line" | grep -qiE "$FM_CLASSIFY_CAPTAIN_RE_DEFAULT" && return 0
+  [ -n "${FM_CAPTAIN_RE:-}" ] || return 1
+  printf '%s' "$line" | grep -qiE "$FM_CAPTAIN_RE"
 }
 
 # 0 when a status line declares a non-empty known external dependency.
