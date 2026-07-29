@@ -8,9 +8,8 @@ set -u
 LOCK="$ROOT/bin/fm-lock.sh"
 HOOK="$ROOT/bin/fm-codex-session-lock-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-codex-session-lock-tests)
+fm_test_session_authority_fd "$TMP_ROOT"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-FM_SESSION_AUTHORITY_CAPABILITY=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
-export FM_SESSION_AUTHORITY_CAPABILITY
 
 make_home() {
   local home="$TMP_ROOT/$1"
@@ -321,21 +320,24 @@ test_numeric_legacy_lock_contract() {
 }
 
 test_wrong_capability_cannot_forge_or_release_authority() {
-  local home fakebin before out status=0 wrong
+  local home fakebin before out status=0 wrong_file wrong_fd
   home=$(make_home keyed-authority)
   fakebin="$home/fakebin"
   make_hidden_ps "$fakebin"
   run_lock "$home" thread-keyed "$fakebin" >/dev/null \
     || fail "could not create keyed authority fixture"
   before=$(cat "$home/state/.lock")
-  wrong=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-  out=$(FM_SESSION_AUTHORITY_CAPABILITY="$wrong" \
+  wrong_file="$TMP_ROOT/wrong-authority"
+  printf '%s' ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff > "$wrong_file"
+  exec {wrong_fd}<"$wrong_file"
+  rm -f "$wrong_file"
+  out=$(FM_SESSION_AUTHORITY_FD="$wrong_fd" \
     run_lock "$home" thread-forged "$fakebin" 2>&1) || status=$?
   expect_code 1 "$status" "a foreign capability must not replace keyed authority"
   [ "$(cat "$home/state/.lock")" = "$before" ] \
     || fail "foreign capability replaced the keyed lock owner"
   ( cd "$home" && printf '{"hook_event_name":"SessionEnd","session_id":"thread-keyed"}\n' \
-    | FM_SESSION_AUTHORITY_CAPABILITY="$wrong" FM_ROOT_OVERRIDE="$home" \
+    | FM_SESSION_AUTHORITY_FD="$wrong_fd" FM_ROOT_OVERRIDE="$home" \
       FM_HOME="$home" CODEX_THREAD_ID=thread-keyed bash "$HOOK" )
   [ "$(cat "$home/state/.lock")" = "$before" ] \
     || fail "foreign capability released keyed authority"

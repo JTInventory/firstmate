@@ -42,7 +42,7 @@
 # Every operational-home variable a firstmate script reads. Extend here, not at
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
-FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN FM_SESSION_AUTHORITY_CAPABILITY"
+FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN FM_SESSION_AUTHORITY_FD"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-procargs-lib.sh"
 
@@ -67,6 +67,10 @@ fm_worker_launch_env_prefix() {
   case "$home" in
     /*) ;;
     *) echo "error: agent role $role requires an absolute owning home, got '${home:-<empty>}'" >&2; return 1 ;;
+  esac
+  case "${FM_SESSION_AUTHORITY_FD:-}" in
+    ''|*[!0-9]*) ;;
+    *) printf 'exec %s>&-; ' "$FM_SESSION_AUTHORITY_FD" ;;
   esac
   for var in $FM_WORKER_ISOLATION_HOME_VARS; do
     if [ "$var" = FM_HOME ] && [ "$role" = secondmate ]; then
@@ -186,7 +190,7 @@ fm_worker_linked_primary_topology_matches() {
 
 fm_worker_primary_authority_matches() {
   local operation=${1:-} root home root_real home_real cwd branch default ref
-  local pid ppid env binding lock authority old marker binding_bound=0
+  local pid ppid env binding lock authority old marker authority_state binding_bound=0
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -224,21 +228,28 @@ fm_worker_primary_authority_matches() {
   if [ "$root_real" != "$home_real" ] && [ "$binding_bound" -eq 0 ]; then
     fm_worker_linked_primary_topology_matches "$root_real" "$home_real" || return 1
   fi
-  fm_session_authority_capability_present || return 1
   if [ -f "$lock" ] && [ ! -L "$lock" ] \
     && [ -f "$authority" ] && [ ! -L "$authority" ]; then
     old=$(cat "$lock" 2>/dev/null) || return 1
-    fm_session_authority_read "$authority" || return 1
+    fm_session_authority_read_shape "$authority" || return 1
     [ "$FM_SESSION_AUTHORITY_OWNER" = "$old" ] \
       && [ "$FM_SESSION_AUTHORITY_HOME" = "$home_real" ] \
       && [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$root_real" ] || return 1
+    if ! fm_session_authority_read "$authority"; then
+      authority_state=0
+      fm_session_authority_process_state "$authority" || authority_state=$?
+      [ "$authority_state" -eq 1 ] && [ "$operation" = "session lock acquisition" ] \
+        && fm_session_authority_capability_present || return 1
+    fi
     if marker=$(fm_codex_owner_marker "$old" 2>/dev/null); then
       if ! fm_codex_thread_active || [ "$CODEX_THREAD_ID" != "$marker" ]; then
-        [ "$operation" = "session lock acquisition" ] || return 1
+        authority_state=0
+        fm_session_authority_process_state "$authority" || authority_state=$?
+        [ "$authority_state" -eq 1 ] \
+          && [ "$operation" = "session lock acquisition" ] || return 1
       fi
     fi
   else
-    [ "$operation" = "session lock acquisition" ] || return 1
     [ ! -e "$authority" ] && [ ! -L "$authority" ] || return 1
     if [ -e "$lock" ] || [ -L "$lock" ]; then
       [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
@@ -247,20 +258,26 @@ fm_worker_primary_authority_matches() {
       case "$pid" in ''|*[!0-9]*) return 1 ;; esac
       if kill -0 "$pid" 2>/dev/null; then
         fm_session_legacy_owner_is_current "$old" || return 1
+        case "$operation" in "session lock acquisition"|update) ;; *) return 1 ;; esac
+      else
+        [ "$operation" = "session lock acquisition" ] || return 1
       fi
+    else
+      [ "$operation" = "session lock acquisition" ] || return 1
     fi
+    fm_session_authority_capability_present || return 1
   fi
   pid=$$
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  while [ "$pid" -gt 1 ]; do
     env=$(fm_worker_process_environment "$pid") || return 1
     if printf '%s\n' "$env" | grep -Eq '(^|[[:space:]])FM_AGENT_ROLE=(crewmate|secondmate)($|[[:space:]])'; then
       return 1
     fi
     ppid=$(fm_session_parent_pid "$pid") || return 1
-    [ "$ppid" -gt 1 ] || break
     [ "$ppid" != "$pid" ] || return 1
     pid=$ppid
   done
+  [ "$pid" -eq 1 ] || return 1
   [ "$cwd" = "$root_real" ]
 }
 

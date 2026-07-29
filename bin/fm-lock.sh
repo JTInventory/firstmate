@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home Firstmate session lock.
-# Writes a capability-authenticated owner. Codex adds its stable thread marker.
+# Writes a descriptor-authenticated owner. Codex adds its stable thread marker.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 #
@@ -100,13 +100,60 @@ restore_session_authority_from_transaction() {
     && restore_session_authority_file "$AUTH_TXN/old-lock" "$LOCK"
 }
 
+session_authority_file_signature() {
+  local file=$1
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf '%s\n' absent
+    return
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  cksum "$file" | awk '{print $1 ":" $2}'
+}
+
+session_authority_manifest_read() {
+  local manifest="$AUTH_TXN/manifest" body expected
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  [ "$(wc -l < "$manifest" | tr -d ' ')" -eq 8 ] || return 1
+  [ "$(sed -n '1p' "$manifest")" = version=1 ] || return 1
+  body=$(sed -n '1,7p' "$manifest") || return 1
+  expected=$(printf '%s\n' "$body" | fm_session_authority_hmac) || return 1
+  [ "$(sed -n '8s/^hmac=//p' "$manifest")" = "$expected" ] || return 1
+  AUTH_MANIFEST_HMAC=$expected
+  AUTH_OLD_LOCK=${body#*$'\n'}; AUTH_OLD_LOCK=${AUTH_OLD_LOCK%%$'\n'*}; AUTH_OLD_LOCK=${AUTH_OLD_LOCK#old-lock=}
+  AUTH_OLD_BINDING=$(sed -n '3s/^old-binding=//p' "$manifest")
+  AUTH_OLD_AUTHORITY=$(sed -n '4s/^old-authority=//p' "$manifest")
+  AUTH_NEW_LOCK=$(sed -n '5s/^new-lock=//p' "$manifest")
+  AUTH_NEW_BINDING=$(sed -n '6s/^new-binding=//p' "$manifest")
+  AUTH_NEW_AUTHORITY=$(sed -n '7s/^new-authority=//p' "$manifest")
+  case "$AUTH_OLD_LOCK:$AUTH_OLD_BINDING:$AUTH_OLD_AUTHORITY:$AUTH_NEW_LOCK:$AUTH_NEW_BINDING:$AUTH_NEW_AUTHORITY" in
+    *[!0-9:absent]*) return 1 ;;
+  esac
+  [ "$(session_authority_file_signature "$AUTH_TXN/old-lock")" = "$AUTH_OLD_LOCK" ] \
+    && [ "$(session_authority_file_signature "$AUTH_TXN/old-binding")" = "$AUTH_OLD_BINDING" ] \
+    && [ "$(session_authority_file_signature "$AUTH_TXN/old-authority")" = "$AUTH_OLD_AUTHORITY" ]
+}
+
 if [ -d "$AUTH_TXN" ] && [ ! -L "$AUTH_TXN" ]; then
   [ -f "$AUTH_TXN/ready" ] && [ ! -L "$AUTH_TXN/ready" ] || {
     echo "error: session authority transaction is incomplete; operate read-only until resolved" >&2
     exit 1
   }
-  if [ -f "$AUTH_TXN/committed" ] && [ ! -L "$AUTH_TXN/committed" ]; then
+  session_authority_manifest_read || {
+    echo "error: session authority transaction evidence is invalid; operate read-only until resolved" >&2
+    exit 1
+  }
+  if [ -f "$AUTH_TXN/committed" ] && [ ! -L "$AUTH_TXN/committed" ] \
+    && [ "$(cat "$AUTH_TXN/committed" 2>/dev/null)" = "manifest=$AUTH_MANIFEST_HMAC" ]; then
+    [ "$(session_authority_file_signature "$LOCK")" = "$AUTH_NEW_LOCK" ] \
+      && [ "$(session_authority_file_signature "$STATE/.primary-checkout")" = "$AUTH_NEW_BINDING" ] \
+      && [ "$(session_authority_file_signature "$AUTHORITY")" = "$AUTH_NEW_AUTHORITY" ] || {
+        echo "error: committed session authority transaction is not fully published; operate read-only until resolved" >&2
+        exit 1
+      }
     rm -rf -- "$AUTH_TXN"
+  elif [ -e "$AUTH_TXN/committed" ] || [ -L "$AUTH_TXN/committed" ]; then
+    echo "error: session authority transaction commit is invalid; operate read-only until resolved" >&2
+    exit 1
   else
     restore_session_authority_from_transaction || {
       echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
@@ -149,7 +196,15 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     && [ "$FM_SESSION_AUTHORITY_OWNER" = "$old" ] \
     && { [ "$old_marker" = "$owner_marker" ] \
       || { [ -z "$old_marker" ] && [ -z "$owner_marker" ]; }; }; then
-    owner=$old
+    if fm_session_authority_process_state "$AUTHORITY"; then
+      owner=$old
+    else
+      authority_state=$?
+      [ "$authority_state" -eq 1 ] || {
+        echo "error: existing session authority lifecycle is ambiguous; operate read-only until resolved" >&2
+        exit 1
+      }
+    fi
   elif [ ! -e "$AUTHORITY" ] && [ ! -L "$AUTHORITY" ] \
     && fm_session_legacy_owner_is_current "$old"; then
     owner=$old
@@ -157,11 +212,15 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     :
   elif [ "$old" != "$owner" ]; then
     holder_status=
-    if [ -f "$AUTHORITY" ] \
-      && [ ! -L "$AUTHORITY" ] \
-      && fm_session_authority_read "$AUTHORITY" \
+    if [ -f "$AUTHORITY" ] && [ ! -L "$AUTHORITY" ] \
+      && fm_session_authority_read_shape "$AUTHORITY" \
       && [ "$FM_SESSION_AUTHORITY_OWNER" = "$old" ]; then
-      holder_status=1
+      if fm_session_authority_process_state "$AUTHORITY"; then
+        holder_status=0
+      else
+        holder_status=$?
+        [ "$holder_status" -eq 1 ] || holder_status=2
+      fi
     fi
     if [ -z "$holder_status" ]; then
       fm_session_lock_holder_state "$old"
@@ -241,6 +300,16 @@ AUTH_TXN_TMP=$(mktemp -d "$STATE/.session-authority-transaction.XXXXXX") || exit
 [ "$OLD_BINDING_PRESENT" -eq 0 ] || cp -p "$BINDING" "$AUTH_TXN_TMP/old-binding" || exit 1
 [ "$OLD_AUTHORITY_PRESENT" -eq 0 ] \
   || cp -p "$AUTHORITY" "$AUTH_TXN_TMP/old-authority" || exit 1
+AUTH_MANIFEST_BODY=$(printf 'version=1\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=%s\nnew-binding=%s\nnew-authority=%s\n' \
+  "$(session_authority_file_signature "$AUTH_TXN_TMP/old-lock")" \
+  "$(session_authority_file_signature "$AUTH_TXN_TMP/old-binding")" \
+  "$(session_authority_file_signature "$AUTH_TXN_TMP/old-authority")" \
+  "$(session_authority_file_signature "$LOCK_TMP")" \
+  "$(session_authority_file_signature "$BINDING_TMP")" \
+  "$(session_authority_file_signature "$AUTHORITY_TMP")") || exit 1
+AUTH_MANIFEST_HMAC=$(printf '%s\n' "$AUTH_MANIFEST_BODY" | fm_session_authority_hmac) || exit 1
+printf '%s\nhmac=%s\n' "$AUTH_MANIFEST_BODY" "$AUTH_MANIFEST_HMAC" \
+  > "$AUTH_TXN_TMP/manifest" || exit 1
 printf '%s\n' ready > "$AUTH_TXN_TMP/ready" && chmod 600 "$AUTH_TXN_TMP/ready" \
   && mv "$AUTH_TXN_TMP" "$AUTH_TXN" || {
   rm -rf -- "$AUTH_TXN_TMP"
@@ -284,7 +353,7 @@ AUTH_COMMIT_TMP=$(mktemp "$AUTH_TXN/.committed.XXXXXX") || {
   restore_session_authority || true
   exit 1
 }
-printf '%s\n' "$owner" > "$AUTH_COMMIT_TMP" && chmod 600 "$AUTH_COMMIT_TMP" \
+printf 'manifest=%s\n' "$AUTH_MANIFEST_HMAC" > "$AUTH_COMMIT_TMP" && chmod 600 "$AUTH_COMMIT_TMP" \
   && mv "$AUTH_COMMIT_TMP" "$AUTH_TXN/committed" || {
   rm -f "$AUTH_COMMIT_TMP"
   restore_session_authority || true

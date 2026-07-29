@@ -11,9 +11,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
+fm_test_session_authority_fd "$TMP_ROOT"
 CODEX_THREAD_ID=fm-secondmate-safety-fixture
-FM_SESSION_AUTHORITY_CAPABILITY=23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01
-export CODEX_THREAD_ID FM_SESSION_AUTHORITY_CAPABILITY
+export CODEX_THREAD_ID
 
 hold_test_task_lock() {
   local state=$1 id=$2 ready=$3

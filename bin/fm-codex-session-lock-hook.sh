@@ -3,7 +3,7 @@
 # Usage: <Codex hook JSON> | fm-codex-session-lock-hook.sh
 #
 # SessionStart claims the lock before the first model turn with the externally
-# provisioned session capability. Later PID-isolated calls transfer that keyed
+# provisioned descriptor capability. Later PID-isolated calls transfer that keyed
 # authority without binding ownership to this short-lived hook process.
 #
 # SessionEnd removes only a regular lock whose Codex thread marker exactly
@@ -79,6 +79,7 @@ if [ -e "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then
   [ -f "$AUTHORITY" ] && [ ! -L "$AUTHORITY" ] || exit 0
   fm_session_authority_read "$AUTHORITY" || exit 0
   [ "$FM_SESSION_AUTHORITY_OWNER" = "$OWNER" ] || exit 0
+  fm_session_authority_is_current_ancestor "$AUTHORITY" || exit 0
 else
   fm_session_authority_capability_present || exit 0
   fm_session_legacy_owner_is_current "$OWNER" || exit 0

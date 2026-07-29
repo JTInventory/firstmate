@@ -36,6 +36,7 @@ UPDATE_IMPL="$ROOT/bin/fm-update.sh"
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-update-tests)
+fm_test_session_authority_fd "$TMP_ROOT"
 mkdir -p "$TMP_ROOT"
 UPDATE="$TMP_ROOT/fm-update-primary"
 {
@@ -83,8 +84,12 @@ new_world() {
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  fm_session_lock_owner > "$w/home/state/.lock"
+  local owner
+  owner=$(fm_session_lock_owner)
+  printf '%s\n' "$owner" > "$w/home/state/.lock"
   printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
+  fm_session_authority_write_file "$w/home/state/.session-authority" \
+    "${owner%%|*}" "$owner" "$w/home" "$w/main"
 
   printf '%s\n' "$w"
 }

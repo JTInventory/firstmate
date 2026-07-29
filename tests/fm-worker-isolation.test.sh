@@ -27,11 +27,11 @@ LOCK="$ROOT/bin/fm-lock.sh"
 SWEEP="$ROOT/bin/fm-isolation-sweep.sh"
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-isolation)
+fm_test_session_authority_fd "$TMP_ROOT"
 unset NO_MISTAKES_GATE
 unset CLAUDECODE PI_CODING_AGENT GROK_AGENT
 CODEX_THREAD_ID=fm-worker-isolation-fixture
-FM_SESSION_AUTHORITY_CAPABILITY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-export CODEX_THREAD_ID FM_SESSION_AUTHORITY_CAPABILITY
+export CODEX_THREAD_ID
 
 # Fixture agents are real long-lived processes, and the code under test finds
 # them by scanning /proc for a declaration marker. Two hygiene rules follow.
@@ -100,7 +100,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -109,7 +109,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
 }
@@ -272,7 +272,7 @@ test_secondmate_child_receives_only_its_own_home() {
   local expected
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
-    "FM_HOME='/homes/dom' "*) : ;;
+    "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME='/homes/dom' "*) : ;;
     *) fail "secondmate declaration did not pin its own home first: $expected" ;;
   esac
   assert_not_contains "$expected" "FM_ROOT_OVERRIDE='" \
@@ -401,7 +401,7 @@ test_caller_marker_cannot_replace_exact_session_authority() {
     "$sleeper" "$owner" "$primary_home" "$primary_home" \
     || fail "could not create foreign live authority fixture"
   out=$(cd "$primary_home" && CODEX_THREAD_ID=forged-thread \
-    FM_SESSION_AUTHORITY_CAPABILITY=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+    FM_SESSION_AUTHORITY_FD=999 \
     FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
     bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1) || status=$?
@@ -593,6 +593,26 @@ test_procargs2_parser_separates_argv_and_environment() {
   pass "one procargs2 snapshot handles valid and malformed records"
 }
 
+write_session_authority_recovery_manifest() {
+  local txn=$1 body hmac
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  body=$(printf 'version=1\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=1:1\nnew-binding=1:1\nnew-authority=1:1\n' \
+    "$(session_test_signature "$txn/old-lock")" \
+    "$(session_test_signature "$txn/old-binding")" \
+    "$(session_test_signature "$txn/old-authority")")
+  hmac=$(printf '%s\n' "$body" | fm_session_authority_hmac) || return 1
+  printf '%s\nhmac=%s\n' "$body" "$hmac" > "$txn/manifest"
+}
+
+session_test_signature() {
+  local file=$1
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf '%s\n' absent
+  else
+    cksum "$file" | awk '{print $1 ":" $2}'
+  fi
+}
+
 test_session_authority_recovery_retains_unverified_backup() {
   local home fakebin out status=0
   home=$(make_primary_home "$TMP_ROOT/session-authority-recovery")
@@ -601,6 +621,8 @@ test_session_authority_recovery_retains_unverified_backup() {
   cp "$home/state/.lock" "$home/state/.session-authority-transaction/old-lock"
   cp "$home/state/.primary-checkout" \
     "$home/state/.session-authority-transaction/old-binding"
+  write_session_authority_recovery_manifest \
+    "$home/state/.session-authority-transaction"
   printf 'ready\n' > "$home/state/.session-authority-transaction/ready"
   fakebin="$TMP_ROOT/session-authority-fakebin"
   mkdir -p "$fakebin"
@@ -627,6 +649,7 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
   cp "$home/state/.lock" "$txn/old-lock"
   cp "$home/state/.primary-checkout" "$txn/old-binding"
   cp "$home/state/.session-authority" "$txn/old-authority"
+  write_session_authority_recovery_manifest "$txn"
   printf '%s\n' ready > "$txn/ready"
   printf '%s\n' '999999|codex:foreign|fallback' > "$home/state/.lock"
   printf '%s\n' 'invalid-authority' > "$home/state/.session-authority"
@@ -642,7 +665,7 @@ test_fresh_enrollment_requires_external_capability() {
   local home out status=0
   home=$(make_primary_home "$TMP_ROOT/fresh-capability-required")
   rm -rf "$home/state"
-  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_CAPABILITY \
+  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" "$LOCK" 2>&1) || status=$?
   expect_code 1 "$status" "fresh enrollment without an external capability must fail"
   assert_absent "$home/state/.lock" "capability-free enrollment published a lock"
@@ -2156,7 +2179,11 @@ test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling() {
   status=0
   teardown_transaction_crossed_irreversible_boundary || status=$?
   expect_code 2 "$status" "a malformed receipt sibling must invalidate the complete set"
-  pass "receipt validation rejects symlinked stages and malformed siblings"
+  rm "$txn/closed-endpoints/malformed-sibling" "$receipt"
+  status=0
+  teardown_transaction_receipts_complete || status=$?
+  expect_code 1 "$status" "a staged close without its receipt must invalidate commit recovery"
+  pass "receipt validation rejects symlinked, malformed, and incomplete proof sets"
 }
 
 test_teardown_finishes_fallible_cleanup_before_provider_boundaries() {

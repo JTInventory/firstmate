@@ -23,8 +23,6 @@ set -u
 # This suite supplies harness identity per case. Ambient Codex identity must not
 # turn direct lock cases into same-thread acquisitions.
 unset CODEX_THREAD_ID 2>/dev/null || true
-FM_SESSION_AUTHORITY_CAPABILITY=3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef012
-export FM_SESSION_AUTHORITY_CAPABILITY
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -34,6 +32,7 @@ export FM_SESSION_AUTHORITY_CAPABILITY
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+fm_test_session_authority_fd "$TMP_ROOT"
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
 SESSION_START_HERDR_SECOND_MATE_ID="fmtest-herdr-${TMP_ROOT##*.}"
@@ -54,9 +53,11 @@ new_world() {
   root="$w/root"
   home="$w/home"
   fakebin="$w/fakebin"
-  mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
+  mkdir -p "$fakebin"
   git init -q -b main "$root"
   git -C "$root" commit -q --allow-empty -m init
+  git -C "$root" worktree add -q -b fixture-home "$home"
+  mkdir -p "$home/state" "$home/data" "$home/config"
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 

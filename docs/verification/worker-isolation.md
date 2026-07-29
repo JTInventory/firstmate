@@ -3,7 +3,9 @@
 Audience: maintainer verification.
 
 This record contains reusable evidence for the guarantees in [`docs/worker-isolation.md`](../worker-isolation.md).
-Host for every capture below: Linux 6.18 (WSL2), tmux 3.6, verified 2026-07-26.
+The command/output blocks are maintained contract examples, not fresh captures
+of the current branch. The original host captures used Linux 6.18 (WSL2) and
+tmux 3.6 on 2026-07-26.
 Exact task chronology, branch names, temporary homes, and delivery transcripts remain in private reports or PR evidence.
 
 ## Launched-agent home declaration
@@ -14,11 +16,11 @@ fm_worker_launch_env_prefix crewmate demo-task /home/cap/firstmate; echo
 fm_worker_launch_env_prefix secondmate dom-x /home/cap/homes/dom; echo
 ```
 
-Observed output, with the final literal trailing space rendered as `<SPACE>`:
+Expected output, with the final literal trailing space rendered as `<SPACE>`:
 
 ```text
-FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='demo-task' FM_AGENT_OWNER_HOME='/home/cap/firstmate'<SPACE>
-FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-x' FM_AGENT_OWNER_HOME='/home/cap/homes/dom'<SPACE>
+exec <AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='demo-task' FM_AGENT_OWNER_HOME='/home/cap/firstmate'<SPACE>
+exec <AUTHORITY_FD>&-; FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-x' FM_AGENT_OWNER_HOME='/home/cap/homes/dom'<SPACE>
 ```
 
 A crewmate carries no home at all; a secondmate carries only its own.
@@ -46,11 +48,11 @@ Captured by driving `bin/fm-spawn.sh` against the fake-provider fixture used by 
 The operating home and repository root are elided as `<HOME>` and `<ROOT>`.
 
 ```text
-claude:   FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-claude' FM_AGENT_OWNER_HOME='<HOME>' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-claude/brief.md')"
-codex:    FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-codex' FM_AGENT_OWNER_HOME='<HOME>' codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '<HOME>/state/ev-codex.turn-ended'\"]" "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-codex/brief.md')"
-opencode: FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-opencode' FM_AGENT_OWNER_HOME='<HOME>' OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --prompt "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-opencode/brief.md')"
-pi:       FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-pi' FM_AGENT_OWNER_HOME='<HOME>' pi -e '<HOME>/state/ev-pi.pi-ext.ts' "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-pi/brief.md')"
-grok:     FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_CAPABILITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-grok' FM_AGENT_OWNER_HOME='<HOME>' grok --always-approve "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-grok/brief.md')"
+claude:   exec <AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-claude' FM_AGENT_OWNER_HOME='<HOME>' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-claude/brief.md')"
+codex:    exec <AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-codex' FM_AGENT_OWNER_HOME='<HOME>' codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '<HOME>/state/ev-codex.turn-ended'\"]" "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-codex/brief.md')"
+opencode: exec <AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-opencode' FM_AGENT_OWNER_HOME='<HOME>' OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --prompt "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-opencode/brief.md')"
+pi:       exec <AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-pi' FM_AGENT_OWNER_HOME='<HOME>' pi -e '<HOME>/state/ev-pi.pi-ext.ts' "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-pi/brief.md')"
+grok:     exec <AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-grok' FM_AGENT_OWNER_HOME='<HOME>' grok --always-approve "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-grok/brief.md')"
 ```
 
 The declaration precedes each adapter's own environment and flags, so an adapter cannot opt out of it.

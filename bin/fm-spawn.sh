@@ -1716,6 +1716,7 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   WORKER_HOME=$PROJ_ABS
   WORKER_ROLE=secondmate
+  LAUNCH="$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
 else
   WORKER_HOME=$(real_path_or_raw "$FM_HOME")
   WORKER_ROLE=crewmate

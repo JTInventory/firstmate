@@ -50,29 +50,55 @@ fm_session_parent_pid() {
   printf '%s\n' "$ppid"
 }
 
-fm_session_authority_capability_present() {
-  local capability=${FM_SESSION_AUTHORITY_CAPABILITY:-}
-  [ "${#capability}" -ge 32 ] || return 1
-  case "$capability" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  [ "$(printenv FM_SESSION_AUTHORITY_CAPABILITY 2>/dev/null)" = "$capability" ]
+fm_session_descriptor_identity() {
+  local pid=$1 fd=$2 value
+  if [ -e "/proc/$pid/fd/$fd" ]; then
+    value=$(readlink "/proc/$pid/fd/$fd" 2>/dev/null) || return 1
+  elif command -v lsof >/dev/null 2>&1; then
+    value=$(lsof -a -p "$pid" -d "$fd" -Fn 2>/dev/null \
+      | sed -n 's/^n//p' | head -n 1) || return 1
+  else
+    return 1
+  fi
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
 }
 
-fm_session_authority_token() {
-  local pid=$1 start=$2 identity=$3 owner=$4 home=$5 checkout=$6
+fm_session_authority_capability_present() {
+  local fd=${FM_SESSION_AUTHORITY_FD:-}
+  case "$fd" in ''|*[!0-9]*) return 1 ;; esac
+  FM_SESSION_AUTHORITY_FD_NUMBER=$fd node -e '
+const fs = require("fs");
+const fd = Number(process.env.FM_SESSION_AUTHORITY_FD_NUMBER);
+if (!Number.isInteger(fd) || fd < 0 || fs.fstatSync(fd).size < 32) process.exit(1);
+' >/dev/null 2>&1
+}
+
+fm_session_authority_hmac() {
+  local fd=${FM_SESSION_AUTHORITY_FD:-}
   fm_session_authority_capability_present || return 1
-  command -v node >/dev/null 2>&1 || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$pid" "$start" "$identity" "$owner" "$home" "$checkout" \
-    | node -e '
+  FM_SESSION_AUTHORITY_FD_NUMBER=$fd node -e '
 const crypto = require("crypto");
+const fs = require("fs");
+const fd = Number(process.env.FM_SESSION_AUTHORITY_FD_NUMBER);
+const size = fs.fstatSync(fd).size;
+const key = Buffer.alloc(size);
+if (fs.readSync(fd, key, 0, size, 0) !== size) process.exit(1);
 let data = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => data += chunk);
 process.stdin.on("end", () => {
-  const key = process.env.FM_SESSION_AUTHORITY_CAPABILITY;
-  if (typeof key !== "string" || key.length < 32) process.exit(1);
+  if (key.length < 32) process.exit(1);
   process.stdout.write(crypto.createHmac("sha256", key).update(data).digest("hex") + "\n");
 });'
+}
+
+fm_session_authority_token() {
+  local pid=$1 start=$2 identity=$3 owner=$4 home=$5 checkout=$6
+  command -v node >/dev/null 2>&1 || return 1
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$pid" "$start" "$identity" "$owner" "$home" "$checkout" \
+    | fm_session_authority_hmac
 }
 
 fm_session_authority_write_file() {
@@ -88,8 +114,8 @@ fm_session_authority_write_file() {
     "$pid" "$start" "$identity" "$token" "$owner" "$home" "$checkout" > "$file"
 }
 
-fm_session_authority_read() {
-  local file=$1 expected
+fm_session_authority_read_shape() {
+  local file=$1
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(wc -l < "$file" | tr -d ' ')" -eq 8 ] || return 1
   [ "$(sed -n '1p' "$file")" = version=2 ] || return 1
@@ -108,6 +134,11 @@ fm_session_authority_read() {
     && [ -n "$FM_SESSION_AUTHORITY_OWNER" ] \
     && [ -n "$FM_SESSION_AUTHORITY_HOME" ] \
     && [ -n "$FM_SESSION_AUTHORITY_CHECKOUT" ] || return 1
+}
+
+fm_session_authority_read() {
+  local file=$1 expected
+  fm_session_authority_read_shape "$file" || return 1
   expected=$(fm_session_authority_token \
     "$FM_SESSION_AUTHORITY_PID" "$FM_SESSION_AUTHORITY_START" \
     "$FM_SESSION_AUTHORITY_IDENTITY" "$FM_SESSION_AUTHORITY_OWNER" \
@@ -117,7 +148,7 @@ fm_session_authority_read() {
 
 fm_session_authority_process_state() {
   local file=$1 current
-  fm_session_authority_read "$file" || return 2
+  fm_session_authority_read_shape "$file" || return 2
   if ! kill -0 "$FM_SESSION_AUTHORITY_PID" 2>/dev/null; then
     return 1
   fi
@@ -187,12 +218,22 @@ fm_codex_thread_active() {
 }
 
 fm_session_lock_owner() {
-  local pid=$$
+  local pid=$$ parent fd=${FM_SESSION_AUTHORITY_FD:-} current target
   fm_session_authority_capability_present || return 1
+  target=$(fm_session_descriptor_identity "$pid" "$fd" 2>/dev/null || true)
+  if [ -n "$target" ]; then
+    while [ "$pid" -gt 1 ]; do
+      parent=$(fm_session_parent_pid "$pid") || return 1
+      [ "$parent" != "$pid" ] || return 1
+      current=$(fm_session_descriptor_identity "$parent" "$fd" 2>/dev/null || true)
+      [ "$current" = "$target" ] || break
+      pid=$parent
+    done
+  fi
   fm_session_process_start "$pid" >/dev/null || return 1
   fm_session_process_identity "$pid" >/dev/null || return 1
   if fm_codex_thread_active; then
-    printf '%s|codex:%s|capability\n' "$pid" "$CODEX_THREAD_ID"
+    printf '%s|codex:%s|descriptor\n' "$pid" "$CODEX_THREAD_ID"
     return
   fi
   printf '%s\n' "$pid"
@@ -215,7 +256,7 @@ fm_codex_owner_marker() {
   case "$marker" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   if [ "$rest" != "$marker" ]; then
     suffix=${rest#*|}
-    case "$suffix" in harness|fallback|capability) ;; *) return 1 ;; esac
+    case "$suffix" in harness|fallback|capability|descriptor) ;; *) return 1 ;; esac
   fi
   printf '%s\n' "$marker"
 }

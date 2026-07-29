@@ -87,6 +87,15 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+fm_test_session_authority_fd() {
+  local dir=$1 file="$1/.session-authority-key"
+  mkdir -p "$dir"
+  printf '%s' '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' > "$file"
+  exec {FM_SESSION_AUTHORITY_FD}<"$file"
+  export FM_SESSION_AUTHORITY_FD
+  rm -f "$file"
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

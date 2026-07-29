@@ -302,13 +302,17 @@ Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection
 ## Codex session lock lifecycle
 
 Codex primaries use the tracked `SessionStart` hook to claim their home's
-session lock before the first model turn. The structured owner combines the
-stable `CODEX_THREAD_ID` with a verified harness PID when one is visible.
-Later PID-isolated calls from the same thread preserve that owner; a different
-thread remains excluded.
+session lock before the first model turn. Launch the primary through
+`bin/fm-session-authority-exec.sh`, which creates an immediately unlinked,
+inherited descriptor capability before it executes the harness. The structured
+owner binds that descriptor's durable process chain to the exact home,
+checkout, process start, executable identity, and `CODEX_THREAD_ID`.
+Firstmate closes the descriptor before launching a crewmate; each secondmate
+receives a newly generated capability for its own home.
 
-The tracked `SessionEnd` hook releases only a regular, non-symlink lock in the
-same home whose structured thread marker exactly matches the ending session.
+The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose
+keyed authority is live, belongs to an ancestor of the hook, and has the exact
+ending session marker.
 It leaves numeric legacy locks and malformed, unreadable, differently owned,
 or concurrently busy locks untouched. Numeric lock files remain supported for
 other harnesses and older homes. `GROK_AGENT=1` takes precedence over an
@@ -325,6 +329,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_SESSION_AUTHORITY_FD= # inherited anonymous descriptor; set only by fm-session-authority-exec.sh
 FM_BACKEND=tmux          # runtime session-provider override for new spawns; herdr is experimental and opt-in
 FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3   # additional `treehouse return` retries after a matching transient git index.lock error; invalid values use 3
