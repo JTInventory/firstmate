@@ -3024,6 +3024,43 @@ SH
   pass "teardown removes safe poll artifacts and refuses quarantine-directory symlinks without traversal"
 }
 
+test_teardown_restores_refs_and_state_after_late_cleanup_failure() {
+  local dir fakebin rc before
+  dir=$(make_case teardown-rollback)
+  fakebin="$dir/fakebin"
+  git init -q -b main "$dir/project"
+  printf 'seed\n' > "$dir/project/file"
+  git -C "$dir/project" add file
+  git -C "$dir/project" commit -qm seed
+  before=$(git -C "$dir/project" rev-parse HEAD)
+  git -C "$dir/project" update-ref refs/firstmate/direct-pr/task-a/base "$before"
+  git -C "$dir/project" update-ref refs/firstmate/direct-pr/task-a/feature "$before"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    'window=orca:task-a' "worktree=$dir/missing-worktree" \
+    "project=$dir/project" 'harness=codex' 'kind=ship' 'task=task-a' \
+    "home=$dir/home" 'mode=direct-PR' 'backend=orca' \
+    'endpoint_generation=orca-task-a' 'yolo=off'
+  printf 'poll sentinel\n' > "$dir/home/state/task-a.pr-poll"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *task-a.pr-poll*) exit 1 ;; esac
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
+  touch "$dir/home/state/.last-watcher-beat"
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force >/dev/null 2>"$dir/teardown.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "late cleanup failure returned success"
+  [ -e "$dir/home/state/task-a.meta" ] \
+    && [ "$(cat "$dir/home/state/task-a.pr-poll")" = 'poll sentinel' ] \
+    || fail "late cleanup failure did not restore task state"
+  [ "$(git -C "$dir/project" rev-parse refs/firstmate/direct-pr/task-a/base)" = "$before" ] \
+    && [ "$(git -C "$dir/project" rev-parse refs/firstmate/direct-pr/task-a/feature)" = "$before" ] \
+    || fail "late cleanup failure did not restore direct-PR refs"
+  pass "ordinary teardown rolls back refs and state after late cleanup failure"
+}
+
 # The GitLab watch must follow a merge request exactly as the GitHub watch
 # follows a pull request, on any instance, and must never turn an unreadable
 # merge request into a merge. Its evidence against the public fixture project
@@ -3685,6 +3722,8 @@ test_expected_head_guard_and_prior_generation_replacement
 test_guarded_replacement_receipt_crash_recovery
 test_guarded_check_recovers_retirement_before_classification
 test_legacy_custom_check_registration_boundaries
+test_teardown_removes_poll_artifacts
+test_teardown_restores_refs_and_state_after_late_cleanup_failure
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only

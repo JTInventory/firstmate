@@ -43,6 +43,7 @@
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
 FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT"
+_FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fm_worker_shell_quote() {  # <text>
   printf "'"
@@ -156,6 +157,48 @@ fm_worker_secondmate_effective_scope_matches() {
   done
 }
 
+fm_worker_primary_authority_matches() {
+  local root home root_real home_real pid ppid env role task harness_pid= cwd
+  [ "${FM_AGENT_ROLE:-}" = primary ] || return 1
+  [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
+  root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  home=${FM_HOME:-$root}
+  root_real=$(fm_worker_canonical_path "$root") || return 1
+  home_real=$(fm_worker_canonical_path "$home") || return 1
+  [ -d "$home_real/state" ] || return 1
+  [ -d /proc ] || return 1
+  pid=$$
+  while [ "$pid" -gt 1 ] 2>/dev/null; do
+    env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+    task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+    if [ "$pid" != "$$" ]; then
+      case "$role" in crewmate|secondmate) return 1 ;; esac
+      [ -z "$task" ] || return 1
+    fi
+    if [ -z "$harness_pid" ]; then
+      case "$(cat "/proc/$pid/comm" 2>/dev/null || true) $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)" in
+        *claude*|*codex*|*opencode*|*grok*|*" pi "*) harness_pid=$pid ;;
+      esac
+    fi
+    ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null) || return 1
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    pid=$ppid
+  done
+  pid=${harness_pid:-$$}
+  cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null) || return 1
+  if [ "$cwd" != "$root_real" ]; then
+    [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
+    case "$home_real" in /tmp/*) ;; *) return 1 ;; esac
+  fi
+  git -C "$root_real" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  if [ "$(git -C "$root_real" rev-parse --git-dir 2>/dev/null)" != \
+    "$(git -C "$root_real" rev-parse --git-common-dir 2>/dev/null)" ]; then
+    [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
+    case "$home_real" in /tmp/*) ;; *) return 1 ;; esac
+  fi
+}
+
 # fm_worker_refuse_primary_operation <operation>
 # Fail closed with one actionable line when a declared task worker attempts an
 # operation only a home's primary may perform. Silent and successful for every
@@ -164,10 +207,10 @@ fm_worker_refuse_primary_operation() {
   local operation=$1
   case "${FM_AGENT_ROLE:-}" in
     primary)
-      if [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ]; then
+      if fm_worker_primary_authority_matches; then
         return 0
       fi
-      echo "error: $operation refused: primary identity declaration is incomplete" >&2
+      echo "error: $operation refused: primary identity is not bound to this process and checkout" >&2
       return 1
       ;;
     crewmate)

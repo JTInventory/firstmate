@@ -1821,7 +1821,7 @@ fm_backend_herdr_parse_target() {  # <target>
 }
 
 fm_backend_herdr_endpoint_generation() {
-  local target=$1 session pane pane_info tab tab_info workspace
+  local target=$1 session pane pane_info tab tab_info workspace generation
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
@@ -1833,8 +1833,22 @@ fm_backend_herdr_endpoint_generation() {
   [ "$(printf '%s' "$tab_info" | jq -r '.result.tab.tab_id // empty')" = "$tab" ] || return 1
   workspace=$(printf '%s' "$tab_info" | jq -r '.result.tab.workspace_id // empty') || return 1
   [ -n "$workspace" ] || return 1
-  printf '%s' "$session|$workspace|$tab|$pane" | cksum \
-    | awk '{printf "herdr-%s-%s", $1, $2}'
+  generation=$(printf '%s' "$pane_info" \
+    | jq -r '.result.pane.tokens.firstmate_endpoint_generation // empty' 2>/dev/null) || return 1
+  case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 1 ;; esac
+  printf '%s' "$generation"
+}
+
+fm_backend_herdr_bind_endpoint_generation() {
+  local target=$1 generation=$2 session pane live
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
+    --source firstmate --token "firstmate_endpoint_generation=$generation" \
+    >/dev/null 2>&1 || return 1
+  live=$(fm_backend_herdr_endpoint_generation "$target") || return 1
+  [ "$live" = "$generation" ]
 }
 
 fm_backend_herdr_target_ready() {  # <target>

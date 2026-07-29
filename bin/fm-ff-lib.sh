@@ -514,6 +514,39 @@ live_secondmate_meta_records() {
   done
 }
 
+fm_secondmate_lifecycle_preflight() {
+  local state=$1 registry=${2:-} meta id line home seen="" status=0
+  [ -d "$state" ] || return 0
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    if grep -q '^kind=secondmate$' "$meta" 2>/dev/null \
+      || { [ -n "$registry" ] && grep -qE "^- ${id}([[:space:]]|$)" "$registry" 2>/dev/null; }; then
+      if ! fm_secondmate_lifecycle_meta_read "$meta" "$id"; then
+        echo "secondmate $id: refused: ${FM_SECONDMATE_META_ERROR:-ambiguous lifecycle metadata}" >&2
+        status=1
+      fi
+    fi
+  done
+  [ -n "$registry" ] && [ -f "$registry" ] || return "$status"
+  while IFS= read -r line; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    id=$(printf '%s\n' "$line" | sed -n 's/^- \([^ ][^ ]*\) - .*/\1/p')
+    home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+    if [ -z "$id" ] || [ -z "$home" ] || printf '%s\n' "$seen" | grep -qxF "$id"; then
+      echo "secondmate ${id:-unknown}: refused: ambiguous registry lifecycle identity" >&2
+      status=1
+      continue
+    fi
+    seen="${seen}${seen:+$'\n'}$id"
+    if [ ! -e "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ]; then
+      echo "secondmate $id: refused: registry entry has no strict live lifecycle metadata" >&2
+      status=1
+    fi
+  done < "$registry"
+  return "$status"
+}
+
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped
@@ -799,6 +832,7 @@ sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md}
   local id home window meta endpoint_generation provider_identity
   [ -d "$state" ] || return 0
+  fm_secondmate_lifecycle_preflight "$state" "$registry" || return 1
   while IFS='|' read -r id home window meta endpoint_generation provider_identity; do
     process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" \
       "$endpoint_generation" "$state" "$provider_identity" || return 1

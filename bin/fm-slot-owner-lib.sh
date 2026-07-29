@@ -622,7 +622,9 @@ fm_slot_stamp_relinquish() {  # <worktree> <task-id> <home> <verdict>
      && fm_slot_owner_record_file "$legacy" \
      && [ "$FM_SLOT_STAMP_TASK" = "$self" ] \
      && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home"; then
+    fm_slot_stamp_clear_exact "$wt" "$self" "$home" || return 1
     rm -f "$legacy" "$claim"
+    return 0
   fi
   fm_slot_stamp_clear_exact "$wt" "$self" "$home"
   return 0

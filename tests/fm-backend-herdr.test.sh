@@ -1868,6 +1868,36 @@ test_parse_target() {
   pass "fm_backend_herdr_parse_target: splits '<session>:<pane_id>' on the FIRST colon (pane_id itself contains one)"
 }
 
+test_endpoint_generation_is_provider_bound_and_recycle_safe() {
+  local token= out
+  fm_backend_herdr_cli() {
+    local _session=$1
+    shift
+    case "$1 $2" in
+      "pane report-metadata")
+        token=${*: -1}
+        token=${token#*=}
+        ;;
+      "pane get")
+        printf '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","tokens":{"firstmate_endpoint_generation":"%s"}}}}\n' "$token"
+        ;;
+      "tab get")
+        printf '{"result":{"tab":{"tab_id":"w1:t2","workspace_id":"w1"}}}\n'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  fm_backend_herdr_bind_endpoint_generation default:w1:p2 herdr-nonce-a \
+    || fail "provider endpoint generation binding failed"
+  out=$(fm_backend_herdr_endpoint_generation default:w1:p2)
+  [ "$out" = herdr-nonce-a ] || fail "provider generation did not round-trip"
+  token=
+  if fm_backend_herdr_endpoint_generation default:w1:p2 >/dev/null 2>&1; then
+    fail "recycled provider ids without the creation token retained generation identity"
+  fi
+  pass "Herdr endpoint generation uses a provider-bound creation nonce"
+}
+
 test_normalize_key() {
   ( . "$ROOT/bin/backends/herdr.sh"
     [ "$(fm_backend_herdr_normalize_key Enter)" = enter ] || exit 1
@@ -3617,6 +3647,7 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
+test_endpoint_generation_is_provider_bound_and_recycle_safe
 test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug

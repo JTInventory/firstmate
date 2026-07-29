@@ -69,6 +69,10 @@ new_world() {
   printf 'r1\n' > "$w/main/README.md"
   mkdir -p "$w/main/bin" "$w/main/.agents/skills"
   printf 'echo a\n' > "$w/main/bin/tool.sh"
+  printf 'true\n' > "$w/main/bin/fm-worker-isolation-lib.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$w/main/bin/fm-isolation-sweep.sh"
+  chmod +x "$w/main/bin/fm-isolation-sweep.sh"
+  printf 'fm_secondmate_lifecycle_identity_matches() { return 0; }\n' > "$w/main/bin/fm-ff-lib.sh"
   printf 's1\n' > "$w/main/.agents/skills/note.md"
   git -C "$w/main" add -A
   git -C "$w/main" commit -qm c1
@@ -298,6 +302,15 @@ if [ "${1:-}" = show-options ]; then
   done
   printf 'endpoint-%s\n' "${target##*:fm-}"
 fi
+if [ "${1:-}" = new-window ]; then
+  printf '@9\n'
+fi
+if [ "${1:-}" = display-message ]; then
+  case "${*: -1}" in
+    '#{window_name}') printf 'fm-sm\n' ;;
+    '#{pane_id}') printf '%%9\n' ;;
+  esac
+fi
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -510,7 +523,7 @@ SH
 }
 
 test_bootstrap_refuses_ambiguous_lifecycle_metadata() {
-  local w c1 before fakebin out
+  local w c1 before fakebin out rc
   w=$(new_world boot-ambiguous)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-ambiguous "$c1"
@@ -519,9 +532,11 @@ test_bootstrap_refuses_ambiguous_lifecycle_metadata() {
   printf 'endpoint_generation=recycled\n' >> "$w/home/state/sm-ambiguous.meta"
   fakebin=$(make_fake_toolchain "$w")
 
+  rc=0
   out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
-    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>&1) || rc=$?
 
+  [ "$rc" -ne 0 ] || fail "bootstrap accepted ambiguous lifecycle metadata"
   [ "$(head_of "$w/sm-ambiguous")" = "$before" ] \
     || fail "bootstrap advanced a home with ambiguous lifecycle metadata"
   assert_contains "$out" "ambiguous lifecycle metadata" \
@@ -531,7 +546,7 @@ test_bootstrap_refuses_ambiguous_lifecycle_metadata() {
 
 # --- T11: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
-  local w c1 c2 fakebin
+  local w c1 c2 fakebin rc
   w=$(new_world spawn-ff)
   c1=$(head_of "$w/main")
   git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
@@ -542,22 +557,17 @@ test_spawn_fast_forwards_before_launch() {
   c2=$(head_of "$w/main")
   [ "$(head_of "$w/sm")" = "$c1" ] || fail "precondition: home should start behind the primary"
 
-  # tmux stub: accept every subcommand, print nothing (so no window pre-exists).
-  fakebin="$w/fakebin"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fakebin=$(make_fake_toolchain "$w")
 
+  rc=0
   env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>&1 || true
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>&1 || rc=$?
 
+  [ "$rc" -eq 0 ] || fail "capability-complete secondmate spawn failed"
   [ "$(head_of "$w/sm")" = "$c2" ] \
     || fail "spawn did not fast-forward the secondmate worktree to the primary's HEAD"
   pass "T10 spawn fast-forwards a secondmate worktree to the primary's local HEAD before launch"

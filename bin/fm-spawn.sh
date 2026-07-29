@@ -1465,9 +1465,12 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     WID="$T"
-    ENDPOINT_GENERATION=$(printf '%s' \
-      "$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID" \
-      | cksum | awk '{printf "herdr-%s-%s", $1, $2}') || exit 1
+    ENDPOINT_GENERATION="herdr-$(date +%s)-$$-$RANDOM"
+    if ! fm_backend_herdr_bind_endpoint_generation "$T" "$ENDPOINT_GENERATION"; then
+      cleanup_spawn_window "$WID"
+      echo "error: Herdr failed to bind a unique endpoint generation for $T" >&2
+      exit 1
+    fi
     ;;
 esac
 spawn_settle_path() {  # <target>

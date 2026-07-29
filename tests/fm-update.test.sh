@@ -297,7 +297,7 @@ test_idempotent_already_current() {
 # Asserts: reg1 is refused and is NOT nudged (no live metadata); sm1 advances,
 # is processed once, and IS nudged; the firstmate repo is never re-processed.
 test_registry_backstop_dedup_and_self_exclusion() {
-  local w out count
+  local w out rc before_main before_sm
   w=$(new_world t7)
   add_sm "$w" sm1
   git -C "$w/main" worktree add -q --detach "$w/reg1" main
@@ -308,23 +308,20 @@ test_registry_backstop_dedup_and_self_exclusion() {
     printf -- '- selfish - self (home: %s/main; scope: x; projects: p; added 2026-06-23)\n' "$w"
   } > "$w/home/data/secondmates.md"
   bump_origin "$w" instr
+  before_main=$(git -C "$w/main" rev-parse HEAD)
+  before_sm=$(git -C "$w/sm1" rev-parse HEAD)
 
-  out=$(run_update "$w")
+  rc=0
+  out=$(run_update "$w" 2>&1) || rc=$?
 
+  [ "$rc" -ne 0 ] || fail "registry-only lifecycle ambiguity returned success"
   assert_contains "$out" "secondmate reg1: refused: registry entry has no strict live lifecycle metadata" \
     "registry-only secondmate was not refused"
-  assert_contains "$out" "secondmate sm1: updated " "meta+registry secondmate fast-forwarded"
-  count=$(printf '%s\n' "$out" | grep -c '^secondmate sm1:' || true)
-  [ "$count" -eq 1 ] || fail "secondmate sm1 processed $count times, expected 1 (dedup across meta+registry)"
-  assert_not_contains "$out" "secondmate selfish" "firstmate repo re-processed as its own secondmate"
-  # sm1 has live metadata, so it is nudged; reg1 has none, so it is not. Pin the
-  # nudge line exactly and confirm reg1 is absent from it (not from the whole
-  # output, where 'secondmate reg1: updated' legitimately appears).
-  local nudge_line
-  nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
-  assert_contains "$nudge_line" "main:fm-sm1" "live-meta secondmate is nudged"
-  assert_not_contains "$nudge_line" "reg1" "registry-only secondmate without live metadata is not nudged"
-  pass "T7 registry-only ambiguity refuses while live metadata dedups safely"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before_main" ] \
+    || fail "primary advanced before lifecycle preflight refused"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before_sm" ] \
+    || fail "live secondmate advanced before registry ambiguity refused"
+  pass "T7 registry-only ambiguity refuses before every update mutation"
 }
 
 # --- T9: firstmate repo on a feature branch is skipped ---------------------

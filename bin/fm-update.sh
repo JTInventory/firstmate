@@ -93,6 +93,11 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
+fm_secondmate_lifecycle_preflight "$STATE" "$SECONDMATES_MD" || {
+  echo "REFUSED: secondmate lifecycle preflight failed; update made no changes" >&2
+  exit 1
+}
+
 update_live_secondmate_identity_matches() {
   local id=$1 expected=$2 target=$3 endpoint_generation=$4 provider_identity=${5:-}
   fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$expected" \
@@ -289,25 +294,6 @@ fm_ff_after_target_update() {
 # authoritative home= path.
 sweep_live_secondmate_metas "$STATE" origin no
 
-# Registry backstop: a secondmate registered in data/secondmates.md but without
-# a live meta (e.g. between restarts) is still its persistent on-disk home.
-if [ -f "$SECONDMATES_MD" ]; then
-  while IFS= read -r line; do
-    case "$line" in
-      "- "*) ;;
-      *) continue ;;
-    esac
-    id=$(printf '%s\n' "$line" | sed -n 's/^- \([^ ][^ ]*\) - .*/\1/p')
-    home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
-    [ "$(resolve_path "$home")" != "$(resolve_path "$FM_ROOT")" ] || continue
-    [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || continue
-    if ! validate_secondmate_home "$id" "$home"; then
-      echo "secondmate $id: skipped: unsafe home: $VALIDATION_ERROR"
-      continue
-    fi
-    echo "secondmate $id: refused: registry entry has no strict live lifecycle metadata"
-  done < "$SECONDMATES_MD"
-fi
 unset -f fm_ff_after_target_update
 
 # --- caller action summary -------------------------------------------------

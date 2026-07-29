@@ -323,6 +323,22 @@ test_undeclared_identity_has_no_primary_mutation_authority() {
   pass "undeclared and legacy identities never inherit primary mutation authority"
 }
 
+test_primary_role_cannot_override_worker_ancestry() {
+  local primary_home out status
+  primary_home=$(make_primary_home "$TMP_ROOT/asserted-primary")
+  status=0
+  out=$(FM_AGENT_ROLE=crewmate FM_AGENT_TASK=worker-a \
+    FM_AGENT_OWNER_HOME="$primary_home" bash -c '
+      cd "$1"
+      FM_AGENT_ROLE=primary FM_AGENT_TASK= FM_AGENT_OWNER_HOME= \
+        bash -c ". \"$2/bin/fm-worker-isolation-lib.sh\"; fm_worker_refuse_primary_operation lock"
+    ' _ "$primary_home" "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "a worker ancestor must defeat a self-asserted primary role"
+  assert_contains "$out" "primary identity is not bound" \
+    "self-asserted primary refusal was not actionable"
+  pass "primary authority is bound to process ancestry and checkout scope"
+}
+
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
   local out
   if [ ! -x "$NUDGE" ]; then
@@ -1927,6 +1943,7 @@ test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
 test_undeclared_identity_has_no_primary_mutation_authority
+test_primary_role_cannot_override_worker_ancestry
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down

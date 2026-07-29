@@ -115,6 +115,7 @@ TEARDOWN_RELINQUISH_IDS=()
 TEARDOWN_RELINQUISH_HOMES=()
 TEARDOWN_RELINQUISH_VERDICTS=()
 TEARDOWN_TXN_DIR="$STATE/.teardown-transactions/$ID"
+TEARDOWN_TXN_COMMITTED=0
 PARENT_PENDING_OPEN=0
 TOP_HOME_ALREADY_RETURNED=0
 
@@ -167,6 +168,9 @@ teardown_admission_lock_acquire() {
 
 teardown_locks_release() {
   local status=$? i
+  if [ "$TEARDOWN_TXN_COMMITTED" -ne 1 ]; then
+    teardown_restore_transaction_evidence >/dev/null 2>&1 || true
+  fi
   for ((i=${#TEARDOWN_LOCKS[@]} - 1; i >= 0; i--)); do
     fm_lock_release "${TEARDOWN_LOCKS[$i]}" || true
   done
@@ -1374,9 +1378,68 @@ teardown_stage_hierarchy_evidence() {
     cp -p "$HOME_PATH/.firstmate-owner" \
       "$TEARDOWN_TXN_DIR/evidence/top/firstmate-owner" || return 1
   fi
-  teardown_stage_evidence_home "$HOME_PATH" home || return 1
+  if [ "$KIND" = secondmate ]; then
+    teardown_stage_evidence_home "$HOME_PATH" home || return 1
+  fi
   mv "$TEARDOWN_TXN_DIR" "$parent/$ID" || return 1
   TEARDOWN_TXN_DIR="$parent/$ID"
+}
+
+teardown_stage_transaction_evidence() {
+  local path index=0 ref oid
+  teardown_stage_hierarchy_evidence || return 1
+  mkdir -p "$TEARDOWN_TXN_DIR/evidence/ownership" \
+    "$TEARDOWN_TXN_DIR/evidence/direct-refs" || return 1
+  for path in \
+    "$(fm_slot_stamp_path "$WT" 2>/dev/null || true)" \
+    "$(fm_slot_return_claim_path "$WT" 2>/dev/null || true)" \
+    "$(fm_slot_return_legacy_path "$WT" 2>/dev/null || true)"; do
+    [ -n "$path" ] || continue
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    printf '%s\n' "$path" > "$TEARDOWN_TXN_DIR/evidence/ownership/$index.path" || return 1
+    cp -a "$path" "$TEARDOWN_TXN_DIR/evidence/ownership/$index.value" || return 1
+    index=$((index + 1))
+  done
+  [ -n "$DIRECT_PR_REF_GIT_DIR" ] || return 0
+  for ref in "refs/firstmate/direct-pr/$ID/base" "refs/firstmate/direct-pr/$ID/feature"; do
+    oid=$(git --git-dir="$DIRECT_PR_REF_GIT_DIR" rev-parse --verify "$ref" 2>/dev/null || true)
+    [ -n "$oid" ] || continue
+    printf '%s\n%s\n' "$ref" "$oid" \
+      > "$TEARDOWN_TXN_DIR/evidence/direct-refs/$index" || return 1
+    index=$((index + 1))
+  done
+  printf '%s\n' "$DIRECT_PR_REF_GIT_DIR" \
+    > "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" || return 1
+}
+
+teardown_restore_transaction_evidence() {
+  local top source item path value git_dir ref oid
+  [ -d "$TEARDOWN_TXN_DIR/evidence" ] || return 0
+  top="$TEARDOWN_TXN_DIR/evidence/top"
+  source=$(cat "$top/source" 2>/dev/null || true)
+  if [ -n "$source" ]; then
+    mkdir -p "$(dirname "$source")" || return 1
+    for item in "$top"/"$ID".*; do
+      [ -f "$item" ] || continue
+      cp -p "$item" "$(dirname "$source")/$(basename "$item")" || return 1
+    done
+  fi
+  for item in "$TEARDOWN_TXN_DIR/evidence/ownership/"*.path; do
+    [ -f "$item" ] || continue
+    path=$(cat "$item") || return 1
+    value="${item%.path}.value"
+    mkdir -p "$(dirname "$path")" || return 1
+    rm -f "$path" || return 1
+    cp -a "$value" "$path" || return 1
+  done
+  git_dir=$(cat "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" 2>/dev/null || true)
+  [ -n "$git_dir" ] || return 0
+  for item in "$TEARDOWN_TXN_DIR/evidence/direct-refs/"[0-9]*; do
+    [ -f "$item" ] || continue
+    ref=$(sed -n '1p' "$item")
+    oid=$(sed -n '2p' "$item")
+    git --git-dir="$git_dir" update-ref "$ref" "$oid" || return 1
+  done
 }
 
 validate_firstmate_home_children_removal() {
@@ -1736,6 +1799,10 @@ teardown_load_staged_return_claims || {
   echo "REFUSED: staged teardown return claims are ambiguous" >&2
   exit 1
 }
+teardown_stage_transaction_evidence || {
+  echo "REFUSED: could not stage recoverable teardown evidence" >&2
+  exit 1
+}
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
@@ -1882,6 +1949,7 @@ if [ -n "${TOP_SLOT_RETAIN_VERDICT:-}" ]; then
   fm_slot_stamp_relinquish "$WT" "$ID" "$FM_HOME" "$TOP_SLOT_RETAIN_VERDICT" || exit 1
 fi
 teardown_reconcile_staged_returns
+TEARDOWN_TXN_COMMITTED=1
 rm -rf -- "$TEARDOWN_TXN_DIR"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
