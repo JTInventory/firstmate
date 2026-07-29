@@ -228,11 +228,12 @@ fm_worker_primary_authority_matches() {
   fi
   pid=$$
   while :; do
+    [ "$pid" -gt 1 ] || break
     env=$(fm_worker_process_environment "$pid") || return 1
     if printf '%s\n' "$env" | grep -Eq '(^|[[:space:]])FM_AGENT_ROLE=(crewmate|secondmate)($|[[:space:]])'; then
       return 1
     fi
-    [ "$pid" != "$stop_pid" ] && [ "$pid" -gt 1 ] || break
+    [ "$pid" != "$stop_pid" ] || break
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
     case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
     [ "$ppid" != "$pid" ] || return 1

@@ -461,7 +461,7 @@ test_procargs2_parser_separates_argv_and_environment() {
   local valid malformed out status=0
   valid="$TMP_ROOT/procargs-valid.bin"
   malformed="$TMP_ROOT/procargs-malformed.bin"
-  printf '\002\000\000\000/bin/bash\000\000bash\000script.sh\000FM_AGENT_ROLE=crewmate\000X=1\000' \
+  printf '\003\000\000\000/bin/bash\000\000bash\000\000\000FM_AGENT_ROLE=crewmate\000X=1\000' \
     > "$valid"
   printf '\001\000\000\000/bin/bash\000bash\000not-an-environment-record\000' \
     > "$malformed"
@@ -474,7 +474,7 @@ test_procargs2_parser_separates_argv_and_environment() {
       "${FM_PROCARGS_ENV[0]}" "${FM_PROCARGS_ENV[1]}"
   ' _ "$ROOT" "$valid") || status=$?
   expect_code 0 "$status" "valid procargs2 fixture must parse"
-  [ "$out" = "bash script.sh|FM_AGENT_ROLE=crewmate|X=1" ] \
+  [ "$out" = "bash  |FM_AGENT_ROLE=crewmate|X=1" ] \
     || fail "procargs2 argv/environment boundary was wrong: $out"
   if bash -c '
     . "$1/bin/fm-procargs-lib.sh"

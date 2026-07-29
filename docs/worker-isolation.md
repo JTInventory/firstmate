@@ -85,7 +85,9 @@ A tmux target is resolved to its stable window id by exact enumeration before an
 `display-message` given a window name it cannot find silently answers for the *active client's* window instead, so a task whose window name was lost or auto-renamed would hand back firstmate's own pane, whose working directory is the primary checkout - a healthy worker reported as collapsed.
 No exact match reports `unknown`, which is why a caller must never re-derive the pane pid from a name itself.
 
-A caller that asks about many tasks passes one process index built from a single `/proc` walk.
+A caller that asks about many tasks passes one process index built from a single `/proc` walk on Linux.
+On macOS it enumerates processes with `ps` and reads each candidate through `kern.procargs2`.
+If either platform cannot provide complete authoritative identity evidence, discovery fails closed instead of treating missing fields as proof.
 Asking per task instead re-walks every process for every task, and the resume sweep runs on the session-start critical path over a home that has held seventeen concurrent tasks.
 
 Reading another process's environment needs care that is easy to get wrong.

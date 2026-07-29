@@ -81,6 +81,31 @@ trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 fm_lock_acquire_wait "$CLAIM_LOCK"
 CLAIM_LOCK_HELD=1
+AUTH_TXN="$STATE/.session-authority-transaction"
+if [ -d "$AUTH_TXN" ] && [ ! -L "$AUTH_TXN" ]; then
+  [ -f "$AUTH_TXN/ready" ] && [ ! -L "$AUTH_TXN/ready" ] || {
+    echo "error: session authority transaction is incomplete; operate read-only until resolved" >&2
+    exit 1
+  }
+  if [ -f "$AUTH_TXN/committed" ] && [ ! -L "$AUTH_TXN/committed" ]; then
+    rm -rf -- "$AUTH_TXN"
+  else
+    if [ -f "$AUTH_TXN/old-lock" ]; then
+      cp -p "$AUTH_TXN/old-lock" "$LOCK"
+    else
+      rm -f "$LOCK"
+    fi
+    if [ -f "$AUTH_TXN/old-binding" ]; then
+      cp -p "$AUTH_TXN/old-binding" "$STATE/.primary-checkout"
+    else
+      rm -f "$STATE/.primary-checkout"
+    fi
+    rm -rf -- "$AUTH_TXN"
+  fi
+elif [ -e "$AUTH_TXN" ] || [ -L "$AUTH_TXN" ]; then
+  echo "error: session authority transaction is ambiguous; operate read-only until resolved" >&2
+  exit 1
+fi
 
 if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   if [ ! -f "$LOCK" ] || [ -L "$LOCK" ]; then
@@ -161,6 +186,14 @@ if ! printf '%s\n' "$ROOT_REAL" > "$BINDING_TMP" \
   echo "error: cannot bind the session lock to its primary checkout" >&2
   exit 1
 fi
+AUTH_TXN_TMP=$(mktemp -d "$STATE/.session-authority-transaction.XXXXXX") || exit 1
+[ "$OLD_LOCK_PRESENT" -eq 0 ] || cp -p "$LOCK" "$AUTH_TXN_TMP/old-lock" || exit 1
+[ "$OLD_BINDING_PRESENT" -eq 0 ] || cp -p "$BINDING" "$AUTH_TXN_TMP/old-binding" || exit 1
+printf '%s\n' ready > "$AUTH_TXN_TMP/ready" && chmod 600 "$AUTH_TXN_TMP/ready" \
+  && mv "$AUTH_TXN_TMP" "$AUTH_TXN" || {
+  rm -rf -- "$AUTH_TXN_TMP"
+  exit 1
+}
 if ! mv "$BINDING_TMP" "$BINDING"; then
   rm -f "$BINDING_TMP" "$LOCK_TMP"
   echo "error: cannot bind the session lock to its primary checkout" >&2
@@ -181,6 +214,17 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+AUTH_COMMIT_TMP=$(mktemp "$AUTH_TXN/.committed.XXXXXX") || {
+  restore_session_authority || true
+  exit 1
+}
+printf '%s\n' "$owner" > "$AUTH_COMMIT_TMP" && chmod 600 "$AUTH_COMMIT_TMP" \
+  && mv "$AUTH_COMMIT_TMP" "$AUTH_TXN/committed" || {
+  rm -f "$AUTH_COMMIT_TMP"
+  restore_session_authority || true
+  exit 1
+}
+rm -rf -- "$AUTH_TXN"
 release_claim_lock
 case "$owner" in
   *'|codex:'*) echo "lock acquired: Codex session owner $owner" ;;

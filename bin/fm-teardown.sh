@@ -161,7 +161,7 @@ teardown_locks_release() {
     if ! teardown_transaction_crossed_irreversible_boundary; then
       teardown_restore_transaction_evidence >/dev/null 2>&1 || true
     elif ! teardown_transaction_has_committed_return; then
-      teardown_restore_top_state_evidence >/dev/null 2>&1 || true
+      teardown_restore_transaction_evidence >/dev/null 2>&1 || true
     fi
   fi
   for ((i=${#TEARDOWN_LOCKS[@]} - 1; i >= 0; i--)); do
@@ -174,10 +174,27 @@ teardown_locks_release() {
 }
 
 teardown_transaction_crossed_irreversible_boundary() {
-  local item
-  for item in "$TEARDOWN_TXN_DIR/closed-endpoints/"* \
-    "$TEARDOWN_TXN_DIR/committed-return-claims/"*; do
-    [ -f "$item" ] && [ ! -L "$item" ] && return 0
+  local item backend target generation claim legacy key
+  for item in "$TEARDOWN_TXN_DIR/closed-endpoints/"*; do
+    [ -f "$item" ] && [ ! -L "$item" ] || continue
+    [ "$(wc -l < "$item" | tr -d ' ')" -eq 3 ] || return 1
+    backend=$(sed -n '1p' "$item")
+    target=$(sed -n '2p' "$item")
+    generation=$(sed -n '3p' "$item")
+    key=$(printf '%s' "$backend|$target|$generation" \
+      | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    [ "$item" = "$TEARDOWN_TXN_DIR/closed-endpoints/$key" ] || return 1
+    return 0
+  done
+  for item in "$TEARDOWN_TXN_DIR/committed-return-claims/"*; do
+    [ -f "$item" ] && [ ! -L "$item" ] || continue
+    [ "$(wc -l < "$item" | tr -d ' ')" -eq 2 ] || return 1
+    claim=$(sed -n '1p' "$item")
+    legacy=$(sed -n '2p' "$item")
+    case "$claim:$legacy" in /*:/*) ;; *) return 1 ;; esac
+    key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    [ "$item" = "$TEARDOWN_TXN_DIR/committed-return-claims/$key" ] || return 1
+    return 0
   done
   return 1
 }
@@ -288,6 +305,23 @@ teardown_restore_transaction_evidence() {
     mkdir -p "$(dirname "$path")" || return 1
     [ -e "$path" ] || [ -L "$path" ] || cp -p "$value" "$path" || return 1
   done
+  for item in "$TEARDOWN_TXN_DIR/evidence/pending/"*.path; do
+    [ -f "$item" ] || continue
+    path=$(cat "$item") || return 1
+    value="${item%.path}.value"
+    rm -rf -- "$path" || return 1
+    [ -e "$value" ] || [ -L "$value" ] || continue
+    mkdir -p "$(dirname "$path")" || return 1
+    cp -a "$value" "$path" || return 1
+  done
+  while IFS= read -r item; do
+    path=$(cat "$item") || return 1
+    value="${item%.pending-path}.pending-value"
+    rm -rf -- "$path" || return 1
+    [ -e "$value" ] || [ -L "$value" ] || continue
+    mkdir -p "$(dirname "$path")" || return 1
+    cp -a "$value" "$path" || return 1
+  done < <(find "$TEARDOWN_TXN_DIR/evidence" -type f -name '*.pending-path' -print 2>/dev/null)
   git_dir=$(cat "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" 2>/dev/null || true)
   if [ -n "$git_dir" ]; then
     for item in "$TEARDOWN_TXN_DIR/evidence/direct-refs/"[0-9]*; do
@@ -782,6 +816,11 @@ teardown_treehouse_return() {
     stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
     if [ "$staged" -eq 1 ] && [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
       teardown_stage_return_claim_record "$claim" "$legacy" || return 1
+      if teardown_return_transaction_is_committed "$claim" "$legacy"; then
+        TEARDOWN_RETURN_CLAIMS+=("$claim")
+        TEARDOWN_RETURN_LEGACIES+=("$legacy")
+        return 0
+      fi
     fi
   fi
   while :; do
@@ -1622,8 +1661,18 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
 }
 
 teardown_stage_evidence_home() {
-  local home=$1 prefix=$2 meta child_id child_kind child_home index=0 dest state_entry
+  local home=$1 prefix=$2 meta child_id child_kind child_home index=0 dest state_entry pending
   [ -d "$home/state" ] || return 0
+  dest="$TEARDOWN_TXN_DIR/evidence/$prefix/pending"
+  mkdir -p "$dest" || return 1
+  for pending in "$home/state/pending-replies" "$home/state/pending-reply-history"; do
+    printf '%s\n' "$pending" > "$dest/$index.pending-path" || return 1
+    if [ -e "$pending" ] || [ -L "$pending" ]; then
+      cp -a "$pending" "$dest/$index.pending-value" || return 1
+    fi
+    index=$((index + 1))
+  done
+  index=0
   for meta in "$home/state"/*.meta; do
     [ -e "$meta" ] || continue
     child_id=$(basename "$meta" .meta)
@@ -1743,7 +1792,8 @@ teardown_stage_transaction_evidence() {
       > "$TEARDOWN_TXN_DIR/evidence/direct-refs/git-dir" || return 1
   fi
   mkdir -p "$TEARDOWN_TXN_DIR/evidence/quarantine" \
-    "$TEARDOWN_TXN_DIR/evidence/registry" || return 1
+    "$TEARDOWN_TXN_DIR/evidence/registry" \
+    "$TEARDOWN_TXN_DIR/evidence/pending" || return 1
   teardown_persist_release_verdicts || return 1
   for item in "$STATE/.pr-check-quarantine/$ID".*; do
     [ -f "$item" ] && [ ! -L "$item" ] || continue
@@ -1755,6 +1805,14 @@ teardown_stage_transaction_evidence() {
     printf '%s\n' "$SECONDMATE_REG" > "$TEARDOWN_TXN_DIR/evidence/registry/path" || return 1
     cp -p "$SECONDMATE_REG" "$TEARDOWN_TXN_DIR/evidence/registry/original" || return 1
   fi
+  index=0
+  for item in "$STATE/pending-replies" "$STATE/pending-reply-history"; do
+    printf '%s\n' "$item" > "$TEARDOWN_TXN_DIR/evidence/pending/$index.path" || return 1
+    if [ -e "$item" ] || [ -L "$item" ]; then
+      cp -a "$item" "$TEARDOWN_TXN_DIR/evidence/pending/$index.value" || return 1
+    fi
+    index=$((index + 1))
+  done
   active_tmp=$(mktemp "$TEARDOWN_TXN_DIR/.active.XXXXXX") || return 1
   printf '%s\n%s\n' "$ID" "$META_IDENTITY" > "$active_tmp" \
     && chmod 600 "$active_tmp" \

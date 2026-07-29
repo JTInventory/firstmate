@@ -246,6 +246,11 @@ case "${1:-}" in
     ;;
 esac
 
+while IFS= read -r FM_UPDATE_INITIAL_LOCK; do
+  [ -n "$FM_UPDATE_INITIAL_LOCK" ] || continue
+  fm_lifecycle_admission_adopt_legacy_update_reexec \
+    "$FM_UPDATE_INITIAL_LOCK" "$FM_ROOT/bin/fm-update.sh" || true
+done < <(fm_spawn_admission_lock_paths "$STATE")
 fm_lifecycle_admission_acquire FM_UPDATE_FLEET_LOCKS \
   "$STATE" "$FM_HOME" "${BASHPID:-$$}" || {
   echo "REFUSED: fleet lifecycle serialization is busy; update made no changes" >&2

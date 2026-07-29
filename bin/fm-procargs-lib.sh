@@ -5,7 +5,7 @@ fm_procargs2_dump() {
 }
 
 fm_procargs2_read() {
-  local pid=$1 argc token saw_exec=0 argv_count=0
+  local pid=$1 argc token saw_exec=0 argv_started=0 argv_count=0
   local -a tokens=()
   FM_PROCARGS_ARGV=()
   FM_PROCARGS_ENV=()
@@ -25,7 +25,10 @@ fm_procargs2_read() {
       continue
     fi
     if [ "$argv_count" -lt "$argc" ]; then
-      [ -n "$token" ] || continue
+      if [ "$argv_started" -eq 0 ]; then
+        [ -n "$token" ] || continue
+        argv_started=1
+      fi
       FM_PROCARGS_ARGV+=("$token")
       argv_count=$((argv_count + 1))
       continue
