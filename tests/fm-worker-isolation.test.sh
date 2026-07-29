@@ -279,7 +279,8 @@ test_secondmate_child_receives_only_its_own_home() {
   assert_not_contains "$expected" "FM_ROOT_OVERRIDE='" \
     "secondmate declaration passed an inherited root override through"
   ticket_line=$(grep -n 'fm_session_enrollment_ticket_write' "$SPAWN" | tail -1 | cut -d: -f1)
-  wrapper_line=$(grep -n 'LAUNCH="$WORKER_ENV_PREFIX$(shell_quote' "$SPAWN" | tail -1 | cut -d: -f1)
+  wrapper_line=$(grep -n 'LAUNCH="${WORKER_ENV_PREFIX}FM_SESSION_ENROLLMENT_CLAIM=' \
+    "$SPAWN" | tail -1 | cut -d: -f1)
   [ -n "$ticket_line" ] && [ -n "$wrapper_line" ] && [ "$ticket_line" -lt "$wrapper_line" ] \
     || fail "secondmate launch did not issue enrollment before applying role and home to the wrapper"
   wait_line=$(grep -n 'fm_session_enrollment_ticket_wait_accepted' "$SPAWN" | tail -1 | cut -d: -f1)
@@ -800,7 +801,7 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
 }
 
 issue_secondmate_enrollment() {
-  local issuer=$1 home=$2 task=$3 owner ready release attempts=0
+  local issuer=$1 home=$2 task=$3 owner ready release claim_file attempts=0
   owner=$(cat "$issuer/state/.lock") || return 1
   printf '%s\n' "$ROOT" > "$issuer/state/.primary-checkout" || return 1
   . "$ROOT/bin/fm-session-lock-lib.sh"
@@ -808,6 +809,7 @@ issue_secondmate_enrollment() {
     "$issuer/state/.session-authority" "$$" "$owner" "$issuer" "$ROOT" || return 1
   ready="$home/state/.session-authority-enrollment.ready"
   release="$home/state/.session-authority-enrollment.release"
+  claim_file="$home/state/.session-authority-enrollment.test-claim"
   (
     cd "$ROOT" || exit 1
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$issuer" \
@@ -820,15 +822,20 @@ issue_secondmate_enrollment() {
           "$FM_SESSION_AUTHORITY_BROKER_PID" "$owner" "$2" "$1" \
           && unset FM_SESSION_AUTHORITY_BROKER_SCRIPT \
           && fm_session_enrollment_ticket_write "$3" "$4" "$5" "$2" \
+          && printf "%s\n" "$FM_SESSION_ENROLLMENT_CLAIM" > "$8" \
           && : > "$6" || exit 1
         while [ ! -e "$7" ]; do sleep 0.02; done
       ' _ "$ROOT" "$issuer" "$home/state/.session-authority-enrollment" \
-        "$task" "$home" "$ready" "$release"
+        "$task" "$home" "$ready" "$release" "$claim_file"
   ) >/dev/null 2>&1 &
   ENROLLMENT_ISSUER_PID=$!
   BG_PIDS+=("$ENROLLMENT_ISSUER_PID")
   while [ "$attempts" -lt 250 ]; do
-    [ -f "$ready" ] && return 0
+    if [ -f "$ready" ] && [ -f "$claim_file" ]; then
+      FM_SESSION_ENROLLMENT_CLAIM=$(cat "$claim_file")
+      rm -f "$claim_file"
+      return 0
+    fi
     kill -0 "$ENROLLMENT_ISSUER_PID" 2>/dev/null || return 1
     sleep 0.02
     attempts=$((attempts + 1))
@@ -837,7 +844,8 @@ issue_secondmate_enrollment() {
 }
 
 test_secondmate_authority_delegation_uses_no_node() {
-  local issuer home fakebin out status=0 ticket forged private public body signature digest
+  local issuer home fakebin out status=0 attacker_status=0 ticket backup
+  local forged private public body signature digest
   issuer=$(make_primary_home "$TMP_ROOT/secondmate-authority-issuer")
   home="$TMP_ROOT/secondmate-authority-delegation"
   mkdir -p "$home/state"
@@ -851,6 +859,8 @@ test_secondmate_authority_delegation_uses_no_node() {
     || fail "secondmate enrollment exposed the issuer authority key"
   assert_contains "$(cat "$ticket")" "signature=" \
     "secondmate enrollment did not carry a scoped signature"
+  ! grep -qF "$FM_SESSION_ENROLLMENT_CLAIM" "$ticket" \
+    || fail "secondmate enrollment ticket exposed its pane claim"
   forged="$ticket.forged"
   private="$TMP_ROOT/forged-enrollment-private"
   public="$TMP_ROOT/forged-enrollment-public"
@@ -864,24 +874,45 @@ test_secondmate_authority_delegation_uses_no_node() {
   sed -n '1,16p' "$ticket" > "$body"
   printf 'public-key=%s\npublic-key-sha256=%s\n' \
     "$(openssl base64 -A < "$public")" "$digest" >> "$body"
+  sed -n '19p' "$ticket" >> "$body"
   openssl dgst -sha256 -sign "$private" -out "$signature" "$body" 2>/dev/null \
     || fail "could not sign forged enrollment fixture"
   cp "$body" "$forged"
   printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$forged"
   (
     . "$ROOT/bin/fm-session-lock-lib.sh"
+    export FM_SESSION_ENROLLMENT_CLAIM
     ! fm_session_enrollment_ticket_validate "$forged" domain "$home"
   ) || fail "a ticket self-signed by an unbound public key was accepted"
+  ! grep -qE 'openssl (ecparam|ec|dgst).* /dev/fd/(10|11)' \
+    "$ROOT/bin/fm-session-lock-lib.sh" \
+    || fail "enrollment key preparation reused Darwin shared-offset descriptors"
   fakebin="$TMP_ROOT/no-node"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
   chmod +x "$fakebin/node"
+  backup="$ticket.backup"
+  cp "$ticket" "$backup"
+  (
+    cd "$home"
+    env -u FM_SESSION_AUTHORITY_FD \
+      -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
+      -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
+      -u FM_SESSION_ENROLLMENT_CLAIM PATH="$fakebin:$PATH" \
+      FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_AGENT_ROLE=secondmate \
+      FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+      "$AUTHORITY_EXEC" "$LOCK"
+  ) >/dev/null 2>&1 || attacker_status=$?
+  expect_code 1 "$attacker_status" \
+    "a same-user wrapper without the pane claim must not consume enrollment"
+  mv "$backup" "$ticket"
   out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
     -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
     -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
     PATH="$fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_AGENT_ROLE=secondmate \
     FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+    FM_SESSION_ENROLLMENT_CLAIM="$FM_SESSION_ENROLLMENT_CLAIM" \
     "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
   expect_code 0 "$status" \
     "a declared secondmate must acquire its session lock"$'\n'"$out"

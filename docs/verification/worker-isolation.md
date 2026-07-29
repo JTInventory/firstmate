@@ -27,8 +27,11 @@ A crewmate carries no home at all; a secondmate carries only its own.
 For a secondmate spawn, this declaration precedes
 `bin/fm-session-authority-exec.sh`; the authorized parent has already placed a
 one-use signed enrollment ticket in that home without exposing the issuer key.
-The signer binds its public-key digest to its live protected process, and spawn
-waits for the matching acceptance receipt before reporting success.
+The signer binds its public-key digest to its live protected process. The
+generated pane command also carries a separate one-use claim that never appears
+in the ticket, and the signer accepts only its claim-bound token. Independent
+private-key descriptors avoid Darwin `/dev/fd` shared-offset reuse. Spawn waits
+for the matching acceptance receipt before reporting success.
 
 The declaration refuses rather than emitting a partial prefix:
 

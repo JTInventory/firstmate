@@ -85,6 +85,7 @@ fi
   echo "error: trusted session enrollment capability is missing or invalid" >&2
   exit 1
 }
+unset FM_SESSION_ENROLLMENT_CLAIM
 
 authority_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-authority.XXXXXX") || exit 1
 cleanup_authority_file() {

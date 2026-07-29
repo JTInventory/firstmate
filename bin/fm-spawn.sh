@@ -1742,9 +1742,9 @@ if [ "$KIND" = secondmate ]; then
     "$SPAWN_AUTHORITY_ENROLLMENT" "$ID" "$PROJ_ABS" "$FM_HOME" || {
       echo "error: could not issue trusted session enrollment for secondmate $ID" >&2
       exit 1
-    }
+  }
   SPAWN_AUTHORITY_ENROLLMENT_SIGNER=$FM_SESSION_ENROLLMENT_SIGNER_PID
-  LAUNCH="$WORKER_ENV_PREFIX$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
+  LAUNCH="${WORKER_ENV_PREFIX}FM_SESSION_ENROLLMENT_CLAIM=$(shell_quote "$FM_SESSION_ENROLLMENT_CLAIM") $(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 fi
@@ -1791,6 +1791,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
+unset FM_SESSION_ENROLLMENT_CLAIM
 
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_LOCK_HELD=0

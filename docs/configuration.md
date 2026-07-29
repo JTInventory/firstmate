@@ -317,7 +317,11 @@ process start, executable identity, and `CODEX_THREAD_ID`. Firstmate closes the
 descriptor and clears the broker before launching a crewmate. An authorized
 home issues a one-use asymmetric enrollment ticket for a fresh secondmate
 without copying the live authority key. The signer's live protected descriptor
-and process environment bind the ticket's public-key digest. A rolling launcher
+and process environment bind the ticket's public-key digest. A separate
+one-use claim travels only in the generated pane launch and is checked through
+a claim-bound token before acceptance, so reading the ticket is not enough to
+consume it. The signer opens two independent private-key descriptors at offset
+zero before unlinking the key, one for each signature. A rolling launcher
 derives the verified broker script from the authority checkout when an older
 live broker lacks that export. The secondmate declaration and home are applied
 before its wrapper consumes the ticket and creates its own broker descriptor.
