@@ -141,7 +141,7 @@ test_classifier_primitives() {
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "merged" \
     || fail "FM_CAPTAIN_RE override suppressed legacy bare merged"
   local terminal
-  for terminal in done needs-decision blocked failed; do
+  for terminal in "done" needs-decision blocked failed; do
     FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "$terminal: x" \
       || fail "FM_CAPTAIN_RE override suppressed $terminal:"
   done
