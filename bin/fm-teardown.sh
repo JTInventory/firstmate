@@ -748,17 +748,35 @@ teardown_stage_home_removal() {
 
 teardown_endpoint_generation_matches() {
   local backend=$1 target=$2 generation=$3 meta=$4 result_name=$5
-  local actual session workspace tab pane endpoint_state=live
+  local actual session workspace tab pane tmux_pane endpoint_state=live
   local live_identity expected_identity
   case "$backend" in
     tmux)
-      actual=$(fm_backend_endpoint_generation tmux "$target" 2>/dev/null || true)
-      if [ -n "$actual" ]; then
-        [ "$actual" = "$generation" ] || return 1
+      tmux_pane=$(teardown_meta_value_exact "$meta" tmux_pane_id optional) \
+        || return 1
+      if [ -n "$tmux_pane" ]; then
+        case "$tmux_pane" in %*) ;; *) return 1 ;; esac
+        case "${tmux_pane#%}" in ''|*[!0-9]*) return 1 ;; esac
+        live_identity=$(fm_backend_endpoint_identity \
+          tmux "$tmux_pane" 2>/dev/null || true)
+        expected_identity="$target|$tmux_pane|$generation"
+        if [ -n "$live_identity" ]; then
+          [ "$live_identity" = "$expected_identity" ] || return 1
+        else
+          teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation" \
+            || return 1
+          endpoint_state=closed
+        fi
       else
-        teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation" \
-          || return 1
-        endpoint_state=closed
+        actual=$(fm_backend_endpoint_generation \
+          tmux "$target" legacy-window 2>/dev/null || true)
+        if [ -n "$actual" ]; then
+          [ "$actual" = "$generation" ] || return 1
+        else
+          teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation" \
+            || return 1
+          endpoint_state=closed
+        fi
       fi
       ;;
     herdr)

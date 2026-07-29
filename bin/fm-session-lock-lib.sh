@@ -327,6 +327,7 @@ fm_session_enrollment_signer_run() {
   local public_key=${FM_SESSION_ENROLLMENT_PUBLIC_KEY:-}
   local public_digest=${FM_SESSION_ENROLLMENT_PUBLIC_SHA256:-}
   local ready="${file}.ready" consume="${file}.consume" accepted="${file}.accepted"
+  local acknowledged="${file}.accepted.ack"
   local consumer consumer_start consumer_identity consume_task consume_home
   local expected_script env_role env_task env_home attempts=0
   [ "$private_key_fd" = 10 ] && [ -r /dev/fd/10 ] || return 1
@@ -372,7 +373,7 @@ fm_session_enrollment_signer_run() {
   esac
   [ "${#public_digest}" -eq 64 ] || return 1
   case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
-  for tmp in "$file" "$ready" "$consume" "$accepted"; do
+  for tmp in "$file" "$ready" "$consume" "$accepted" "$acknowledged"; do
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
   done
   body=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-body.XXXXXX") || {
@@ -464,12 +465,26 @@ fm_session_enrollment_signer_run() {
           return 1
         }
       rm -f "$body" "$signature" "$consume" "$ready"
-      return 0
+      attempts=0
+      while [ "$attempts" -lt 1500 ]; do
+        if fm_session_enrollment_acceptance_validate \
+          "$acknowledged" "$$" "$nonce" "$public_key" "$public_digest" \
+          && [ "$(sed -n '4s/^consumer-pid=//p' "$acknowledged")" = "$consumer" ] \
+          && [ "$(sed -n '5s/^consumer-start=//p' "$acknowledged")" = "$consumer_start" ] \
+          && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
+          && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ]; then
+          return 0
+        fi
+        kill -0 "$consumer" 2>/dev/null || return 1
+        sleep 0.02
+        attempts=$((attempts + 1))
+      done
+      return 1
     fi
     sleep 0.02
     attempts=$((attempts + 1))
   done
-  rm -f "$file" "$ready" "$consume" "$accepted"
+  rm -f "$file" "$ready" "$consume" "$accepted" "$acknowledged"
   return 1
 }
 
@@ -524,7 +539,8 @@ fm_session_enrollment_ticket_write() {
   done
   kill "$signer" 2>/dev/null || true
   wait "$signer" 2>/dev/null || true
-  rm -f "$file" "$ready" "${file}.consume" "${file}.accepted"
+  rm -f "$file" "$ready" "${file}.consume" "${file}.accepted" \
+    "${file}.accepted.ack"
   return 1
 }
 
@@ -579,7 +595,7 @@ fm_session_enrollment_consumption_request() {
 
 fm_session_enrollment_ticket_wait_accepted() {
   local file=$1 signer=$2 nonce=$3 public_key=$4 public_digest=$5
-  local attempts=${6:-1500} accepted="${file}.accepted" seen=0
+  local attempts=${6:-1500} accepted="${file}.accepted.ack" seen=0
   case "$signer:$attempts" in *[!0-9:]*) return 1 ;; esac
   [ "${#nonce}" -eq 64 ] || return 1
   case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
@@ -587,7 +603,7 @@ fm_session_enrollment_ticket_wait_accepted() {
     if fm_session_enrollment_acceptance_validate \
       "$accepted" "$signer" "$nonce" "$public_key" "$public_digest"; then
       wait "$signer" 2>/dev/null || return 1
-      rm -f "$accepted" "${file}.ready" "${file}.consume"
+      rm -f "$accepted" "${file}.accepted" "${file}.ready" "${file}.consume"
       return 0
     elif ! kill -0 "$signer" 2>/dev/null; then
       wait "$signer" 2>/dev/null || true

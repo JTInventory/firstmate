@@ -298,7 +298,7 @@ test_secondmate_child_receives_only_its_own_home() {
   assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" "respawn-pane -k" \
     "tmux secondmate launch was not serialized with its returned pane pid"
   assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" \
-    'show-options -p -v -t "$1"' \
+    'show-options -p -v -t "$target"' \
     "tmux endpoint generation was not bound to an exact pane"
   assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" "exec env \$command" \
     "tmux trusted launch placed environment assignments after exec"
@@ -309,6 +309,12 @@ test_secondmate_child_receives_only_its_own_home() {
   assert_contains "$(cat "$SPAWN")" \
     '"$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"' \
     "Herdr enrollment did not bind the complete recorded endpoint identity"
+  assert_contains "$(cat "$SPAWN")" \
+    'SPAWN_EXPECTED_ENDPOINT_IDENTITY="$WID|$SPAWN_ENDPOINT_TARGET|$ENDPOINT_GENERATION"' \
+    "tmux enrollment did not bind the created window and exact pane"
+  assert_contains "$(cat "$SPAWN")" \
+    'echo "tmux_pane_id=$SPAWN_ENDPOINT_TARGET"' \
+    "tmux exact pane identity was not persisted"
   wait_line=$(grep -n 'fm_session_enrollment_ticket_wait_accepted' "$SPAWN" | tail -1 | cut -d: -f1)
   recheck_line=$(grep -n 'trusted endpoint identity changed after secondmate' \
     "$SPAWN" | tail -1 | cut -d: -f1)
@@ -955,9 +961,9 @@ test_secondmate_authority_delegation_uses_no_node() {
     "secondmate authority delegation did not reach lock acquisition"
   assert_absent "$home/state/.session-authority-enrollment" \
     "secondmate enrollment ticket remained reusable"
-  assert_present "$home/state/.session-authority-enrollment.accepted" \
-    "secondmate wrapper did not publish enrollment acceptance"
-  rm -f "$home/state/.session-authority-enrollment.accepted"
+  assert_present "$home/state/.session-authority-enrollment.accepted.ack" \
+    "secondmate wrapper did not acknowledge signed enrollment acceptance"
+  rm -f "$home/state/.session-authority-enrollment.accepted.ack"
   : > "$home/state/.session-authority-enrollment.release"
   wait "$ENROLLMENT_ISSUER_PID" 2>/dev/null || true
   pass "secondmate lock acquisition preserves delegated authority without Node"
@@ -1093,6 +1099,37 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     ! fm_backend_tmux_launch_trusted_process %3 domain /work "wrapper" "@7|%3|g7"
   ' _ "$ROOT") || fail "tmux accepted an exact pane moved to another window"
   out=$(bash -c '
+    FM_BACKEND_LIB_DIR="$1/bin"
+    . "$1/bin/backends/tmux.sh"
+    tmux() {
+      case "$1" in
+        list-panes) printf "%%3\n" ;;
+        display-message) printf "%%3\n" ;;
+        show-options)
+          case "$*" in
+            *" -w "*) printf "legacy-g7\n" ;;
+            *) return 1 ;;
+          esac
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_tmux_endpoint_generation @7 legacy-window
+  ' _ "$ROOT") || fail "tmux rejected a stable single-pane legacy generation"
+  [ "$out" = legacy-g7 ] \
+    || fail "tmux legacy generation compatibility returned $out"
+  out=$(bash -c '
+    FM_BACKEND_LIB_DIR="$1/bin"
+    . "$1/bin/backends/tmux.sh"
+    tmux() {
+      case "$1" in
+        list-panes) printf "%%3\n%%4\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    ! fm_backend_tmux_endpoint_generation @7 legacy-window
+  ' _ "$ROOT") || fail "tmux accepted ambiguous multi-pane legacy generation"
+  out=$(bash -c '
     . "$1/bin/backends/herdr.sh"
     fm_backend_herdr_endpoint_identity() {
       printf "default|other-workspace|w9:t9|w1:p2|g7"
@@ -1179,6 +1216,8 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
     openssl dgst -sha256 -sign "$3" -out "$signature" "$body" 2>/dev/null
     cat "$body" > "$1"
     printf "signature=%s\n" "$(openssl base64 -A < "$signature")" >> "$1"
+    sleep 0.05
+    mv "$1" "$1.ack"
   ' _ "${ticket}.accepted" "$nonce" "$private" &
   signer=$!
   BG_PIDS+=("$signer")
@@ -1186,7 +1225,9 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
     "$ticket" "$signer" "$nonce" "$public_key" "$public_digest" 100 \
     || fail "spawn acceptance wait rejected a matching receipt"
   assert_absent "${ticket}.accepted" "accepted enrollment receipt was not retired"
-  pass "secondmate spawn waits for verified enrollment consumption"
+  assert_absent "${ticket}.accepted.ack" \
+    "consumer-acknowledged enrollment receipt was not retired"
+  pass "secondmate spawn waits for consumer-acknowledged enrollment"
 }
 
 test_forged_key_cannot_issue_secondmate_enrollment() {
@@ -1687,11 +1728,12 @@ make_generation_tmux() {
   local fakebin=$1 generation=$2 log=${3:-}
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
-if [ "\${1:-}" = show-options ]; then
-  printf '%s\n' '$generation'
-elif [ -n '$log' ]; then
-  printf '%s\n' "\$*" >> '$log'
-fi
+case "\${1:-}" in
+  list-panes) printf '%%7\n' ;;
+  display-message) printf '%%7\n' ;;
+  show-options) printf '%s\n' '$generation' ;;
+  *) [ -z '$log' ] || printf '%s\n' "\$*" >> '$log' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -2643,6 +2685,8 @@ test_teardown_refuses_stale_endpoint_generation_before_mutation() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$log"
 case "\${1:-}" in
+  list-panes) printf '%%7\n' ;;
+  display-message) printf '%%7\n' ;;
   show-options) printf '%s\n' endpoint-recycled ;;
 esac
 exit 0
@@ -2760,6 +2804,8 @@ test_teardown_finishes_fallible_cleanup_before_provider_boundaries() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$log"
 case "\${1:-}" in
+  list-panes) printf '%%7\n' ;;
+  display-message) printf '%%7\n' ;;
   show-options) printf '%s\n' endpoint-live ;;
   kill-window)
     [ ! -e "\$FM_ORDER_STATE/task-live.meta" ] || exit 22

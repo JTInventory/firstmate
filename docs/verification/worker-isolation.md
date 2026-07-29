@@ -33,13 +33,16 @@ resolves that exact PID through tmux's exact-pane serialized respawn response
 or Herdr's direct agent-start response and pane process-info. The normalized
 launcher `PATH` is carried into that direct process launch. Both backends compare
 their complete live endpoint identity with the recorded endpoint before ticket
-issue and again after authenticated acceptance. The ticket
+issue and again after authenticated acceptance. New tmux metadata persists the
+exact pane; older window-scoped records are accepted only with one stable pane.
+The ticket
 binds the wrapper's start value and executable identity, and the signer accepts
 only that exact process. The
 private signing key stays in shell memory and fresh anonymous pipes, with no
-filesystem pathname, environment export, or terminal command text. Spawn waits
-for the matching acceptance receipt and the final identity recheck before
-reporting success.
+filesystem pathname, environment export, or terminal command text. The wrapper
+atomically acknowledges the signed, consumer-bound acceptance, and the signer
+verifies that acknowledgment. Spawn waits for it and the final identity recheck
+before reporting success.
 
 The declaration refuses rather than emitting a partial prefix:
 

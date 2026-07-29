@@ -849,11 +849,27 @@ test_forced_secondmate_teardown_propagates_child_close_failure() {
 #!/usr/bin/env bash
 case "$*" in
   "kill-window -t firstmate:fm-child-x1") exit 1 ;;
-  "show-options -p -v -t firstmate:fm-task-x1 @firstmate_endpoint_generation")
+  "list-panes -t firstmate:fm-task-x1 -F #{pane_id}")
+    printf '%%7\n'
+    exit 0
+    ;;
+  "list-panes -t firstmate:fm-child-x1 -F #{pane_id}")
+    printf '%%8\n'
+    exit 0
+    ;;
+  "display-message -p -t %7 #{pane_id}")
+    printf '%%7\n'
+    exit 0
+    ;;
+  "display-message -p -t %8 #{pane_id}")
+    printf '%%8\n'
+    exit 0
+    ;;
+  "show-options -w -v -t firstmate:fm-task-x1 @firstmate_endpoint_generation")
     printf '%s\n' endpoint-task-x1
     exit 0
     ;;
-  "show-options -p -v -t firstmate:fm-child-x1 @firstmate_endpoint_generation")
+  "show-options -w -v -t firstmate:fm-child-x1 @firstmate_endpoint_generation")
     printf '%s\n' endpoint-child-x1
     exit 0
     ;;

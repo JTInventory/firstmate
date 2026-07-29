@@ -307,7 +307,8 @@ spawn_abort_cleanup() {
     || rm -f "$SPAWN_AUTHORITY_ENROLLMENT" \
       "${SPAWN_AUTHORITY_ENROLLMENT}.ready" \
       "${SPAWN_AUTHORITY_ENROLLMENT}.consume" \
-      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted"
+      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted" \
+      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted.ack"
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
   fi
@@ -1493,16 +1494,23 @@ EOF
 esac
 SPAWN_EXPECTED_ENDPOINT_IDENTITY=
 if [ "$KIND" = secondmate ]; then
-  SPAWN_EXPECTED_ENDPOINT_IDENTITY=$(
+  SPAWN_LIVE_ENDPOINT_IDENTITY=$(
     fm_backend_endpoint_identity "$BACKEND" "$SPAWN_ENDPOINT_TARGET"
   ) || {
     echo "error: could not bind the exact endpoint identity for $T" >&2
     exit 1
   }
-  if [ "$BACKEND" = herdr ] \
-    && [ "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
-      != "$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION" ]; then
-    echo "error: Herdr endpoint identity changed during spawn" >&2
+  case "$BACKEND" in
+    tmux)
+      SPAWN_EXPECTED_ENDPOINT_IDENTITY="$WID|$SPAWN_ENDPOINT_TARGET|$ENDPOINT_GENERATION"
+      ;;
+    herdr)
+      SPAWN_EXPECTED_ENDPOINT_IDENTITY="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"
+      ;;
+    *) exit 1 ;;
+  esac
+  if [ "$SPAWN_LIVE_ENDPOINT_IDENTITY" != "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" ]; then
+    echo "error: backend endpoint identity changed during spawn" >&2
     exit 1
   fi
 fi
@@ -1713,6 +1721,7 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   # Missing backend= is the compatibility spelling for tmux. Record only
   # non-default backends so existing and new tmux metadata stay unchanged.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  [ "$BACKEND" != tmux ] || echo "tmux_pane_id=$SPAWN_ENDPOINT_TARGET"
   if [ "$BACKEND" = herdr ]; then
     echo "display_label=$DISPLAY_LABEL"
     echo "task_key=$TASK_KEY"

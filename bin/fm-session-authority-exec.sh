@@ -68,7 +68,14 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
           "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
           "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
           "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
-          && [ "$(sed -n '4s/^consumer-pid=//p' "${enrollment}.accepted")" = "$$" ]; then
+          && [ "$(sed -n '4s/^consumer-pid=//p' "${enrollment}.accepted")" = "$$" ] \
+          && [ ! -e "${enrollment}.accepted.ack" ] \
+          && [ ! -L "${enrollment}.accepted.ack" ] \
+          && mv "${enrollment}.accepted" "${enrollment}.accepted.ack" \
+          && fm_session_enrollment_acceptance_validate \
+            "${enrollment}.accepted.ack" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+            "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+            "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256"; then
           rm -f "$enrollment_ticket" "${enrollment}.consume"
           authorized=1
           break
@@ -78,7 +85,8 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
         enrollment_attempts=$((enrollment_attempts + 1))
       done
       if [ "$authorized" -ne 1 ]; then
-        rm -f "$enrollment_ticket" "${enrollment}.consume" "${enrollment}.accepted"
+        rm -f "$enrollment_ticket" "${enrollment}.consume" \
+          "${enrollment}.accepted" "${enrollment}.accepted.ack"
       fi
     else
       rm -f "$enrollment_ticket" "${enrollment}.consume"

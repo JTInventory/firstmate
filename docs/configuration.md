@@ -330,8 +330,11 @@ generated terminal command, or in a sibling-readable environment. A rolling laun
 derives the verified broker script from the authority checkout when an older
 live broker lacks that export. The secondmate declaration and home are applied
 before its wrapper consumes the ticket and creates its own broker descriptor.
-Spawn waits for the matching acceptance receipt before releasing lifecycle
-locks or reporting success. On macOS, `getsid(2)` must identify a live session
+The wrapper atomically acknowledges the matching signed acceptance, and its
+signer verifies that consumer-bound acknowledgment before spawn releases
+lifecycle locks or reports success. New tmux task metadata keeps the exact pane
+and pane-scoped generation. Older window-scoped records remain usable only
+while the recorded window has one stable pane. On macOS, `getsid(2)` must identify a live session
 leader in the caller's ancestry; leaderless or unreadable sessions refuse.
 
 The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose

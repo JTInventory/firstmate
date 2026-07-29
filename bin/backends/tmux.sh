@@ -73,6 +73,15 @@ fm_backend_tmux_pane_id() {
   printf '%s' "$pane"
 }
 
+fm_backend_tmux_single_pane_id() {
+  local target=$1 panes pane count
+  panes=$(tmux list-panes -t "$target" -F '#{pane_id}' 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$panes" | sed '/^$/d' | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ] || return 1
+  pane=$(printf '%s\n' "$panes" | sed '/^$/d')
+  fm_backend_tmux_pane_id "$pane"
+}
+
 fm_backend_tmux_bind_endpoint_generation() {
   local pane=$1 generation=$2 number
   case "$pane" in %*) ;; *) return 1 ;; esac
@@ -85,18 +94,34 @@ fm_backend_tmux_bind_endpoint_generation() {
 }
 
 fm_backend_tmux_endpoint_generation() {
-  tmux show-options -p -v -t "$1" @firstmate_endpoint_generation 2>/dev/null
+  local target=$1 compatibility=${2:-} pane
+  case "$target" in
+    %*) tmux show-options -p -v -t "$target" \
+      @firstmate_endpoint_generation 2>/dev/null ;;
+    *)
+      [ "$compatibility" = legacy-window ] || return 1
+      pane=$(fm_backend_tmux_single_pane_id "$target") || return 1
+      [ -n "$pane" ] || return 1
+      local generation current
+      generation=$(tmux show-options -w -v -t "$target" \
+        @firstmate_endpoint_generation 2>/dev/null) || return 1
+      current=$(fm_backend_tmux_single_pane_id "$target") || return 1
+      [ "$current" = "$pane" ] || return 1
+      printf '%s' "$generation"
+      ;;
+  esac
 }
 
 fm_backend_tmux_endpoint_identity() {
   local target=$1 pane window window_number generation
+  case "$target" in %*) ;; *) return 1 ;; esac
   pane=$(fm_backend_tmux_pane_id "$target") || return 1
   window=$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null \
     | tr -d '[:space:]') || return 1
   case "$window" in @*) ;; *) return 1 ;; esac
   window_number=${window#@}
   case "$window_number" in ''|*[!0-9]*) return 1 ;; esac
-  generation=$(fm_backend_tmux_endpoint_generation "$target") || return 1
+  generation=$(fm_backend_tmux_endpoint_generation "$pane") || return 1
   [ -n "$generation" ] || return 1
   printf '%s|%s|%s' "$window" "$pane" "$generation"
 }

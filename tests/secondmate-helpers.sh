@@ -59,6 +59,11 @@ case "${1:-}" in
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     exit 0
     ;;
+  set-option)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    printf '%s\n' "${@: -1}" > "${FM_FAKE_TMUX_LOG}.endpoint-generation"
+    exit 0
+    ;;
   show-options)
     target=
     while [ $# -gt 0 ]; do
@@ -73,7 +78,15 @@ case "${1:-}" in
     if grep -Fx "$target" "${FM_FAKE_TMUX_LOG}.closed" >/dev/null 2>&1; then
       exit 0
     fi
-    printf '%s\n' "${FM_FAKE_ENDPOINT_GENERATION:-endpoint-$id}"
+    if [ -f "${FM_FAKE_TMUX_LOG}.endpoint-generation" ]; then
+      cat "${FM_FAKE_TMUX_LOG}.endpoint-generation"
+    else
+      printf '%s\n' "${FM_FAKE_ENDPOINT_GENERATION:-endpoint-$id}"
+    fi
+    exit 0
+    ;;
+  list-panes)
+    printf '%s\n' "${FM_FAKE_PANE_ID:-%42}"
     exit 0
     ;;
   list-windows)
@@ -84,6 +97,8 @@ case "${1:-}" in
     ;;
   display-message)
     case "$*" in
+      *"#{pane_id}"*) printf '%s\n' "${FM_FAKE_PANE_ID:-%42}" ;;
+      *"#{window_id}"*) printf '%s\n' "${FM_FAKE_WINDOW_ID:-@42}" ;;
       *"#{window_name}"*) cat "${FM_FAKE_TMUX_LOG}.window-name" ;;
       *) printf 'firstmate\n' ;;
     esac

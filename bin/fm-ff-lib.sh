@@ -355,15 +355,16 @@ FM_SECONDMATE_META_HARNESS=
 FM_SECONDMATE_META_BACKEND=
 FM_SECONDMATE_META_TARGET=
 FM_SECONDMATE_META_PROVIDER_IDENTITY=
+FM_SECONDMATE_META_TMUX_PANE=
 FM_SECONDMATE_META_ERROR=
 
 fm_secondmate_lifecycle_meta_read() {
   local meta=$1 expected_id=$2 line key value
   local kind_count=0 home_count=0 task_count=0 window_count=0 generation_count=0
   local harness_count=0 backend_count=0 session_count=0 workspace_count=0
-  local tab_count=0 pane_count=0
+  local tab_count=0 pane_count=0 tmux_pane_count=0
   local kind= home= task= window= generation= harness= backend=
-  local session= workspace= tab= pane= target= provider_identity=
+  local session= workspace= tab= pane= tmux_pane= target= provider_identity=
   FM_SECONDMATE_META_HOME=
   FM_SECONDMATE_META_WINDOW=
   FM_SECONDMATE_META_ENDPOINT_GENERATION=
@@ -371,6 +372,7 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_BACKEND=
   FM_SECONDMATE_META_TARGET=
   FM_SECONDMATE_META_PROVIDER_IDENTITY=
+  FM_SECONDMATE_META_TMUX_PANE=
   FM_SECONDMATE_META_HERDR_SESSION=
   FM_SECONDMATE_META_HERDR_WORKSPACE=
   FM_SECONDMATE_META_HERDR_TAB=
@@ -396,6 +398,7 @@ fm_secondmate_lifecycle_meta_read() {
       herdr_workspace_id) workspace_count=$((workspace_count + 1)); workspace=$value ;;
       herdr_tab_id) tab_count=$((tab_count + 1)); tab=$value ;;
       herdr_pane_id) pane_count=$((pane_count + 1)); pane=$value ;;
+      tmux_pane_id) tmux_pane_count=$((tmux_pane_count + 1)); tmux_pane=$value ;;
       endpoint_generation)
         generation_count=$((generation_count + 1))
         generation=$value
@@ -442,16 +445,30 @@ fm_secondmate_lifecycle_meta_read() {
   case "$backend" in
     tmux)
       if [ "$session_count" -ne 0 ] || [ "$workspace_count" -ne 0 ] \
-        || [ "$tab_count" -ne 0 ] || [ "$pane_count" -ne 0 ]; then
+        || [ "$tab_count" -ne 0 ] || [ "$pane_count" -ne 0 ] \
+        || [ "$tmux_pane_count" -gt 1 ]; then
         FM_SECONDMATE_META_ERROR="provider fields do not match lifecycle backend"
         return 1
       fi
-      target=$window
-      provider_identity="tmux:$window"
+      if [ "$tmux_pane_count" -eq 1 ]; then
+        case "$tmux_pane" in
+          %*) ;;
+          *) FM_SECONDMATE_META_ERROR="unsafe tmux pane identity"; return 1 ;;
+        esac
+        case "${tmux_pane#%}" in
+          ''|*[!0-9]*) FM_SECONDMATE_META_ERROR="unsafe tmux pane identity"; return 1 ;;
+        esac
+        target=$tmux_pane
+        provider_identity="tmux:$window:$tmux_pane"
+      else
+        target=$window
+        provider_identity="tmux:$window"
+      fi
       ;;
     herdr)
       if [ "$session_count" -ne 1 ] || [ "$workspace_count" -ne 1 ] \
         || [ "$tab_count" -ne 1 ] || [ "$pane_count" -ne 1 ] \
+        || [ "$tmux_pane_count" -ne 0 ] \
         || [ -z "$session" ] || [ -z "$workspace" ] \
         || [ -z "$tab" ] || [ -z "$pane" ]; then
         FM_SECONDMATE_META_ERROR="incomplete or ambiguous Herdr endpoint"
@@ -482,6 +499,7 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_BACKEND=$backend
   FM_SECONDMATE_META_TARGET=$target
   FM_SECONDMATE_META_PROVIDER_IDENTITY=$provider_identity
+  FM_SECONDMATE_META_TMUX_PANE=$tmux_pane
   FM_SECONDMATE_META_HERDR_SESSION=$session
   FM_SECONDMATE_META_HERDR_WORKSPACE=$workspace
   FM_SECONDMATE_META_HERDR_TAB=$tab
@@ -507,9 +525,16 @@ fm_secondmate_live_endpoint_matches() {
   local live_generation live_identity expected_identity
   case "$FM_SECONDMATE_META_BACKEND" in
     tmux)
-      live_generation=$(fm_backend_endpoint_generation \
-        tmux "$FM_SECONDMATE_META_TARGET" 2>/dev/null) || return 1
-      [ "$live_generation" = "$FM_SECONDMATE_META_ENDPOINT_GENERATION" ]
+      if [ -n "$FM_SECONDMATE_META_TMUX_PANE" ]; then
+        live_identity=$(fm_backend_endpoint_identity \
+          tmux "$FM_SECONDMATE_META_TMUX_PANE" 2>/dev/null) || return 1
+        expected_identity="$FM_SECONDMATE_META_WINDOW|$FM_SECONDMATE_META_TMUX_PANE|$FM_SECONDMATE_META_ENDPOINT_GENERATION"
+        [ "$live_identity" = "$expected_identity" ]
+      else
+        live_generation=$(fm_backend_endpoint_generation \
+          tmux "$FM_SECONDMATE_META_WINDOW" legacy-window 2>/dev/null) || return 1
+        [ "$live_generation" = "$FM_SECONDMATE_META_ENDPOINT_GENERATION" ]
+      fi
       ;;
     herdr)
       fm_backend_source herdr || return 1
