@@ -937,27 +937,40 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
-  claim_spawn_slot || exit 1
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
   # spawn section). Purely local - no fetch: the home is a worktree of this same
   # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent re-reads
+  # wrong-branch home refuses launch. The agent re-reads
   # AGENTS.md fresh on launch, so no nudge is needed here.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+    sm_ff_rc=0
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1) || sm_ff_rc=$?
+    [ "$sm_ff_rc" -eq 0 ] || {
+      echo "error: secondmate $ID sync failed before launch: $(first_line "$sm_ff_out")" >&2
+      exit 1
+    }
     case "$sm_ff_out" in
       *': skipped:'*)
         sm_ff_line=$(first_line "$sm_ff_out")
         sm_ff_prefix="secondmate $ID: skipped: "
         sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
-        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+        echo "error: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+        exit 1
         ;;
     esac
   else
-    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    echo "error: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    exit 1
   fi
+  [ -r "$PROJ_ABS/bin/fm-worker-isolation-lib.sh" ] \
+    && [ -x "$PROJ_ABS/bin/fm-isolation-sweep.sh" ] \
+    && grep -q 'fm_secondmate_lifecycle_identity_matches' "$PROJ_ABS/bin/fm-ff-lib.sh" 2>/dev/null || {
+      echo "error: secondmate $ID lacks required worker-isolation lifecycle capabilities" >&2
+      exit 1
+    }
+  claim_spawn_slot || exit 1
   # Inheritance propagation is separate from the tracked local-HEAD fast-forward:
   # declared local config converges into config/, while captain-shared.md converges
   # read-only into data/. Primary launch knobs remain local to the primary home.

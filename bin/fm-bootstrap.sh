@@ -102,6 +102,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+FM_WAKE_LIB_READ_ONLY=$BOOTSTRAP_READ_ONLY
+export FM_WAKE_LIB_READ_ONLY
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
@@ -1012,6 +1014,13 @@ crew_dispatch_validate() {
   fi
 }
 
+isolation_status=0
+"$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null || isolation_status=$?
+if [ "$isolation_status" -ne 0 ] && [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
+  echo "REFUSED: worker isolation is unproven; bootstrap remains read-only until every ISOLATION finding is resolved" >&2
+  exit 1
+fi
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1067,7 +1076,6 @@ gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # so every session re-establishes it from live process evidence. Read-only, so
 # it runs in detect-only mode too. bin/fm-isolation-sweep.sh owns the evidence
 # discipline and the exact ISOLATION line shapes.
-"$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null || true
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)

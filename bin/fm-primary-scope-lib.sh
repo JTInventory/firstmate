@@ -31,9 +31,10 @@ fm_root_is_secondmate_home() {
 fm_primary_scope_matches() {
   local root=$1 state=$2 git_dir git_common_dir
   case "${FM_AGENT_ROLE:-}" in
+    primary) [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1 ;;
     crewmate) return 1 ;;
     secondmate) fm_worker_secondmate_scope_matches "$root" "$state" || return 1 ;;
-    "") [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1 ;;
+    "") return 1 ;;
     *) return 1 ;;
   esac
   if ! fm_root_is_secondmate_home "$root"; then

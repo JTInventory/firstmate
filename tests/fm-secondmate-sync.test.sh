@@ -29,6 +29,9 @@ set -u
 
 fm_ff_target_lock_acquire() { return 0; }
 fm_ff_target_lock_release() { return 0; }
+fm_backend_endpoint_generation() {
+  printf 'endpoint-%s' "${2##*:fm-}"
+}
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
@@ -36,6 +39,15 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
+SYNC_PIDS=()
+cleanup_secondmate_sync() {
+  local pid
+  for pid in "${SYNC_PIDS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap cleanup_secondmate_sync EXIT
 
 # --- world builders --------------------------------------------------------
 
@@ -76,8 +88,13 @@ add_sm_worktree() {
     printf 'home=%s/%s\n' "$w" "$id"
     printf 'task=%s\n' "$id"
     printf 'endpoint_generation=endpoint-%s\n' "$id"
+    printf 'worktree=%s/%s\n' "$w" "$id"
+    printf 'project=%s/main\n' "$w"
     printf 'harness=codex\n'
   } > "$w/home/state/$id.meta"
+  (cd "$w/$id" && env FM_AGENT_ROLE=secondmate FM_AGENT_TASK="$id" \
+    FM_AGENT_OWNER_HOME="$w/$id" sleep 300) >/dev/null 2>&1 </dev/null &
+  SYNC_PIDS+=("$!")
 }
 
 # bump_primary <w> <mode>: advance the PRIMARY's main branch by one local commit.
@@ -270,7 +287,20 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  cat >"$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show-options ]; then
+  target=
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
+    shift
+  done
+  printf 'endpoint-%s\n' "${target##*:fm-}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -449,6 +479,10 @@ test_bootstrap_retry_retains_delivery_until_acknowledged() {
   fakebin=$(make_fake_toolchain "$w")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = show-options ]; then
+  printf '%s\n' endpoint-sm-ack
+  exit 0
+fi
 printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
 exit 0
 SH
@@ -529,9 +563,9 @@ SH
   pass "T10 spawn fast-forwards a secondmate worktree to the primary's local HEAD before launch"
 }
 
-# --- T11: spawn warns when pre-launch sync is skipped ------------------------
-test_spawn_warns_when_sync_skipped_before_launch() {
-  local w c1 before fakebin err
+# --- T11: spawn refuses when pre-launch sync is skipped -----------------------
+test_spawn_refuses_when_sync_skipped_before_launch() {
+  local w c1 before fakebin err rc
   w=$(new_world spawn-skip)
   c1=$(head_of "$w/main")
   git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
@@ -551,19 +585,21 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
 
+  rc=0
   env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || true
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || rc=$?
 
+  [ "$rc" -ne 0 ] || fail "dirty secondmate home launched after sync refusal"
   assert_contains "$(cat "$err")" \
-    "warning: secondmate sm sync skipped before launch: dirty working tree" \
-    "spawn warning reports the skipped sync reason"
+    "error: secondmate sm sync skipped before launch: dirty working tree" \
+    "spawn refusal reports the skipped sync reason"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty spawn home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty spawn edit was discarded"
-  pass "T11 spawn warns when pre-launch sync is skipped"
+  pass "T11 spawn refuses when pre-launch sync is skipped"
 }
 
 test_ff_updated
@@ -580,6 +616,6 @@ test_bootstrap_retry_respects_secondmate_lifecycle_lock
 test_bootstrap_retry_retains_delivery_until_acknowledged
 test_bootstrap_refuses_ambiguous_lifecycle_metadata
 test_spawn_fast_forwards_before_launch
-test_spawn_warns_when_sync_skipped_before_launch
+test_spawn_refuses_when_sync_skipped_before_launch
 
 echo "# all fm-secondmate-sync tests passed"

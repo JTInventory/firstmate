@@ -536,6 +536,7 @@ fm_backend_endpoint_generation() {
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_endpoint_generation "$@" ;;
+    herdr) fm_backend_herdr_endpoint_generation "$@" ;;
     *) return 1 ;;
   esac
 }

@@ -29,6 +29,7 @@ LOCK="$ROOT/bin/fm-lock.sh"
 SWEEP="$ROOT/bin/fm-isolation-sweep.sh"
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-isolation)
+unset NO_MISTAKES_GATE
 
 # Fixture agents are real long-lived processes, and the code under test finds
 # them by scanning /proc for a declaration marker. Two hygiene rules follow.
@@ -236,7 +237,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
     id="declared-$harness-b1"
     rec=$(make_launch_case "launch-$harness" "$id")
     read_launch_record "$rec"
-    out=$(HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
+    out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
       FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -308,6 +309,18 @@ test_declared_worker_is_never_a_primary_scope_match() {
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "a secondmate mismatched to its trusted marker matched primary scope"
   pass "primary scope rejects crewmates, unknown identities, partial identities, and mismatched secondmates"
+}
+
+test_undeclared_identity_has_no_primary_mutation_authority() {
+  local out status
+  status=0
+  out=$(env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME bash -c \
+    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "undeclared identity must refuse primary mutation"
+  assert_contains "$out" "primary identity is undeclared" \
+    "undeclared primary refusal was not actionable"
+  pass "undeclared and legacy identities never inherit primary mutation authority"
 }
 
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
@@ -678,7 +691,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   fm_git_init_commit "$lying"
   pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
 
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -719,6 +732,27 @@ EOF
 slot_verdict() {  # <state> <id> <wt> <stamp-home> [role] [worker-home]
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" "${5:-crewmate}" )
+}
+
+write_current_meta() {
+  local file=$1 task=$2 home=$3 generation=$4
+  shift 4
+  fm_write_meta "$file" "$@" \
+    "task=$task" "home=$home" "endpoint_generation=$generation"
+}
+
+make_generation_tmux() {
+  local fakebin=$1 generation=$2 log=${3:-}
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = show-options ]; then
+  printf '%s\n' '$generation'
+elif [ -n '$log' ]; then
+  printf '%s\n' "\$*" >> '$log'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
 }
 
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
@@ -819,6 +853,19 @@ test_malformed_or_partial_stamp_retains() {
   pass "present malformed, duplicate, partial, and extra ownership fields retain their slots"
 }
 
+test_missing_stamp_retains() {
+  local rec verdict
+  rec=$(make_slot_world slot-missing-stamp)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-missing.meta" \
+    "window=firstmate:fm-task-missing" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  verdict=$(slot_verdict "$WORLD/home/state" task-missing "$WT_DIR" "$WORLD/home")
+  assert_contains "$verdict" "retain: slot ownership stamp is missing" \
+    "unstamped pooled slot was authorized for disposal"
+  pass "missing ownership stamps retain pooled slots"
+}
+
 test_unavailable_occupant_evidence_retains() {
   local rec verdict
   rec=$(make_slot_world slot-unknown-occupants)
@@ -848,6 +895,8 @@ test_unclassified_live_process_retains() {
   fm_write_meta "$WORLD/home/state/task-unclassified.meta" \
     "window=firstmate:fm-task-unclassified" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-unclassified "$WORLD/home" )
   verdict=$(
     . "$ROOT/bin/fm-slot-owner-lib.sh"
     fm_agent_proc_cwd() { return 1; }
@@ -867,6 +916,8 @@ test_undeclared_in_slot_process_retains() {
   fm_write_meta "$WORLD/home/state/task-undeclared.meta" \
     "window=firstmate:fm-task-undeclared" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-undeclared "$WORLD/home" )
   ( cd "$WT_DIR" \
     && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
       FM_AGENT_TEST_RUN="$RUN_TAG" sleep 300 ) >/dev/null 2>&1 </dev/null &
@@ -956,6 +1007,8 @@ test_a_live_agent_of_another_task_retains_the_slot() {
   fm_write_meta "$WORLD/home/state/task-e5.meta" \
     "window=firstmate:fm-task-e5" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e5 "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$occupant" "$WORLD/home" >/dev/null
   verdict=$(slot_verdict "$WORLD/home/state" task-e5 "$WT_DIR" "$WORLD/home")
   case "$verdict" in
@@ -971,6 +1024,8 @@ test_same_task_in_another_home_or_role_retains_the_slot() {
   rec=$(make_slot_world slot-same-task-foreign-identity)
   read_slot_world "$rec"
   id="same-task-e9-$RUN_TAG"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" "$id" "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$id" "$WORLD/other-home" crewmate >/dev/null
   verdict=$(slot_verdict "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home")
   case "$verdict" in
@@ -980,6 +1035,8 @@ test_same_task_in_another_home_or_role_retains_the_slot() {
   rec=$(make_slot_world slot-same-task-foreign-role)
   read_slot_world "$rec"
   id="same-task-role-e9-$RUN_TAG"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" "$id" "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$id" "$WORLD/home" secondmate >/dev/null
   verdict=$(slot_verdict "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home" crewmate)
   case "$verdict" in
@@ -989,7 +1046,7 @@ test_same_task_in_another_home_or_role_retains_the_slot() {
   pass "live slot occupancy excludes only the exact task, home, and role identity"
 }
 
-test_a_relinquished_slot_is_releasable_by_its_remaining_holder() {
+test_a_relinquished_slot_requires_remaining_ownership_proof() {
   # The exact reported leak sequence. B is the stamped true owner and paused A's
   # stale metadata also names the slot, so B retains and its own metadata goes.
   # If B's stamp outlived it, A's later teardown would retain on the stamp with
@@ -1020,9 +1077,9 @@ test_a_relinquished_slot_is_releasable_by_its_remaining_holder() {
   rm -f "$WORLD/home/state/owner-e7.meta"
 
   verdict=$(slot_verdict "$WORLD/home/state" paused-e7 "$WT_DIR" "$WORLD/home")
-  [ "$verdict" = dispose ] \
-    || fail "the last holder could not release a slot nothing else references: $verdict"
-  pass "a retiring owner gives up its own stamp so the remaining holder can still release the slot"
+  assert_contains "$verdict" "retain: slot ownership stamp is missing" \
+    "an unstamped remaining holder was allowed to release the slot"
+  pass "a retiring owner cannot grant unstamped disposal authority to a remaining holder"
 }
 
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
@@ -1081,6 +1138,27 @@ test_same_task_stamp_in_another_home_survives_relinquish() {
   pass "relinquish clears only the exact task and canonical owner-home claim"
 }
 
+test_relinquish_retires_exact_transition_artifacts() {
+  local rec claim legacy stamp
+  rec=$(make_slot_world slot-transition-relinquish)
+  read_slot_world "$rec"
+  (
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_write "$WT_DIR" transition-owner "$WORLD/home"
+    fm_slot_stamp_stage_return "$WT_DIR" transition-owner "$WORLD/home" \
+      "$WORLD/home/state" transition-owner
+    claim=$FM_SLOT_RETURN_CLAIM
+    legacy=$FM_SLOT_RETURN_LEGACY
+    fm_slot_stamp_relinquish "$WT_DIR" transition-owner "$WORLD/home" \
+      "retain: slot is also recorded by task(s) paused-owner in this home"
+    [ ! -e "$claim" ] && [ ! -e "$legacy" ] && [ ! -L "$claim" ] && [ ! -L "$legacy" ]
+  ) || fail "exact same-task transition artifacts survived relinquish"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf none )
+  [ "$stamp" = none ] || fail "exact transition stamp survived relinquish"
+  pass "relinquish retires exact transition claim, owner, and stamp together"
+}
+
 test_teardown_retires_a_contested_lease_even_with_force() {
   local rec fakebin out status stamp
   rec=$(make_slot_world slot-teardown)
@@ -1092,9 +1170,10 @@ printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  fm_fake_exit0 "$fakebin" tmux gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  make_generation_tmux "$fakebin" endpoint-task-e6
   : > "$WORLD/treehouse.log"
-  fm_write_meta "$WORLD/home/state/task-e6.meta" \
+  write_current_meta "$WORLD/home/state/task-e6.meta" task-e6 "$WORLD/home" endpoint-task-e6 \
     "window=firstmate:fm-task-e6" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
   fm_write_meta "$WORLD/home/state/quarantined-e6.meta" \
@@ -1136,8 +1215,9 @@ test_retained_stamp_survives_failed_metadata_retirement() {
   rec=$(make_slot_world slot-retain-failure)
   read_slot_world "$rec"
   fakebin=$(fm_fakebin "$WORLD/fake")
-  fm_fake_exit0 "$fakebin" tmux gh-axi gh treehouse
-  fm_write_meta "$WORLD/home/state/task-e11.meta" \
+  fm_fake_exit0 "$fakebin" gh-axi gh treehouse
+  make_generation_tmux "$fakebin" endpoint-task-e11
+  write_current_meta "$WORLD/home/state/task-e11.meta" task-e11 "$WORLD/home" endpoint-task-e11 \
     "window=firstmate:fm-task-e11" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off"
   fm_write_meta "$WORLD/home/state/paused-e11.meta" \
@@ -1186,8 +1266,9 @@ grep -Fx 'lease_holder=task-e12' "$claim" >/dev/null || exit 22
 exit 17
 SH
   chmod +x "$fakebin/treehouse"
-  fm_fake_exit0 "$fakebin" tmux gh-axi gh
-  fm_write_meta "$WORLD/home/state/task-e12.meta" \
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  make_generation_tmux "$fakebin" endpoint-task-e12
+  write_current_meta "$WORLD/home/state/task-e12.meta" task-e12 "$WORLD/home" endpoint-task-e12 \
     "window=firstmate:fm-task-e12" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
@@ -1272,8 +1353,9 @@ git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
 printf 'task=replacement\nhome=%s\n' "$FM_REUSE_HOME" > "$git_dir/fm-slot-owner"
 SH
   chmod +x "$fakebin/treehouse"
-  fm_fake_exit0 "$fakebin" tmux gh-axi gh
-  fm_write_meta "$WORLD/home/state/task-reuse.meta" \
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  make_generation_tmux "$fakebin" endpoint-task-reuse
+  write_current_meta "$WORLD/home/state/task-reuse.meta" task-reuse "$WORLD/home" endpoint-task-reuse \
     "window=firstmate:fm-task-reuse" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
@@ -1313,8 +1395,9 @@ printf 'task=replacement\nhome=%s\n' "$FM_REUSE_HOME" > "$git_dir/fm-slot-owner"
 exit 17
 SH
   chmod +x "$fakebin/treehouse"
-  fm_fake_exit0 "$fakebin" tmux gh-axi gh
-  fm_write_meta "$WORLD/home/state/task-failed-reuse.meta" \
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  make_generation_tmux "$fakebin" endpoint-task-failed-reuse
+  write_current_meta "$WORLD/home/state/task-failed-reuse.meta" task-failed-reuse "$WORLD/home" endpoint-task-failed-reuse \
     "window=firstmate:fm-task-failed-reuse" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
@@ -1379,9 +1462,10 @@ test_ordinary_teardown_acquires_admission_before_task_lock() {
   rec=$(make_slot_world slot-lock-order)
   read_slot_world "$rec"
   fakebin=$(fm_fakebin "$WORLD/fake")
-  fm_fake_exit0 "$fakebin" tmux gh-axi gh treehouse
+  fm_fake_exit0 "$fakebin" gh-axi gh treehouse
+  make_generation_tmux "$fakebin" endpoint-task-e13
   ready="$WORLD/locks.ready"
-  fm_write_meta "$WORLD/home/state/task-e13.meta" \
+  write_current_meta "$WORLD/home/state/task-e13.meta" task-e13 "$WORLD/home" endpoint-task-e13 \
     "window=firstmate:fm-task-e13" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
@@ -1448,7 +1532,7 @@ SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" gh-axi gh
   mkdir -p "$WORLD/corrupt-project"
-  fm_write_meta "$WORLD/home/state/task-e14.meta" \
+  write_current_meta "$WORLD/home/state/task-e14.meta" task-e14 "$WORLD/home" endpoint-task-e14 \
     "window=firstmate:fm-task-e14" "worktree=$WT_DIR" \
     "project=$WORLD/corrupt-project" "harness=claude" "kind=scout" \
     "mode=no-mistakes" "yolo=off"
@@ -1488,7 +1572,7 @@ SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" gh-axi gh treehouse
   for key in worktree window project kind home; do
-    fm_write_meta "$WORLD/home/state/task-core.meta" \
+    write_current_meta "$WORLD/home/state/task-core.meta" task-core "$WORLD/home" endpoint-task-core \
       "window=firstmate:fm-task-core" "worktree=$WT_DIR" "project=$PROJ_DIR" \
       "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
     case "$key" in
@@ -1533,7 +1617,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" gh-axi gh treehouse
-  fm_write_meta "$WORLD/home/state/task-stale.meta" \
+  write_current_meta "$WORLD/home/state/task-stale.meta" task-stale "$WORLD/home" endpoint-original \
     "window=firstmate:fm-task-stale" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
   set +e
@@ -1575,7 +1659,7 @@ make_sweep_home() {
 
 run_sweep() {  # <world>
   FM_ROOT_OVERRIDE="$1/project" FM_HOME="$1/home" \
-    FM_STATE_OVERRIDE="$1/home/state" "$SWEEP" 2>&1
+    FM_STATE_OVERRIDE="$1/home/state" "$SWEEP" 2>&1 || true
 }
 
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout() {
@@ -1704,7 +1788,7 @@ SH
   chmod +x "$FAKEBIN_DIR/mktemp"
   : > "$CASE_DIR/kill.log"
   set +e
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
@@ -1724,7 +1808,7 @@ SH
     || fail "could not install the preexisting exact claim fixture"
   : > "$CASE_DIR/kill.log"
   set +e
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
@@ -1749,7 +1833,7 @@ test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
     || fail "could not install foreign claim fixture"
   : > "$CASE_DIR/kill.log"
   set +e
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$CASE_DIR" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
@@ -1842,6 +1926,7 @@ test_declaration_refuses_rather_than_emitting_a_partial_prefix
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
+test_undeclared_identity_has_no_primary_mutation_authority
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
@@ -1858,6 +1943,7 @@ test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_exact_stamp_clear_accepts_canonical_home_alias
 test_clean_ownership_disposes
 test_malformed_or_partial_stamp_retains
+test_missing_stamp_retains
 test_unavailable_occupant_evidence_retains
 test_unclassified_live_process_retains
 test_undeclared_in_slot_process_retains
@@ -1866,9 +1952,10 @@ test_ambiguous_sibling_scope_metadata_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot
 test_same_task_in_another_home_or_role_retains_the_slot
-test_a_relinquished_slot_is_releasable_by_its_remaining_holder
+test_a_relinquished_slot_requires_remaining_ownership_proof
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks
 test_same_task_stamp_in_another_home_survives_relinquish
+test_relinquish_retires_exact_transition_artifacts
 test_teardown_retires_a_contested_lease_even_with_force
 test_retained_stamp_survives_failed_metadata_retirement
 test_stamp_survives_failed_pool_return

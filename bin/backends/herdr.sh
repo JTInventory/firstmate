@@ -1820,6 +1820,23 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
+fm_backend_herdr_endpoint_generation() {
+  local target=$1 session pane pane_info tab tab_info workspace
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  [ "$(printf '%s' "$pane_info" | jq -r '.result.pane.pane_id // empty')" = "$pane" ] || return 1
+  tab=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id // empty') || return 1
+  [ -n "$tab" ] || return 1
+  tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  [ "$(printf '%s' "$tab_info" | jq -r '.result.tab.tab_id // empty')" = "$tab" ] || return 1
+  workspace=$(printf '%s' "$tab_info" | jq -r '.result.tab.workspace_id // empty') || return 1
+  [ -n "$workspace" ] || return 1
+  printf '%s' "$session|$workspace|$tab|$pane" | cksum \
+    | awk '{printf "herdr-%s-%s", $1, $2}'
+}
+
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1

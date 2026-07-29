@@ -330,8 +330,28 @@ SH
   pass "bootstrap refuses worker mutation while preserving detect-only inspection"
 }
 
+test_bootstrap_blocks_mutation_on_unproven_restore_sweep() {
+  local home fakebin out rc
+  home="$TMP_ROOT/unproven-restore"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/project" "$home/wt"
+  fm_write_meta "$home/state/unproven.meta" \
+    "window=firstmate:fm-unproven" "worktree=$home/wt" "project=$home/project" \
+    "harness=codex" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fakebin=$(make_fake_toolchain "$home")
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "bootstrap mutated after an unproven isolation sweep"
+  printf '%s\n' "$out" | grep -F 'ISOLATION: task unproven is unproven' >/dev/null \
+    || fail "bootstrap did not surface the actionable isolation finding"
+  printf '%s\n' "$out" | grep -F 'bootstrap remains read-only' >/dev/null \
+    || fail "bootstrap did not explain its fail-closed restore state"
+  pass "unproven restore isolation blocks later bootstrap mutation"
+}
+
 test_bootstrap_reporting
 test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
 test_bootstrap_discovers_home_nvm_tasks_axi
 test_bootstrap_refuses_worker_mutation_before_home_resolution
+test_bootstrap_blocks_mutation_on_unproven_restore_sweep

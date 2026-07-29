@@ -10,7 +10,7 @@
 # checkout. Isolation therefore has to be re-established from live evidence on
 # every resume, not assumed from the launch that happened before the reboot.
 #
-# This sweep is READ-ONLY and always exits 0. It prints one actionable
+# This sweep is READ-ONLY. It exits nonzero when it prints an actionable
 # `ISOLATION:` line per task whose live agent process is provably not where its
 # record says it is or whose isolation cannot be proved from an authoritative
 # process reading, so bin/fm-bootstrap.sh can surface it in the session-start
@@ -56,6 +56,7 @@ ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 # sweep exists for had 17 concurrent tasks. An empty index is a real answer (no
 # live process declares a task), not a missing one.
 PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
+ISOLATION_FAILED=0
 
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
@@ -66,11 +67,13 @@ for meta in "$STATE"/*.meta; do
     /*) ;;
     *)
       echo "ISOLATION: task $id has corrupt scope metadata: worktree must be one non-empty absolute path; preserve its state and reconcile $meta before any mutation"
+      ISOLATION_FAILED=1
       continue
       ;;
   esac
   if [ "$recorded_count" -ne 1 ]; then
     echo "ISOLATION: task $id has corrupt scope metadata: worktree must appear exactly once; preserve its state and reconcile $meta before any mutation"
+    ISOLATION_FAILED=1
     continue
   fi
   backend=$(fm_backend_of_meta "$meta")
@@ -80,12 +83,14 @@ for meta in "$STATE"/*.meta; do
   kind=$(fm_meta_get "$meta" kind)
   if [ "$kind_count" -ne 1 ]; then
     echo "ISOLATION: task $id is unproven: kind must appear exactly once; preserve its state and reconcile $meta before any mutation"
+    ISOLATION_FAILED=1
     continue
   fi
   case "$kind" in
     ship|scout|secondmate) ;;
     *)
       echo "ISOLATION: task $id is unproven: kind must be one non-empty valid worker kind; preserve its state and reconcile $meta before any mutation"
+      ISOLATION_FAILED=1
       continue
       ;;
   esac
@@ -99,11 +104,13 @@ for meta in "$STATE"/*.meta; do
       /*) ;;
       *)
         echo "ISOLATION: task $id has corrupt secondmate scope metadata: home must be one non-empty absolute path; preserve its state and reconcile $meta before any mutation"
+        ISOLATION_FAILED=1
         continue
         ;;
     esac
     if [ "$expected_count" -ne 1 ]; then
       echo "ISOLATION: task $id has corrupt secondmate scope metadata: home must appear exactly once; preserve its state and reconcile $meta before any mutation"
+      ISOLATION_FAILED=1
       continue
     fi
     expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
@@ -122,6 +129,7 @@ for meta in "$STATE"/*.meta; do
       conflict_cwd_real=$(fm_agent_canonical_dir "$conflict_cwd") || conflict_cwd_real=$conflict_cwd
       fm_agent_path_within "$recorded_real" "$conflict_cwd_real" || continue
       echo "ISOLATION: task $id has conflicting worker identity at process $conflict_pid: home=$conflict_home role=$conflict_role, expected home=$expected_home role=$role; stop it before it acts on either home's records"
+      ISOLATION_FAILED=1
     done <<EOF
 $conflict_pids
 EOF
@@ -131,6 +139,7 @@ EOF
   pids=$(fm_agent_root_pids_for_identity "$id" "$expected_home" "$role" "$PID_INDEX" 2>/dev/null || true)
   if [ -z "$pids" ]; then
     echo "ISOLATION: task $id is unproven: no live agent process declares the required task=$id home=$expected_home role=$role identity; stop any undeclared endpoint process and relaunch the worker with complete isolation declarations"
+    ISOLATION_FAILED=1
     continue
   fi
 
@@ -139,6 +148,7 @@ EOF
     cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
     if [ -z "$cwd" ]; then
       echo "ISOLATION: task $id is unproven for agent process $pid: authoritative process cwd is unavailable; stop or re-establish the worker before any mutation"
+      ISOLATION_FAILED=1
       continue
     fi
     cwd_real=$(fm_agent_canonical_dir "$cwd") || cwd_real=$cwd
@@ -151,12 +161,14 @@ EOF
 
     if fm_agent_path_within "$ROOT_REAL" "$cwd_real" || fm_agent_path_within "$HOME_REAL" "$cwd_real"; then
       echo "ISOLATION: task $id collapsed onto the primary checkout - agent process $pid is running in $cwd_real instead of its worktree $recorded_real; stop that worker before it writes, then relaunch it in an isolated worktree"
+      ISOLATION_FAILED=1
       continue
     fi
     echo "ISOLATION: task $id is not in its recorded worktree - agent process $pid is running in $cwd_real instead of $recorded_real; reconcile the record before any disposal or steer"
+    ISOLATION_FAILED=1
   done <<EOF
 $pids
 EOF
 done
 
-exit 0
+exit "$ISOLATION_FAILED"

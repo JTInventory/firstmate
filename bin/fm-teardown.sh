@@ -561,6 +561,7 @@ teardown_treehouse_return() {
     stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
     if [ "$staged" -eq 1 ] && [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
       teardown_stage_return_claim_record "$claim" "$legacy" || return 1
+      fm_slot_stamp_mark_return_committed "$claim" "$legacy" || return 1
     fi
   fi
   while :; do
@@ -575,6 +576,10 @@ teardown_treehouse_return() {
       [ -n "$out" ] && printf '%s\n' "$out"
       if [ "$staged" -eq 1 ]; then
         if [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
+          teardown_mark_return_transaction_committed "$claim" "$legacy" || {
+            echo "error: returned $label $dir but could not record its committed transition" >&2
+            return 1
+          }
           TEARDOWN_RETURN_CLAIMS+=("$claim")
           TEARDOWN_RETURN_LEGACIES+=("$legacy")
         elif ! fm_slot_stamp_finalize_return "$claim" "$legacy"; then
@@ -587,6 +592,11 @@ teardown_treehouse_return() {
     [ -n "$out" ] && printf '%s\n' "$out" >&2
     if ! treehouse_return_is_index_lock_error "$out" || [ "$attempt" -ge "$retries" ]; then
       if [ "$staged" -eq 1 ]; then
+        [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -ne 1 ] \
+          || fm_slot_stamp_unmark_return_committed "$claim" || {
+            echo "error: could not roll back committed ownership evidence for $label $dir" >&2
+            return 1
+          }
         fm_slot_stamp_restore_return "$dir" "$stamp_id" "$stamp_home" "$claim" \
           "$lease_holder" "$stamp_path" "$legacy" || {
           echo "error: could not restore ownership evidence for $label $dir" >&2
@@ -1721,6 +1731,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ]; then
   validate_child_worktree_for_removal "$WT" "$PROJ" "worktree" >/dev/null || exit 1
   require_treehouse_return_capability "worktree" "$WT" || exit 1
 fi
+TEARDOWN_DEFER_RETURN_FINALIZE=1
+teardown_load_staged_return_claims || {
+  echo "REFUSED: staged teardown return claims are ambiguous" >&2
+  exit 1
+}
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
@@ -1830,15 +1845,15 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
 fi
-remove_grok_turnend_auth "$STATE" "$ID"
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
   exit 1
 }
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+remove_grok_turnend_auth "$STATE" "$ID"
+# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
+# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
+[ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
 if [ "$KIND" = secondmate ]; then
   teardown_commit_staged_returns || {
     echo "error: secondmate retirement commit could not be recorded" >&2
@@ -1856,16 +1871,18 @@ if [ "$KIND" = secondmate ]; then
   fi
   remove_secondmate_registry_entry "$ID" || exit 1
 fi
+teardown_commit_staged_returns || {
+  echo "error: teardown return commit could not be recorded; preserving ownership evidence and task state" >&2
+  exit 1
+}
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
 if [ -n "${TOP_SLOT_RETAIN_VERDICT:-}" ]; then
   fm_slot_stamp_relinquish "$WT" "$ID" "$FM_HOME" "$TOP_SLOT_RETAIN_VERDICT" || exit 1
 fi
-if [ "$KIND" = secondmate ]; then
-  teardown_reconcile_staged_returns
-  rm -rf -- "$TEARDOWN_TXN_DIR"
-fi
+teardown_reconcile_staged_returns
+rm -rf -- "$TEARDOWN_TXN_DIR"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

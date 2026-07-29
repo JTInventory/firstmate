@@ -29,6 +29,8 @@ FM_TEST_LIB_SOURCED=1
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export FM_AGENT_ROLE=primary
+unset FM_AGENT_TASK FM_AGENT_OWNER_HOME
 
 # --- ambient Herdr isolation ------------------------------------------------
 #
@@ -168,20 +170,12 @@ fm_git_worktree() {
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta
 # file (truncating any prior content).
 fm_write_meta() {
-  local file=$1 kv id owner_home
+  local file=$1 kv
   shift
   : > "$file"
   for kv in "$@"; do
     printf '%s\n' "$kv" >> "$file"
   done
-  if grep -q '^kind=' "$file"; then
-    id=$(basename "$file" .meta)
-    owner_home=$(dirname "$(dirname "$file")")
-    grep -q '^task=' "$file" || printf 'task=%s\n' "$id" >> "$file"
-    grep -q '^home=' "$file" || printf 'home=%s\n' "$owner_home" >> "$file"
-    grep -q '^endpoint_generation=' "$file" \
-      || printf 'endpoint_generation=endpoint-%s\n' "$id" >> "$file"
-  fi
 }
 
 # fm_write_secondmate_meta <file> <home> [window] [projects]: write the standard

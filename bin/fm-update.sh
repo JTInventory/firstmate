@@ -299,8 +299,13 @@ if [ -f "$SECONDMATES_MD" ]; then
     esac
     id=$(printf '%s\n' "$line" | sed -n 's/^- \([^ ][^ ]*\) - .*/\1/p')
     home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+    [ "$(resolve_path "$home")" != "$(resolve_path "$FM_ROOT")" ] || continue
     [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || continue
-    process_secondmate "$id" "$home" "" origin no
+    if ! validate_secondmate_home "$id" "$home"; then
+      echo "secondmate $id: skipped: unsafe home: $VALIDATION_ERROR"
+      continue
+    fi
+    echo "secondmate $id: refused: registry entry has no strict live lifecycle metadata"
   done < "$SECONDMATES_MD"
 fi
 unset -f fm_ff_after_target_update

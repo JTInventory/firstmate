@@ -333,21 +333,33 @@ fm_slot_stamp_mark_return_committed() {
   local claim=$1 legacy=${2:-} marker tmp
   [ -n "$claim" ] || return 0
   [ -n "$legacy" ] || legacy="${claim}.owner"
+  marker=$(fm_slot_stamp_committed_return_path "$claim") || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    if [ -e "$claim" ] || [ -L "$claim" ]; then
+      [ -f "$claim" ] && [ ! -L "$claim" ] && cmp -s "$claim" "$marker"
+      return
+    fi
+    return 0
+  fi
   fm_slot_return_claim_record_file "$claim" || return 1
   fm_slot_owner_record_file "$legacy" || return 1
   [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$FM_SLOT_STAMP_TASK" ] \
     && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$FM_SLOT_STAMP_HOME" || return 1
-  marker=$(fm_slot_stamp_committed_return_path "$claim") || return 1
-  if [ -e "$marker" ] || [ -L "$marker" ]; then
-    [ -f "$marker" ] && [ ! -L "$marker" ] \
-      && cmp -s "$claim" "$marker"
-    return
-  fi
   tmp=$(mktemp "${marker}.XXXXXX") || return 1
   cp "$claim" "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$marker" || {
     rm -f "$tmp"
     return 1
   }
+}
+
+fm_slot_stamp_unmark_return_committed() {
+  local claim=$1 marker
+  marker=$(fm_slot_stamp_committed_return_path "$claim") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ -f "$claim" ] && [ ! -L "$claim" ] && cmp -s "$claim" "$marker" || return 1
+  rm -f "$marker"
 }
 
 fm_slot_stamp_reconcile_committed_return() {
@@ -531,6 +543,10 @@ fm_slot_disposal_verdict() {
     printf 'retain: slot ownership stamp is present but malformed, partial, unreadable, or cannot be classified'
     return 0
   fi
+  if [ "$stamp_status" -ne 0 ]; then
+    printf 'retain: slot ownership stamp is missing and ownership cannot be proved'
+    return 0
+  fi
   if [ "$stamp_status" -eq 0 ]; then
     stamp_task=$FM_SLOT_STAMP_TASK
     stamp_home=$FM_SLOT_STAMP_HOME
@@ -587,7 +603,7 @@ fm_slot_disposal_verdict() {
 # Always succeeds: a slot with no stamp, or one stamped for someone else, simply
 # keeps whatever evidence it has.
 fm_slot_stamp_relinquish() {  # <worktree> <task-id> <home> <verdict>
-  local wt=$1 self=$2 home=$3 verdict=$4 stamp_task stamp_home
+  local wt=$1 self=$2 home=$3 verdict=$4 stamp_task stamp_home claim legacy
   case "$verdict" in
     "$FM_SLOT_RETAIN_META_PREFIX"*) ;;
     *) return 0 ;;
@@ -596,6 +612,18 @@ fm_slot_stamp_relinquish() {  # <worktree> <task-id> <home> <verdict>
   [ "$stamp_task" = "$self" ] || return 0
   stamp_home=$(fm_slot_stamp_field "$wt" home) || return 0
   fm_slot_same_path "$stamp_home" "$home" || return 0
-  fm_slot_stamp_clear "$wt"
+  claim=$(fm_slot_return_claim_path "$wt" 2>/dev/null || true)
+  legacy=$(fm_slot_return_legacy_path "$wt" 2>/dev/null || true)
+  if [ -n "$claim" ] && [ -n "$legacy" ] \
+     && fm_slot_return_claim_record_file "$claim" \
+     && [ "$FM_SLOT_RETURN_CLAIM_TASK" = "$self" ] \
+     && [ "$FM_SLOT_RETURN_CLAIM_HOLDER" = "$self" ] \
+     && fm_slot_same_path "$FM_SLOT_RETURN_CLAIM_HOME" "$home" \
+     && fm_slot_owner_record_file "$legacy" \
+     && [ "$FM_SLOT_STAMP_TASK" = "$self" ] \
+     && fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$home"; then
+    rm -f "$legacy" "$claim"
+  fi
+  fm_slot_stamp_clear_exact "$wt" "$self" "$home"
   return 0
 }

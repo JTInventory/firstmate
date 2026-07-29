@@ -85,7 +85,7 @@ fm_worker_launch_env_prefix() {
 # it declares none (a primary firstmate, or a pre-declaration legacy agent).
 fm_worker_declared_role() {
   case "${FM_AGENT_ROLE:-}" in
-    crewmate|secondmate) printf '%s' "$FM_AGENT_ROLE" ;;
+    primary|crewmate|secondmate) printf '%s' "$FM_AGENT_ROLE" ;;
   esac
 }
 
@@ -163,6 +163,13 @@ fm_worker_secondmate_effective_scope_matches() {
 fm_worker_refuse_primary_operation() {
   local operation=$1
   case "${FM_AGENT_ROLE:-}" in
+    primary)
+      if [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ]; then
+        return 0
+      fi
+      echo "error: $operation refused: primary identity declaration is incomplete" >&2
+      return 1
+      ;;
     crewmate)
       echo "error: $operation refused: this process is task worker '${FM_AGENT_TASK:-unnamed}' launched by ${FM_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
       return 1
@@ -173,10 +180,7 @@ fm_worker_refuse_primary_operation() {
       return 1
       ;;
     "")
-      if [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ]; then
-        return 0
-      fi
-      echo "error: $operation refused: worker identity declaration is incomplete" >&2
+      echo "error: $operation refused: primary identity is undeclared" >&2
       return 1
       ;;
     *)

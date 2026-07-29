@@ -453,8 +453,11 @@ fm_secondmate_lifecycle_meta_read() {
         FM_SECONDMATE_META_ERROR="incomplete or ambiguous Herdr endpoint"
         return 1
       fi
-      case "$session$workspace$tab$pane" in
+      case "$session$workspace$tab" in
         *'|'*|*:* ) FM_SECONDMATE_META_ERROR="unsafe provider endpoint"; return 1 ;;
+      esac
+      case "$pane" in
+        *'|'* ) FM_SECONDMATE_META_ERROR="unsafe provider endpoint"; return 1 ;;
       esac
       target="$session:$pane"
       if [ "$window" != "$target" ]; then
@@ -479,7 +482,7 @@ fm_secondmate_lifecycle_meta_read() {
 
 fm_secondmate_lifecycle_identity_matches() {
   local state=$1 id=$2 expected_home=$3 expected_window=$4 expected_generation=$5
-  local expected_provider=${6:-}
+  local expected_provider=${6:-} live_generation
   fm_secondmate_lifecycle_meta_read "$state/$id.meta" "$id" || return 1
   [ "$FM_SECONDMATE_META_WINDOW" = "$expected_window" ] \
     && [ "$FM_SECONDMATE_META_ENDPOINT_GENERATION" = "$expected_generation" ] \
@@ -487,6 +490,9 @@ fm_secondmate_lifecycle_identity_matches() {
   [ -z "$expected_provider" ] \
     || [ "$FM_SECONDMATE_META_PROVIDER_IDENTITY" = "$expected_provider" ] \
     || return 1
+  live_generation=$(fm_backend_endpoint_generation \
+    "$FM_SECONDMATE_META_BACKEND" "$FM_SECONDMATE_META_TARGET" 2>/dev/null) || return 1
+  [ -n "$live_generation" ] && [ "$live_generation" = "$expected_generation" ] || return 1
   validate_secondmate_home "$id" "$FM_SECONDMATE_META_HOME" || return 1
   [ "$VALIDATED_HOME" = "$expected_home" ]
 }

@@ -346,11 +346,18 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-dispatch-select.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh|bin/fm-teardown.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      printf '%s\n' secondmate
+      [ "$path" != bin/fm-teardown.sh ] || printf '%s\n' pr-forge
+      ;;
+    bin/fm-send.sh|bin/fm-dispatch-select.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit

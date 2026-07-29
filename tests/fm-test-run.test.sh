@@ -101,6 +101,7 @@ init_changed_fixture_repo() {
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
+    fm-worker-isolation.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
@@ -162,6 +163,20 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  : >"$repo/bin/fm-spawn.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-worker-isolation.test.sh" "spawn changes select worker-isolation coverage"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "spawn changes select secondmate-safety coverage"
+  git -C "$repo" add bin/fm-spawn.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm spawn-change
+
+  : >"$repo/bin/fm-teardown.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-worker-isolation.test.sh" "teardown changes select worker-isolation coverage"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "teardown changes select secondmate-safety coverage"
+  git -C "$repo" add bin/fm-teardown.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm teardown-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

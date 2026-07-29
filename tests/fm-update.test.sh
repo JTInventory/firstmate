@@ -143,8 +143,13 @@ bump_origin() {
 }
 
 run_update() {
-  local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+  local w=$1 fakebin
+  fakebin=$(make_fake_tmux "$w/update-fake")
+  : >"$w/update-fake/tmux.log"
+  : >"$w/update-fake/tmux.log.closed"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/update-fake/pane.txt" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
 ack_firstmate_reread() {
@@ -156,10 +161,15 @@ ack_firstmate_reread() {
 }
 
 ack_secondmate_nudge() {
-  local w=$1 target=$2 generation
+  local w=$1 target=$2 generation fakebin
   generation=$(fm_update_obligation_generation \
     "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1")
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+  fakebin=$(make_fake_tmux "$w/ack-fake")
+  : >"$w/ack-fake/tmux.log"
+  : >"$w/ack-fake/tmux.log.closed"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/ack-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/ack-fake/pane.txt" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-secondmate-nudge "$target" "$generation" >/dev/null
 }
 
@@ -284,7 +294,7 @@ test_idempotent_already_current() {
 #   reg1 - registered in secondmates.md only, NO live meta (registry backstop);
 #   sm1  - present in BOTH meta and the registry (must be processed exactly once);
 #   selfish - a bogus registry line pointing the firstmate repo at itself.
-# Asserts: reg1 advances but is NOT nudged (no live metadata); sm1 advances,
+# Asserts: reg1 is refused and is NOT nudged (no live metadata); sm1 advances,
 # is processed once, and IS nudged; the firstmate repo is never re-processed.
 test_registry_backstop_dedup_and_self_exclusion() {
   local w out count
@@ -301,7 +311,8 @@ test_registry_backstop_dedup_and_self_exclusion() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate reg1: updated " "registry-only secondmate fast-forwarded"
+  assert_contains "$out" "secondmate reg1: refused: registry entry has no strict live lifecycle metadata" \
+    "registry-only secondmate was not refused"
   assert_contains "$out" "secondmate sm1: updated " "meta+registry secondmate fast-forwarded"
   count=$(printf '%s\n' "$out" | grep -c '^secondmate sm1:' || true)
   [ "$count" -eq 1 ] || fail "secondmate sm1 processed $count times, expected 1 (dedup across meta+registry)"
@@ -313,7 +324,7 @@ test_registry_backstop_dedup_and_self_exclusion() {
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
   assert_contains "$nudge_line" "main:fm-sm1" "live-meta secondmate is nudged"
   assert_not_contains "$nudge_line" "reg1" "registry-only secondmate without live metadata is not nudged"
-  pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
+  pass "T7 registry-only ambiguity refuses while live metadata dedups safely"
 }
 
 # --- T9: firstmate repo on a feature branch is skipped ---------------------
@@ -483,17 +494,40 @@ test_acknowledgements_are_generation_bound() {
 }
 
 test_herdr_target_acknowledges_exact_live_meta() {
-  local w out generation
+  local w out generation fakebin endpoint
   w=$(new_world t15)
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=default:w1:p2/' "$w/home/state/sm1.meta"
+  printf '%s\n' 'backend=herdr' 'herdr_session=default' \
+    'herdr_workspace_id=workspace-1' 'herdr_tab_id=tab-1' \
+    'herdr_pane_id=w1:p2' >> "$w/home/state/sm1.meta"
+  endpoint=$(printf '%s' 'default|workspace-1|tab-1|w1:p2' | cksum \
+    | awk '{printf "herdr-%s-%s", $1, $2}')
+  sed -i "s/^endpoint_generation=.*/endpoint_generation=$endpoint/" \
+    "$w/home/state/sm1.meta"
   bump_origin "$w" instr
+  fakebin=$(make_fake_tmux "$w/update-fake")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"pane get w1:p2"*) printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"tab-1"}}}' ;;
+  *"tab get tab-1"*) printf '%s\n' '{"result":{"tab":{"tab_id":"tab-1","workspace_id":"workspace-1"}}}' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
 
-  out=$(run_update "$w")
+  : >"$w/update-fake/tmux.log"
+  : >"$w/update-fake/tmux.log.closed"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/update-fake/pane.txt" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
   assert_contains "$out" "nudge-secondmates: default:w1:p2" "Herdr target is surfaced unchanged"
   generation=$(sed -n 's/^nudge-secondmate-generation: default:w1:p2|//p' <<< "$out")
   [ -n "$generation" ] || fail "Herdr target generation was not reported"
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/update-fake/pane.txt" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-secondmate-nudge default:w1:p2 "$generation" >/dev/null
   ! fm_update_obligation_pending "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     || fail "Herdr target acknowledgement did not clear its obligation"
@@ -1132,6 +1166,19 @@ test_ambiguous_lifecycle_metadata_refuses_update() {
   pass "T31 ambiguous lifecycle metadata refuses update mutations"
 }
 
+test_live_endpoint_generation_mismatch_refuses_lifecycle_identity() {
+  local w rc=0
+  w=$(new_world t31-live-generation)
+  add_sm "$w" sm1
+  (
+    fm_backend_endpoint_generation() { printf 'recycled'; }
+    fm_secondmate_lifecycle_identity_matches "$w/home/state" sm1 "$w/sm1" \
+      main:fm-sm1 endpoint-sm1 tmux:main:fm-sm1
+  ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "recycled live endpoint generation matched stale metadata"
+  pass "live endpoint generation mismatches refuse lifecycle identity"
+}
+
 test_secondmate_delivery_is_one_locked_generation_transaction() {
   local w generation fakebin out lock
   w=$(new_world t32)
@@ -1463,6 +1510,7 @@ test_secondmate_lock_covers_recovery_callback
 test_locked_secondmate_action_revalidates_after_acquire
 test_secondmate_acknowledgement_respects_lifecycle_lock
 test_ambiguous_lifecycle_metadata_refuses_update
+test_live_endpoint_generation_mismatch_refuses_lifecycle_identity
 test_secondmate_delivery_is_one_locked_generation_transaction
 test_secondmate_delivery_refuses_recycled_endpoint_ack
 test_duplicate_provider_fields_refuse_lifecycle_mutation
