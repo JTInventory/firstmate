@@ -12,19 +12,60 @@ session_start=$5
 record="$state/.session-durable-authority"
 requests="$state/.session-durable-authority-requests"
 key=
+live_key=
 IFS= read -r key <&18 || exit 1
+IFS= read -r live_key <&9 || exit 1
 [ "${#key}" -ge 64 ] || exit 1
 case "$key" in *[!0-9a-f]*) exit 1 ;; esac
+[ "${#live_key}" -ge 64 ] || exit 1
+case "$live_key" in *[!0-9a-f]*) exit 1 ;; esac
+launch="${record}.launch.$$"
+attempts=0
+while [ "$attempts" -lt 100 ] \
+  && { [ ! -f "$launch" ] || [ -L "$launch" ]; }; do
+  sleep 0.02
+  attempts=$((attempts + 1))
+done
+[ -f "$launch" ] && [ ! -L "$launch" ] \
+  && [ "$(wc -l < "$launch" | tr -d ' ')" -eq 11 ] \
+  && [ "$(sed -n '1p' "$launch")" = version=1 ] \
+  && [ "$(sed -n '2s/^pid=//p' "$launch")" = "$$" ] \
+  && [ "$(sed -n '3s/^start=//p' "$launch")" \
+    = "$(fm_session_process_start "$$" 2>/dev/null)" ] \
+  && [ "$(sed -n '4s/^identity=//p' "$launch")" \
+    = "$(fm_session_process_identity "$$" 2>/dev/null)" ] \
+  && [ "$(sed -n '5s/^state=//p' "$launch")" = "$state" ] \
+  && [ "$(sed -n '6s/^home=//p' "$launch")" = "$home" ] \
+  && [ "$(sed -n '7s/^checkout=//p' "$launch")" = "$checkout" ] \
+  && [ "$(sed -n '8s/^session-pid=//p' "$launch")" = "$session_pid" ] \
+  && [ "$(sed -n '9s/^session-start=//p' "$launch")" = "$session_start" ] \
+  || exit 1
+launch_body=$(sed -n '1,9p' "$launch")$'\n'
+launch_live=$(sed -n '10s/^live-authority-hmac=//p' "$launch")
+launch_durable=$(sed -n '11s/^durable-authority-hmac=//p' "$launch")
+[ "$launch_live" = "$(printf '%s' "$launch_body" \
+    | fm_session_hmac_sha256_key "$live_key")" ] \
+  && [ "$launch_durable" = "$(printf '%s' "$launch_body" \
+    | fm_session_hmac_sha256_key "$key")" ] || exit 1
+rm -f "$launch"
+exec 9<&-
 exec 18<&-
+unset live_key
+unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+unset FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
+unset FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
 
 start=$(fm_session_process_start "$$") || exit 1
 identity=$(fm_session_process_identity "$$") || exit 1
 tmp=$(mktemp "${record}.XXXXXX") || exit 1
 mkdir -p "$requests" || exit 1
 chmod 700 "$requests" || exit 1
-printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nsession-pid=%s\nsession-start=%s\nhome=%s\ncheckout=%s\n' \
+body=$(printf 'version=2\npid=%s\nstart=%s\nidentity=%s\nsession-pid=%s\nsession-start=%s\nhome=%s\ncheckout=%s\n' \
   "$$" "$start" "$identity" "$session_pid" "$session_start" "$home" \
-  "$checkout" > "$tmp" \
+  "$checkout") || exit 1
+body="${body}"$'\n'
+hmac=$(printf '%s' "$body" | fm_session_hmac_sha256_key "$key") || exit 1
+printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
   && chmod 600 "$tmp" && mv "$tmp" "$record" || {
     rm -f "$tmp"
     exit 1
@@ -33,6 +74,46 @@ printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nsession-pid=%s\nsession-start=
 while :; do
   [ -f "$record" ] \
     && [ "$(sed -n '2s/^pid=//p' "$record" 2>/dev/null)" = "$$" ] || exit 0
+  for challenge in "$requests"/*.challenge; do
+    [ -e "$challenge" ] || continue
+    challenge_response="${challenge}.response"
+    [ -f "$challenge" ] && [ ! -L "$challenge" ] \
+      && [ ! -e "$challenge_response" ] && [ ! -L "$challenge_response" ] \
+      && [ "$(wc -l < "$challenge" | tr -d ' ')" -eq 6 ] \
+      && [ "$(sed -n '1p' "$challenge")" = version=1 ] \
+      && [ "$(sed -n '3s/^custodian-pid=//p' "$challenge")" = "$$" ] \
+      && [ "$(sed -n '4s/^custodian-start=//p' "$challenge")" = "$start" ] \
+      || {
+        rm -f "$challenge"
+        continue
+      }
+    challenge_requester=$(sed -n '5s/^requester-pid=//p' "$challenge")
+    challenge_requester_start=$(sed -n '6s/^requester-start=//p' "$challenge")
+    case "$challenge_requester" in
+      ''|*[!0-9]*) rm -f "$challenge"; continue ;;
+    esac
+    [ "$(fm_session_process_start "$challenge_requester" 2>/dev/null)" \
+      = "$challenge_requester_start" ] || {
+        rm -f "$challenge"
+        continue
+      }
+    challenge_body=$(cat "$challenge")$'\n'
+    challenge_hmac=$(printf '%s' "$challenge_body" \
+      | fm_session_hmac_sha256_key "$key") || {
+        rm -f "$challenge"
+        continue
+      }
+    challenge_tmp=$(mktemp "${challenge_response}.XXXXXX") || {
+      rm -f "$challenge"
+      continue
+    }
+    printf '%sauthority-hmac=%s\n' "$challenge_body" "$challenge_hmac" \
+      > "$challenge_tmp" \
+      && chmod 600 "$challenge_tmp" \
+      && mv "$challenge_tmp" "$challenge_response" \
+      || rm -f "$challenge_tmp"
+    rm -f "$challenge"
+  done
   for request in "$requests"/*.request; do
     [ -e "$request" ] || continue
     response="${request%.request}.response"
@@ -76,6 +157,8 @@ while :; do
         "$requester" "$checkout/bin/fm-session-authority-exec.sh" \
       && [ "$(fm_session_process_session_id "$requester" 2>/dev/null)" \
         = "$session_pid" ] \
+      && [ "$(fm_session_process_start "$session_pid" 2>/dev/null)" \
+        = "$session_start" ] \
       && [ "$(fm_session_process_argument_value \
         "$requester" --durable-recovery 2>/dev/null)" = "$nonce" ] \
       && [ "$(fm_session_process_argument_value \
@@ -120,8 +203,24 @@ while :; do
         rm -f "$request" "$public_file" "$encrypted"
         continue
       }
-      printf 'version=1\nnonce=%s\nciphertext=%s\n' "$nonce" \
-        "$(openssl base64 -A < "$encrypted")" > "$response_tmp" \
+      ciphertext=$(openssl base64 -A < "$encrypted") || {
+        rm -f "$request" "$public_file" "$encrypted" "$response_tmp"
+        continue
+      }
+      response_body=$(printf 'version=2\nnonce=%s\nciphertext=%s\ncustodian-pid=%s\ncustodian-start=%s\nrequester-pid=%s\nrequester-start=%s\npublic-key-sha256=%s\n' \
+        "$nonce" "$ciphertext" "$$" "$start" "$requester" "$requester_start" \
+        "$public_digest") || {
+          rm -f "$request" "$public_file" "$encrypted" "$response_tmp"
+          continue
+        }
+      response_body="${response_body}"$'\n'
+      response_hmac=$(printf '%s' "$response_body" \
+        | fm_session_hmac_sha256_key "$key") || {
+          rm -f "$request" "$public_file" "$encrypted" "$response_tmp"
+          continue
+        }
+      printf '%sauthority-hmac=%s\n' "$response_body" "$response_hmac" \
+        > "$response_tmp" \
         && chmod 600 "$response_tmp" && mv "$response_tmp" "$response" \
         || rm -f "$response_tmp"
     fi

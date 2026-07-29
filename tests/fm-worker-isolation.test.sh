@@ -1088,6 +1088,39 @@ test_durable_receipts_survive_live_key_rotation() {
   pass "durable teardown receipts survive live authority key rotation"
 }
 
+test_durable_custodian_is_root_bound_and_scoped() {
+  local home state record first_pid second_pid
+  if ! fm_session_descriptor_channel_isolated \
+    "$FM_SESSION_AUTHORITY_DURABLE_FD"; then
+    pass "skip: sibling process access to durable authority is not isolated"
+    return 0
+  fi
+  home="$TMP_ROOT/durable-custodian-home"
+  state="$home/state"
+  record="$state/.session-durable-authority"
+  mkdir -p "$state"
+  fm_session_durable_custodian_ensure "$state" "$home" "$ROOT" \
+    || fail "authority could not launch its durable custodian"
+  fm_session_durable_custodian_validate "$record" \
+    || fail "custodian record was not bound to the durable root"
+  first_pid=$FM_SESSION_DURABLE_CUSTODIAN_PID
+  if [ "$(uname -s 2>/dev/null)" = Linux ]; then
+    [ ! -e "/proc/$first_pid/fd/9" ] \
+      || fail "durable custodian retained the live authority descriptor"
+  fi
+  sed -i 's/^authority-hmac=.*/authority-hmac=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$record"
+  fm_session_durable_custodian_ensure "$state" "$home" "$ROOT" \
+    || fail "authority could not replace an invalid custodian record"
+  fm_session_durable_custodian_validate "$record" \
+    || fail "replacement custodian lost durable-root continuity"
+  second_pid=$FM_SESSION_DURABLE_CUSTODIAN_PID
+  [ "$second_pid" != "$first_pid" ] \
+    || fail "invalid custodian record did not trigger authenticated replacement"
+  rm -f "$record"
+  pass "durable custodian launch, scope, and replacement stay root-bound"
+}
+
 test_authority_hmac_needs_only_openssl() {
   local actual
   actual=$(printf 'Hi There' \
@@ -1097,7 +1130,15 @@ test_authority_hmac_needs_only_openssl() {
   [ "$actual" = \
     b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7 ] \
     || fail "shell/OpenSSL HMAC did not match the known SHA-256 vector"
-  pass "authority HMAC uses the declared OpenSSL dependency"
+  if (
+    fm_session_hmac_pad() { return 1; }
+    printf 'must-fail' \
+      | fm_session_hmac_sha256_key \
+        0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
+  ) >/dev/null 2>&1; then
+    fail "authority HMAC masked a failed padding stage"
+  fi
+  pass "authority HMAC uses OpenSSL and fails closed across pipeline stages"
 }
 
 test_authority_fds_reprove_isolation_after_exec() {
@@ -3429,6 +3470,7 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_darwin_session_identity_uses_supported_fields
   test_secondmate_spawn_waits_for_enrollment_acceptance
   test_durable_receipts_survive_live_key_rotation
+  test_durable_custodian_is_root_bound_and_scoped
   test_authority_hmac_needs_only_openssl
   echo "# focused session-authority tests passed"
   exit 0

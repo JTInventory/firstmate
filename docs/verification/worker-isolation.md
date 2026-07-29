@@ -52,12 +52,19 @@ attempt to prove that procfs cannot expose any authority-bearing descriptor
 before creating its secret; readable or unrecognized isolation refuses
 startup. Darwin has no corresponding procfs descriptor path. The wrapper then
 keeps live-broker HMAC and durable-receipt HMAC on distinct protected
-descriptors. A detached custodian retains only the durable receipt root. A
-replacement wrapper that no longer inherited that descriptor re-execs with a
-one-use RSA public key in immutable arguments; the custodian checks the exact
-wrapper, original kernel session, live process identity, and declaration-free
-ancestry before returning the root encrypted to that key. The wrapper rotates
-the separate live-broker key after recovery. The wrapper then
+descriptors. The live broker authorizes a detached custodian with a launch
+certificate bound to its exact PID and session and authenticated by both roots.
+After validating it, the custodian closes FD 9, clears the live-broker
+environment, and retains only the durable receipt root. A replacement wrapper
+that no longer inherited that descriptor re-execs with a one-use RSA public key
+in immutable arguments; the custodian checks the exact wrapper, original kernel
+session and session-start identity, live process identity, and declaration-free
+ancestry before returning the root encrypted to that key. The ciphertext and
+both endpoint identities carry a durable-root HMAC. The wrapper validates that
+response and the custodian record with the recovered root before adopting it,
+then rotates the separate live-broker key. A broker that still holds the root
+can authenticate and replace a stale custodian without changing durable
+provenance. The wrapper then
 creates an anonymous consumer key and publishes its public key and exact live
 process identity in `${enrollment}.consume`. The signer validates that request
 and publishes a signed `${enrollment}.accepted` record. The wrapper validates

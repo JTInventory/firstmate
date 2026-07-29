@@ -143,7 +143,15 @@ run_under_replacement_broker() {
   old_live=$(printf rotation-proof | fm_session_authority_hmac) || return 1
   old_durable=$(printf rotation-proof | fm_session_authority_durable_hmac) \
     || return 1
-  "$ROOT/bin/fm-session-authority-exec.sh" bash -c '
+  fm_session_durable_custodian_ensure \
+    "$FM_STATE_OVERRIDE" "$FM_HOME" "$ROOT" || return 1
+  sed -i 's/^pid=.*/pid=99999999/' \
+    "$FM_STATE_OVERRIDE/.session-authority" || return 1
+  (
+    exec 9<&-
+    exec 18<&-
+    unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+    "$ROOT/bin/fm-session-authority-exec.sh" bash -c '
     root=$1
     command=$2
     old_live=$3
@@ -157,7 +165,8 @@ run_under_replacement_broker() {
     [ "$new_live" != "$old_live" ] || exit 1
     [ "$new_durable" = "$old_durable" ] || exit 1
     bash -c "$command" _ "$root" "$@"
-  ' _ "$ROOT" "$command" "$old_live" "$old_durable" "$@"
+    ' _ "$ROOT" "$command" "$old_live" "$old_durable" "$@"
+  )
 }
 
 new_protocol_migration_world() {

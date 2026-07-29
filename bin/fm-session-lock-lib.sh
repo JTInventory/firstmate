@@ -254,15 +254,17 @@ fm_session_hmac_sha256_key() {
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
   command -v openssl >/dev/null 2>&1 || return 1
   inner=$(
+    set -o pipefail
     {
-      fm_session_hmac_pad "$key" 54
-      cat
+      fm_session_hmac_pad "$key" 54 || exit 1
+      cat || exit 1
     } | openssl dgst -sha256 -binary 2>/dev/null | openssl base64 -A
   ) || return 1
   output=$(
+    set -o pipefail
     {
-      fm_session_hmac_pad "$key" 92
-      printf '%s' "$inner" | openssl base64 -d -A
+      fm_session_hmac_pad "$key" 92 || exit 1
+      printf '%s' "$inner" | openssl base64 -d -A || exit 1
     } | openssl dgst -sha256 2>/dev/null
   ) || return 1
   digest=${output##*= }
@@ -465,8 +467,8 @@ fm_session_durable_consumer_prepare() {
 fm_session_durable_custodian_read() {
   local file=$1 current
   [ -f "$file" ] && [ ! -L "$file" ] \
-    && [ "$(wc -l < "$file" | tr -d ' ')" -eq 8 ] \
-    && [ "$(sed -n '1p' "$file")" = version=1 ] || return 1
+    && [ "$(wc -l < "$file" | tr -d ' ')" -eq 9 ] \
+    && [ "$(sed -n '1p' "$file")" = version=2 ] || return 1
   FM_SESSION_DURABLE_CUSTODIAN_PID=$(sed -n '2s/^pid=//p' "$file")
   FM_SESSION_DURABLE_CUSTODIAN_START=$(sed -n '3s/^start=//p' "$file")
   FM_SESSION_DURABLE_CUSTODIAN_IDENTITY=$(sed -n '4s/^identity=//p' "$file")
@@ -498,20 +500,104 @@ fm_session_durable_custodian_read() {
       = "$FM_SESSION_DURABLE_CUSTODIAN_SESSION_START" ]
 }
 
+fm_session_durable_custodian_validate() {
+  local file=$1
+  fm_session_durable_custodian_read "$file" \
+    && fm_session_authority_record_validate "$file" 9
+}
+
+fm_session_durable_custodian_launch_write() {
+  local file=$1 pid=$2 start=$3 identity=$4 state=$5 home=$6 checkout=$7
+  local session=$8 session_start=$9 body live_hmac durable_hmac tmp
+  case "$pid:$start:$identity:$state:$home:$checkout:$session:$session_start" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  body=$(printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nstate=%s\nhome=%s\ncheckout=%s\nsession-pid=%s\nsession-start=%s\n' \
+    "$pid" "$start" "$identity" "$state" "$home" "$checkout" "$session" \
+    "$session_start") \
+    || return 1
+  body="${body}"$'\n'
+  live_hmac=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
+  durable_hmac=$(printf '%s' "$body" | fm_session_authority_durable_hmac) \
+    || return 1
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  chmod 600 "$tmp" \
+    && printf '%slive-authority-hmac=%s\ndurable-authority-hmac=%s\n' \
+      "$body" "$live_hmac" "$durable_hmac" > "$tmp" \
+    && mv "$tmp" "$file" || {
+      rm -f "$tmp"
+      return 1
+    }
+}
+
+fm_session_durable_custodian_challenge() {
+  local state=$1 custodian=$2 custodian_start=$3 nonce requests request response
+  local start body response_body actual expected tmp attempts=0
+  nonce=$(fm_session_random_hex 32) || return 1
+  start=$(fm_session_process_start "$$") || return 1
+  requests="$state/.session-durable-authority-requests"
+  request="$requests/$nonce.challenge"
+  response="${request}.response"
+  [ -d "$requests" ] && [ ! -L "$requests" ] \
+    && [ ! -e "$request" ] && [ ! -L "$request" ] \
+    && [ ! -e "$response" ] && [ ! -L "$response" ] || return 1
+  tmp=$(mktemp "${request}.XXXXXX") || return 1
+  body=$(printf 'version=1\nnonce=%s\ncustodian-pid=%s\ncustodian-start=%s\nrequester-pid=%s\nrequester-start=%s\n' \
+    "$nonce" "$custodian" "$custodian_start" "$$" "$start") || return 1
+  body="${body}"$'\n'
+  printf '%s' "$body" > "$tmp" \
+    && chmod 600 "$tmp" && mv "$tmp" "$request" || {
+      rm -f "$tmp"
+      return 1
+    }
+  while [ "$attempts" -lt 100 ]; do
+    [ ! -f "$response" ] || break
+    kill -0 "$custodian" 2>/dev/null || {
+      rm -f "$request" "$response"
+      return 1
+    }
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$response" ] && [ ! -L "$response" ] \
+    && [ "$(wc -l < "$response" | tr -d ' ')" -eq 7 ] || {
+      rm -f "$request" "$response"
+      return 1
+    }
+  response_body=$(sed -n '1,6p' "$response")$'\n'
+  [ "$response_body" = "$body" ] || {
+    rm -f "$request" "$response"
+    return 1
+  }
+  actual=$(sed -n '7s/^authority-hmac=//p' "$response")
+  expected=$(printf '%s' "$body" | fm_session_authority_durable_hmac) || {
+    rm -f "$request" "$response"
+    return 1
+  }
+  rm -f "$request" "$response"
+  [ "$actual" = "$expected" ]
+}
+
 fm_session_durable_custodian_ensure() {
   local state=$1 home=$2 checkout=$3 record script session session_start pid
-  local attempts=0 log
+  local attempts=0 log launch start identity
   record="$state/.session-durable-authority"
   script="$checkout/bin/fm-session-durable-authority.sh"
-  if fm_session_durable_custodian_read "$record" \
+  if fm_session_durable_custodian_validate "$record" \
     && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home" ] \
     && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$checkout" ] \
     && fm_session_process_runs_script \
-      "$FM_SESSION_DURABLE_CUSTODIAN_PID" "$script"; then
+      "$FM_SESSION_DURABLE_CUSTODIAN_PID" "$script" \
+    && fm_session_durable_custodian_challenge \
+      "$state" "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
+      "$FM_SESSION_DURABLE_CUSTODIAN_START"; then
     return 0
   fi
-  [ ! -e "$record" ] && [ ! -L "$record" ] || return 1
   fm_session_authority_durable_capability_present || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    rm -f "$record" || return 1
+  fi
   session=$(fm_session_process_session_id "$$") || return 1
   session_start=$(fm_session_process_start "$session") || return 1
   log="$state/.session-durable-authority.log"
@@ -526,23 +612,59 @@ fm_session_durable_custodian_ensure() {
     return 1
   fi
   pid=$!
-  while [ "$attempts" -lt 100 ]; do
-    if fm_session_durable_custodian_read "$record" \
-      && [ "$FM_SESSION_DURABLE_CUSTODIAN_PID" = "$pid" ] \
-      && fm_session_process_runs_script "$pid" "$script"; then
-      return 0
-    fi
-    kill -0 "$pid" 2>/dev/null || return 1
+  while [ "$attempts" -lt 100 ] \
+    && ! fm_session_process_runs_script "$pid" "$script"; do
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.02
     attempts=$((attempts + 1))
   done
+  fm_session_process_runs_script "$pid" "$script" \
+    && start=$(fm_session_process_start "$pid") \
+    && identity=$(fm_session_process_identity "$pid") || {
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 1
+    }
+  attempts=0
+  launch="${record}.launch.$pid"
+  fm_session_durable_custodian_launch_write \
+    "$launch" "$pid" "$start" "$identity" "$state" "$home" "$checkout" \
+    "$session" "$session_start" \
+    || {
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      rm -f "$launch"
+      return 1
+    }
+  while [ "$attempts" -lt 100 ]; do
+    if fm_session_durable_custodian_validate "$record" \
+      && [ "$FM_SESSION_DURABLE_CUSTODIAN_PID" = "$pid" ] \
+      && fm_session_process_runs_script "$pid" "$script" \
+      && fm_session_durable_custodian_challenge \
+        "$state" "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
+        "$FM_SESSION_DURABLE_CUSTODIAN_START"; then
+      rm -f "$launch"
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || {
+      rm -f "$launch"
+      return 1
+    }
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$launch"
   return 1
 }
 
 fm_session_durable_authority_recover() {
   local state=$1 home=$2 checkout=$3 nonce=$4 public=$5 digest=$6
   local record requests request response start identity tmp attempts=0
-  local private_path encrypted_file ciphertext key
+  local private_path encrypted_file ciphertext key actual expected body
+  local response_custodian response_custodian_start response_requester
+  local response_requester_start response_digest
   record="$state/.session-durable-authority"
   fm_session_durable_custodian_read "$record" \
     && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home" ] \
@@ -576,12 +698,20 @@ fm_session_durable_authority_recover() {
     attempts=$((attempts + 1))
   done
   [ -f "$response" ] && [ ! -L "$response" ] \
-    && [ "$(sed -n '1p' "$response")" = version=1 ] \
+    && [ "$(wc -l < "$response" | tr -d ' ')" -eq 9 ] \
+    && [ "$(sed -n '1p' "$response")" = version=2 ] \
     && [ "$(sed -n '2s/^nonce=//p' "$response")" = "$nonce" ] || {
       rm -f "$request" "$response"
       return 1
     }
   ciphertext=$(sed -n '3s/^ciphertext=//p' "$response")
+  response_custodian=$(sed -n '4s/^custodian-pid=//p' "$response")
+  response_custodian_start=$(sed -n '5s/^custodian-start=//p' "$response")
+  response_requester=$(sed -n '6s/^requester-pid=//p' "$response")
+  response_requester_start=$(sed -n '7s/^requester-start=//p' "$response")
+  response_digest=$(sed -n '8s/^public-key-sha256=//p' "$response")
+  actual=$(sed -n '9s/^authority-hmac=//p' "$response")
+  body=$(sed -n '1,8p' "$response")$'\n'
   private_path=/dev/fd/16
   [ -r "$private_path" ] || private_path=/proc/self/fd/16
   [ -r "$private_path" ] || {
@@ -599,13 +729,38 @@ fm_session_durable_authority_recover() {
         rm -f "$encrypted_file" "$request" "$response"
         return 1
       }
-  rm -f "$encrypted_file" "$request" "$response"
+  rm -f "$encrypted_file"
   exec 16<&-
   [ "${#key}" -ge 64 ] || return 1
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
   exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
   unset key
   FM_SESSION_AUTHORITY_DURABLE_FD=18
+  [ "$response_custodian" = "$FM_SESSION_DURABLE_CUSTODIAN_PID" ] \
+    && [ "$response_custodian_start" \
+      = "$FM_SESSION_DURABLE_CUSTODIAN_START" ] \
+    && [ "$response_requester" = "$$" ] \
+    && [ "$response_requester_start" = "$start" ] \
+    && [ "$response_digest" = "$digest" ] \
+    && fm_session_durable_custodian_validate "$record" || {
+      rm -f "$request" "$response"
+      exec 18<&-
+      unset FM_SESSION_AUTHORITY_DURABLE_FD
+      return 1
+    }
+  expected=$(printf '%s' "$body" | fm_session_authority_durable_hmac) || {
+    rm -f "$request" "$response"
+    exec 18<&-
+    unset FM_SESSION_AUTHORITY_DURABLE_FD
+    return 1
+  }
+  [ "$actual" = "$expected" ] || {
+    rm -f "$request" "$response"
+    exec 18<&-
+    unset FM_SESSION_AUTHORITY_DURABLE_FD
+    return 1
+  }
+  rm -f "$request" "$response"
 }
 
 fm_session_enrollment_signer_prepare() {
