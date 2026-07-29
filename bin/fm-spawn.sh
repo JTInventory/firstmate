@@ -245,6 +245,7 @@ SPAWN_SLOT_CLAIM_PUBLISHED=0
 SPAWN_SLOT_CLAIM_WT=
 SPAWN_SLOT_CLAIM_HOME=
 SPAWN_AUTHORITY_ENROLLMENT=
+SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 
 claim_spawn_slot() {
   local home
@@ -298,7 +299,14 @@ spawn_herdr_flat_uncertainty_record() {
 
 spawn_abort_cleanup() {
   local status=$? cleanup_session i
-  [ -z "$SPAWN_AUTHORITY_ENROLLMENT" ] || rm -f "$SPAWN_AUTHORITY_ENROLLMENT"
+  if [ -n "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" ]; then
+    kill "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" 2>/dev/null || true
+    wait "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" 2>/dev/null || true
+  fi
+  [ -z "$SPAWN_AUTHORITY_ENROLLMENT" ] \
+    || rm -f "$SPAWN_AUTHORITY_ENROLLMENT" \
+      "${SPAWN_AUTHORITY_ENROLLMENT}.ready" \
+      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted"
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
   fi
@@ -1734,6 +1742,7 @@ if [ "$KIND" = secondmate ]; then
       echo "error: could not issue trusted session enrollment for secondmate $ID" >&2
       exit 1
     }
+  SPAWN_AUTHORITY_ENROLLMENT_SIGNER=$FM_SESSION_ENROLLMENT_SIGNER_PID
   LAUNCH="$WORKER_ENV_PREFIX$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
@@ -1771,6 +1780,7 @@ fi
 HERDR_FLAT_ABORT_CLEANUP=0
 fm_backend_send_key "$BACKEND" "$WID" Enter
 SPAWN_AUTHORITY_ENROLLMENT=
+SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_LOCK_HELD=0

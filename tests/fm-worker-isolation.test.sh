@@ -811,6 +811,7 @@ issue_secondmate_enrollment() {
         printf "%s\n" "$1" > "$2/state/.primary-checkout"
         fm_session_authority_write_file "$2/state/.session-authority" \
           "$FM_SESSION_AUTHORITY_BROKER_PID" "$owner" "$2" "$1" \
+          && unset FM_SESSION_AUTHORITY_BROKER_SCRIPT \
           && fm_session_enrollment_ticket_write "$3" "$4" "$5" "$2" \
           && : > "$6" || exit 1
         while [ ! -e "$7" ]; do sleep 0.02; done
@@ -829,7 +830,7 @@ issue_secondmate_enrollment() {
 }
 
 test_secondmate_authority_delegation_uses_no_node() {
-  local issuer home fakebin out status=0
+  local issuer home fakebin out status=0 ticket
   issuer=$(make_primary_home "$TMP_ROOT/secondmate-authority-issuer")
   home="$TMP_ROOT/secondmate-authority-delegation"
   mkdir -p "$home/state"
@@ -838,6 +839,11 @@ test_secondmate_authority_delegation_uses_no_node() {
   printf '%s\n' domain > "$home/.fm-secondmate-home"
   issue_secondmate_enrollment "$issuer" "$home" domain \
     || fail "could not issue fresh secondmate enrollment"
+  ticket="$home/state/.session-authority-enrollment"
+  ! grep -q '^key=' "$ticket" \
+    || fail "secondmate enrollment exposed the issuer authority key"
+  assert_contains "$(cat "$ticket")" "signature=" \
+    "secondmate enrollment did not carry a scoped signature"
   fakebin="$TMP_ROOT/no-node"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
@@ -857,6 +863,32 @@ test_secondmate_authority_delegation_uses_no_node() {
   : > "$home/state/.session-authority-enrollment.release"
   wait "$ENROLLMENT_ISSUER_PID" 2>/dev/null || true
   pass "secondmate lock acquisition preserves delegated authority without Node"
+}
+
+test_darwin_session_identity_uses_supported_fields() {
+  local out
+  out=$(bash -c '
+    . "$1/bin/fm-session-lock-lib.sh"
+    uname() { printf "Darwin\n"; }
+    fm_session_parent_pid() {
+      case "$1" in
+        987654) printf "987653\n" ;;
+        987653) printf "987652\n" ;;
+        987652) printf "1\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    ps() {
+      case "$*" in
+        *"-p 987654 -o sess="*|*"-p 987653 -o sess="*|*"-p 987652 -o sess="*) printf "0xabc\n" ;;
+        *"-p 1 -o sess="*) printf "0xdef\n" ;;
+        *) return 91 ;;
+      esac
+    }
+    fm_session_process_session_id 987654
+  ' _ "$ROOT") || fail "Darwin session identity rejected supported sess output"
+  [ "$out" = 987652 ] || fail "Darwin session identity did not resolve the numeric leader: $out"
+  pass "Darwin session identity derives a numeric leader from supported sess output"
 }
 
 test_forged_key_cannot_issue_secondmate_enrollment() {
@@ -2798,6 +2830,7 @@ test_session_authority_recovery_retains_unverified_backup
 test_session_authority_recovery_precedes_current_tuple_validation
 test_fresh_enrollment_requires_external_capability
 test_secondmate_authority_delegation_uses_no_node
+test_darwin_session_identity_uses_supported_fields
 test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker

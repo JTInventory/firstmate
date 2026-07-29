@@ -42,6 +42,16 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     && mv "$enrollment" "$enrollment_claim"; then
     if fm_session_enrollment_ticket_validate \
       "$enrollment_claim" "$FM_AGENT_TASK" "$home_real"; then
+      enrollment_accepted="${enrollment}.accepted"
+      enrollment_accepted_tmp=$(mktemp "${enrollment_accepted}.XXXXXX") || exit 1
+      chmod 600 "$enrollment_accepted_tmp" \
+        && printf 'signer-pid=%s\nnonce=%s\n' \
+          "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
+          > "$enrollment_accepted_tmp" \
+        && mv "$enrollment_accepted_tmp" "$enrollment_accepted" || {
+          rm -f "$enrollment_accepted_tmp"
+          exit 1
+        }
       rm -f "$enrollment_claim"
       authorized=1
     else

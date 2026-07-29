@@ -26,7 +26,7 @@ FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERR
 A crewmate carries no home at all; a secondmate carries only its own.
 For a secondmate spawn, this declaration precedes
 `bin/fm-session-authority-exec.sh`; the authorized parent has already placed a
-one-use keyed enrollment ticket in that home.
+one-use signed enrollment ticket in that home without exposing the issuer key.
 
 The declaration refuses rather than emitting a partial prefix:
 

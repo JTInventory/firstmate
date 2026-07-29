@@ -315,9 +315,11 @@ start, executable, script, ancestry, and descriptor identity remain live. The
 structured owner binds the broker's process chain to the exact home, checkout,
 process start, executable identity, and `CODEX_THREAD_ID`. Firstmate closes the
 descriptor and clears the broker before launching a crewmate. An authorized
-home issues a one-use keyed enrollment ticket for a fresh secondmate; the
-secondmate declaration and home are applied before its wrapper consumes that
-ticket and creates its own broker descriptor.
+home issues a one-use asymmetric enrollment ticket for a fresh secondmate
+without copying the live authority key. A rolling launcher derives the verified
+broker script from the authority checkout when an older live broker lacks that
+export. The secondmate declaration and home are applied before its wrapper
+consumes the ticket and creates its own broker descriptor.
 
 The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose
 keyed authority is live, belongs to an ancestor of the hook, and has the exact
