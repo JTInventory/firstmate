@@ -1090,7 +1090,7 @@ test_durable_receipts_survive_live_key_rotation() {
 
 test_durable_custodian_is_root_bound_and_scoped() {
   local home state record first_pid second_pid owner record_tmp attack_state
-  local partial_before partial_after
+  local recovery_request recovery_response attempts
   if ! fm_session_descriptor_channel_isolated \
     "$FM_SESSION_AUTHORITY_DURABLE_FD"; then
     pass "skip: sibling process access to durable authority is not isolated"
@@ -1112,10 +1112,18 @@ test_durable_custodian_is_root_bound_and_scoped() {
   fm_session_durable_custodian_validate "$record" \
     || fail "custodian record was not bound to the durable root"
   first_pid=$FM_SESSION_DURABLE_CUSTODIAN_PID
-  partial_before=$(printf partial-descriptor-proof \
-    | fm_session_authority_durable_hmac) \
-    || fail "could not issue the partial-descriptor durable proof"
-  partial_after=$(
+  recovery_request="$state/.session-durable-authority-requests/worker.request"
+  recovery_response="${recovery_request%.request}.response"
+  printf 'version=1\n' > "$recovery_request" \
+    || fail "could not stage an unauthorized recovery request"
+  attempts=0
+  while [ "$attempts" -lt 100 ] && [ -e "$recovery_request" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ ! -e "$recovery_request" ] && [ ! -e "$recovery_response" ] \
+    || fail "custodian served an unauthorized durable-root request"
+  if (
     exec 18<&-
     unset FM_SESSION_AUTHORITY_DURABLE_FD
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
@@ -1123,9 +1131,9 @@ test_durable_custodian_is_root_bound_and_scoped() {
         . "$1/bin/fm-session-lock-lib.sh"
         printf partial-descriptor-proof | fm_session_authority_durable_hmac
       ' _ "$ROOT"
-  ) || fail "live-only replacement could not recover the custodian root"
-  [ "$partial_after" = "$partial_before" ] \
-    || fail "live-only replacement adopted a new durable root"
+  ) >/dev/null 2>&1; then
+    fail "live-only replacement recovered without durable capability"
+  fi
   (
     exec 17</dev/null
     ! FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
@@ -1165,16 +1173,16 @@ test_durable_custodian_is_root_bound_and_scoped() {
     || fail "could not install invalid custodian evidence"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     "$AUTHORITY_EXEC" true \
-    || fail "authority could not recover after custodian-record tampering"
+    || fail "capability holder could not repair custodian-record tampering"
   fm_session_durable_custodian_validate "$record" \
     || fail "custodian did not restore its durable-root record"
   second_pid=$FM_SESSION_DURABLE_CUSTODIAN_PID
   [ "$second_pid" = "$first_pid" ] \
-    || fail "record tampering displaced the kernel-anchored custodian"
+    || fail "record tampering displaced the root-authenticated custodian"
   kill "$first_pid" 2>/dev/null || true
   sleep 0.05
   rm -f "$record"
-  pass "live custodian anchor rejects self-authenticating replacements"
+  pass "custodian recovery requires the inherited durable capability"
 }
 
 test_authority_hmac_needs_only_openssl() {

@@ -167,8 +167,7 @@ run_under_replacement_broker() {
     }
   (
     exec 9<&-
-    exec 18<&-
-    unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+    unset FM_SESSION_AUTHORITY_FD
     "$ROOT/bin/fm-session-authority-exec.sh" bash -c '
     root=$1
     command=$2

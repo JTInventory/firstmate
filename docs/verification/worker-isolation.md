@@ -56,30 +56,21 @@ descriptors. Only the production authority wrapper may authorize a detached
 custodian, after proving its own broker PID, start, executable identity, and
 script path. It gives the custodian a launch certificate bound to its exact PID
 and session and authenticated by both roots, plus a one-use signing channel on
-reserved FD 17. FD 17 must be unused and sibling-isolated. The custodian binds a
-deterministic loopback TLS endpoint before publishing its record. Recovery gets
-the signing public key from that kernel-held endpoint and requires the
-worker-writable record to match it. A worker cannot replace that trust key with
-spoofed argv, a copied record, and caller-created descriptors while the genuine
-listener exists. The custodian repairs a changed record instead of surrendering
-the endpoint.
+reserved FD 17. FD 17 must be unused and sibling-isolated. The custodian repairs
+a changed record, but the record and custodian are trusted only after a caller
+proves the inherited durable capability with the complete-record HMAC and a
+fresh root-bound challenge.
 After validating it, the custodian closes FDs 9, 18, and 17, clears the
-live-broker environment, and retains only the durable receipt root and signing
-private key in shell memory. A replacement wrapper
-that no longer inherited that descriptor re-execs with a one-use RSA public key
-in immutable arguments; the custodian checks the exact wrapper, original kernel
-session and session-start identity, live process identity, and permitted primary
-or exact-home secondmate ancestry before returning the root encrypted to that
-key. The ciphertext and both endpoint identities carry a durable-root HMAC.
-Before installing the candidate root on FD 18, the wrapper sends a second fresh
-challenge to the same live custodian and requires both a candidate-root HMAC
-and a signature matching the loopback endpoint key. It then installs
-the root, validates the complete record again, and rotates the separate
-live-broker key. A replacement that retained only FD 9 must also recover an
-existing custodian root before the compatibility adoption path can run. A
-restarted secondmate must recover that root before creating any new scoped key.
-A broker that still holds the root can authenticate and replace a stale
-custodian without changing durable provenance. The wrapper then
+live-broker environment, and retains only the durable receipt root in shell
+memory. It never returns the durable root to a process that did not inherit that
+capability. A replacement that retains FD 18 validates the
+complete custodian record, rotates the separate live-broker key, and preserves
+durable journal and teardown provenance. A replacement that retains only FD 9,
+or neither protected descriptor, refuses. A restarted secondmate without its
+own scoped durable descriptor also refuses and must be enrolled again. This
+fail-closed boundary is required because files, argv, local sockets, ports, and
+processes are all replaceable by another process running as the same OS user.
+The wrapper then
 creates an anonymous consumer key and publishes its public key and exact live
 process identity in `${enrollment}.consume`. The signer validates that request
 and publishes a signed `${enrollment}.accepted` record. The wrapper validates
