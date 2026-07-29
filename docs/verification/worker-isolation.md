@@ -55,11 +55,17 @@ keeps live-broker HMAC and durable-receipt HMAC on distinct protected
 descriptors. Only the production authority wrapper may authorize a detached
 custodian, after proving its own broker PID, start, executable identity, and
 script path. It gives the custodian a launch certificate bound to its exact PID
-and session and authenticated by both roots, plus an anonymous signing key whose
-public half is pinned in the custodian's immutable arguments.
-After validating it, the custodian closes FD 9 and its signing-key descriptor,
-clears the live-broker environment, and retains only the durable receipt root
-and signing private key in shell memory. A replacement wrapper
+and session and authenticated by both roots, plus a one-use signing channel on
+reserved FD 17 whose public half is pinned in the custodian's immutable
+arguments. FD 17 must be unused and sibling-isolated. At startup the custodian
+independently proves that its actual parent is that exact production wrapper and
+that its inherited FDs 9, 18, and 17 are the same protected channels still held
+by the parent. The parent closes FD 17 before launching the harness command, so
+a later broker child cannot invoke the public custodian script with self-created
+keys.
+After validating it, the custodian closes FDs 9, 18, and 17, clears the
+live-broker environment, and retains only the durable receipt root and signing
+private key in shell memory. A replacement wrapper
 that no longer inherited that descriptor re-execs with a one-use RSA public key
 in immutable arguments; the custodian checks the exact wrapper, original kernel
 session and session-start identity, live process identity, and permitted primary
@@ -70,9 +76,11 @@ challenge to the same live custodian and requires both a candidate-root HMAC
 and a signature matching the public key pinned in that exact process's
 arguments. It then installs
 the root, validates the complete record again, and rotates the separate
-live-broker key. A restarted secondmate must recover that root before creating
-any new scoped key. A broker that still holds the root can authenticate and
-replace a stale custodian without changing durable provenance. The wrapper then
+live-broker key. A replacement that retained only FD 9 must also recover an
+existing custodian root before the compatibility adoption path can run. A
+restarted secondmate must recover that root before creating any new scoped key.
+A broker that still holds the root can authenticate and replace a stale
+custodian without changing durable provenance. The wrapper then
 creates an anonymous consumer key and publishes its public key and exact live
 process identity in `${enrollment}.consume`. The signer validates that request
 and publishes a signed `${enrollment}.accepted` record. The wrapper validates

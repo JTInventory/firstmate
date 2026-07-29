@@ -338,6 +338,7 @@ fm_session_descriptor_channel_isolated() {
           9) exec 9</dev/null ;;
           10) exec 10</dev/null ;;
           16) exec 16</dev/null ;;
+          17) exec 17</dev/null ;;
           18) exec 18</dev/null ;;
           *) return 1 ;;
         esac
@@ -354,6 +355,7 @@ fm_session_descriptor_channel_isolated() {
           9) exec 9<&- ;;
           10) exec 10<&- ;;
           16) exec 16<&- ;;
+          17) exec 17<&- ;;
           18) exec 18<&- ;;
         esac
       fi
@@ -536,13 +538,16 @@ fm_session_durable_custodian_broker_authorized() {
 fm_session_durable_custodian_launch_write() {
   local file=$1 pid=$2 start=$3 identity=$4 state=$5 home=$6 checkout=$7
   local session=$8 session_start=$9 public=${10} public_digest=${11}
+  local broker=${12} broker_start=${13} broker_identity=${14}
+  local broker_script=${15}
   local body live_hmac durable_hmac tmp
-  case "$pid:$start:$identity:$state:$home:$checkout:$session:$session_start:$public:$public_digest" in
+  case "$pid:$start:$identity:$state:$home:$checkout:$session:$session_start:$public:$public_digest:$broker:$broker_start:$broker_identity:$broker_script" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
-  body=$(printf 'version=2\npid=%s\nstart=%s\nidentity=%s\nstate=%s\nhome=%s\ncheckout=%s\nsession-pid=%s\nsession-start=%s\ncustodian-public-key=%s\ncustodian-public-key-sha256=%s\n' \
+  body=$(printf 'version=3\npid=%s\nstart=%s\nidentity=%s\nstate=%s\nhome=%s\ncheckout=%s\nsession-pid=%s\nsession-start=%s\ncustodian-public-key=%s\ncustodian-public-key-sha256=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nbroker-script=%s\n' \
     "$pid" "$start" "$identity" "$state" "$home" "$checkout" "$session" \
-    "$session_start" "$public" "$public_digest") \
+    "$session_start" "$public" "$public_digest" "$broker" "$broker_start" \
+    "$broker_identity" "$broker_script") \
     || return 1
   body="${body}"$'\n'
   live_hmac=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
@@ -700,6 +705,11 @@ fm_session_durable_custodian_ensure() {
   fi
   session=$(fm_session_process_session_id "$$") || return 1
   session_start=$(fm_session_process_start "$session") || return 1
+  if ( : <&17 ) 2>/dev/null || ( : >&17 ) 2>/dev/null; then
+    return 1
+  fi
+  fm_session_descriptor_channel_isolated 17 \
+    && fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
   public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
@@ -711,15 +721,28 @@ fm_session_durable_custodian_ensure() {
   public=$(printf '%s\n' "$public" | openssl base64 -A) || return 1
   exec 17< <(printf '%s\n' "$private") || return 1
   unset private
+  fm_session_descriptor_channel_isolated 17 \
+    && fm_session_exec_descriptor_isolation_durable || {
+      exec 17<&-
+      return 1
+    }
   log="$state/.session-durable-authority.log"
   if command -v setsid >/dev/null 2>&1; then
     setsid "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
+      --broker-pid "$FM_SESSION_AUTHORITY_BROKER_PID" \
+      --broker-start "$FM_SESSION_AUTHORITY_BROKER_START" \
+      --broker-identity "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
+      --broker-script "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
       --custodian-public-key "$public" \
       --custodian-public-key-sha256 "$digest" \
       </dev/null >>"$log" 2>&1 &
   elif command -v perl >/dev/null 2>&1; then
     perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
       "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
+      --broker-pid "$FM_SESSION_AUTHORITY_BROKER_PID" \
+      --broker-start "$FM_SESSION_AUTHORITY_BROKER_START" \
+      --broker-identity "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
+      --broker-script "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
       --custodian-public-key "$public" \
       --custodian-public-key-sha256 "$digest" \
       </dev/null >>"$log" 2>&1 &
@@ -728,7 +751,6 @@ fm_session_durable_custodian_ensure() {
     return 1
   fi
   pid=$!
-  exec 17<&-
   while [ "$attempts" -lt 100 ] \
     && ! fm_session_process_runs_script "$pid" "$script"; do
     kill -0 "$pid" 2>/dev/null || break
@@ -740,6 +762,7 @@ fm_session_durable_custodian_ensure() {
     && identity=$(fm_session_process_identity "$pid") || {
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
+      exec 17<&-
       return 1
     }
   attempts=0
@@ -747,10 +770,14 @@ fm_session_durable_custodian_ensure() {
   fm_session_durable_custodian_launch_write \
     "$launch" "$pid" "$start" "$identity" "$state" "$home" "$checkout" \
     "$session" "$session_start" "$public" "$digest" \
+    "$FM_SESSION_AUTHORITY_BROKER_PID" "$FM_SESSION_AUTHORITY_BROKER_START" \
+    "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
+    "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
     || {
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       rm -f "$launch"
+      exec 17<&-
       return 1
     }
   while [ "$attempts" -lt 100 ]; do
@@ -761,10 +788,12 @@ fm_session_durable_custodian_ensure() {
         "$state" "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
         "$FM_SESSION_DURABLE_CUSTODIAN_START"; then
       rm -f "$launch"
+      exec 17<&-
       return 0
     fi
     kill -0 "$pid" 2>/dev/null || {
       rm -f "$launch"
+      exec 17<&-
       return 1
     }
     sleep 0.02
@@ -773,6 +802,7 @@ fm_session_durable_custodian_ensure() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   rm -f "$launch"
+  exec 17<&-
   return 1
 }
 

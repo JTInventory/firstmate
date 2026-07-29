@@ -9,15 +9,37 @@ home=$2
 checkout=$3
 session_pid=$4
 session_start=$5
-[ "$6" = --custodian-public-key ] || exit 1
-custodian_public=$7
-[ "$8" = --custodian-public-key-sha256 ] || exit 1
-custodian_public_digest=$9
+[ "$6" = --broker-pid ] || exit 1
+broker_pid=$7
+[ "$8" = --broker-start ] || exit 1
+broker_start=$9
+[ "${10}" = --broker-identity ] || exit 1
+broker_identity=${11}
+[ "${12}" = --broker-script ] || exit 1
+broker_script=${13}
+[ "${14}" = --custodian-public-key ] || exit 1
+custodian_public=${15}
+[ "${16}" = --custodian-public-key-sha256 ] || exit 1
+custodian_public_digest=${17}
 record="$state/.session-durable-authority"
 requests="$state/.session-durable-authority-requests"
 key=
 live_key=
 custodian_private=
+[ "$broker_script" = "$checkout/bin/fm-session-authority-exec.sh" ] \
+  && [ "$(fm_session_parent_pid "$$" 2>/dev/null)" = "$broker_pid" ] \
+  && [ "$(fm_session_process_start "$broker_pid" 2>/dev/null)" \
+    = "$broker_start" ] \
+  && [ "$(fm_session_process_identity "$broker_pid" 2>/dev/null)" \
+    = "$broker_identity" ] \
+  && fm_session_process_runs_script "$broker_pid" "$broker_script" \
+  && [ "$(fm_session_descriptor_identity "$$" 9 2>/dev/null)" \
+    = "$(fm_session_descriptor_identity "$broker_pid" 9 2>/dev/null)" ] \
+  && [ "$(fm_session_descriptor_identity "$$" 18 2>/dev/null)" \
+    = "$(fm_session_descriptor_identity "$broker_pid" 18 2>/dev/null)" ] \
+  && [ "$(fm_session_descriptor_identity "$$" 17 2>/dev/null)" \
+    = "$(fm_session_descriptor_identity "$broker_pid" 17 2>/dev/null)" ] \
+  || exit 1
 IFS= read -r key <&18 || exit 1
 IFS= read -r live_key <&9 || exit 1
 IFS= read -r custodian_private <&17 || exit 1
@@ -48,8 +70,8 @@ while [ "$attempts" -lt 100 ] \
   attempts=$((attempts + 1))
 done
 [ -f "$launch" ] && [ ! -L "$launch" ] \
-  && [ "$(wc -l < "$launch" | tr -d ' ')" -eq 13 ] \
-  && [ "$(sed -n '1p' "$launch")" = version=2 ] \
+  && [ "$(wc -l < "$launch" | tr -d ' ')" -eq 17 ] \
+  && [ "$(sed -n '1p' "$launch")" = version=3 ] \
   && [ "$(sed -n '2s/^pid=//p' "$launch")" = "$$" ] \
   && [ "$(sed -n '3s/^start=//p' "$launch")" \
     = "$(fm_session_process_start "$$" 2>/dev/null)" ] \
@@ -64,10 +86,15 @@ done
     = "$custodian_public" ] \
   && [ "$(sed -n '11s/^custodian-public-key-sha256=//p' "$launch")" \
     = "$custodian_public_digest" ] \
+  && [ "$(sed -n '12s/^broker-pid=//p' "$launch")" = "$broker_pid" ] \
+  && [ "$(sed -n '13s/^broker-start=//p' "$launch")" = "$broker_start" ] \
+  && [ "$(sed -n '14s/^broker-identity=//p' "$launch")" \
+    = "$broker_identity" ] \
+  && [ "$(sed -n '15s/^broker-script=//p' "$launch")" = "$broker_script" ] \
   || exit 1
-launch_body=$(sed -n '1,11p' "$launch")$'\n'
-launch_live=$(sed -n '12s/^live-authority-hmac=//p' "$launch")
-launch_durable=$(sed -n '13s/^durable-authority-hmac=//p' "$launch")
+launch_body=$(sed -n '1,15p' "$launch")$'\n'
+launch_live=$(sed -n '16s/^live-authority-hmac=//p' "$launch")
+launch_durable=$(sed -n '17s/^durable-authority-hmac=//p' "$launch")
 [ "$launch_live" = "$(printf '%s' "$launch_body" \
     | fm_session_hmac_sha256_key "$live_key")" ] \
   && [ "$launch_durable" = "$(printf '%s' "$launch_body" \

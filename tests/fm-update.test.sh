@@ -139,7 +139,7 @@ write_migration_launch_receipt() {
 run_under_replacement_broker() {
   local command=$1
   shift
-  local old_live old_durable authority authority_backup status=0
+  local old_live old_durable authority authority_backup authority_tmp status=0
   old_live=$(printf rotation-proof | fm_session_authority_hmac) || return 1
   old_durable=$(printf rotation-proof | fm_session_authority_durable_hmac) \
     || return 1
@@ -156,10 +156,15 @@ run_under_replacement_broker() {
       rm -f "$authority_backup"
       return 1
     }
-  sed -i 's/^pid=.*/pid=99999999/' "$authority" || {
+  authority_tmp=$(mktemp "${authority}.XXXXXX") || {
     rm -f "$authority_backup"
     return 1
   }
+  sed 's/^pid=.*/pid=99999999/' "$authority" > "$authority_tmp" \
+    && chmod 600 "$authority_tmp" && mv "$authority_tmp" "$authority" || {
+      rm -f "$authority_backup" "$authority_tmp"
+      return 1
+    }
   (
     exec 9<&-
     exec 18<&-

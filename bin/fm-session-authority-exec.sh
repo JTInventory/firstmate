@@ -254,6 +254,10 @@ if [ "$enrollment_fd" != 9 ] && ( : <&9 ) 2>/dev/null; then
   echo "error: session authority descriptor 9 is already in use" >&2
   exit 1
 fi
+if ( : <&17 ) 2>/dev/null || ( : >&17 ) 2>/dev/null; then
+  echo "error: custodian signing descriptor 17 is already in use" >&2
+  exit 1
+fi
 if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   if [ "$enrollment_fd" = 9 ]; then
     exec 9<&-
@@ -301,10 +305,36 @@ elif [ "$enrollment_fd" = 9 ] \
   && fm_session_authority_capability_present; then
   if ! fm_session_authority_durable_capability_present; then
     unset FM_SESSION_AUTHORITY_DURABLE_FD
-    fm_session_authority_durable_descriptor_adopt || {
-      echo "error: durable session authority adoption failed" >&2
-      exit 1
-    }
+    if [ -e "$STATE/.session-durable-authority" ] \
+      || [ -L "$STATE/.session-durable-authority" ]; then
+      [ -f "$STATE/.session-durable-authority" ] \
+        && [ ! -L "$STATE/.session-durable-authority" ] || {
+          echo "error: durable session authority custodian is invalid" >&2
+          exit 1
+        }
+      if [ -z "$durable_recovery" ]; then
+        fm_session_durable_consumer_prepare || {
+          echo "error: durable session authority recovery key is unavailable" >&2
+          exit 1
+        }
+        exec "$SCRIPT_DIR/fm-session-authority-exec.sh" \
+          --durable-recovery "$FM_SESSION_DURABLE_RECOVERY_NONCE" \
+          --durable-consumer-key "$FM_SESSION_DURABLE_CONSUMER_PUBLIC" \
+          --durable-consumer-key-sha256 "$FM_SESSION_DURABLE_CONSUMER_SHA256" \
+          "$@"
+      fi
+      fm_session_durable_authority_recover \
+        "$STATE" "$home_real" "$FM_ROOT" "$durable_recovery" \
+        "$durable_consumer_key" "$durable_consumer_digest" || {
+          echo "error: durable session authority recovery failed" >&2
+          exit 1
+        }
+    else
+      fm_session_authority_durable_descriptor_adopt || {
+        echo "error: durable session authority adoption failed" >&2
+        exit 1
+      }
+    fi
   fi
   exec 9<&-
   unset FM_SESSION_AUTHORITY_FD

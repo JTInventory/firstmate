@@ -992,7 +992,7 @@ test_authority_fds_require_sibling_proc_isolation() {
         sibling_can_open=1
       fi
       exec 8<&-
-      for fd in 7 8 9 10 18 "$FM_SESSION_AUTHORITY_FD"; do
+      for fd in 7 8 9 10 17 18 "$FM_SESSION_AUTHORITY_FD"; do
         if [ "$sibling_can_open" -eq 1 ]; then
           ! fm_session_descriptor_channel_isolated "$fd" \
             || fail "authority descriptor $fd remained usable through sibling procfs"
@@ -1020,7 +1020,7 @@ test_authority_fds_require_sibling_proc_isolation() {
       fi
       ;;
     Darwin)
-      for fd in 7 8 9 10 18 "$FM_SESSION_AUTHORITY_FD"; do
+      for fd in 7 8 9 10 17 18 "$FM_SESSION_AUTHORITY_FD"; do
         fm_session_descriptor_channel_isolated "$fd" \
           || fail "authority descriptor $fd rejected the procfs-free Darwin boundary"
       done
@@ -1033,7 +1033,7 @@ test_authority_fds_require_sibling_proc_isolation() {
       ) || fail "primary authority creation rejected Darwin descriptors"
       ;;
     *)
-      for fd in 7 8 9 10 18 "$FM_SESSION_AUTHORITY_FD"; do
+      for fd in 7 8 9 10 17 18 "$FM_SESSION_AUTHORITY_FD"; do
         ! fm_session_descriptor_channel_isolated "$fd" \
           || fail "authority descriptor $fd trusted an unrecognized isolation boundary"
       done
@@ -1089,7 +1089,8 @@ test_durable_receipts_survive_live_key_rotation() {
 }
 
 test_durable_custodian_is_root_bound_and_scoped() {
-  local home state record first_pid second_pid owner
+  local home state record first_pid second_pid owner record_tmp attack_state
+  local partial_before partial_after
   if ! fm_session_descriptor_channel_isolated \
     "$FM_SESSION_AUTHORITY_DURABLE_FD"; then
     pass "skip: sibling process access to durable authority is not isolated"
@@ -1111,14 +1112,57 @@ test_durable_custodian_is_root_bound_and_scoped() {
   fm_session_durable_custodian_validate "$record" \
     || fail "custodian record was not bound to the durable root"
   first_pid=$FM_SESSION_DURABLE_CUSTODIAN_PID
+  partial_before=$(printf partial-descriptor-proof \
+    | fm_session_authority_durable_hmac) \
+    || fail "could not issue the partial-descriptor durable proof"
+  partial_after=$(
+    exec 18<&-
+    unset FM_SESSION_AUTHORITY_DURABLE_FD
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$AUTHORITY_EXEC" bash -c '
+        . "$1/bin/fm-session-lock-lib.sh"
+        printf partial-descriptor-proof | fm_session_authority_durable_hmac
+      ' _ "$ROOT"
+  ) || fail "live-only replacement could not recover the custodian root"
+  [ "$partial_after" = "$partial_before" ] \
+    || fail "live-only replacement adopted a new durable root"
+  (
+    exec 17</dev/null
+    ! FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$AUTHORITY_EXEC" true
+  ) >/dev/null 2>&1 \
+    || fail "authority wrapper accepted an occupied signing descriptor"
+  attack_state="$home/attacker-state"
+  mkdir -p "$attack_state"
+  if FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$AUTHORITY_EXEC" bash -c '
+      root=$1
+      attack_state=$2
+      home=$3
+      exec 17</dev/null
+      exec "$root/bin/fm-session-durable-authority.sh" \
+        "$attack_state" "$home" "$root" 1 1 \
+        --broker-pid "$FM_SESSION_AUTHORITY_BROKER_PID" \
+        --broker-start "$FM_SESSION_AUTHORITY_BROKER_START" \
+        --broker-identity "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
+        --broker-script "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
+        --custodian-public-key invalid \
+        --custodian-public-key-sha256 invalid
+    ' _ "$ROOT" "$attack_state" "$home" >/dev/null 2>&1; then
+    fail "a broker child self-authorized the public custodian script"
+  fi
   if [ "$(uname -s 2>/dev/null)" = Linux ]; then
     [ ! -e "/proc/$first_pid/fd/9" ] \
       || fail "durable custodian retained the live authority descriptor"
     [ ! -e "/proc/$first_pid/fd/17" ] \
       || fail "durable custodian retained its launch signing descriptor"
   fi
-  sed -i 's/^authority-hmac=.*/authority-hmac=0000000000000000000000000000000000000000000000000000000000000000/' \
-    "$record"
+  record_tmp=$(mktemp "${record}.XXXXXX") \
+    || fail "could not stage invalid custodian evidence"
+  sed 's/^authority-hmac=.*/authority-hmac=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$record" > "$record_tmp" \
+    && chmod 600 "$record_tmp" && mv "$record_tmp" "$record" \
+    || fail "could not install invalid custodian evidence"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     "$AUTHORITY_EXEC" true \
     || fail "authority could not replace an invalid custodian record"
