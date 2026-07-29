@@ -64,6 +64,8 @@ SECONDMATES_MD="$DATA/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
+FM_WAKE_LIB_READ_ONLY=1
+export FM_WAKE_LIB_READ_ONLY
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"

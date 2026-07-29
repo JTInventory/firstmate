@@ -42,7 +42,7 @@
 # Every operational-home variable a firstmate script reads. Extend here, not at
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
-FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT"
+FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fm_worker_shell_quote() {  # <text>
@@ -158,7 +158,8 @@ fm_worker_secondmate_effective_scope_matches() {
 }
 
 fm_worker_primary_authority_matches() {
-  local root home root_real home_real cwd branch default ref lock_owned=0
+  local operation=${1:-} root home root_real home_real cwd branch default ref
+  local pid ppid env binding
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -181,14 +182,39 @@ fm_worker_primary_authority_matches() {
   [ "$branch" = "$default" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
     || return 1
+  pid=$$
+  while [ "$pid" -gt 1 ] 2>/dev/null; do
+    env=
+    if [ -r "/proc/$pid/environ" ]; then
+      env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null || true)
+    elif command -v ps >/dev/null 2>&1; then
+      env=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null || true)
+    fi
+    if printf '%s\n' "$env" | grep -Eq '(^|[[:space:]])FM_AGENT_ROLE=(crewmate|secondmate)($|[[:space:]])'; then
+      return 1
+    fi
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ppid" != "$pid" ] || return 1
+    pid=$ppid
+  done
   if [ -e "$home_real/state/.lock" ] || [ -L "$home_real/state/.lock" ]; then
     [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
     . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
     fm_session_lock_owned_by_self "$home_real/state" || return 1
-    lock_owned=1
   fi
-  { [ "$root_real" = "$home_real" ] && [ "$cwd" = "$root_real" ]; } \
-    || [ "$lock_owned" = 1 ]
+  if [ "$root_real" != "$home_real" ]; then
+    binding="$home_real/state/.primary-checkout"
+    if [ "$operation" = "session lock acquisition" ] \
+       && [ ! -e "$binding" ] && [ ! -L "$binding" ]; then
+      :
+    else
+      [ -f "$binding" ] && [ ! -L "$binding" ] || return 1
+      [ "$(cat "$binding" 2>/dev/null || true)" = "$root_real" ] || return 1
+      [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
+    fi
+  fi
+  [ "$cwd" = "$root_real" ]
 }
 
 # fm_worker_refuse_primary_operation <operation>
@@ -199,7 +225,7 @@ fm_worker_refuse_primary_operation() {
   local operation=$1
   case "${FM_AGENT_ROLE:-}" in
     primary|"")
-      fm_worker_primary_authority_matches && return 0
+      fm_worker_primary_authority_matches "$operation" && return 0
       echo "error: $operation refused: primary identity is not bound to this process and checkout" >&2
       return 1
       ;;

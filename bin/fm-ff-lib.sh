@@ -371,6 +371,10 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_BACKEND=
   FM_SECONDMATE_META_TARGET=
   FM_SECONDMATE_META_PROVIDER_IDENTITY=
+  FM_SECONDMATE_META_HERDR_SESSION=
+  FM_SECONDMATE_META_HERDR_WORKSPACE=
+  FM_SECONDMATE_META_HERDR_TAB=
+  FM_SECONDMATE_META_HERDR_PANE=
   FM_SECONDMATE_META_ERROR=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     FM_SECONDMATE_META_ERROR="metadata is missing, unreadable, or not a regular file"
@@ -478,11 +482,15 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_BACKEND=$backend
   FM_SECONDMATE_META_TARGET=$target
   FM_SECONDMATE_META_PROVIDER_IDENTITY=$provider_identity
+  FM_SECONDMATE_META_HERDR_SESSION=$session
+  FM_SECONDMATE_META_HERDR_WORKSPACE=$workspace
+  FM_SECONDMATE_META_HERDR_TAB=$tab
+  FM_SECONDMATE_META_HERDR_PANE=$pane
 }
 
 fm_secondmate_lifecycle_identity_matches() {
   local state=$1 id=$2 expected_home=$3 expected_window=$4 expected_generation=$5
-  local expected_provider=${6:-} live_generation
+  local expected_provider=${6:-}
   fm_secondmate_lifecycle_meta_read "$state/$id.meta" "$id" || return 1
   [ "$FM_SECONDMATE_META_WINDOW" = "$expected_window" ] \
     && [ "$FM_SECONDMATE_META_ENDPOINT_GENERATION" = "$expected_generation" ] \
@@ -490,11 +498,28 @@ fm_secondmate_lifecycle_identity_matches() {
   [ -z "$expected_provider" ] \
     || [ "$FM_SECONDMATE_META_PROVIDER_IDENTITY" = "$expected_provider" ] \
     || return 1
-  live_generation=$(fm_backend_endpoint_generation \
-    "$FM_SECONDMATE_META_BACKEND" "$FM_SECONDMATE_META_TARGET" 2>/dev/null) || return 1
-  [ -n "$live_generation" ] && [ "$live_generation" = "$expected_generation" ] || return 1
+  fm_secondmate_live_endpoint_matches || return 1
   validate_secondmate_home "$id" "$FM_SECONDMATE_META_HOME" || return 1
   [ "$VALIDATED_HOME" = "$expected_home" ]
+}
+
+fm_secondmate_live_endpoint_matches() {
+  local live_generation live_identity expected_identity
+  case "$FM_SECONDMATE_META_BACKEND" in
+    tmux)
+      live_generation=$(fm_backend_endpoint_generation \
+        tmux "$FM_SECONDMATE_META_TARGET" 2>/dev/null) || return 1
+      [ "$live_generation" = "$FM_SECONDMATE_META_ENDPOINT_GENERATION" ]
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      live_identity=$(fm_backend_herdr_endpoint_identity \
+        "$FM_SECONDMATE_META_TARGET" 2>/dev/null) || return 1
+      expected_identity="$FM_SECONDMATE_META_HERDR_SESSION|$FM_SECONDMATE_META_HERDR_WORKSPACE|$FM_SECONDMATE_META_HERDR_TAB|$FM_SECONDMATE_META_HERDR_PANE|$FM_SECONDMATE_META_ENDPOINT_GENERATION"
+      [ "$live_identity" = "$expected_identity" ]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 live_secondmate_meta_records() {
@@ -516,7 +541,7 @@ live_secondmate_meta_records() {
 
 fm_secondmate_lifecycle_preflight() {
   local state=$1 registry=${2:-} meta id line home seen="" status=0 kind_count kind
-  local live_generation registry_home
+  local registry_home
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
@@ -549,16 +574,11 @@ fm_secondmate_lifecycle_preflight() {
         status=1
         continue
       fi
-      live_generation=$(fm_backend_endpoint_generation \
-        "$FM_SECONDMATE_META_BACKEND" "$FM_SECONDMATE_META_TARGET" 2>/dev/null) || {
-        echo "secondmate $id: refused: live endpoint generation is unverifiable" >&2
+      fm_secondmate_live_endpoint_matches || {
+        echo "secondmate $id: refused: live endpoint generation or provider identity is unverifiable" >&2
         status=1
         continue
       }
-      if [ "$live_generation" != "$FM_SECONDMATE_META_ENDPOINT_GENERATION" ]; then
-        echo "secondmate $id: refused: live endpoint generation changed" >&2
-        status=1
-      fi
     fi
   done
   [ -n "$registry" ] && [ -f "$registry" ] || return "$status"

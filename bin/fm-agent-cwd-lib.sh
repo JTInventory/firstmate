@@ -100,12 +100,33 @@ fm_agent_proc_cwd() {
 # applied left to right, so a trailing `2>/dev/null` on the same command is set
 # up only AFTER the input redirect has already failed and printed to stderr.
 fm_agent_environ() {
-  local pid=$1 dump
+  local pid=$1 dump argc arg saw_executable=0 argv_seen=0
   fm_agent_pid_is_numeric "$pid" || return 1
-  [ -r "/proc/$pid/environ" ] || return 1
-  dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-  [ -n "$dump" ] || return 1
-  printf '%s' "$dump"
+  if [ -r "/proc/$pid/environ" ]; then
+    dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+    [ -n "$dump" ] || return 1
+    printf '%s' "$dump"
+    return 0
+  fi
+  command -v sysctl >/dev/null 2>&1 \
+    && command -v dd >/dev/null 2>&1 \
+    && command -v od >/dev/null 2>&1 || return 1
+  argc=$(sysctl -n kern.procargs2 "$pid" 2>/dev/null \
+    | od -An -tu4 -N4 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$argc" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS= read -r -d '' arg; do
+    if [ "$saw_executable" -eq 0 ]; then
+      [ -n "$arg" ] || continue
+      saw_executable=1
+      continue
+    fi
+    if [ "$argv_seen" -lt "$argc" ]; then
+      [ -n "$arg" ] || continue
+      argv_seen=$((argv_seen + 1))
+      continue
+    fi
+    case "$arg" in *=*) printf '%s\n' "$arg" ;; esac
+  done < <(sysctl -n kern.procargs2 "$pid" 2>/dev/null | dd bs=4 skip=1 2>/dev/null)
 }
 
 # fm_agent_proc_env <pid> <var>: one environment value of a live process, or 1
@@ -129,11 +150,13 @@ fm_agent_proc_env() {
 # exists for had 17 concurrent tasks.
 # Returns 1 when procfs is unavailable or no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid task home role env found=1
-  [ -d /proc ] || return 1
-  for entry in /proc/[0-9]*; do
-    [ -d "$entry" ] || continue
-    pid=${entry#/proc/}
+  local entry pid task home role env found=1 pids
+  if [ -d /proc ]; then
+    pids=$(printf '%s\n' /proc/[0-9]* | sed 's#.*/##')
+  else
+    pids=$(LC_ALL=C ps -A -o pid= 2>/dev/null) || return 1
+  fi
+  for pid in $pids; do
     env=$(fm_agent_environ "$pid") || continue
     task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
     home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
@@ -152,7 +175,7 @@ fm_agent_task_pid_index() {
 # walking /proc again; an empty one is a real answer - no process declares a
 # task - not a missing argument.
 fm_agent_pids_for_identity() {
-  local id=$1 home=$2 role=$3 index pids entry pid env found=1
+  local id=$1 home=$2 role=$3 index pids
   [ -n "$id" ] && [ -n "$home" ] && [ -n "$role" ] || return 1
   if [ "$#" -ge 4 ]; then
     index=$4
@@ -162,18 +185,8 @@ fm_agent_pids_for_identity() {
     printf '%s\n' "$pids"
     return 0
   fi
-  [ -d /proc ] || return 1
-  for entry in /proc/[0-9]*; do
-    [ -d "$entry" ] || continue
-    pid=${entry#/proc/}
-    env=$(fm_agent_environ "$pid") || continue
-    printf '%s\n' "$env" | grep -qxF "FM_AGENT_TASK=$id" || continue
-    printf '%s\n' "$env" | grep -qxF "FM_AGENT_OWNER_HOME=$home" || continue
-    printf '%s\n' "$env" | grep -qxF "FM_AGENT_ROLE=$role" || continue
-    printf '%s\n' "$pid"
-    found=0
-  done
-  return "$found"
+  index=$(fm_agent_task_pid_index) || return 1
+  fm_agent_pids_for_identity "$id" "$home" "$role" "$index"
 }
 
 # fm_agent_root_pids_for_identity <task-id> <owner-home> <role> [pid-index]:

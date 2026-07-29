@@ -10,6 +10,10 @@ FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 FM_LOCK_LEGACY_IDENTITY_MAX_AGE="${FM_LOCK_LEGACY_IDENTITY_MAX_AGE:-300}"
+if [ -z "${FM_LOCK_PROCESS_TOKEN:-}" ]; then
+  FM_LOCK_PROCESS_TOKEN="${BASHPID:-$$}-${RANDOM:-0}-$(date +%s)"
+  export FM_LOCK_PROCESS_TOKEN
+fi
 [ "${FM_WAKE_LIB_READ_ONLY:-0}" = 1 ] || mkdir -p "$STATE"
 
 fm_spawn_admission_lock_path() {
@@ -22,10 +26,36 @@ fm_spawn_admission_lock_paths() {
 }
 
 fm_lifecycle_admission_lock_owned_by_process() {
-  local lock=$1 current
+  local lock=$1 current owner stored_start stored_identity stored_token reexec_path current_identity
   current=${BASHPID:-$$}
-  [ -d "$lock" ] \
-    && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$current" ]
+  owner=$(fm_lock_link_owner "$lock" 2>/dev/null) || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$current" ] || return 1
+  stored_start=$(cat "$owner/pid-start" 2>/dev/null || true)
+  [ -n "$stored_start" ] \
+    && fm_pid_start_matches_stored "$current" "$stored_start" || return 1
+  stored_token=$(cat "$owner/process-token" 2>/dev/null || true)
+  [ -n "$stored_token" ] \
+    && [ "$stored_token" = "${FM_LOCK_PROCESS_TOKEN:-}" ] || return 1
+  stored_identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  [ -n "$stored_identity" ] || return 1
+  if ! fm_pid_identity_matches_stored "$current" "$stored_identity"; then
+    reexec_path=$(cat "$owner/reexec-path" 2>/dev/null || true)
+    [ -n "$reexec_path" ] \
+      && fm_pid_command_matches_path "$current" "$reexec_path" || return 1
+    current_identity=$(fm_pid_identity "$current") || return 1
+    printf '%s\n' "$current_identity" > "$owner/pid-identity" || return 1
+    rm -f "$owner/reexec-path" || return 1
+  fi
+  return 0
+}
+
+fm_lifecycle_admission_authorize_reexec() {
+  local lock=$1 path=$2 owner
+  case "$path" in /*) ;; *) return 1 ;; esac
+  fm_lifecycle_admission_lock_owned_by_process "$lock" || return 1
+  owner=$(fm_lock_link_owner "$lock") || return 1
+  printf '%s\n' "$path" > "$owner/reexec-path"
 }
 
 fm_lifecycle_admission_acquire() {
@@ -680,6 +710,8 @@ fm_lock_clean_known_files() {
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
     "$lockdir/owner-path" \
+    "$lockdir/process-token" \
+    "$lockdir/reexec-path" \
     2>/dev/null || true
 }
 
@@ -707,6 +739,8 @@ fm_lock_prepare_owner() {
   [ -z "$identity" ] || printf '%s\n' "$identity" > "$ownerdir/pid-identity"
   start=$(fm_pid_start "$mypid" 2>/dev/null || true)
   [ -z "$start" ] || printf '%s\n' "$start" > "$ownerdir/pid-start"
+  [ -n "${FM_LOCK_PROCESS_TOKEN:-}" ] \
+    && printf '%s\n' "$FM_LOCK_PROCESS_TOKEN" > "$ownerdir/process-token" || return 1
   if [ -n "$owner_home" ]; then
     printf '%s\n' "$owner_home" > "$ownerdir/fm-home" || return 1
   fi
@@ -1025,6 +1059,7 @@ fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   current=${BASHPID:-$$}
   if [ -L "$lockdir" ]; then
+    fm_lifecycle_admission_lock_owned_by_process "$lockdir" || return 0
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
     pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
@@ -1034,6 +1069,7 @@ fm_lock_release() {
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
+  fm_lifecycle_admission_lock_owned_by_process "$lockdir" || return 0
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"

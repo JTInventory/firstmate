@@ -125,6 +125,16 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
+BINDING="$STATE/.primary-checkout"
+BINDING_TMP=$(mktemp "$STATE/.primary-checkout.XXXXXX" 2>/dev/null) || exit 1
+if ! printf '%s\n' "$ROOT_REAL" > "$BINDING_TMP" \
+   || ! chmod 600 "$BINDING_TMP" \
+   || ! mv "$BINDING_TMP" "$BINDING"; then
+  rm -f "$BINDING_TMP"
+  echo "error: cannot bind the session lock to its primary checkout" >&2
+  exit 1
+fi
 release_claim_lock
 case "$owner" in
   *'|codex:'*) echo "lock acquired: Codex session owner $owner" ;;

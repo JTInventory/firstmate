@@ -58,13 +58,15 @@ Three enforcement points consume the declaration.
 `bin/fm-primary-scope-lib.sh` reports a declared worker as non-primary whatever root and state it was handed, which keeps every tracked project-local startup and turn-end adapter inert for workers.
 `bin/fm-spawn.sh` and `bin/fm-teardown.sh` refuse outright, because a worker acting on an inherited home would create or destroy direct reports the real primary never recorded.
 
+An undeclared primary is accepted only from the default-branch checkout with no worker ancestor. When `FM_ROOT` and `FM_HOME` differ, `bin/fm-lock.sh` binds them in `state/.primary-checkout`; later mutations require that exact binding and the matching session-lock owner. The lock-acquisition path may create the first binding for a fresh home, but an inherited role or an existing conflicting binding still refuses.
+
 ### The method of record for an agent's working directory
 
 `bin/fm-agent-cwd-lib.sh` owns the answer and its per-provider limits.
 Resolution is most-authoritative-first: the root-most live process carrying the task's declaration marker, then the provider's pane process id descended to the running agent, then `unknown`.
 It never falls back to a pane value, so a caller that wants a hint has to ask its provider for one and label it as a hint.
 
-The declaration marker matters here beyond home isolation: it is the provider-independent identity key, and it is the only source that survives a restore which re-parents or relabels panes.
+The declaration marker matters here beyond home isolation: it is the provider-independent identity key, and it is the only source that survives a restore which re-parents or relabels panes. Linux reads it from procfs. macOS reads the same process arguments and environment from `kern.procargs2`; if neither authoritative process interface is available, the result is unproven.
 
 Per-provider process id availability:
 

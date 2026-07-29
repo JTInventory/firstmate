@@ -255,7 +255,7 @@ spawn_secondmate() {
     harness=$1
     shift
   fi
-  mkdir -p "$world/home/state" "$world/home/data/$id"
+  mkdir -p "$world/home/state" "$world/home/data/$id" "$world/home/config"
   primary="${home}.seed"
   if [ ! -x "$primary/bin/fm-spawn.sh" ]; then
     cp -a "$ROOT/bin/." "$primary/bin/"
@@ -263,8 +263,10 @@ spawn_secondmate() {
     git -C "$primary" add bin AGENTS.md
     git -C "$primary" commit -qm primary
   fi
-  . "$ROOT/bin/fm-session-lock-lib.sh"
-  CLAUDECODE=1 fm_session_lock_owner > "$world/home/state/.lock"
+  printf 'claude\n' > "$world/home/config/crew-harness"
+  printf '%s|codex:%s|fallback\n' "$$" fm-secondmate-fixture \
+    > "$world/home/state/.lock"
+  printf '%s\n' "$primary" > "$world/home/state/.primary-checkout"
   printf 'secondmate fixture\n' > "$world/home/data/$id/brief.md"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
@@ -275,7 +277,8 @@ spawn_secondmate() {
   spawn_args+=(--secondmate)
   (
     cd "$primary" || exit 1
-    env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    env -u NO_MISTAKES_GATE -u CLAUDECODE PATH="$fakebin:$BASE_PATH" TMUX='' \
+      CODEX_THREAD_ID=fm-secondmate-fixture \
       FM_ROOT_OVERRIDE="$primary" FM_HOME="$world/home" \
       FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
       FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \

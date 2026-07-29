@@ -447,17 +447,17 @@ teardown_stage_home_removal() {
 }
 
 teardown_endpoint_generation_matches() {
-  local backend=$1 target=$2 generation=$3 meta=$4 actual session workspace tab pane
+  local backend=$1 target=$2 generation=$3 meta=$4 result_name=$5
+  local actual session workspace tab pane endpoint_state=live
   local live_identity expected_identity
-  TEARDOWN_ENDPOINT_ALREADY_CLOSED=0
   case "$backend" in
     tmux)
       actual=$(fm_backend_endpoint_generation tmux "$target" 2>/dev/null || true)
       if [ -n "$actual" ]; then
-        [ "$actual" = "$generation" ]
+        [ "$actual" = "$generation" ] || return 1
       else
         teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
-          && TEARDOWN_ENDPOINT_ALREADY_CLOSED=1
+          && endpoint_state=closed
       fi
       ;;
     herdr)
@@ -470,14 +470,15 @@ teardown_endpoint_generation_matches() {
       live_identity=$(fm_backend_herdr_endpoint_identity "$target" 2>/dev/null || true)
       expected_identity="$session|$workspace|$tab|$pane|$generation"
       if [ -n "$live_identity" ]; then
-        [ "$live_identity" = "$expected_identity" ]
+        [ "$live_identity" = "$expected_identity" ] || return 1
       else
         teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
-          && TEARDOWN_ENDPOINT_ALREADY_CLOSED=1
+          && endpoint_state=closed
       fi
       ;;
     *) return 1 ;;
   esac
+  printf -v "$result_name" '%s' "$endpoint_state"
 }
 
 META_IDENTITY=$(teardown_file_identity "$META") || exit 1
@@ -485,7 +486,9 @@ META_IDENTITY=$(teardown_file_identity "$META") || exit 1
   echo "REFUSED: task metadata changed while teardown acquired lifecycle locks" >&2
   exit 1
 }
-teardown_endpoint_generation_matches "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" || {
+TOP_ENDPOINT_STATE=
+teardown_endpoint_generation_matches \
+  "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" TOP_ENDPOINT_STATE || {
   echo "REFUSED: task endpoint generation is stale or cannot be verified; preserving task state" >&2
   exit 1
 }
@@ -685,7 +688,6 @@ teardown_treehouse_return() {
     stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
     if [ "$staged" -eq 1 ] && [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
       teardown_stage_return_claim_record "$claim" "$legacy" || return 1
-      fm_slot_stamp_mark_return_committed "$claim" "$legacy" || return 1
     fi
   fi
   while :; do
@@ -700,6 +702,10 @@ teardown_treehouse_return() {
       [ -n "$out" ] && printf '%s\n' "$out"
       if [ "$staged" -eq 1 ]; then
         if [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
+          fm_slot_stamp_mark_return_committed "$claim" "$legacy" || {
+            echo "error: returned $label $dir but could not record provider completion" >&2
+            return 1
+          }
           teardown_mark_return_transaction_committed "$claim" "$legacy" || {
             echo "error: returned $label $dir but could not record its committed transition" >&2
             return 1
@@ -716,11 +722,6 @@ teardown_treehouse_return() {
     [ -n "$out" ] && printf '%s\n' "$out" >&2
     if ! treehouse_return_is_index_lock_error "$out" || [ "$attempt" -ge "$retries" ]; then
       if [ "$staged" -eq 1 ]; then
-        [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -ne 1 ] \
-          || fm_slot_stamp_unmark_return_committed "$claim" || {
-            echo "error: could not roll back committed ownership evidence for $label $dir" >&2
-            return 1
-          }
         fm_slot_stamp_restore_return "$dir" "$stamp_id" "$stamp_home" "$claim" \
           "$lease_holder" "$stamp_path" "$legacy" || {
           echo "error: could not restore ownership evidence for $label $dir" >&2
@@ -1589,6 +1590,7 @@ teardown_stage_transaction_evidence() {
 
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home slot_verdict
+  local child_endpoint_state
   sub_state="$home/state"
   teardown_admission_lock_acquire "$sub_state" "$home" || return 1
   for child_meta in "$sub_state"/*.meta; do
@@ -1602,8 +1604,12 @@ validate_firstmate_home_children_removal() {
     child_proj=$TEARDOWN_CHILD_PROJECT
     child_kind=$TEARDOWN_CHILD_KIND
     teardown_endpoint_generation_matches "$child_backend" "$TEARDOWN_CHILD_WINDOW" \
-      "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" || {
+      "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" child_endpoint_state || {
       echo "REFUSED: child $child_id endpoint generation is stale or cannot be verified" >&2
+      return 1
+    }
+    [ "$child_endpoint_state" = closed ] || {
+      echo "REFUSED: child $child_id endpoint is live and cannot be retired recoverably" >&2
       return 1
     }
     if [ "$child_kind" = secondmate ]; then
@@ -1697,6 +1703,7 @@ validate_child_backend() {
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
+  local child_endpoint_state
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1734,19 +1741,11 @@ cleanup_firstmate_home_children() {
       fi
     fi
     teardown_endpoint_generation_matches "$child_backend" "$child_t" \
-      "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" || {
+      "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" child_endpoint_state || {
       echo "REFUSED: child $child_id endpoint generation changed before cleanup" >&2
       return 1
     }
-    if [ -n "$child_t" ]; then
-      teardown_stage_endpoint_close \
-        "$child_backend" "$child_t" "$TEARDOWN_CHILD_ENDPOINT_GENERATION" || return 1
-      if [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ] \
-         && ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
-        echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
-        return 1
-      fi
-    fi
+    [ "$child_endpoint_state" = closed ] || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$TEARDOWN_CHILD_HOME
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
@@ -1939,8 +1938,18 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ]; then
   validate_child_worktree_for_removal "$WT" "$PROJ" "worktree" >/dev/null || exit 1
   require_treehouse_return_capability "worktree" "$WT" "$ID" || exit 1
 fi
-if [ "$BACKEND" != orca ] && [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ]; then
+if [ "$BACKEND" != orca ] && [ "$TOP_ENDPOINT_STATE" != closed ]; then
   echo "REFUSED: live endpoint retirement cannot be rolled back with the remaining worktree and state transaction; preserving endpoint, ownership evidence, and task state" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ -e "${HOME_PATH:-$WT}" ]; then
+  echo "REFUSED: secondmate home retirement is not recoverable; preserving home, endpoint evidence, and task state" >&2
+  exit 1
+fi
+if [ "$KIND" != secondmate ] && [ -d "$WT" ] \
+   && slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
+     crewmate "worktree" refuse; then
+  echo "REFUSED: worktree return is not recoverable; preserving its lease, ownership evidence, and task state" >&2
   exit 1
 fi
 TEARDOWN_DEFER_RETURN_FINALIZE=1
@@ -1984,38 +1993,26 @@ if [ "$BACKEND" = herdr ] \
 fi
 
 if [ "$BACKEND" = herdr ]; then
-  teardown_endpoint_generation_matches "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" || {
+  endpoint_state=
+  teardown_endpoint_generation_matches \
+    "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" endpoint_state || {
     echo "REFUSED: task endpoint generation changed before cleanup; preserving task state" >&2
     exit 1
   }
-  teardown_stage_endpoint_close "$BACKEND" "$T" "$ENDPOINT_GENERATION" || {
-    echo "REFUSED: could not stage exact endpoint retirement for $ID" >&2
-    exit 1
-  }
-  if [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ] \
-     && ! teardown_herdr_endpoint_focus_safe "$T"; then
-    echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
-    exit 1
-  fi
+  [ "$endpoint_state" = closed ] || exit 1
   if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
   elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
     echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
-  teardown_endpoint_generation_matches "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" || {
+  endpoint_state=
+  teardown_endpoint_generation_matches \
+    "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" endpoint_state || {
     echo "REFUSED: task endpoint generation changed before cleanup; preserving task state" >&2
     exit 1
   }
-  teardown_stage_endpoint_close "$BACKEND" "$T" "$ENDPOINT_GENERATION" || {
-    echo "REFUSED: could not stage exact endpoint retirement for $ID" >&2
-    exit 1
-  }
-  if [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ] \
-     && ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
-    echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
-    exit 1
-  fi
+  [ "$endpoint_state" = closed ] || exit 1
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then

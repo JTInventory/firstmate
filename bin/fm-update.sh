@@ -44,6 +44,8 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-watcher-protocol-lib.sh
 . "$SCRIPT_DIR/fm-watcher-protocol-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
+FM_WAKE_LIB_READ_ONLY=1
+export FM_WAKE_LIB_READ_ONLY
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-delivery-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-delivery-lib.sh"
@@ -62,10 +64,7 @@ fm_update_lock_is_held() {
 }
 
 fm_update_lock_owned_by_process() {
-  local lock=$1 current
-  current=${BASHPID:-$$}
-  [ -d "$lock" ] && [ ! -L "$lock" ] \
-    && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$current" ]
+  fm_lifecycle_admission_lock_owned_by_process "$1"
 }
 
 fm_ff_target_lock_acquire() {
@@ -75,26 +74,17 @@ fm_ff_target_lock_acquire() {
 }
 
 fm_update_fleet_lock_acquire() {
-  local meta home state_dir lock line
+  local id home state_dir lock meta generation provider
   local candidates=""
   candidates="$STATE|$FM_HOME"
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    home=$(sed -n 's/^home=//p' "$meta" 2>/dev/null)
-    case "$home" in
-      /*) [ -d "$home/state" ] && candidates="${candidates}
-$home/state|$home" ;;
-    esac
-  done
-  if [ -f "$SECONDMATES_MD" ] && [ ! -L "$SECONDMATES_MD" ]; then
-    while IFS= read -r line; do
-      home=$(printf '%s\n' "$line" | sed -n 's/.*(home: \([^;)]*\).*/\1/p')
-      case "$home" in
-        /*) [ -d "$home/state" ] && candidates="${candidates}
-$home/state|$home" ;;
-      esac
-    done < "$SECONDMATES_MD"
-  fi
+  while IFS='|' read -r id home _ meta generation provider; do
+    [ -n "$id" ] || continue
+    validate_secondmate_home "$id" "$home" || return 1
+    home=$VALIDATED_HOME
+    [ -d "$home/state" ] || continue
+    candidates="${candidates}
+$home/state|$home"
+  done < <(live_secondmate_meta_records "$STATE" "$SECONDMATES_MD")
   while IFS='|' read -r state_dir home; do
     [ -n "$state_dir" ] || continue
     while IFS= read -r lock; do
@@ -241,24 +231,9 @@ deliver_secondmate_nudge() {
 }
 
 case "${1:-}" in
-  --ack-reread-firstmate)
-    [ $# -eq 2 ] || { usage; exit 1; }
-    fm_update_obligation_ack "$(fm_watcher_protocol_reread_marker "$STATE")" "$2" "$FM_ROOT" || {
-      echo "firstmate reread acknowledgement: generation mismatch" >&2
-      exit 1
-    }
-    echo "acknowledged-reread-firstmate: yes"
-    exit 0
-    ;;
-  --ack-secondmate-nudge)
+  --ack-reread-firstmate) [ $# -eq 2 ] || { usage; exit 1; } ;;
+  --ack-secondmate-nudge|--deliver-secondmate-nudge)
     [ $# -eq 3 ] || { usage; exit 1; }
-    ack_secondmate_nudge "$2" "$3"
-    exit $?
-    ;;
-  --deliver-secondmate-nudge)
-    [ $# -eq 3 ] || { usage; exit 1; }
-    deliver_secondmate_nudge "$2" "$3"
-    exit $?
     ;;
   '')
     ;;
@@ -268,7 +243,8 @@ case "${1:-}" in
     ;;
 esac
 
-fm_update_fleet_lock_acquire || {
+fm_lifecycle_admission_acquire FM_UPDATE_FLEET_LOCKS \
+  "$STATE" "$FM_HOME" "${BASHPID:-$$}" || {
   echo "REFUSED: fleet lifecycle serialization is busy; update made no changes" >&2
   exit 1
 }
@@ -276,6 +252,29 @@ fm_secondmate_lifecycle_preflight "$STATE" "$SECONDMATES_MD" || {
   echo "REFUSED: secondmate lifecycle preflight failed; update made no changes" >&2
   exit 1
 }
+fm_update_fleet_lock_acquire || {
+  echo "REFUSED: fleet lifecycle serialization is busy; update made no changes" >&2
+  exit 1
+}
+
+case "${1:-}" in
+  --ack-reread-firstmate)
+    fm_update_obligation_ack "$(fm_watcher_protocol_reread_marker "$STATE")" "$2" "$FM_ROOT" || {
+      echo "firstmate reread acknowledgement: generation mismatch" >&2
+      exit 1
+    }
+    echo "acknowledged-reread-firstmate: yes"
+    exit 0
+    ;;
+  --ack-secondmate-nudge)
+    ack_secondmate_nudge "$2" "$3"
+    exit $?
+    ;;
+  --deliver-secondmate-nudge)
+    deliver_secondmate_nudge "$2" "$3"
+    exit $?
+    ;;
+esac
 
 # --- main firstmate repo ---------------------------------------------------
 
@@ -300,6 +299,12 @@ if [ "$FF_STATUS" = "updated" ]; then
   if [ "${FM_UPDATE_REEXECED:-0}" != 1 ] \
     && [ "$script_root" = "$root_real" ] \
     && [ -x "$installed_update" ]; then
+    for lock in "${FM_UPDATE_FLEET_LOCKS[@]}"; do
+      fm_lifecycle_admission_authorize_reexec "$lock" "$installed_update" || {
+        echo "firstmate: skipped: lifecycle lock could not authorize updater re-entry" >&2
+        exit 1
+      }
+    done
     export FM_UPDATE_REEXECED=1
     export FM_HOME
     export FM_ROOT_OVERRIDE="$FM_ROOT"

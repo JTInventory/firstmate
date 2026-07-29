@@ -84,6 +84,7 @@ new_world() {
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
   . "$ROOT/bin/fm-session-lock-lib.sh"
   fm_session_lock_owner > "$w/home/state/.lock"
+  printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
 
   printf '%s\n' "$w"
 }
@@ -113,6 +114,9 @@ new_protocol_migration_world() {
   git -C "$w/seed" push -q origin main
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_lock_owner > "$w/home/state/.lock"
+  printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
   cp -R "$ROOT/bin/." "$w/seed/bin/"
   git -C "$w/seed" add bin
   git -C "$w/seed" commit -qm protocol-v3
@@ -163,10 +167,13 @@ run_update() {
 }
 
 ack_firstmate_reread() {
-  local w=$1 generation
+  local w=$1 generation fakebin
   generation=$(fm_update_obligation_generation \
     "$w/home/state/.watch-protocol-reread-required" "$w/main")
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+  fakebin=$(make_fake_tmux "$w/ack-firstmate-fake")
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/ack-firstmate-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/ack-firstmate-fake/pane.txt" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-reread-firstmate "$generation" >/dev/null
 }
 
@@ -345,11 +352,10 @@ test_firstmate_wrong_branch_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" "off-default firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when firstmate was skipped"
+  assert_contains "$out" "primary identity is not bound" "off-default firstmate refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "skipped firstmate HEAD moved"
-  pass "T9 firstmate off its default branch is skipped, not forced"
+  pass "T9 firstmate off its default branch is refused before mutation"
 }
 
 test_firstmate_detached_head_skipped() {
@@ -361,11 +367,10 @@ test_firstmate_detached_head_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "firstmate: skipped: detached HEAD, expected main" "detached firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when detached firstmate was skipped"
+  assert_contains "$out" "primary identity is not bound" "detached firstmate refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "detached firstmate HEAD moved"
-  pass "T10 firstmate detached HEAD is skipped"
+  pass "T10 detached firstmate is refused before mutation"
 }
 
 test_unsafe_secondmate_home_skipped_before_git_update() {
@@ -430,9 +435,10 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
 
-  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch.sh" >/dev/null 2>&1 &
+  (cd "$w/main" && exec env PATH="$fakebin:$PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" FM_STATE_OVERRIDE="$w/home/state" \
+    FM_POLL=5 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$w/main/bin/fm-watch.sh") >/dev/null 2>&1 &
   watcher=$!
   UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $watcher"
   for _ in $(seq 1 60); do
@@ -444,9 +450,10 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
   [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v2 ] \
     || fail "migration fixture did not start the predecessor watcher"
 
-  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 "$w/main/bin/fm-watch-arm.sh" >"$w/arm.out" &
+  (cd "$w/main" && exec env PATH="$fakebin:$PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" FM_STATE_OVERRIDE="$w/home/state" \
+    FM_POLL=5 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$w/main/bin/fm-watch-arm.sh") >"$w/arm.out" &
   arm=$!
   UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $arm"
   for _ in $(seq 1 60); do
@@ -458,15 +465,16 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
 
   rc=0
   # A v2 updater completed the install before the v3 updater learned to re-exec.
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_UPDATE_REEXECED=1 \
+  out=$(cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" FM_UPDATE_REEXECED=1 \
     FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "predecessor updater did not install the new updater"
   assert_contains "$out" "firstmate: updated " "predecessor updater installed v3"
 
   rc=0
-  PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" >"$w/second-pass.out" 2>&1 || rc=$?
+  (cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" \
+    FM_ROOT_OVERRIDE="$w/main" FM_STATE_OVERRIDE="$w/home/state" \
+    "$w/main/bin/fm-update.sh") >"$w/second-pass.out" 2>&1 || rc=$?
   out=$(cat "$w/second-pass.out")
   [ "$rc" -ne 0 ] || fail "installed updater accepted the predecessor watcher"
   assert_contains "$out" "watcher protocol restart could not be verified" \
@@ -517,10 +525,10 @@ test_herdr_target_acknowledges_exact_live_meta() {
     "$w/home/state/sm1.meta"
   bump_origin "$w" instr
   fakebin=$(make_fake_tmux "$w/update-fake")
-  cat > "$fakebin/herdr" <<'SH'
+cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"pane get w1:p2"*) printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"tab-1"}}}' ;;
+  *"pane get w1:p2"*) printf '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"tab-1","tokens":{"firstmate_endpoint_generation":"%s"}}}}\n' "$FM_FAKE_HERDR_GENERATION" ;;
   *"tab get tab-1"*) printf '%s\n' '{"result":{"tab":{"tab_id":"tab-1","workspace_id":"workspace-1"}}}' ;;
   *) exit 1 ;;
 esac
@@ -529,13 +537,15 @@ SH
 
   : >"$w/update-fake/tmux.log"
   : >"$w/update-fake/tmux.log.closed"
-  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_HERDR_GENERATION="$endpoint" \
+    FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$w/update-fake/pane.txt" \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
   assert_contains "$out" "nudge-secondmates: default:w1:p2" "Herdr target is surfaced unchanged"
   generation=$(sed -n 's/^nudge-secondmate-generation: default:w1:p2|//p' <<< "$out")
   [ -n "$generation" ] || fail "Herdr target generation was not reported"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_GENERATION="$endpoint" \
+    FM_FAKE_TMUX_LOG="$w/update-fake/tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$w/update-fake/pane.txt" \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-secondmate-nudge default:w1:p2 "$generation" >/dev/null
@@ -1160,20 +1170,50 @@ test_secondmate_acknowledgement_respects_lifecycle_lock() {
 }
 
 test_ambiguous_lifecycle_metadata_refuses_update() {
-  local w out before
+  local w out before foreign
   w=$(new_world t31)
   add_sm "$w" sm1
   before=$(git -C "$w/sm1" rev-parse HEAD)
   bump_origin "$w" instr
-  printf 'home=%s/recycled\n' "$w" >> "$w/home/state/sm1.meta"
+  foreign="$w/recycled"
+  mkdir -p "$foreign/state"
+  printf 'home=%s\n' "$foreign" >> "$w/home/state/sm1.meta"
 
   out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
 
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
     || fail "ambiguous lifecycle metadata authorized a secondmate update"
+  [ ! -e "$foreign/state/.spawn-admission.lock" ] \
+    && [ ! -e "$foreign/state/.locks" ] \
+    || fail "ambiguous lifecycle metadata created a lock under an unvalidated home"
   assert_contains "$out" "ambiguous lifecycle metadata" \
     "ambiguous lifecycle metadata refusal was not reported"
   pass "T31 ambiguous lifecycle metadata refuses update mutations"
+}
+
+test_acknowledgement_requires_locked_strict_preflight() {
+  local w generation marker rc=0
+  w=$(new_world t31-ack-preflight)
+  add_sm "$w" sm1
+  generation=$(git -C "$w/main" rev-parse HEAD)
+  marker="$w/home/state/.watch-protocol-reread-required"
+  fm_update_obligation_write "$marker" "$generation"
+  printf 'home=%s/recycled\n' "$w" >> "$w/home/state/sm1.meta"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --ack-reread-firstmate "$generation" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "acknowledgement bypassed strict lifecycle preflight"
+  fm_update_obligation_pending "$marker" "$w/main" \
+    || fail "failed lifecycle preflight cleared the reread obligation"
+  pass "update acknowledgements stay behind locked strict preflight"
+}
+
+test_reexec_lock_reentry_requires_complete_identity() {
+  local w lock
+  w=$(new_world t31-reexec-lock)
+  lock="$w/home/state/.reexec-test.lock"
+  bash "$ROOT/tests/fixtures/fm-lock-reexec-helper.sh" "$ROOT" "$lock" \
+    || fail "complete reexec identity could not safely reenter its symlink lock"
+  pass "reexec lock ownership verifies PID, start, identity, token, and symlink"
 }
 
 test_live_endpoint_generation_mismatch_refuses_lifecycle_identity() {
@@ -1553,6 +1593,8 @@ test_secondmate_lock_covers_recovery_callback
 test_locked_secondmate_action_revalidates_after_acquire
 test_secondmate_acknowledgement_respects_lifecycle_lock
 test_ambiguous_lifecycle_metadata_refuses_update
+test_acknowledgement_requires_locked_strict_preflight
+test_reexec_lock_reentry_requires_complete_identity
 test_live_endpoint_generation_mismatch_refuses_lifecycle_identity
 test_live_generation_preflight_preserves_primary
 test_corrupt_kind_preflight_preserves_primary
