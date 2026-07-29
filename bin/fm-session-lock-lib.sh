@@ -50,6 +50,34 @@ fm_session_parent_pid() {
   printf '%s\n' "$ppid"
 }
 
+fm_session_process_session_id() {
+  local pid=$1 stat state ppid pgrp sid
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    stat=${stat##*) }
+    read -r state ppid pgrp sid _ <<< "$stat"
+  else
+    sid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+  fi
+  case "$sid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$sid" -gt 1 ] || return 1
+  printf '%s\n' "$sid"
+}
+
+fm_session_ancestry_reaches_session_leader() {
+  local pid=$$ sid ppid
+  sid=$(fm_session_process_session_id "$pid") || return 1
+  [ "$sid" != "$pid" ] || return 1
+  while [ "$pid" -gt 1 ]; do
+    [ "$pid" != "$sid" ] || return 0
+    ppid=$(fm_session_parent_pid "$pid") || return 1
+    [ "$ppid" != "$pid" ] || return 1
+    pid=$ppid
+  done
+  return 1
+}
+
 fm_session_descriptor_identity() {
   local pid=$1 fd=$2 value
   if [ -e "/proc/$pid/fd/$fd" ]; then
@@ -62,6 +90,17 @@ fm_session_descriptor_identity() {
   fi
   [ -n "$value" ] || return 1
   printf '%s\n' "$value"
+}
+
+fm_session_process_runs_script() {
+  local pid=$1 script=$2 actual args
+  if [ -r "/proc/$pid/cmdline" ]; then
+    actual=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n '2p') || return 1
+    [ "$actual" = "$script" ]
+    return
+  fi
+  args=$(ps -ww -o args= -p "$pid" 2>/dev/null) || return 1
+  case "$args" in *" $script"|*" $script "*) return 0 ;; *) return 1 ;; esac
 }
 
 fm_session_random_hex() {
@@ -115,6 +154,27 @@ fm_session_authority_capability_present() {
   key=$(tr -d '\n' < "$key_path" 2>/dev/null) || return 1
   [ "${#key}" -ge 64 ] || return 1
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+fm_session_authority_broker_present() {
+  local script=$1 broker=${FM_SESSION_AUTHORITY_BROKER_PID:-}
+  local start=${FM_SESSION_AUTHORITY_BROKER_START:-}
+  local identity=${FM_SESSION_AUTHORITY_BROKER_IDENTITY:-}
+  local current caller_target broker_target
+  fm_session_authority_capability_present || return 1
+  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$broker" != "$$" ] || return 1
+  fm_session_pid_is_current_ancestor "$broker" || return 1
+  current=$(fm_session_process_start "$broker") || return 1
+  [ "$current" = "$start" ] || return 1
+  current=$(fm_session_process_identity "$broker") || return 1
+  [ "$current" = "$identity" ] || return 1
+  fm_session_process_runs_script "$broker" "$script" || return 1
+  caller_target=$(fm_session_descriptor_identity \
+    "$$" "$FM_SESSION_AUTHORITY_FD") || return 1
+  broker_target=$(fm_session_descriptor_identity \
+    "$broker" "$FM_SESSION_AUTHORITY_FD") || return 1
+  [ "$caller_target" = "$broker_target" ]
 }
 
 fm_session_authority_hmac() {

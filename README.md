@@ -65,7 +65,7 @@ The first mate detects and offers to install everything else.
 gh auth login
 git clone https://github.com/kunchenguid/firstmate
 cd firstmate
-bin/fm-session-authority-exec.sh claude   # delegates the enrolled launcher capability; AGENTS.md takes over
+bin/fm-session-authority-exec.sh claude   # starts the trusted first-enrollment broker; AGENTS.md takes over
 ```
 
 Then just talk:

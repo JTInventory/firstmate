@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Read-only `status` keeps its documented always-exit-0 contract.
 if [ "${1:-}" != status ]; then
   case "${FM_AGENT_ROLE:-}" in
-    ""|primary|secondmate) ;;
+    ""|primary) ;;
     *) fm_worker_refuse_primary_operation "session lock acquisition" || exit 1 ;;
   esac
 fi
@@ -52,6 +52,10 @@ if [ "${1:-}" = status ]; then
   exit 0
 fi
 
+fm_session_authority_broker_present "$SCRIPT_DIR/fm-session-authority-exec.sh" || {
+  echo "error: trusted session authority broker is missing or invalid; operate read-only until resolved" >&2
+  exit 1
+}
 mkdir -p "$STATE" 2>/dev/null || {
   echo "error: cannot create session-lock state directory $STATE; operate read-only until resolved" >&2
   exit 1
@@ -203,7 +207,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   old_marker=$(fm_codex_owner_marker "$old" 2>/dev/null || true)
   owner_marker=$(fm_codex_owner_marker "$owner" 2>/dev/null || true)
   if [ -f "$AUTHORITY" ] && [ ! -L "$AUTHORITY" ] \
-    && fm_session_authority_read "$AUTHORITY" \
+    && fm_session_authority_read_shape "$AUTHORITY" \
     && [ "$FM_SESSION_AUTHORITY_OWNER" = "$old" ] \
     && { [ "$old_marker" = "$owner_marker" ] \
       || { [ -z "$old_marker" ] && [ -z "$owner_marker" ]; }; }; then

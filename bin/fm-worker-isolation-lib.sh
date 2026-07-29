@@ -42,7 +42,8 @@
 # Every operational-home variable a firstmate script reads. Extend here, not at
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
-FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN FM_SESSION_AUTHORITY_FD"
+FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN"
+FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-procargs-lib.sh"
 
@@ -68,10 +69,12 @@ fm_worker_launch_env_prefix() {
     /*) ;;
     *) echo "error: agent role $role requires an absolute owning home, got '${home:-<empty>}'" >&2; return 1 ;;
   esac
-  case "${FM_SESSION_AUTHORITY_FD:-}" in
-    ''|*[!0-9]*) ;;
-    *) printf 'exec %s>&-; ' "$FM_SESSION_AUTHORITY_FD" ;;
-  esac
+  if [ "$role" = crewmate ]; then
+    case "${FM_SESSION_AUTHORITY_FD:-}" in
+      ''|*[!0-9]*) ;;
+      *) printf 'exec %s>&-; ' "$FM_SESSION_AUTHORITY_FD" ;;
+    esac
+  fi
   for var in $FM_WORKER_ISOLATION_HOME_VARS; do
     if [ "$var" = FM_HOME ] && [ "$role" = secondmate ]; then
       printf 'FM_HOME=%s ' "$(fm_worker_shell_quote "$home")"
@@ -82,6 +85,11 @@ fm_worker_launch_env_prefix() {
   for var in $FM_WORKER_ISOLATION_LIFECYCLE_VARS; do
     printf '%s= ' "$var"
   done
+  if [ "$role" = crewmate ]; then
+    for var in $FM_WORKER_ISOLATION_AUTHORITY_VARS; do
+      printf '%s= ' "$var"
+    done
+  fi
   printf 'FM_AGENT_ROLE=%s ' "$role"
   printf 'FM_AGENT_TASK=%s ' "$(fm_worker_shell_quote "$id")"
   printf 'FM_AGENT_OWNER_HOME=%s ' "$(fm_worker_shell_quote "$home")"
@@ -186,6 +194,48 @@ fm_worker_linked_primary_topology_matches() {
     && [ "$(fm_worker_canonical_path "$home_top")" = "$home" ] \
     && [ "$(fm_worker_canonical_path "$root_common")" = \
       "$(fm_worker_canonical_path "$home_common")" ]
+}
+
+fm_worker_primary_bootstrap_matches() {
+  local root home root_real home_real cwd branch default ref pid ppid sid env
+  case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
+  [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
+  root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  home=${FM_HOME:-$root}
+  root_real=$(fm_worker_canonical_path "$root") || return 1
+  home_real=$(fm_worker_canonical_path "$home") || return 1
+  [ "$root_real" = "$home_real" ] || return 1
+  cwd=$(pwd -P) || return 1
+  [ "$cwd" = "$root_real" ] || return 1
+  branch=$(git -C "$root_real" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  ref=$(git -C "$root_real" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    default=${ref#origin/}
+  elif git -C "$root_real" show-ref --verify --quiet refs/heads/main; then
+    default=main
+  elif git -C "$root_real" show-ref --verify --quiet refs/heads/master; then
+    default=master
+  else
+    return 1
+  fi
+  [ "$branch" = "$default" ] || return 1
+  [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
+    || return 1
+  . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+  sid=$(fm_session_process_session_id "$$") || return 1
+  [ "$sid" != "$$" ] || return 1
+  pid=$$
+  while [ "$pid" -gt 1 ]; do
+    env=$(fm_worker_process_environment "$pid") || return 1
+    if printf '%s\n' "$env" | grep -Eq '(^|[[:space:]])FM_AGENT_ROLE=(crewmate|secondmate)($|[[:space:]])'; then
+      return 1
+    fi
+    [ "$pid" != "$sid" ] || return 0
+    ppid=$(fm_session_parent_pid "$pid") || return 1
+    [ "$ppid" != "$pid" ] || return 1
+    pid=$ppid
+  done
+  return 1
 }
 
 fm_worker_primary_authority_matches() {

@@ -302,14 +302,19 @@ Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection
 ## Codex session lock lifecycle
 
 Codex primaries use the tracked `SessionStart` hook to claim their home's
-session lock before the first model turn. An initial trusted launcher supplies
-the enrollment descriptor. `bin/fm-session-authority-exec.sh` accepts only a
-verified live authority belonging to its current ancestor chain, then delegates
-an immediately unlinked descriptor capability before it executes the harness.
-The structured owner binds that descriptor's durable process chain to the exact
-home, checkout, process start, executable identity, and `CODEX_THREAD_ID`.
-Firstmate closes the descriptor before launching a crewmate; each secondmate
-receives a newly generated capability for its own home.
+session lock before the first model turn. `bin/fm-session-authority-exec.sh`
+is the broker. On a fresh clone it accepts only an empty authority state from
+the default-branch checkout when its real ancestry still reaches the launching
+session and contains no worker declaration. On later launches it requires the
+current live keyed authority or the same primary-only recovery proof. It keeps
+the broker process alive as the harness parent and delegates an immediately
+unlinked descriptor. `bin/fm-lock.sh` accepts that descriptor only while the
+exact broker process, start, executable, script, ancestry, and descriptor
+identity remain live. The structured owner binds the broker's process chain to
+the exact home, checkout, process start, executable identity, and
+`CODEX_THREAD_ID`. Firstmate closes the descriptor and clears the broker before
+launching a crewmate. A secondmate keeps its newly delegated descriptor and
+broker through its own first lock acquisition.
 
 The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose
 keyed authority is live, belongs to an ancestor of the hook, and has the exact
@@ -330,7 +335,10 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_SESSION_AUTHORITY_FD= # inherited anonymous descriptor; initially supplied by the trusted launcher, then delegated by fm-session-authority-exec.sh
+FM_SESSION_AUTHORITY_FD= # anonymous descriptor delegated by fm-session-authority-exec.sh
+FM_SESSION_AUTHORITY_BROKER_PID=       # exact live authority broker pid
+FM_SESSION_AUTHORITY_BROKER_START=     # broker process-start identity
+FM_SESSION_AUTHORITY_BROKER_IDENTITY=  # broker executable identity
 FM_BACKEND=tmux          # runtime session-provider override for new spawns; herdr is experimental and opt-in
 FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3   # additional `treehouse return` retries after a matching transient git index.lock error; invalid values use 3

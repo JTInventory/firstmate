@@ -101,7 +101,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -110,7 +110,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
 }
@@ -273,7 +273,7 @@ test_secondmate_child_receives_only_its_own_home() {
   local expected
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
-    "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME='/homes/dom' "*) : ;;
+    "FM_HOME='/homes/dom' "*) : ;;
     *) fail "secondmate declaration did not pin its own home first: $expected" ;;
   esac
   assert_not_contains "$expected" "FM_ROOT_OVERRIDE='" \
@@ -381,7 +381,7 @@ test_fresh_primary_session_lock_enrolls_atomically() {
   rm -rf "$primary_home/state"
   out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    "$LOCK" 2>&1) || status=$?
+    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
   expect_code 0 "$status" "an empty primary home must enroll under the acquisition lock"
   assert_present "$primary_home/state/.lock" "fresh enrollment omitted the session lock"
   assert_present "$primary_home/state/.primary-checkout" \
@@ -414,13 +414,11 @@ test_caller_marker_cannot_replace_exact_session_authority() {
   pass "primary authority requires the recorded process tuple in current ancestry"
 }
 
-test_reparented_markerless_process_has_no_fresh_primary_authority() {
-  local primary_home case_dir child initial_parent final_parent status out attempts=0
-  primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
-  case_dir="$TMP_ROOT/reparented-enrollment"
+run_reparented_lock_attempt() {
+  local case_dir=$1 primary_home=$2 child attempts=0
   mkdir -p "$case_dir"
   perl -MPOSIX -e '
-    my ($dir, $home, $authority_exec) = @ARGV;
+    my ($dir, $home, $lock) = @ARGV;
     my $pid = fork();
     die "fork failed" unless defined $pid;
     if ($pid) {
@@ -445,17 +443,19 @@ test_reparented_markerless_process_has_no_fresh_primary_authority() {
     POSIX::dup2(fileno($key_read), 7) >= 0 or die "dup2 failed";
     $0 = "codex";
     delete @ENV{qw(FM_AGENT_TASK FM_AGENT_OWNER_HOME)};
-    @ENV{qw(FM_AGENT_ROLE FM_SESSION_AUTHORITY_FD FM_ROOT_OVERRIDE FM_HOME)}
-      = ("primary", "7", $home, $home);
+    @ENV{qw(FM_AGENT_ROLE FM_SESSION_AUTHORITY_FD FM_ROOT_OVERRIDE FM_HOME
+      FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
+      FM_SESSION_AUTHORITY_BROKER_IDENTITY)}
+      = ("primary", "7", $home, $home, "$$", "proc:1", "exe:/bin/bash");
     open STDOUT, ">", "$dir/output" or die $!;
     open STDERR, ">&", \*STDOUT or die $!;
-    my $rc = system($authority_exec, "true");
+    my $rc = system($lock);
     my $status = $rc == -1 ? 127 : $rc >> 8;
     open my $status_file, ">", "$dir/status" or die $!;
     print {$status_file} "$status\n";
     close $status_file;
     exit 0;
-  ' "$case_dir" "$primary_home" "$AUTHORITY_EXEC"
+  ' "$case_dir" "$primary_home" "$LOCK"
   child=$(cat "$case_dir/child")
   BG_PIDS+=("$child")
   while [ "$attempts" -lt 250 ]; do
@@ -464,15 +464,55 @@ test_reparented_markerless_process_has_no_fresh_primary_authority() {
     attempts=$((attempts + 1))
   done
   assert_present "$case_dir/status" "the reparented worker did not finish enrollment"
+}
+
+test_reparented_markerless_process_has_no_fresh_primary_authority() {
+  local primary_home case_dir initial_parent final_parent status out
+  primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
+  rm -rf "$primary_home/state"
+  case_dir="$TMP_ROOT/reparented-enrollment"
+  run_reparented_lock_attempt "$case_dir" "$primary_home"
   initial_parent=$(cat "$case_dir/initial-parent")
   final_parent=$(cat "$case_dir/final-parent")
   [ "$initial_parent" != "$final_parent" ] || fail "the enrollment worker was not reparented"
   status=$(cat "$case_dir/status")
   out=$(cat "$case_dir/output")
   expect_code 1 "$status" "a reparented markerless process must not create primary authority"
-  assert_contains "$out" "trusted session enrollment capability is missing or invalid" \
+  assert_contains "$out" "trusted session authority broker is missing or invalid" \
     "reparented enrollment refusal lost its capability reason"
+  assert_absent "$primary_home/state/.lock" \
+    "reparented direct enrollment published a session lock"
+  assert_absent "$primary_home/state/.primary-checkout" \
+    "reparented direct enrollment published a checkout binding"
+  assert_absent "$primary_home/state/.session-authority" \
+    "reparented direct enrollment published session authority"
   pass "a real reparented worker cannot mint enrollment by clearing and forging identity"
+}
+
+test_reparented_worker_cannot_trigger_forged_authority_recovery() {
+  local primary_home case_dir before_lock before_authority status out txn
+  primary_home=$(make_primary_home "$TMP_ROOT/reparented-recovery-primary")
+  before_lock=$(cat "$primary_home/state/.lock")
+  before_authority=$(cat "$primary_home/state/.session-authority")
+  txn="$primary_home/state/.session-authority-transaction"
+  mkdir "$txn"
+  printf '%s\n' ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+    > "$txn/key"
+  printf '%s\n' forged > "$txn/manifest"
+  printf '%s\n' ready > "$txn/ready"
+  case_dir="$TMP_ROOT/reparented-recovery"
+  run_reparented_lock_attempt "$case_dir" "$primary_home"
+  status=$(cat "$case_dir/status")
+  out=$(cat "$case_dir/output")
+  expect_code 1 "$status" "a reparented worker must not trigger transaction recovery"
+  assert_contains "$out" "trusted session authority broker is missing or invalid" \
+    "forged recovery was inspected before independent authorization"
+  [ "$(cat "$primary_home/state/.lock")" = "$before_lock" ] \
+    || fail "forged recovery changed the session lock"
+  [ "$(cat "$primary_home/state/.session-authority")" = "$before_authority" ] \
+    || fail "forged recovery changed session authority"
+  assert_present "$txn" "unauthorized recovery removed forged transaction evidence"
+  pass "recovery authorizes the broker before reading transaction material"
 }
 
 test_foreign_session_lock_defeats_primary_topology() {
@@ -563,7 +603,7 @@ test_stale_session_lock_reaches_verified_recovery() {
   kill "$sleeper"
   wait "$sleeper" 2>/dev/null || true
   out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    "$LOCK" 2>&1) || status=$?
+    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
   expect_code 0 "$status" "a provably stale session lock must reach verified recovery"
   assert_contains "$out" "lock acquired" "stale session-lock recovery did not complete"
   pass "primary authority permits only verified stale session-lock recovery"
@@ -587,7 +627,7 @@ test_binding_failure_never_installs_new_session_owner() {
   rm -f "$primary_home/state/.lock" "$primary_home/state/.primary-checkout"
   mkdir "$primary_home/state/.primary-checkout"
   out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    "$LOCK" 2>&1) || status=$?
+    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
   expect_code 1 "$status" "invalid checkout binding must refuse lock acquisition"
   assert_absent "$primary_home/state/.lock" \
     "binding failure left a newly installed session owner"
@@ -683,7 +723,7 @@ printf 'corrupt\n' > "${@: -1}"
 SH
   chmod +x "$fakebin/cp"
   out=$(cd "$home" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    "$LOCK" 2>&1) || status=$?
+    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
   expect_code 1 "$status" "unverified session-authority recovery must fail closed"
   [ -d "$home/state/.session-authority-transaction" ] \
     || fail "unverified session-authority recovery destroyed its backup"
@@ -693,7 +733,7 @@ SH
 }
 
 test_session_authority_recovery_precedes_current_tuple_validation() {
-  local home txn wrong_key out status=0
+  local home txn out status=0
   home=$(make_primary_home "$TMP_ROOT/session-authority-mixed-recovery")
   txn="$home/state/.session-authority-transaction"
   mkdir "$txn"
@@ -704,12 +744,9 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
   printf '%s\n' ready > "$txn/ready"
   printf '%s\n' '999999|codex:foreign|fallback' > "$home/state/.lock"
   printf '%s\n' 'invalid-authority' > "$home/state/.session-authority"
-  wrong_key="$home/wrong-launcher-key"
-  printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-    > "$wrong_key"
-  out=$(cd "$home" && exec 7<"$wrong_key" \
-    && FM_SESSION_AUTHORITY_FD=7 FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-      "$LOCK" 2>&1) || status=$?
+  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
   expect_code 1 "$status" "launcher-key loss must not prevent transaction recovery"
   assert_absent "$txn" "verified authority recovery left its transaction behind"
   [ "$(cat "$home/state/.lock")" != '999999|codex:foreign|fallback' ] \
@@ -720,18 +757,18 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
 test_secondmate_authority_delegation_uses_no_node() {
   local home fakebin out status=0
   home=$(make_primary_home "$TMP_ROOT/secondmate-authority-delegation")
+  printf '%s\n' domain > "$home/.fm-secondmate-home"
   fakebin="$TMP_ROOT/no-node"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
   chmod +x "$fakebin/node"
   out=$(cd "$home" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain \
-    FM_AGENT_OWNER_HOME="$home" "$AUTHORITY_EXEC" \
-    bash -c '. "$1/bin/fm-session-lock-lib.sh"; fm_session_authority_capability_present' \
-    _ "$ROOT" 2>&1) || status=$?
-  expect_code 0 "$status" "a declared secondmate must receive delegated session authority"
-  [ -z "$out" ] || fail "secondmate authority delegation emitted unexpected output: $out"
-  pass "secondmate authority delegation works without Node"
+    FM_AGENT_OWNER_HOME="$home" "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+  expect_code 0 "$status" "a declared secondmate must acquire its session lock"
+  assert_contains "$out" "lock acquired" \
+    "secondmate authority delegation did not reach lock acquisition"
+  pass "secondmate lock acquisition preserves delegated authority without Node"
 }
 
 test_fresh_enrollment_requires_external_capability() {
@@ -742,7 +779,7 @@ test_fresh_enrollment_requires_external_capability() {
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" "$LOCK" 2>&1) || status=$?
   expect_code 1 "$status" "fresh enrollment without an external capability must fail"
   assert_absent "$home/state/.lock" "capability-free enrollment published a lock"
-  assert_contains "$out" "capability is missing or invalid" \
+  assert_contains "$out" "broker is missing or invalid" \
     "capability-free enrollment refusal lost its reason"
   pass "fresh enrollment requires independently supplied authority capability"
 }
@@ -2637,6 +2674,7 @@ test_fresh_primary_requires_durable_session_binding
 test_fresh_primary_session_lock_enrolls_atomically
 test_caller_marker_cannot_replace_exact_session_authority
 test_reparented_markerless_process_has_no_fresh_primary_authority
+test_reparented_worker_cannot_trigger_forged_authority_recovery
 test_foreign_session_lock_defeats_primary_topology
 test_linked_main_worktree_can_prove_primary_authority
 test_primary_role_cannot_override_worker_ancestry
