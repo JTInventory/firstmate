@@ -370,6 +370,7 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_SESSION_AUTHORITY_FD= # anonymous descriptor delegated by fm-session-authority-exec.sh
+FM_SESSION_AUTHORITY_DURABLE_FD= # protected durable receipt descriptor
 FM_SESSION_AUTHORITY_BROKER_PID=       # exact live authority broker pid
 FM_SESSION_AUTHORITY_BROKER_START=     # broker process-start identity
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=  # broker executable identity

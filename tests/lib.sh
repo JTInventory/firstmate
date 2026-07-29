@@ -97,7 +97,8 @@ fm_test_session_authority_fd() {
   fi
   exec 19< <(while :; do printf '%s\n' "$key"; done)
   FM_SESSION_AUTHORITY_FD=19
-  export FM_SESSION_AUTHORITY_FD
+  FM_SESSION_AUTHORITY_DURABLE_FD=19
+  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

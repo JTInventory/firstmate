@@ -233,14 +233,20 @@ fm_session_sha256_file() {
 }
 
 fm_session_hmac_sha256_key_file() {
-  local key_file=$1 key output digest
+  local key_file=$1 digest
   [ -r "$key_file" ] || return 1
-  key=$(tr -d '\n' < "$key_file" 2>/dev/null) || return 1
-  [ "${#key}" -ge 64 ] || return 1
-  case "$key" in *[!0-9a-f]*) return 1 ;; esac
-  command -v openssl >/dev/null 2>&1 || return 1
-  output=$(openssl dgst -sha256 -hmac "$key" 2>/dev/null) || return 1
-  digest=${output##*= }
+  command -v perl >/dev/null 2>&1 || return 1
+  digest=$(perl -MDigest::SHA=hmac_sha256_hex -e '
+    my $path = shift;
+    open my $key_fh, "<", $path or exit 1;
+    my $key = <$key_fh>;
+    defined $key or exit 1;
+    chomp $key;
+    $key =~ /\A[0-9a-f]{64,}\z/ or exit 1;
+    local $/;
+    my $body = <STDIN>;
+    print hmac_sha256_hex(defined($body) ? $body : "", $key), "\n";
+  ' "$key_file") || return 1
   [ "${#digest}" -eq 64 ] || return 1
   case "$digest" in *[!0-9a-f]*) return 1 ;; esac
   printf '%s\n' "$digest"
@@ -289,7 +295,7 @@ fm_session_authority_broker_present() {
 }
 
 fm_session_descriptor_channel_isolated() {
-  local fd=$1 system parent=$$ opened=0 status=0
+  local fd=$1 system parent=${BASHPID:-$$} opened=0 status=0
   case "$fd" in ''|*[!0-9]*) return 1 ;; esac
   system=$(uname -s 2>/dev/null) || return 1
   case "$system" in
@@ -347,7 +353,7 @@ fm_session_exec_descriptor_isolation_durable() {
 }
 
 fm_session_authority_descriptor_create() {
-  local key
+  local key durable_key
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null \
     || ( : <&7 ) 2>/dev/null || ( : >&7 ) 2>/dev/null; then
     return 1
@@ -356,9 +362,46 @@ fm_session_authority_descriptor_create() {
     && fm_session_descriptor_channel_isolated 7 \
     && fm_session_exec_descriptor_isolation_durable || return 1
   key=$(fm_session_random_hex 48) || return 1
+  durable_key=$(fm_session_random_hex 48) || return 1
+  exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
+  exec 7< <(while :; do printf '%s\n' "$durable_key"; done) || {
+    exec 9<&-
+    return 1
+  }
+  unset key durable_key
+  FM_SESSION_AUTHORITY_FD=9
+  FM_SESSION_AUTHORITY_DURABLE_FD=7
+}
+
+fm_session_authority_live_descriptor_rotate() {
+  local key
+  fm_session_authority_durable_capability_present || return 1
+  if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null; then
+    return 1
+  fi
+  fm_session_descriptor_channel_isolated 9 \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  key=$(fm_session_random_hex 48) || return 1
   exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
   unset key
   FM_SESSION_AUTHORITY_FD=9
+}
+
+fm_session_authority_durable_descriptor_adopt() {
+  local key
+  [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] || return 1
+  if ( : <&7 ) 2>/dev/null || ( : >&7 ) 2>/dev/null; then
+    return 1
+  fi
+  fm_session_authority_capability_present \
+    && fm_session_descriptor_channel_isolated 7 \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  exec 7< <(while :; do printf '%s\n' "$key"; done) || return 1
+  unset key
+  FM_SESSION_AUTHORITY_DURABLE_FD=7
 }
 
 fm_session_enrollment_signer_prepare() {
@@ -609,7 +652,7 @@ fm_session_enrollment_signer_run() {
           "$consumer_start" "$consumer_public_key" "$consumer_public_digest" \
           && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
           && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
-          && fm_session_enrollment_ack_validate \
+          && fm_session_enrollment_final_validate \
             "$finalized" "$accepted_digest" "$$" "$nonce" "$consumer" \
             "$consumer_start" "$consumer_public_key" "$consumer_public_digest"; then
           return 0
@@ -720,24 +763,26 @@ fm_session_enrollment_acceptance_validate() {
   return "$status"
 }
 
-fm_session_enrollment_ack_validate() {
+fm_session_enrollment_receipt_validate() {
   local acknowledged=$1 accepted_digest=$2 signer=$3 nonce=$4 consumer=$5
   local consumer_start=$6 public_key=$7 public_digest=$8
+  local expected_stage=$9
   local public_file signature_file body_file signature status
   [ -f "$acknowledged" ] && [ ! -L "$acknowledged" ] || return 1
   [ "${#accepted_digest}" -eq 64 ] || return 1
   case "$accepted_digest" in *[!0-9a-f]*) return 1 ;; esac
-  [ "$(wc -l < "$acknowledged" | tr -d ' ')" -eq 8 ] || return 1
-  [ "$(sed -n '1p' "$acknowledged")" = version=1 ] \
-    && [ "$(sed -n '2s/^signer-pid=//p' "$acknowledged")" = "$signer" ] \
-    && [ "$(sed -n '3s/^nonce=//p' "$acknowledged")" = "$nonce" ] \
-    && [ "$(sed -n '4s/^consumer-pid=//p' "$acknowledged")" = "$consumer" ] \
-    && [ "$(sed -n '5s/^consumer-start=//p' "$acknowledged")" = "$consumer_start" ] \
-    && [ "$(sed -n '7s/^consumer-public-key-sha256=//p' "$acknowledged")" \
+  [ "$(wc -l < "$acknowledged" | tr -d ' ')" -eq 9 ] || return 1
+  [ "$(sed -n '1p' "$acknowledged")" = version=2 ] \
+    && [ "$(sed -n '2s/^stage=//p' "$acknowledged")" = "$expected_stage" ] \
+    && [ "$(sed -n '3s/^signer-pid=//p' "$acknowledged")" = "$signer" ] \
+    && [ "$(sed -n '4s/^nonce=//p' "$acknowledged")" = "$nonce" ] \
+    && [ "$(sed -n '5s/^consumer-pid=//p' "$acknowledged")" = "$consumer" ] \
+    && [ "$(sed -n '6s/^consumer-start=//p' "$acknowledged")" = "$consumer_start" ] \
+    && [ "$(sed -n '8s/^consumer-public-key-sha256=//p' "$acknowledged")" \
       = "$public_digest" ] || return 1
-  [ "$(sed -n '6s/^acceptance-sha256=//p' "$acknowledged")" \
+  [ "$(sed -n '7s/^acceptance-sha256=//p' "$acknowledged")" \
     = "$accepted_digest" ] || return 1
-  signature=$(sed -n '8s/^signature=//p' "$acknowledged")
+  signature=$(sed -n '9s/^signature=//p' "$acknowledged")
   [ -n "$signature" ] && [ "${#public_digest}" -eq 64 ] || return 1
   public_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-ack-public.XXXXXX") \
     || return 1
@@ -750,7 +795,7 @@ fm_session_enrollment_ack_validate() {
   printf '%s' "$public_key" | openssl base64 -d -A > "$public_file" 2>/dev/null \
     && printf '%s' "$signature" | openssl base64 -d -A \
       > "$signature_file" 2>/dev/null \
-    && sed -n '1,7p' "$acknowledged" > "$body_file" || {
+    && sed -n '1,8p' "$acknowledged" > "$body_file" || {
       rm -f "$public_file" "$signature_file" "$body_file"
       return 1
     }
@@ -762,8 +807,17 @@ fm_session_enrollment_ack_validate() {
   return "$status"
 }
 
-fm_session_enrollment_ack_write() {
+fm_session_enrollment_ack_validate() {
+  fm_session_enrollment_receipt_validate "$@" ack
+}
+
+fm_session_enrollment_final_validate() {
+  fm_session_enrollment_receipt_validate "$@" final
+}
+
+fm_session_enrollment_receipt_write() {
   local acknowledged=$1 accepted=$2 signer=$3 nonce=$4 public_digest=$5
+  local stage=$6
   local private_fd=${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD:-}
   local private consumer_start accepted_digest body signature tmp
   [ "$private_fd" = 8 ] && [ -r /dev/fd/8 ] || return 1
@@ -778,8 +832,8 @@ fm_session_enrollment_ack_write() {
   signature=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-ack-signature.XXXXXX") \
     || { rm -f "$body"; return 1; }
   chmod 600 "$body" "$signature" \
-    && printf 'version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
-      "$signer" "$nonce" "$$" "$consumer_start" "$accepted_digest" \
+    && printf 'version=2\nstage=%s\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
+      "$stage" "$signer" "$nonce" "$$" "$consumer_start" "$accepted_digest" \
       "$public_digest" > "$body" \
     && fm_session_enrollment_sign_data "$private" "$signature" "$body" || {
       rm -f "$body" "$signature"
@@ -799,8 +853,12 @@ fm_session_enrollment_ack_write() {
   rm -f "$body" "$signature"
 }
 
+fm_session_enrollment_ack_write() {
+  fm_session_enrollment_receipt_write "$@" ack
+}
+
 fm_session_enrollment_final_write() {
-  fm_session_enrollment_ack_write "$@"
+  fm_session_enrollment_receipt_write "$@" final || return 1
   exec 8<&-
 }
 
@@ -961,26 +1019,53 @@ fm_session_enrollment_ticket_validate() {
   return "$status"
 }
 
-fm_session_authority_hmac() {
-  local key output digest
-  fm_session_descriptor_channel_isolated \
-    "${FM_SESSION_AUTHORITY_FD:-}" \
-    && fm_session_exec_descriptor_isolation_durable || return 1
-  IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
-  [ "${#key}" -ge 64 ] || return 1
-  case "$key" in *[!0-9a-f]*) return 1 ;; esac
-  output=$(openssl dgst -sha256 -hmac "$key" 2>/dev/null) || return 1
-  unset key
-  digest=${output##*= }
+fm_session_hmac_from_descriptor() {
+  local fd=$1 digest
+  case "$fd" in ''|*[!0-9]*) return 1 ;; esac
+  command -v perl >/dev/null 2>&1 || return 1
+  digest=$(perl -MDigest::SHA=hmac_sha256_hex -e '
+    my $fd = shift;
+    open my $key_fh, "<&=$fd" or exit 1;
+    my $key = <$key_fh>;
+    defined $key or exit 1;
+    chomp $key;
+    $key =~ /\A[0-9a-f]{64,}\z/ or exit 1;
+    local $/;
+    my $body = <STDIN>;
+    print hmac_sha256_hex(defined($body) ? $body : "", $key), "\n";
+  ' "$fd") || return 1
   [ "${#digest}" -eq 64 ] || return 1
   case "$digest" in *[!0-9a-f]*) return 1 ;; esac
   printf '%s\n' "$digest"
 }
 
+fm_session_authority_hmac() {
+  fm_session_descriptor_channel_isolated \
+    "${FM_SESSION_AUTHORITY_FD:-}" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_hmac_from_descriptor "$FM_SESSION_AUTHORITY_FD"
+}
+
+fm_session_authority_durable_capability_present() {
+  local key fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  fm_session_descriptor_channel_isolated "$fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  IFS= read -r key <&"$fd" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+fm_session_authority_durable_hmac() {
+  local fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  fm_session_descriptor_channel_isolated "$fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_hmac_from_descriptor "$fd"
+}
+
 fm_session_authority_record_write() {
   local file=$1 body=$2 hmac tmp
   case "$body" in *$'\r'*) return 1 ;; esac
-  hmac=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
+  hmac=$(printf '%s' "$body" | fm_session_authority_durable_hmac) || return 1
   tmp=$(mktemp "${file}.XXXXXX") || return 1
   chmod 600 "$tmp" \
     && printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
@@ -998,7 +1083,7 @@ fm_session_authority_record_validate() {
   [ "${#actual}" -eq 64 ] || return 1
   case "$actual" in *[!0-9a-f]*) return 1 ;; esac
   body=$(sed -n "1,$((lines - 1))p" "$file")$'\n'
-  expected=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
+  expected=$(printf '%s' "$body" | fm_session_authority_durable_hmac) || return 1
   [ "$actual" = "$expected" ]
 }
 

@@ -232,7 +232,8 @@ teardown_transaction_receipt_binding() {
   case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 1 ;; esac
   case "$home" in /*) ;; *) return 1 ;; esac
   body=$(cat "$identity")$'\n'
-  printf '%sreceipt=%s\n' "$body" "$receipt" | fm_session_authority_hmac
+  printf '%sreceipt=%s\n' "$body" "$receipt" \
+    | fm_session_authority_durable_hmac
 }
 
 teardown_digest_text() {

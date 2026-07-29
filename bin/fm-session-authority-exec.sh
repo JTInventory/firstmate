@@ -232,19 +232,54 @@ fi
   exit 1
 }
 enrollment_fd=${FM_SESSION_AUTHORITY_FD:-}
+durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
 if [ "$enrollment_fd" != 9 ] && ( : <&9 ) 2>/dev/null; then
   echo "error: session authority descriptor 9 is already in use" >&2
   exit 1
 fi
-if [ "$enrollment_fd" = 9 ] \
+if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
+  if [ "$enrollment_fd" = 9 ]; then
+    exec 9<&-
+  elif [ -n "$enrollment_fd" ]; then
+    eval "exec ${enrollment_fd}<&-"
+  fi
+  if [ "$durable_fd" = 7 ]; then
+    exec 7<&-
+  elif [ -n "$durable_fd" ]; then
+    eval "exec ${durable_fd}<&-"
+  fi
+  unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+  fm_session_authority_descriptor_create || {
+    echo "error: protected session authority descriptor is unavailable" >&2
+    exit 1
+  }
+elif [ "$enrollment_fd" = 9 ] \
   && fm_session_authority_capability_present; then
-  :
+  if ! fm_session_authority_durable_capability_present; then
+    unset FM_SESSION_AUTHORITY_DURABLE_FD
+    fm_session_authority_durable_descriptor_adopt || {
+      echo "error: durable session authority adoption failed" >&2
+      exit 1
+    }
+  fi
+  exec 9<&-
+  unset FM_SESSION_AUTHORITY_FD
+  fm_session_authority_live_descriptor_rotate || {
+    echo "error: protected session authority rotation failed" >&2
+    exit 1
+  }
 else
   if [ "$enrollment_fd" = 9 ]; then
     exec 9<&-
   elif [ -n "$enrollment_fd" ]; then
     eval "exec ${enrollment_fd}<&-"
   fi
+  if [ "$durable_fd" = 7 ]; then
+    exec 7<&-
+  elif [ -n "$durable_fd" ]; then
+    eval "exec ${durable_fd}<&-"
+  fi
+  unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
   fm_session_authority_descriptor_create || {
     echo "error: protected session authority descriptor is unavailable" >&2
     exit 1
@@ -254,7 +289,8 @@ FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
-export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_BROKER_PID
+export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+export FM_SESSION_AUTHORITY_BROKER_PID
 export FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY
 export FM_SESSION_AUTHORITY_BROKER_SCRIPT
 child_pid=

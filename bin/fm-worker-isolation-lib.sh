@@ -43,7 +43,7 @@
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
 FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN"
-FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT"
+FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-procargs-lib.sh"
 
@@ -70,10 +70,18 @@ fm_worker_launch_env_prefix() {
     *) echo "error: agent role $role requires an absolute owning home, got '${home:-<empty>}'" >&2; return 1 ;;
   esac
   if [ "$role" = crewmate ]; then
-    case "${FM_SESSION_AUTHORITY_FD:-}" in
-      ''|*[!0-9]*) ;;
-      *) printf 'exec %s>&-; ' "$FM_SESSION_AUTHORITY_FD" ;;
-    esac
+    for var in FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD; do
+      eval "authority_fd=\${$var:-}"
+      case "$authority_fd" in
+        ''|*[!0-9]*) ;;
+        *)
+          [ "$var" != FM_SESSION_AUTHORITY_DURABLE_FD ] \
+            || [ "$authority_fd" != "${FM_SESSION_AUTHORITY_FD:-}" ] \
+            || continue
+          printf 'exec %s>&-; ' "$authority_fd"
+          ;;
+      esac
+    done
   fi
   for var in $FM_WORKER_ISOLATION_HOME_VARS; do
     if [ "$var" = FM_HOME ] && [ "$role" = secondmate ]; then

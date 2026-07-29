@@ -40,29 +40,27 @@ if [ "${FM_UPDATE_FOCUS:-}" = exact-pane-delivery ] \
   FM_UPDATE_AUTHORITY_TMP=$(fm_test_tmproot fm-update-authority)
   mkdir -p "$FM_UPDATE_AUTHORITY_TMP/auth/state" "$FM_UPDATE_AUTHORITY_TMP/work"
   authority_key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  durable_key=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
   exec 9< <(while :; do printf '%s\n' "$authority_key"; done)
+  exec 7< <(while :; do printf '%s\n' "$durable_key"; done)
   FM_SESSION_AUTHORITY_FD=9
-  export FM_SESSION_AUTHORITY_FD
+  FM_SESSION_AUTHORITY_DURABLE_FD=7
+  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  fm_session_descriptor_channel_isolated() { return 0; }
-  fm_session_exec_descriptor_isolation_durable() { return 0; }
+  if ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
+    || ! fm_session_descriptor_channel_isolated \
+      "$FM_SESSION_AUTHORITY_DURABLE_FD"; then
+    echo "# skip: production authority descriptor isolation is unavailable"
+    exit 0
+  fi
   fm_session_authority_write_file \
     "$FM_UPDATE_AUTHORITY_TMP/auth/state/.session-authority" \
     "$PPID" "$PPID" "$FM_UPDATE_AUTHORITY_TMP/auth" "$ROOT"
   export FM_UPDATE_AUTHORITY_TMP
   cd "$ROOT" || exit 1
-  exec bash -c '
-    . "$1/bin/fm-session-lock-lib.sh"
-    FM_SESSION_AUTHORITY_BROKER_PID=$$
-    FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$")
-    FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$")
-    FM_SESSION_AUTHORITY_BROKER_SCRIPT=$0
-    export FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
-    export FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
-    FM_UPDATE_AUTHORITY_WRAPPED=1 FM_ROOT_OVERRIDE="$1" \
-      FM_HOME="$2" "$3" "${@:4}"
-  ' "$ROOT/bin/fm-session-authority-exec.sh" "$ROOT" \
-    "$FM_UPDATE_AUTHORITY_TMP/auth" "$0" "$@"
+  exec env FM_UPDATE_AUTHORITY_WRAPPED=1 FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$FM_UPDATE_AUTHORITY_TMP/auth" \
+    "$ROOT/bin/fm-session-authority-exec.sh" "$0" "$@"
 fi
 if [ "${FM_UPDATE_AUTHORITY_WRAPPED:-}" = 1 ]; then
   TMP_ROOT="$FM_UPDATE_AUTHORITY_TMP/work"
@@ -118,10 +116,6 @@ new_world() {
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  if [ "${FM_UPDATE_AUTHORITY_WRAPPED:-}" = 1 ]; then
-    fm_session_descriptor_channel_isolated() { return 0; }
-    fm_session_exec_descriptor_isolation_durable() { return 0; }
-  fi
   local owner
   owner=$(fm_session_lock_owner)
   printf '%s\n' "$owner" > "$w/home/state/.lock"
@@ -145,25 +139,25 @@ write_migration_launch_receipt() {
 run_under_replacement_broker() {
   local command=$1
   shift
-  bash -c '
+  local old_live old_durable
+  old_live=$(printf rotation-proof | fm_session_authority_hmac) || return 1
+  old_durable=$(printf rotation-proof | fm_session_authority_durable_hmac) \
+    || return 1
+  "$ROOT/bin/fm-session-authority-exec.sh" bash -c '
     root=$1
     command=$2
-    shift 2
+    old_live=$3
+    old_durable=$4
+    shift 4
     . "$root/bin/fm-session-lock-lib.sh"
-    fm_session_descriptor_channel_isolated() { return 0; }
-    fm_session_exec_descriptor_isolation_durable() { return 0; }
-    fm_session_process_runs_script() {
-      [ "$1" = "$FM_SESSION_AUTHORITY_BROKER_PID" ] \
-        && [ "$2" = "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" ]
-    }
-    FM_SESSION_AUTHORITY_BROKER_PID=$$
-    FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$")
-    FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$")
-    FM_SESSION_AUTHORITY_BROKER_SCRIPT=$0
-    export FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
-    export FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
+    "$root/bin/fm-lock.sh" >/dev/null || exit 1
+    new_live=$(printf rotation-proof | fm_session_authority_hmac) || exit 1
+    new_durable=$(printf rotation-proof | fm_session_authority_durable_hmac) \
+      || exit 1
+    [ "$new_live" != "$old_live" ] || exit 1
+    [ "$new_durable" = "$old_durable" ] || exit 1
     bash -c "$command" _ "$root" "$@"
-  ' "$ROOT/bin/fm-session-authority-exec.sh" "$ROOT" "$command" "$@"
+  ' _ "$ROOT" "$command" "$old_live" "$old_durable" "$@"
 }
 
 new_protocol_migration_world() {
@@ -1405,10 +1399,6 @@ test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
   local topology_meta topology_fakebin topology_resolved
   local committed_meta committed_fakebin committed_resolved committed_process
   w=$(new_world t32-exact-pane)
-  if [ "${FM_UPDATE_AUTHORITY_WRAPPED:-}" = 1 ]; then
-    fm_session_descriptor_channel_isolated() { return 0; }
-    fm_session_exec_descriptor_isolation_durable() { return 0; }
-  fi
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
   printf 'tmux_pane_id=%%42\n' >> "$w/home/state/sm1.meta"
@@ -1462,10 +1452,6 @@ SH
     "$w/home/state/.locks/tmux-endpoint-42.migration.lock"
   write_migration_launch_receipt "$w/home/state" sm1 "$w/sm1" "$$" \
     || fail "could not publish primary-issued sm1 launch receipt"
-  fm_session_process_runs_script() {
-    [ "$1" = "$FM_SESSION_AUTHORITY_BROKER_PID" ] \
-      && [ "$2" = "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" ]
-  }
   fm_session_authority_capability_present \
     || fail "migration broker fixture lost its protected capability"
   fm_session_authority_read "$w/home/state/.session-authority" \
@@ -1659,12 +1645,6 @@ SH
       FM_STATE_OVERRIDE="$w/home/state" \
       run_under_replacement_broker '
         . "$1/bin/fm-backend.sh"
-        fm_session_descriptor_channel_isolated() { return 0; }
-        fm_session_exec_descriptor_isolation_durable() { return 0; }
-        fm_session_process_runs_script() {
-          [ "$1" = "$FM_SESSION_AUTHORITY_BROKER_PID" ] \
-            && [ "$2" = "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" ]
-        }
         fixture_root=$2
         fixture_pid=$3
         fm_backend_tmux_legacy_process_pid() { printf "%s" "$fixture_pid"; }

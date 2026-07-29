@@ -101,7 +101,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -983,9 +983,10 @@ test_secondmate_authority_delegation_uses_no_node() {
 }
 
 test_authority_fds_require_sibling_proc_isolation() {
-  local parent=$$ sibling_can_open=0 fd original_fd
+  local parent=$$ sibling_can_open=0 fd original_fd original_durable_fd
   . "$ROOT/bin/fm-session-lock-lib.sh"
   original_fd=$FM_SESSION_AUTHORITY_FD
+  original_durable_fd=$FM_SESSION_AUTHORITY_DURABLE_FD
   case "$(uname -s 2>/dev/null)" in
     Linux)
       exec 8</dev/null
@@ -1013,7 +1014,9 @@ test_authority_fds_require_sibling_proc_isolation() {
         fm_session_authority_capability_present \
           || fail "protected primary authority descriptor was unreadable"
         exec 9<&-
+        exec 7<&-
         FM_SESSION_AUTHORITY_FD=$original_fd
+        FM_SESSION_AUTHORITY_DURABLE_FD=$original_durable_fd
       fi
       ;;
     Darwin)
@@ -1026,7 +1029,9 @@ test_authority_fds_require_sibling_proc_isolation() {
       fm_session_authority_capability_present \
         || fail "Darwin primary authority descriptor was unreadable"
       exec 9<&-
+      exec 7<&-
       FM_SESSION_AUTHORITY_FD=$original_fd
+      FM_SESSION_AUTHORITY_DURABLE_FD=$original_durable_fd
       ;;
     *)
       for fd in 7 8 9 10 "$FM_SESSION_AUTHORITY_FD"; do
@@ -1036,6 +1041,44 @@ test_authority_fds_require_sibling_proc_isolation() {
       ;;
   esac
   pass "every authority descriptor proves sibling isolation before key creation"
+}
+
+test_durable_receipts_survive_live_key_rotation() {
+  local txn before after old_fd status=0
+  local ID META TEARDOWN_TXN_DIR
+  txn="$TMP_ROOT/durable-receipt-rotation"
+  if ! fm_session_descriptor_channel_isolated \
+    "$FM_SESSION_AUTHORITY_DURABLE_FD"; then
+    pass "skip: sibling process access to durable authority is not isolated"
+    return 0
+  fi
+  ID=durable-receipt
+  META="$txn/durable-receipt.meta"
+  TEARDOWN_TXN_DIR="$txn"
+  mkdir -p "$txn"
+  printf 'meta\n' > "$META"
+  printf 'task=%s\nmeta=%s\nchecksum=%s %s\ngeneration=durable-proof\nhome=%s\n' \
+    "$ID" "$META" "$(fm_session_sha256_file "$META")" \
+    "$(wc -c < "$META" | tr -d ' ')" "$TMP_ROOT" > "$txn/identity"
+  eval "$(awk '
+    /^teardown_transaction_receipt_binding\(\)/ { emit=1 }
+    /^META=/ { emit=0 }
+    emit { print }
+  ' "$ROOT/bin/fm-teardown.sh")"
+  before=$(teardown_transaction_receipt_binding endpoint-proof) \
+    || fail "durable teardown receipt could not be issued"
+  old_fd=$FM_SESSION_AUTHORITY_FD
+  exec 20< <(while :; do
+    printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  done)
+  FM_SESSION_AUTHORITY_FD=20
+  after=$(teardown_transaction_receipt_binding endpoint-proof) || status=$?
+  exec 20<&-
+  FM_SESSION_AUTHORITY_FD=$old_fd
+  expect_code 0 "$status" "live authority rotation rejected a durable receipt"
+  [ "$after" = "$before" ] \
+    || fail "teardown receipt changed when only the live authority key rotated"
+  pass "durable teardown receipts survive live authority key rotation"
 }
 
 test_authority_fds_reprove_isolation_after_exec() {
@@ -1379,7 +1422,7 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
   rm -f "$ack"
   body="$dir/ack-body"
   signature="$dir/ack-signature"
-  printf 'version=1\nsigner-pid=42\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
+  printf 'version=2\nstage=ack\nsigner-pid=42\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
     "$nonce" "$accepted_digest" "$consumer_digest" > "$body"
   openssl dgst -sha256 -sign "$consumer_private" \
     -out "$signature" "$body" 2>/dev/null
@@ -1388,7 +1431,12 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
   fm_session_enrollment_ack_validate "$ack" "$accepted_digest" 42 "$nonce" 42 \
     fixture "$consumer_key" "$consumer_digest" \
     || fail "consumer-signed acknowledgment fixture was rejected"
-  rm -f "$accepted" "$ack"
+  cp "$ack" "$dir/final"
+  ! fm_session_enrollment_final_validate \
+    "$dir/final" "$accepted_digest" 42 "$nonce" 42 \
+    fixture "$consumer_key" "$consumer_digest" \
+    || fail "acknowledgment replay forged final enrollment acceptance"
+  rm -f "$accepted" "$ack" "$dir/final"
   bash -c '
     set -eu
     sleep 0.05
@@ -1407,7 +1455,7 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
       "$(openssl base64 -A < "$accepted_signature")" >> "$accepted"
     accepted_digest=$(openssl dgst -sha256 "$accepted" 2>/dev/null)
     accepted_digest=${accepted_digest##*= }
-    printf "version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n" \
+    printf "version=2\nstage=ack\nsigner-pid=%s\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n" \
       "$$" "$2" "$accepted_digest" "$5" > "$ack_body"
     openssl dgst -sha256 -sign "$4" -out "$ack_signature" \
       "$ack_body" 2>/dev/null
@@ -3361,6 +3409,7 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_backend_owned_launch_proof_covers_tmux_and_herdr
   test_darwin_session_identity_uses_supported_fields
   test_secondmate_spawn_waits_for_enrollment_acceptance
+  test_durable_receipts_survive_live_key_rotation
   echo "# focused session-authority tests passed"
   exit 0
 fi
