@@ -1165,14 +1165,16 @@ test_durable_custodian_is_root_bound_and_scoped() {
     || fail "could not install invalid custodian evidence"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     "$AUTHORITY_EXEC" true \
-    || fail "authority could not replace an invalid custodian record"
+    || fail "authority could not recover after custodian-record tampering"
   fm_session_durable_custodian_validate "$record" \
-    || fail "replacement custodian lost durable-root continuity"
+    || fail "custodian did not restore its durable-root record"
   second_pid=$FM_SESSION_DURABLE_CUSTODIAN_PID
-  [ "$second_pid" != "$first_pid" ] \
-    || fail "invalid custodian record did not trigger authenticated replacement"
+  [ "$second_pid" = "$first_pid" ] \
+    || fail "record tampering displaced the kernel-anchored custodian"
+  kill "$first_pid" 2>/dev/null || true
+  sleep 0.05
   rm -f "$record"
-  pass "only the production broker can preserve or replace the durable custodian"
+  pass "live custodian anchor rejects self-authenticating replacements"
 }
 
 test_authority_hmac_needs_only_openssl() {

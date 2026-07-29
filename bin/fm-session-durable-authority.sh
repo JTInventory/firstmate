@@ -23,6 +23,8 @@ custodian_public=${15}
 custodian_public_digest=${17}
 record="$state/.session-durable-authority"
 requests="$state/.session-durable-authority-requests"
+anchor_certificate=
+anchor_pid=
 key=
 live_key=
 custodian_private=
@@ -110,6 +112,51 @@ unset FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
 
 start=$(fm_session_process_start "$$") || exit 1
 identity=$(fm_session_process_identity "$$") || exit 1
+anchor_port=$(fm_session_durable_anchor_port "$state" "$home" "$checkout") \
+  || exit 1
+anchor_certificate=$(mktemp "${record}.anchor.XXXXXX") || exit 1
+exec 17< <(printf '%s\n' "$custodian_private") || exit 1
+openssl req -new -x509 -sha256 -days 36500 -subj /CN=firstmate-durable \
+  -key /dev/fd/17 -out "$anchor_certificate" 2>/dev/null || {
+    exec 17<&-
+    rm -f "$anchor_certificate"
+    exit 1
+  }
+exec 17<&-
+[ -s "$anchor_certificate" ] || {
+      rm -f "$anchor_certificate"
+      exit 1
+    }
+(
+  exec 17< <(printf '%s\n' "$custodian_private") || exit 1
+  exec openssl s_server -accept "127.0.0.1:$anchor_port" \
+    -cert "$anchor_certificate" -key /dev/fd/17 -quiet -www
+) </dev/null >/dev/null 2>&1 &
+anchor_pid=$!
+attempts=0
+while [ "$attempts" -lt 100 ]; do
+  if fm_session_durable_anchor_public_key "$state" "$home" "$checkout" \
+    && [ "$FM_SESSION_DURABLE_ANCHOR_PUBLIC_KEY" = "$custodian_public" ] \
+    && [ "$FM_SESSION_DURABLE_ANCHOR_PUBLIC_SHA256" \
+      = "$custodian_public_digest" ]; then
+    break
+  fi
+  kill -0 "$anchor_pid" 2>/dev/null || {
+    rm -f "$anchor_certificate"
+    exit 1
+  }
+  sleep 0.02
+  attempts=$((attempts + 1))
+done
+rm -f "$anchor_certificate"
+[ "$attempts" -lt 100 ] || {
+  kill "$anchor_pid" 2>/dev/null || true
+  wait "$anchor_pid" 2>/dev/null || true
+  exit 1
+}
+trap 'kill "$anchor_pid" 2>/dev/null || true; wait "$anchor_pid" 2>/dev/null || true' \
+  EXIT
+trap 'exit 1' HUP INT TERM
 tmp=$(mktemp "${record}.XXXXXX") || exit 1
 mkdir -p "$requests" || exit 1
 chmod 700 "$requests" || exit 1
@@ -127,7 +174,15 @@ printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
 while :; do
   [ -f "$record" ] && [ ! -L "$record" ] \
     && [ "$(cat "$record" 2>/dev/null)" = \
-      "$(printf '%sauthority-hmac=%s' "$body" "$hmac")" ] || exit 0
+      "$(printf '%sauthority-hmac=%s' "$body" "$hmac")" ] || {
+        tmp=$(mktemp "${record}.XXXXXX") || exit 1
+        printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
+          && chmod 600 "$tmp" && mv "$tmp" "$record" || {
+            rm -f "$tmp"
+            exit 1
+          }
+      }
+  kill -0 "$anchor_pid" 2>/dev/null || exit 1
   for challenge in "$requests"/*.recovery-challenge; do
     [ -e "$challenge" ] || continue
     challenge_response="${challenge}.response"

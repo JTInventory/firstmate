@@ -56,13 +56,13 @@ descriptors. Only the production authority wrapper may authorize a detached
 custodian, after proving its own broker PID, start, executable identity, and
 script path. It gives the custodian a launch certificate bound to its exact PID
 and session and authenticated by both roots, plus a one-use signing channel on
-reserved FD 17 whose public half is pinned in the custodian's immutable
-arguments. FD 17 must be unused and sibling-isolated. At startup the custodian
-independently proves that its actual parent is that exact production wrapper and
-that its inherited FDs 9, 18, and 17 are the same protected channels still held
-by the parent. The parent closes FD 17 before launching the harness command, so
-a later broker child cannot invoke the public custodian script with self-created
-keys.
+reserved FD 17. FD 17 must be unused and sibling-isolated. The custodian binds a
+deterministic loopback TLS endpoint before publishing its record. Recovery gets
+the signing public key from that kernel-held endpoint and requires the
+worker-writable record to match it. A worker cannot replace that trust key with
+spoofed argv, a copied record, and caller-created descriptors while the genuine
+listener exists. The custodian repairs a changed record instead of surrendering
+the endpoint.
 After validating it, the custodian closes FDs 9, 18, and 17, clears the
 live-broker environment, and retains only the durable receipt root and signing
 private key in shell memory. A replacement wrapper
@@ -73,8 +73,7 @@ or exact-home secondmate ancestry before returning the root encrypted to that
 key. The ciphertext and both endpoint identities carry a durable-root HMAC.
 Before installing the candidate root on FD 18, the wrapper sends a second fresh
 challenge to the same live custodian and requires both a candidate-root HMAC
-and a signature matching the public key pinned in that exact process's
-arguments. It then installs
+and a signature matching the loopback endpoint key. It then installs
 the root, validates the complete record again, and rotates the separate
 live-broker key. A replacement that retained only FD 9 must also recover an
 existing custodian root before the compatibility adoption path can run. A

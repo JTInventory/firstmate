@@ -467,7 +467,7 @@ fm_session_durable_consumer_prepare() {
 }
 
 fm_session_durable_custodian_read() {
-  local file=$1 current
+  local file=$1 current state anchor_public anchor_digest
   [ -f "$file" ] && [ ! -L "$file" ] \
     && [ "$(wc -l < "$file" | tr -d ' ')" -eq 11 ] \
     && [ "$(sed -n '1p' "$file")" = version=3 ] || return 1
@@ -486,6 +486,7 @@ fm_session_durable_custodian_read() {
   FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_SHA256=$(
     sed -n '10s/^custodian-public-key-sha256=//p' "$file"
   )
+  state=${file%/.session-durable-authority}
   case "$FM_SESSION_DURABLE_CUSTODIAN_PID:$FM_SESSION_DURABLE_CUSTODIAN_SESSION" in
     *[!0-9:]*|:) return 1 ;;
   esac
@@ -500,11 +501,13 @@ fm_session_durable_custodian_read() {
     && fm_session_enrollment_public_key_validate \
       "$FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_KEY" \
       "$FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_SHA256" \
-    && [ "$(fm_session_process_argument_value \
-      "$FM_SESSION_DURABLE_CUSTODIAN_PID" --custodian-public-key)" \
-      = "$FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_KEY" ] \
-    && [ "$(fm_session_process_argument_value \
-      "$FM_SESSION_DURABLE_CUSTODIAN_PID" --custodian-public-key-sha256)" \
+    && fm_session_durable_anchor_public_key \
+      "$state" "$FM_SESSION_DURABLE_CUSTODIAN_HOME" \
+      "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" || return 1
+  anchor_public=$FM_SESSION_DURABLE_ANCHOR_PUBLIC_KEY
+  anchor_digest=$FM_SESSION_DURABLE_ANCHOR_PUBLIC_SHA256
+  [ "$anchor_public" = "$FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_KEY" ] \
+    && [ "$anchor_digest" \
       = "$FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_SHA256" ] || return 1
   current=$(fm_session_process_start \
     "$FM_SESSION_DURABLE_CUSTODIAN_PID") || return 1
@@ -515,6 +518,62 @@ fm_session_durable_custodian_read() {
     && [ "$(fm_session_process_start \
       "$FM_SESSION_DURABLE_CUSTODIAN_SESSION" 2>/dev/null)" \
       = "$FM_SESSION_DURABLE_CUSTODIAN_SESSION_START" ]
+}
+
+fm_session_durable_anchor_port() {
+  local state=$1 home=$2 checkout=$3 output digest prefix
+  case "$state:$home:$checkout" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  output=$(
+    set -o pipefail
+    printf 'firstmate-durable-anchor-v1\n%s\n%s\n%s\n' \
+      "$state" "$home" "$checkout" \
+      | openssl dgst -sha256 2>/dev/null
+  ) || return 1
+  digest=${output##*= }
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  prefix=${digest:0:6}
+  printf '%s\n' $((24000 + (16#$prefix % 16000)))
+}
+
+fm_session_durable_anchor_public_key() {
+  local state=$1 home=$2 checkout=$3 port transcript certificate public
+  local digest status=1
+  port=$(fm_session_durable_anchor_port "$state" "$home" "$checkout") \
+    || return 1
+  transcript=$(mktemp "${TMPDIR:-/tmp}/fm-durable-anchor.XXXXXX") \
+    || return 1
+  certificate=$(mktemp "${TMPDIR:-/tmp}/fm-durable-certificate.XXXXXX") \
+    || {
+      rm -f "$transcript"
+      return 1
+    }
+  public=$(mktemp "${TMPDIR:-/tmp}/fm-durable-public.XXXXXX") || {
+    rm -f "$transcript" "$certificate"
+    return 1
+  }
+  if (
+      set -o pipefail
+      printf 'GET / HTTP/1.0\r\n\r\n' \
+        | openssl s_client -connect "127.0.0.1:$port" -showcerts \
+          > "$transcript" 2>/dev/null
+    ) \
+    && awk '
+      /-----BEGIN CERTIFICATE-----/ { capture = 1 }
+      capture { print }
+      /-----END CERTIFICATE-----/ { exit }
+    ' "$transcript" > "$certificate" \
+    && openssl x509 -in "$certificate" -pubkey -noout \
+      > "$public" 2>/dev/null \
+    && digest=$(fm_session_sha256_file "$public") \
+    && FM_SESSION_DURABLE_ANCHOR_PUBLIC_KEY=$(
+      openssl base64 -A < "$public"
+    ); then
+    FM_SESSION_DURABLE_ANCHOR_PUBLIC_SHA256=$digest
+    status=0
+  fi
+  rm -f "$transcript" "$certificate" "$public"
+  return "$status"
 }
 
 fm_session_durable_custodian_validate() {
@@ -654,11 +713,7 @@ fm_session_durable_custodian_candidate_challenge() {
     return 1
   }
   rm -f "$request" "$response"
-  [ "$response_body" = "$body" ] && [ "$actual" = "$expected" ] \
-    && [ "$(fm_session_process_argument_value \
-      "$custodian" --custodian-public-key)" = "$public" ] \
-    && [ "$(fm_session_process_argument_value \
-      "$custodian" --custodian-public-key-sha256)" = "$digest" ] || return 1
+  [ "$response_body" = "$body" ] && [ "$actual" = "$expected" ] || return 1
   public_file=$(mktemp "${TMPDIR:-/tmp}/fm-custodian-public.XXXXXX") \
     || return 1
   signature_file=$(mktemp "${TMPDIR:-/tmp}/fm-custodian-signature.XXXXXX") \
@@ -697,6 +752,22 @@ fm_session_durable_custodian_ensure() {
       "$state" "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
       "$FM_SESSION_DURABLE_CUSTODIAN_START"; then
     return 0
+  fi
+  if fm_session_durable_anchor_public_key "$state" "$home" "$checkout"; then
+    attempts=0
+    while [ "$attempts" -lt 100 ]; do
+      if fm_session_durable_custodian_validate "$record" \
+        && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home" ] \
+        && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$checkout" ] \
+        && fm_session_durable_custodian_challenge \
+          "$state" "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
+          "$FM_SESSION_DURABLE_CUSTODIAN_START"; then
+        return 0
+      fi
+      sleep 0.02
+      attempts=$((attempts + 1))
+    done
+    return 1
   fi
   fm_session_authority_durable_capability_present || return 1
   if [ -e "$record" ] || [ -L "$record" ]; then
@@ -816,10 +887,7 @@ fm_session_durable_authority_recover() {
   record="$state/.session-durable-authority"
   fm_session_durable_custodian_read "$record" \
     && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home" ] \
-    && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$checkout" ] \
-    && fm_session_process_runs_script \
-      "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
-      "$checkout/bin/fm-session-durable-authority.sh" || return 1
+    && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$checkout" ] || return 1
   custodian_public=$FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_KEY
   custodian_public_digest=$FM_SESSION_DURABLE_CUSTODIAN_PUBLIC_SHA256
   [ "${FM_SESSION_DURABLE_CONSUMER_PRIVATE_FD:-}" = 16 ] \
