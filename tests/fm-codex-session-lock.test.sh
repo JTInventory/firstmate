@@ -172,16 +172,17 @@ test_session_start_retains_verified_harness_owner() {
   pass "SessionStart retains a visible Codex harness PID"
 }
 
-test_same_thread_preserves_existing_owner() {
-  local home fakebin before out
+test_same_thread_marker_cannot_adopt_unbound_owner() {
+  local home fakebin before out status=0
   home=$(make_home same-thread)
   fakebin="$home/fakebin"
   make_hidden_ps "$fakebin"
   before='8123|codex:thread-same|fallback'
   printf '%s\n' "$before" > "$home/state/.lock"
-  out=$(run_lock "$home" thread-same "$fakebin") || fail "same Codex thread could not reacquire: $out"
+  out=$(run_lock "$home" thread-same "$fakebin" 2>&1) || status=$?
+  expect_code 1 "$status" "a matching caller marker must not adopt an unbound owner"
   [ "$(cat "$home/state/.lock")" = "$before" ] || fail "same thread replaced the stable owner"
-  pass "same Codex thread preserves its owner across PID isolation"
+  pass "a Codex thread marker alone cannot adopt session ownership"
 }
 
 test_dead_verified_owner_is_reclaimed() {
@@ -209,7 +210,8 @@ test_different_threads_remain_excluded() {
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
   expect_code 1 "$status" "different live Codex thread must be excluded"
-  assert_contains "$out" "another live firstmate session holds the lock" "live owner refusal was not explicit"
+  assert_contains "$out" "primary identity is not bound" \
+    "live owner without exact authority did not fail closed"
 
   make_hidden_ps "$fakebin"
   owner='17|codex:thread-hidden|fallback'
@@ -217,7 +219,8 @@ test_different_threads_remain_excluded() {
   status=0
   out=$(run_lock "$home" thread-other "$fakebin" 2>&1) || status=$?
   expect_code 1 "$status" "different thread must not reclaim a fallback owner"
-  assert_contains "$out" "cannot verify whether another Codex session holds the lock" "fallback refusal lost its reason"
+  assert_contains "$out" "primary identity is not bound" \
+    "unbound fallback owner did not fail closed"
   pass "different Codex threads stay excluded for live and fallback owners"
 }
 
@@ -284,7 +287,7 @@ test_two_homes_release_only_their_own_lock() {
 }
 
 test_numeric_legacy_lock_contract() {
-  local home fakebin sleeper out status owner
+  local home fakebin sleeper out status
   home=$(make_home numeric-legacy)
   fakebin="$home/fakebin"
   sleep 60 & sleeper=$!
@@ -297,12 +300,12 @@ test_numeric_legacy_lock_contract() {
   [ "$(cat "$home/state/.lock")" = "$sleeper" ] || fail "SessionEnd removed a numeric legacy owner"
 
   make_codex_parent_ps "$fakebin"
-  FM_FAKE_CODEX_PID="$sleeper" run_lock "$home" same-session "$fakebin" >/dev/null \
-    || fail "same session could not upgrade its numeric legacy lock"
-  owner=$(cat "$home/state/.lock")
-  [ "$owner" = "$sleeper|codex:same-session|harness" ] \
-    || fail "numeric legacy lock was not upgraded to the structured owner: $owner"
-  printf '%s\n' "$sleeper" > "$home/state/.lock"
+  status=0
+  out=$(FM_FAKE_CODEX_PID="$sleeper" run_lock "$home" same-session "$fakebin" 2>&1) \
+    || status=$?
+  expect_code 1 "$status" "a live legacy lock without exact authority must fail closed"
+  [ "$(cat "$home/state/.lock")" = "$sleeper" ] \
+    || fail "failed legacy migration changed the numeric owner"
 
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
@@ -315,7 +318,7 @@ test_hook_registration_preserves_jt_pretool
 test_hooks_work_when_jq_fails
 test_matching_session_end_only_releases_regular_exact_owner
 test_session_start_retains_verified_harness_owner
-test_same_thread_preserves_existing_owner
+test_same_thread_marker_cannot_adopt_unbound_owner
 test_dead_verified_owner_is_reclaimed
 test_different_threads_remain_excluded
 test_grok_precedence_and_primary_lock_protection

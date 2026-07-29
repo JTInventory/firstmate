@@ -21,6 +21,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
+AUTHORITY="$STATE/.session-authority"
 PAYLOAD=$(cat 2>/dev/null || true)
 
 command -v node >/dev/null 2>&1 || exit 0
@@ -76,4 +77,9 @@ OWNER=$(cat "$LOCK" 2>/dev/null) || exit 0
 MARKER=$(fm_codex_owner_marker "$OWNER" 2>/dev/null || true)
 [ -n "$(fm_codex_owner_kind "$OWNER" 2>/dev/null || true)" ] || exit 0
 [ "$MARKER" = "$SESSION_ID" ] || exit 0
-rm -f "$LOCK" 2>/dev/null || true
+if [ -e "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then
+  [ -f "$AUTHORITY" ] && [ ! -L "$AUTHORITY" ] || exit 0
+  fm_session_authority_read "$AUTHORITY" || exit 0
+  [ "$FM_SESSION_AUTHORITY_OWNER" = "$OWNER" ] || exit 0
+fi
+rm -f "$AUTHORITY" "$LOCK" 2>/dev/null || true

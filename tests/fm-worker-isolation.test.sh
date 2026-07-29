@@ -211,15 +211,19 @@ SH
 }
 
 make_launch_case() {
-  local name=$1 id=$2 case_dir home proj wt fakebin
+  local name=$1 id=$2 case_dir home proj wt fakebin owner
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_launch_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
+  owner="$$|codex:$CODEX_THREAD_ID|fallback"
+  printf '%s\n' "$owner" > "$home/state/.lock"
   printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file "$home/state/.session-authority" "$$" \
+    "$owner" "$home" "$ROOT" || fail "could not create launch authority fixture"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -278,13 +282,18 @@ test_secondmate_child_receives_only_its_own_home() {
 # --- C. a declared worker is inert and refused -------------------------------
 
 make_primary_home() {
-  local dir=$1
+  local dir=$1 owner
   mkdir -p "$dir/bin" "$dir/state" "$dir/data" "$dir/config"
   fm_git_init_commit "$dir"
   git -C "$dir" branch -M main
   printf '# agents\n' > "$dir/AGENTS.md"
-  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$dir/state/.lock"
+  owner="$$|codex:$CODEX_THREAD_ID|harness"
+  printf '%s\n' "$owner" > "$dir/state/.lock"
   printf '%s\n' "$dir" > "$dir/state/.primary-checkout"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file \
+    "$dir/state/.session-authority" "$$" "$owner" "$dir" "$dir" \
+    || fail "could not create primary session-authority fixture"
   printf '%s\n' "$dir"
 }
 
@@ -364,6 +373,44 @@ test_fresh_primary_requires_durable_session_binding() {
   pass "fresh primary authority requires a durable session and checkout binding"
 }
 
+test_fresh_primary_session_lock_enrolls_atomically() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/fresh-enrollment")
+  rm -rf "$primary_home/state"
+  out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    "$LOCK" 2>&1) || status=$?
+  expect_code 0 "$status" "an empty primary home must enroll under the acquisition lock"
+  assert_present "$primary_home/state/.lock" "fresh enrollment omitted the session lock"
+  assert_present "$primary_home/state/.primary-checkout" \
+    "fresh enrollment omitted the checkout binding"
+  assert_present "$primary_home/state/.session-authority" \
+    "fresh enrollment omitted exact process authority"
+  pass "fresh primary enrollment publishes one bound authority transaction"
+}
+
+test_caller_marker_cannot_replace_exact_session_authority() {
+  local primary_home sleeper owner out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/exact-session-authority")
+  sleep 60 & sleeper=$!
+  owner="$sleeper|codex:forged-thread|harness"
+  printf '%s\n' "$owner" > "$primary_home/state/.lock"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file "$primary_home/state/.session-authority" \
+    "$sleeper" "$owner" "$primary_home" "$primary_home" \
+    || fail "could not create foreign live authority fixture"
+  out=$(cd "$primary_home" && CODEX_THREAD_ID=forged-thread \
+    FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1) || status=$?
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  expect_code 1 "$status" "a caller-controlled thread marker must not replace exact authority"
+  assert_contains "$out" "primary identity is not bound" \
+    "foreign exact authority refusal lost its reason"
+  pass "primary authority requires the recorded process tuple in current ancestry"
+}
+
 test_reparented_markerless_process_has_no_fresh_primary_authority() {
   local primary_home out status=0
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
@@ -404,6 +451,10 @@ test_linked_main_worktree_can_prove_primary_authority() {
   printf '# agents\n' > "$primary/AGENTS.md"
   printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$primary/state/.lock"
   printf '%s\n' "$primary" > "$primary/state/.primary-checkout"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file "$primary/state/.session-authority" "$$" \
+    "$$|codex:$CODEX_THREAD_ID|fallback" "$primary" "$primary" \
+    || fail "could not create linked primary authority fixture"
   out=$(cd "$primary" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
     bash -c '
@@ -451,22 +502,19 @@ test_primary_authority_refuses_unreadable_ancestry() {
 }
 
 test_stale_session_lock_reaches_verified_recovery() {
-  local primary_home fakebin out status=0
+  local primary_home out status=0 sleeper owner
   primary_home=$(make_primary_home "$TMP_ROOT/stale-primary-lock")
-  printf '99999999\n' > "$primary_home/state/.lock"
-  fakebin="$TMP_ROOT/stale-primary-fakebin"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *"-o comm="*"-p $FM_FAKE_HARNESS_PID"*) printf 'codex\n'; exit 0 ;;
-esac
-exec /bin/ps "$@"
-SH
-  chmod +x "$fakebin/ps"
-  out=$(cd "$primary_home" && PATH="$fakebin:$PATH" \
-    FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1"' _ "$LOCK" 2>&1) || status=$?
+  sleep 60 & sleeper=$!
+  owner="$sleeper|codex:stale-thread|harness"
+  printf '%s\n' "$owner" > "$primary_home/state/.lock"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file "$primary_home/state/.session-authority" \
+    "$sleeper" "$owner" "$primary_home" "$primary_home" \
+    || fail "could not create stale authority fixture"
+  kill "$sleeper"
+  wait "$sleeper" 2>/dev/null || true
+  out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    "$LOCK" 2>&1) || status=$?
   expect_code 0 "$status" "a provably stale session lock must reach verified recovery"
   assert_contains "$out" "lock acquired" "stale session-lock recovery did not complete"
   pass "primary authority permits only verified stale session-lock recovery"
@@ -505,6 +553,7 @@ test_procargs2_parser_separates_argv_and_environment() {
   snapshots="$TMP_ROOT/procargs-snapshots"
   mkdir -p "$snapshots"
   : > "$calls"
+  printf 'preserved\n' > "$TMP_ROOT/fd-eight"
   printf '\003\000\000\000/bin/bash\000\000bash\000\000\000FM_AGENT_ROLE=crewmate\000X=1\000' \
     > "$valid"
   printf '\001\000\000\000/bin/bash\000bash\000not-an-environment-record\000' \
@@ -513,11 +562,15 @@ test_procargs2_parser_separates_argv_and_environment() {
     . "$1/bin/fm-procargs-lib.sh"
     DUMP=$2
     CALLS=$3
+    exec 8< "$4"
+    exec 9> "$5"
     fm_procargs2_dump() { printf "call\n" >> "$CALLS"; command cat "$DUMP"; }
     fm_procargs2_read 1
+    IFS= read -r preserved <&8
+    printf "%s\n" preserved >&9
     printf "%s|%s|%s\n" "${FM_PROCARGS_ARGV[*]}" \
       "${FM_PROCARGS_ENV[0]}" "${FM_PROCARGS_ENV[1]}"
-  ' _ "$ROOT" "$valid" "$calls") || status=$?
+  ' _ "$ROOT" "$valid" "$calls" "$TMP_ROOT/fd-eight" "$TMP_ROOT/fd-nine") || status=$?
   expect_code 0 "$status" "valid procargs2 fixture must parse"
   [ "$out" = "bash  |FM_AGENT_ROLE=crewmate|X=1" ] \
     || fail "procargs2 argv/environment boundary was wrong: $out"
@@ -525,6 +578,8 @@ test_procargs2_parser_separates_argv_and_environment() {
     || fail "procargs2 parser read more than one process snapshot"
   [ -z "$(find "$snapshots" -mindepth 1 -maxdepth 1 -print -quit)" ] \
     || fail "procargs2 parser left a named process snapshot on disk"
+  [ "$(cat "$TMP_ROOT/fd-nine")" = preserved ] \
+    || fail "procargs2 parser clobbered a caller-owned descriptor"
   if TMPDIR="$snapshots" bash -c '
     . "$1/bin/fm-procargs-lib.sh"
     DUMP=$2
@@ -971,14 +1026,18 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
 # --- E. pooled-slot ownership -----------------------------------------------
 
 make_slot_world() {
-  local name=$1 world proj wt other
+  local name=$1 world proj wt other owner
   world="$TMP_ROOT/$name"
   proj="$world/project"
   wt="$world/wt"
   other="$world/wt-other"
   mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
-  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$world/home/state/.lock"
+  owner="$$|codex:$CODEX_THREAD_ID|fallback"
+  printf '%s\n' "$owner" > "$world/home/state/.lock"
   printf '%s\n' "$ROOT" > "$world/home/state/.primary-checkout"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file "$world/home/state/.session-authority" "$$" \
+    "$owner" "$world/home" "$ROOT" || fail "could not create slot authority fixture"
   fm_git_worktree "$proj" "$wt" "slot-$name"
   git -C "$proj" worktree add --quiet -b "slot-$name-other" "$other"
   printf '%s\n' "$world|$proj|$wt|$other"
@@ -2381,6 +2440,8 @@ test_declared_worker_is_never_a_primary_scope_match
 test_unbound_identity_has_no_primary_mutation_authority
 test_real_primary_needs_no_ambient_role
 test_fresh_primary_requires_durable_session_binding
+test_fresh_primary_session_lock_enrolls_atomically
+test_caller_marker_cannot_replace_exact_session_authority
 test_reparented_markerless_process_has_no_fresh_primary_authority
 test_foreign_session_lock_defeats_primary_topology
 test_linked_main_worktree_can_prove_primary_authority

@@ -226,6 +226,28 @@ teardown_transaction_receipt_binding() {
   cksum "$identity" | awk '{print $1 " " $2}'
 }
 
+teardown_receipt_endpoint_stage_matches() {
+  local backend=$1 target=$2 generation=$3 key record
+  key=$(printf '%s' "$backend|$target|$generation" \
+    | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  record="$TEARDOWN_TXN_DIR/closing-endpoints/$key"
+  [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ "$(sed -n '1p' "$record")" = "$backend" ] \
+    && [ "$(sed -n '2p' "$record")" = "$target" ] \
+    && [ "$(sed -n '3p' "$record")" = "$generation" ] \
+    && [ "$(wc -l < "$record" | tr -d ' ')" -eq 3 ]
+}
+
+teardown_receipt_return_stage_matches() {
+  local claim=$1 legacy=$2 key record
+  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  record="$TEARDOWN_TXN_DIR/return-claims/$key"
+  [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ "$(sed -n '1p' "$record")" = "$claim" ] \
+    && [ "$(sed -n '2p' "$record")" = "$legacy" ] \
+    && [ "$(wc -l < "$record" | tr -d ' ')" -eq 2 ]
+}
+
 teardown_transaction_crossed_irreversible_boundary() {
   local item backend target generation claim legacy key binding expected_binding found=0
   local -a items=()
@@ -257,6 +279,7 @@ teardown_transaction_crossed_irreversible_boundary() {
     [ -n "$expected_binding" ] \
       || expected_binding=$(teardown_transaction_receipt_binding) || return 2
     [ "$binding" = "$expected_binding" ] || return 2
+    teardown_receipt_endpoint_stage_matches "$backend" "$target" "$generation" || return 2
     found=1
   done
   items=()
@@ -279,6 +302,7 @@ teardown_transaction_crossed_irreversible_boundary() {
     [ -n "$expected_binding" ] \
       || expected_binding=$(teardown_transaction_receipt_binding) || return 2
     [ "$binding" = "$expected_binding" ] || return 2
+    teardown_receipt_return_stage_matches "$claim" "$legacy" || return 2
     found=1
   done
   [ "$found" -eq 1 ]

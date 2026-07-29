@@ -6,31 +6,48 @@ fm_procargs2_dump() {
 
 fm_procargs2_read() {
   local pid=$1 argc token saw_exec=0 argv_started=0 argv_count=0 snapshot
+  local read_fd= write_fd= candidate
   local -a tokens=()
   FM_PROCARGS_ARGV=()
   FM_PROCARGS_ENV=()
   command -v od >/dev/null 2>&1 || return 1
   command -v dd >/dev/null 2>&1 || return 1
   snapshot=$(mktemp "${TMPDIR:-/tmp}/fm-procargs2.XXXXXX") || return 1
-  exec 8< "$snapshot" || { rm -f "$snapshot"; return 1; }
-  exec 9> "$snapshot" || { exec 8<&-; rm -f "$snapshot"; return 1; }
-  rm -f "$snapshot" || { exec 8<&- 9>&-; return 1; }
-  fm_procargs2_dump "$pid" >&9 2>/dev/null || {
-    exec 8<&- 9>&-
+  candidate=10
+  while [ "$candidate" -le 99 ]; do
+    if ! eval ": <&$candidate" 2>/dev/null \
+      && ! eval ": >&$candidate" 2>/dev/null; then
+      if [ -z "$read_fd" ]; then read_fd=$candidate; else write_fd=$candidate; break; fi
+    fi
+    candidate=$((candidate + 1))
+  done
+  [ -n "$read_fd" ] && [ -n "$write_fd" ] || { rm -f "$snapshot"; return 1; }
+  eval "exec $read_fd< \"\$snapshot\"" || { rm -f "$snapshot"; return 1; }
+  eval "exec $write_fd> \"\$snapshot\"" || {
+    eval "exec $read_fd<&-"
+    rm -f "$snapshot"
     return 1
   }
-  exec 9>&-
-  argc=$(dd bs=4 count=1 <&8 2>/dev/null | od -An -tu4 2>/dev/null \
+  rm -f "$snapshot" || {
+    eval "exec $read_fd<&-; exec $write_fd>&-"
+    return 1
+  }
+  if ! eval "fm_procargs2_dump \"\$pid\" >&$write_fd 2>/dev/null"; then
+    eval "exec $read_fd<&-; exec $write_fd>&-"
+    return 1
+  fi
+  eval "exec $write_fd>&-"
+  argc=$(eval "dd bs=4 count=1 <&$read_fd 2>/dev/null" | od -An -tu4 2>/dev/null \
     | tr -d '[:space:]') || {
-    exec 8<&-
+    eval "exec $read_fd<&-"
     return 1
   }
-  case "$argc" in ''|*[!0-9]*) exec 8<&-; return 1 ;; esac
-  [ "$argc" -gt 0 ] || { exec 8<&-; return 1; }
+  case "$argc" in ''|*[!0-9]*) eval "exec $read_fd<&-"; return 1 ;; esac
+  [ "$argc" -gt 0 ] || { eval "exec $read_fd<&-"; return 1; }
   while IFS= read -r -d '' token; do
     tokens+=("$token")
-  done < <(dd bs=1 <&8 2>/dev/null)
-  exec 8<&-
+  done < <(eval "dd bs=1 <&$read_fd 2>/dev/null")
+  eval "exec $read_fd<&-"
   for token in "${tokens[@]}"; do
     if [ "$saw_exec" -eq 0 ]; then
       [ -n "$token" ] || continue

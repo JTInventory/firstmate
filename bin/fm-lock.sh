@@ -81,7 +81,9 @@ trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 fm_lock_acquire_wait "$CLAIM_LOCK"
 CLAIM_LOCK_HELD=1
+fm_worker_refuse_primary_operation "session lock acquisition" || exit 1
 AUTH_TXN="$STATE/.session-authority-transaction"
+AUTHORITY="$STATE/.session-authority"
 restore_session_authority_file() {
   local backup=$1 destination=$2 tmp
   if [ -e "$backup" ] || [ -L "$backup" ]; then
@@ -101,6 +103,7 @@ restore_session_authority_file() {
 
 restore_session_authority_from_transaction() {
   restore_session_authority_file "$AUTH_TXN/old-binding" "$STATE/.primary-checkout" \
+    && restore_session_authority_file "$AUTH_TXN/old-authority" "$AUTHORITY" \
     && restore_session_authority_file "$AUTH_TXN/old-lock" "$LOCK"
 }
 
@@ -134,13 +137,31 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   }
   old_marker=$(fm_codex_owner_marker "$old" 2>/dev/null || true)
   owner_marker=$(fm_codex_owner_marker "$owner" 2>/dev/null || true)
-  if [ -n "$old_marker" ] && [ "$old_marker" = "$owner_marker" ]; then
+  if [ -n "$old_marker" ] && [ "$old_marker" = "$owner_marker" ] \
+    && [ -f "$STATE/.session-authority" ] \
+    && [ ! -L "$STATE/.session-authority" ] \
+    && fm_session_authority_read "$STATE/.session-authority" \
+    && [ "$FM_SESSION_AUTHORITY_OWNER" = "$old" ] \
+    && fm_session_authority_is_current_ancestor "$STATE/.session-authority"; then
     owner=$old
   elif [ "$old" = "${owner%%|*}" ] && [ -n "$owner_marker" ]; then
     :
   elif [ "$old" != "$owner" ]; then
-    fm_session_lock_holder_state "$old"
-    holder_status=$?
+    holder_status=
+    if [ -f "$STATE/.session-authority" ] \
+      && [ ! -L "$STATE/.session-authority" ] \
+      && fm_session_authority_read "$STATE/.session-authority" \
+      && [ "$FM_SESSION_AUTHORITY_OWNER" = "$old" ]; then
+      if fm_session_authority_process_state "$STATE/.session-authority"; then
+        holder_status=0
+      else
+        holder_status=$?
+      fi
+    fi
+    if [ -z "$holder_status" ]; then
+      fm_session_lock_holder_state "$old"
+      holder_status=$?
+    fi
     case "$holder_status" in
       0)
         echo "error: another live firstmate session holds the lock (owner $old); operate read-only until resolved" >&2
@@ -155,11 +176,13 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   fi
 fi
 ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
+HOME_REAL=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || exit 1
 BINDING="$STATE/.primary-checkout"
 OLD_LOCK_PRESENT=0
 OLD_LOCK=
 OLD_BINDING_PRESENT=0
 OLD_BINDING=
+OLD_AUTHORITY_PRESENT=0
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   OLD_LOCK=$(cat "$LOCK") || exit 1
   OLD_LOCK_PRESENT=1
@@ -172,6 +195,13 @@ if [ -e "$BINDING" ] || [ -L "$BINDING" ]; then
   OLD_BINDING=$(cat "$BINDING") || exit 1
   OLD_BINDING_PRESENT=1
 fi
+if [ -e "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then
+  if [ ! -f "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then
+    echo "error: session authority record is ambiguous; operate read-only until resolved" >&2
+    exit 1
+  fi
+  OLD_AUTHORITY_PRESENT=1
+fi
 restore_session_authority() {
   restore_session_authority_from_transaction
 }
@@ -180,25 +210,46 @@ LOCK_TMP=$(mktemp "$STATE/.lock.XXXXXX" 2>/dev/null) || {
   rm -f "$BINDING_TMP"
   exit 1
 }
+AUTHORITY_TMP=$(mktemp "$STATE/.session-authority.XXXXXX" 2>/dev/null) || {
+  rm -f "$BINDING_TMP" "$LOCK_TMP"
+  exit 1
+}
+owner_pid=${owner%%|*}
+case "$owner_pid" in ''|*[!0-9]*)
+  rm -f "$BINDING_TMP" "$LOCK_TMP" "$AUTHORITY_TMP"
+  exit 1
+  ;;
+esac
 if ! printf '%s\n' "$ROOT_REAL" > "$BINDING_TMP" \
    || ! chmod 600 "$BINDING_TMP" \
    || ! printf '%s\n' "$owner" > "$LOCK_TMP" \
-   || ! chmod 600 "$LOCK_TMP"; then
-  rm -f "$BINDING_TMP" "$LOCK_TMP"
+   || ! chmod 600 "$LOCK_TMP" \
+   || ! fm_session_authority_write_file \
+     "$AUTHORITY_TMP" "$owner_pid" "$owner" "$HOME_REAL" "$ROOT_REAL" \
+   || ! chmod 600 "$AUTHORITY_TMP"; then
+  rm -f "$BINDING_TMP" "$LOCK_TMP" "$AUTHORITY_TMP"
   echo "error: cannot bind the session lock to its primary checkout" >&2
   exit 1
 fi
 AUTH_TXN_TMP=$(mktemp -d "$STATE/.session-authority-transaction.XXXXXX") || exit 1
 [ "$OLD_LOCK_PRESENT" -eq 0 ] || cp -p "$LOCK" "$AUTH_TXN_TMP/old-lock" || exit 1
 [ "$OLD_BINDING_PRESENT" -eq 0 ] || cp -p "$BINDING" "$AUTH_TXN_TMP/old-binding" || exit 1
+[ "$OLD_AUTHORITY_PRESENT" -eq 0 ] \
+  || cp -p "$AUTHORITY" "$AUTH_TXN_TMP/old-authority" || exit 1
 printf '%s\n' ready > "$AUTH_TXN_TMP/ready" && chmod 600 "$AUTH_TXN_TMP/ready" \
   && mv "$AUTH_TXN_TMP" "$AUTH_TXN" || {
   rm -rf -- "$AUTH_TXN_TMP"
   exit 1
 }
 if ! mv "$BINDING_TMP" "$BINDING"; then
-  rm -f "$BINDING_TMP" "$LOCK_TMP"
+  rm -f "$BINDING_TMP" "$LOCK_TMP" "$AUTHORITY_TMP"
   echo "error: cannot bind the session lock to its primary checkout" >&2
+  exit 1
+fi
+if ! mv "$AUTHORITY_TMP" "$AUTHORITY"; then
+  rm -f "$AUTHORITY_TMP" "$LOCK_TMP"
+  restore_session_authority || true
+  echo "error: cannot write session authority; operate read-only until resolved" >&2
   exit 1
 fi
 if ! mv "$LOCK_TMP" "$LOCK"; then
@@ -214,6 +265,15 @@ fi
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
   restore_session_authority || true
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
+if ! fm_session_authority_read "$AUTHORITY" \
+  || [ "$FM_SESSION_AUTHORITY_OWNER" != "$owner" ] \
+  || [ "$FM_SESSION_AUTHORITY_HOME" != "$HOME_REAL" ] \
+  || [ "$FM_SESSION_AUTHORITY_CHECKOUT" != "$ROOT_REAL" ] \
+  || ! fm_session_authority_process_state "$AUTHORITY"; then
+  restore_session_authority || true
+  echo "error: session authority verification failed; operate read-only until resolved" >&2
   exit 1
 fi
 AUTH_COMMIT_TMP=$(mktemp "$AUTH_TXN/.committed.XXXXXX") || {

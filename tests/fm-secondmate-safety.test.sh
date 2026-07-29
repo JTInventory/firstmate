@@ -1868,14 +1868,19 @@ test_secondmate_force_teardown_refuses_ambiguous_child_metadata() {
 
 test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   local home subhome childproj childwt fakebin log err pending_path sentinel receipt_dir key before binding
+  local claim legacy claim_key committed_dir owner
   home="$TMP_ROOT/child-hook-return-home"
   subhome="$TMP_ROOT/child-hook-return-subhome"
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/child-hook-return-worktree"
   err="$TMP_ROOT/child-hook-return.err"
   mkdir -p "$home/state" "$home/data"
-  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
+  owner="$$|codex:$CODEX_THREAD_ID|fallback"
+  printf '%s\n' "$owner" > "$home/state/.lock"
   printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file "$home/state/.session-authority" "$$" \
+    "$owner" "$home" "$ROOT" || fail "could not create teardown authority fixture"
   git clone -q "$ROOT" "$subhome"
   git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
   mkdir -p "$subhome/state"
@@ -1954,7 +1959,49 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
     | awk '{print $1 " " $2}')
   printf '%s\n%s\n%s\ntransaction=%s\n' \
     tmux firstmate:fm-safe endpoint-safe "$binding" > "$receipt_dir/$key"
+  rm -f "$home/state/domain.meta"
+  before=$(wc -l < "$log")
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-hook-return-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "teardown accepted a receipt for an unstaged endpoint"
+  fi
+  [ "$(wc -l < "$log")" -eq "$before" ] \
+    || fail "unstaged endpoint receipt authorized provider disposal"
+  grep -F 'interrupted teardown evidence could not be recovered' "$err" >/dev/null \
+    || fail "unstaged endpoint receipt did not reject the transaction"
+
+  rm -rf "$receipt_dir"
+  claim="$TMP_ROOT/unstaged-return.claim"
+  legacy="${claim}.owner"
+  claim_key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}')
+  committed_dir="$home/state/.teardown-transactions/domain/committed-return-claims"
+  mkdir -p "$committed_dir"
+  printf '%s\n%s\ntransaction=%s\n' "$claim" "$legacy" "$binding" \
+    > "$committed_dir/$claim_key"
+  rm -f "$home/state/domain.meta"
+  before=$(wc -l < "$log")
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-hook-return-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "teardown accepted a return receipt without a staged claim"
+  fi
+  [ "$(wc -l < "$log")" -eq "$before" ] \
+    || fail "unstaged return receipt authorized provider disposal"
+  grep -F 'interrupted teardown evidence could not be recovered' "$err" >/dev/null \
+    || fail "unstaged return receipt did not reject the transaction"
+
+  rm -rf "$committed_dir"
+  mkdir -p "$receipt_dir"
+  printf '%s\n%s\n%s\ntransaction=%s\n' \
+    tmux firstmate:fm-safe endpoint-safe "$binding" > "$receipt_dir/$key"
+  mkdir -p "$home/state/.teardown-transactions/domain/closing-endpoints"
+  printf '%s\n%s\n%s\n' tmux firstmate:fm-safe endpoint-safe \
+    > "$home/state/.teardown-transactions/domain/closing-endpoints/$key"
   ln -s "$sentinel" "$receipt_dir/malformed-sibling"
+  rm -f "$home/state/domain.meta"
   before=$(wc -l < "$log")
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_FAKE_TMUX_LOG="$log" \
@@ -1970,7 +2017,7 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
 }
 
 test_secondmate_force_teardown_finalizes_state_before_child_disposal() {
-  local home subhome project_a project_b child_a child_b fakebin log err lease_dir claim
+  local home subhome project_a project_b child_a child_b fakebin log err lease_dir claim owner
   home="$TMP_ROOT/staged-hierarchy-home"
   subhome="$TMP_ROOT/staged-hierarchy-subhome"
   project_a="$subhome/projects/alpha"
@@ -1980,8 +2027,12 @@ test_secondmate_force_teardown_finalizes_state_before_child_disposal() {
   lease_dir="$TMP_ROOT/staged-hierarchy-leases"
   err="$TMP_ROOT/staged-hierarchy.err"
   mkdir -p "$home/state" "$home/data" "$lease_dir"
-  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
+  owner="$$|codex:$CODEX_THREAD_ID|fallback"
+  printf '%s\n' "$owner" > "$home/state/.lock"
   printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file "$home/state/.session-authority" "$$" \
+    "$owner" "$home" "$ROOT" || fail "could not create hierarchy authority fixture"
   git clone -q "$ROOT" "$subhome"
   git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
   mkdir -p "$subhome/state"
