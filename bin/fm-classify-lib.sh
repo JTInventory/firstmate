@@ -32,8 +32,8 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
-# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
-# needs a custom verb vocabulary; absent, this default applies.
+# its away-mode classification. FM_CAPTAIN_RE adds a custom nonterminal match
+# vocabulary while the standard terminal and progress verbs remain authoritative.
 #
 # Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
 # legacy lines that lack a standard terminal verb. status_is_captain_relevant is
@@ -101,18 +101,15 @@ status_is_terminal_verb() {
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
-  status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
+    done|needs-decision|blocked|failed)
+      return 0
+      ;;
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
   esac
-  if [ -z "${FM_CAPTAIN_RE+x}" ]; then
-    case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
-    esac
-  fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 

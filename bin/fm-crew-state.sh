@@ -63,6 +63,7 @@ ID=${1:-}
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=$(fm_nonnegative_integer_or_default "${FM_CREW_STATE_NM_TIMEOUT:-10}" 10 86400)
+RUNS_LIMIT=$(fm_nonnegative_integer_or_default "${FM_CREW_STATE_RUNS_LIMIT:-200}" 200 10000)
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -319,9 +320,9 @@ nm_ci_is_monitoring() {
   [ "${status:-}" = running ] || return 1
   printf '%s\n' "$RUN_OUT" | grep -qE '^[[:space:]]*ci,[[:space:]]*running,'
 }
-# Most recent run id whose branch matches, from the `no-mistakes axi` run list.
-nm_run_id_for_branch() {  # <branch> <list-output>
-  local branch=$1 list=$2 row id rest br in_runs=0 found=""
+# Recent run ids whose branch matches, from the `no-mistakes axi` run list.
+nm_run_ids_for_branch() {  # <branch> <list-output>
+  local branch=$1 list=$2 row id rest br in_runs=0 rows=0
   while IFS= read -r row; do
     if [[ $(trim "$row") =~ ^runs\[[0-9]+\]\{.*\}:$ ]]; then
       in_runs=1
@@ -338,11 +339,13 @@ nm_run_id_for_branch() {  # <branch> <list-output>
       *,*) ;;
       *) continue ;;
     esac
+    [ "$rows" -lt "$RUNS_LIMIT" ] || break
+    rows=$((rows + 1))
     id=${row%%,*}; id=$(strip_quotes "$id")
     rest=${row#*,}
     br=${rest%%,*}; br=$(strip_quotes "$br")
-    if [ "$br" = "$branch" ]; then printf '%s\n' "$id"; break; fi
-  done <<< "$list" | { IFS= read -r found || true; printf '%s' "$found"; }
+    [ "$br" = "$branch" ] && printf '%s\n' "$id"
+  done <<< "$list"
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -374,15 +377,19 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or its branch name
-      # matches but its code identity does not. Find this branch's own most
-      # recent run in the list, then inspect and head-bind it directly.
+      # matches but its code identity does not. Inspect bounded recent runs for
+      # this branch until one is compatible with the worktree.
       list_out=$(nm_run axi)
-      rid=$(nm_run_id_for_branch "$CREW_BRANCH" "$list_out")
-      if [ -n "$rid" ]; then
+      candidate_ids=$(nm_run_ids_for_branch "$CREW_BRANCH" "$list_out")
+      while IFS= read -r rid; do
+        [ -n "$rid" ] || continue
         RUN_OUT=$(nm_run axi status --run "$rid")
         run_branch=$(strip_quotes "$(nm_field branch)")
-        [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree && HAVE_RUN=1
-      fi
+        if [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+          HAVE_RUN=1
+          break
+        fi
+      done <<< "$candidate_ids"
     fi
   fi
 fi

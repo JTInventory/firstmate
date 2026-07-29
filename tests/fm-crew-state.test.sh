@@ -55,7 +55,9 @@ shift
 case "${1:-}" in
   status)
     shift
-    if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+    if [ "${1:-}" = --run ]; then
+      run_key="FM_FAKE_AXI_STATUS_RUN_${2:-}"
+      printf '%s\n' "${!run_key:-${FM_FAKE_AXI_STATUS_RUN:-}}"
     else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
   '') printf '%s\n' "${FM_FAKE_AXI_LIST:-}" ;;
 esac
@@ -888,6 +890,44 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+test_same_branch_candidates_scan_until_compatible_within_limit() {
+  reset_fakes
+  local d current_head stale_head compatible_status stale_status out
+  d=$(new_case same-branch-candidates)
+  make_repo_on_branch "$d/wt" fm/feat-reused
+  current_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q --orphan stale-history
+  git -C "$d/wt" commit -q --allow-empty -m 'stale branch history'
+  stale_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/feat-reused
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" "window=fm:fm-reused" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$stale_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-reused)"
+  stale_status="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUN_HEAD="$current_head"
+  compatible_status=$(run_fixing fm/feat-reused)
+  FM_FAKE_AXI_LIST="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  "01STALE",fm/feat-reused,awaiting_approval,$stale_head,""
+  "01CURRENT",fm/feat-reused,fixing,$current_head,""
+EOF
+)"
+  FM_FAKE_AXI_STATUS_RUN_01STALE="$stale_status"
+  FM_FAKE_AXI_STATUS_RUN_01CURRENT="$compatible_status"
+  export FM_FAKE_AXI_STATUS_RUN_01STALE FM_FAKE_AXI_STATUS_RUN_01CURRENT
+  FM_CREW_STATE_RUNS_LIMIT=1
+  export FM_CREW_STATE_RUNS_LIMIT
+  out=$(run_crew_state "$d" reused)
+  assert_not_contains "$out" "source: run-step" "candidate beyond the configured run limit was scanned"
+  FM_CREW_STATE_RUNS_LIMIT=2
+  out=$(run_crew_state "$d" reused)
+  assert_contains "$out" "source: run-step" "compatible later same-branch run was not selected"
+  assert_contains "$out" "state: working" "compatible fixing run did not remain authoritative"
+  unset FM_CREW_STATE_RUNS_LIMIT FM_FAKE_AXI_STATUS_RUN_01STALE FM_FAKE_AXI_STATUS_RUN_01CURRENT
+  pass "same-branch candidates scan until compatible within the configured limit"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -925,5 +965,6 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_same_branch_candidates_scan_until_compatible_within_limit
 
 echo "all fm-crew-state tests passed"
