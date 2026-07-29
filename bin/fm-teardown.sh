@@ -114,6 +114,10 @@ TEARDOWN_RELINQUISH_WTS=()
 TEARDOWN_RELINQUISH_IDS=()
 TEARDOWN_RELINQUISH_HOMES=()
 TEARDOWN_RELINQUISH_VERDICTS=()
+TEARDOWN_RELEASE_KEYS=()
+TEARDOWN_RELEASE_RESULTS=()
+TEARDOWN_RELEASE_VERDICTS=()
+TEARDOWN_RELEASE_BINDING_MODE=record
 TEARDOWN_TXN_DIR="$STATE/.teardown-transactions/$ID"
 TEARDOWN_TXN_COMMITTED=0
 TEARDOWN_TXN_ACTIVE=0
@@ -154,7 +158,11 @@ teardown_admission_lock_acquire() {
 teardown_locks_release() {
   local status=$? i
   if [ "$TEARDOWN_TXN_ACTIVE" -eq 1 ] && [ "$TEARDOWN_TXN_COMMITTED" -ne 1 ]; then
-    teardown_restore_transaction_evidence >/dev/null 2>&1 || true
+    if ! teardown_transaction_crossed_irreversible_boundary; then
+      teardown_restore_transaction_evidence >/dev/null 2>&1 || true
+    elif ! teardown_transaction_has_committed_return; then
+      teardown_restore_top_state_evidence >/dev/null 2>&1 || true
+    fi
   fi
   for ((i=${#TEARDOWN_LOCKS[@]} - 1; i >= 0; i--)); do
     fm_lock_release "${TEARDOWN_LOCKS[$i]}" || true
@@ -163,6 +171,23 @@ teardown_locks_release() {
     rmdir "${TEARDOWN_LOCK_DIRS_CREATED[$i]}" 2>/dev/null || true
   done
   return "$status"
+}
+
+teardown_transaction_crossed_irreversible_boundary() {
+  local item
+  for item in "$TEARDOWN_TXN_DIR/closed-endpoints/"* \
+    "$TEARDOWN_TXN_DIR/committed-return-claims/"*; do
+    [ -f "$item" ] && [ ! -L "$item" ] && return 0
+  done
+  return 1
+}
+
+teardown_transaction_has_committed_return() {
+  local item
+  for item in "$TEARDOWN_TXN_DIR/committed-return-claims/"*; do
+    [ -f "$item" ] && [ ! -L "$item" ] && return 0
+  done
+  return 1
 }
 
 META="$STATE/$ID.meta"
@@ -200,9 +225,36 @@ teardown_restore_owned_evidence() {
   }
 }
 
+teardown_restore_top_state_evidence() {
+  local evidence source item path owner_path
+  evidence="$TEARDOWN_TXN_DIR/evidence/top"
+  source=$(cat "$evidence/source" 2>/dev/null || true)
+  [ -n "$source" ] || return 0
+  mkdir -p "$(dirname "$source")" || return 1
+  if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+    [ -f "$evidence/meta" ] && [ ! -L "$evidence/meta" ] || return 1
+    cp -p "$evidence/meta" "$source" || return 1
+  fi
+  for item in "$evidence"/*; do
+    [ -f "$item" ] || continue
+    case "$(basename "$item")" in
+      source|meta|identity|*.path|firstmate-owner|firstmate-owner.returning) continue ;;
+    esac
+    path="$(dirname "$source")/$(basename "$item")"
+    [ -e "$path" ] || [ -L "$path" ] || cp -p "$item" "$path" || return 1
+  done
+  for item in firstmate-owner firstmate-owner.returning; do
+    [ -f "$evidence/$item" ] || continue
+    owner_path=$(cat "$evidence/$item.path" 2>/dev/null || true)
+    [ -n "$owner_path" ] || continue
+    teardown_restore_owned_evidence "$evidence/$item" "$owner_path" || return 1
+  done
+}
+
 teardown_restore_transaction_evidence() {
   local evidence source item path value git_dir ref oid owner_path registry original expected
   [ -d "$TEARDOWN_TXN_DIR/evidence" ] || return 0
+  teardown_restore_top_state_evidence || return 1
   while IFS= read -r evidence; do
     source=$(cat "$evidence/source" 2>/dev/null || true)
     [ -n "$source" ] || continue
@@ -293,6 +345,9 @@ teardown_recover_interrupted_transaction() {
     return 1
   }
   TEARDOWN_TXN_ACTIVE=1
+  if teardown_transaction_crossed_irreversible_boundary; then
+    return 0
+  fi
   teardown_restore_transaction_evidence
 }
 
@@ -412,6 +467,42 @@ teardown_stage_endpoint_close() {
   }
 }
 
+teardown_endpoint_close_receipt_path() {
+  local backend=$1 target=$2 generation=$3 key
+  key=$(printf '%s' "$backend|$target|$generation" \
+    | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  printf '%s/closed-endpoints/%s' "$TEARDOWN_TXN_DIR" "$key"
+}
+
+teardown_endpoint_close_is_confirmed() {
+  local backend=$1 target=$2 generation=$3 record
+  record=$(teardown_endpoint_close_receipt_path "$backend" "$target" "$generation") \
+    || return 1
+  [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ "$(sed -n '1p' "$record")" = "$backend" ] \
+    && [ "$(sed -n '2p' "$record")" = "$target" ] \
+    && [ "$(sed -n '3p' "$record")" = "$generation" ] \
+    && [ "$(wc -l < "$record" | tr -d ' ')" -eq 3 ]
+}
+
+teardown_confirm_endpoint_close() {
+  local backend=$1 target=$2 generation=$3 record dir tmp
+  record=$(teardown_endpoint_close_receipt_path "$backend" "$target" "$generation") \
+    || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation"
+    return
+  fi
+  dir=${record%/*}
+  mkdir -p "$dir" || return 1
+  tmp=$(mktemp "$dir/.closed.XXXXXX") || return 1
+  printf '%s\n%s\n%s\n' "$backend" "$target" "$generation" > "$tmp" \
+    && chmod 600 "$tmp" && mv "$tmp" "$record" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
 teardown_home_transaction_path() {
   local id=$1 home=$2 key
   key=$(printf '%s' "$id|$home" | cksum | awk '{printf "%s-%s", $1, $2}') \
@@ -456,8 +547,9 @@ teardown_endpoint_generation_matches() {
       if [ -n "$actual" ]; then
         [ "$actual" = "$generation" ] || return 1
       else
-        teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
-          && endpoint_state=closed
+        teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation" \
+          || return 1
+        endpoint_state=closed
       fi
       ;;
     herdr)
@@ -472,8 +564,9 @@ teardown_endpoint_generation_matches() {
       if [ -n "$live_identity" ]; then
         [ "$live_identity" = "$expected_identity" ] || return 1
       else
-        teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
-          && endpoint_state=closed
+        teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation" \
+          || return 1
+        endpoint_state=closed
       fi
       ;;
     *) return 1 ;;
@@ -626,6 +719,7 @@ teardown_load_staged_return_claims() {
     claim=$(sed -n '1p' "$record")
     legacy=$(sed -n '2p' "$record")
     case "$claim:$legacy" in /*:/*) ;; *) return 1 ;; esac
+    teardown_return_transaction_is_committed "$claim" "$legacy" || return 1
     seen=0
     for existing in "${TEARDOWN_RETURN_CLAIMS[@]}"; do
       [ "$existing" != "$claim" ] || seen=1
@@ -702,14 +796,17 @@ teardown_treehouse_return() {
       [ -n "$out" ] && printf '%s\n' "$out"
       if [ "$staged" -eq 1 ]; then
         if [ "$TEARDOWN_DEFER_RETURN_FINALIZE" -eq 1 ]; then
-          fm_slot_stamp_mark_return_committed "$claim" "$legacy" || {
-            echo "error: returned $label $dir but could not record provider completion" >&2
-            return 1
-          }
           teardown_mark_return_transaction_committed "$claim" "$legacy" || {
             echo "error: returned $label $dir but could not record its committed transition" >&2
             return 1
           }
+          if { [ -e "$claim" ] || [ -L "$claim" ]; } \
+             && { [ -e "$legacy" ] || [ -L "$legacy" ]; }; then
+            fm_slot_stamp_mark_return_committed "$claim" "$legacy" || {
+              echo "error: returned $label $dir but could not record provider completion" >&2
+              return 1
+            }
+          fi
           TEARDOWN_RETURN_CLAIMS+=("$claim")
           TEARDOWN_RETURN_LEGACIES+=("$legacy")
         elif ! fm_slot_stamp_finalize_return "$claim" "$legacy"; then
@@ -740,16 +837,14 @@ teardown_treehouse_return() {
 teardown_commit_staged_returns() {
   local i
   for ((i=0; i<${#TEARDOWN_RETURN_CLAIMS[@]}; i++)); do
-    if [ -e "${TEARDOWN_RETURN_CLAIMS[$i]}" ] \
-       || [ -L "${TEARDOWN_RETURN_CLAIMS[$i]}" ]; then
+    teardown_return_transaction_is_committed \
+      "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" \
+      || return 1
+    if { [ -e "${TEARDOWN_RETURN_CLAIMS[$i]}" ] \
+         || [ -L "${TEARDOWN_RETURN_CLAIMS[$i]}" ]; } \
+       && { [ -e "${TEARDOWN_RETURN_LEGACIES[$i]}" ] \
+         || [ -L "${TEARDOWN_RETURN_LEGACIES[$i]}" ]; }; then
       fm_slot_stamp_mark_return_committed \
-        "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" \
-        || return 1
-      teardown_mark_return_transaction_committed \
-        "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" \
-        || return 1
-    else
-      teardown_return_transaction_is_committed \
         "${TEARDOWN_RETURN_CLAIMS[$i]}" "${TEARDOWN_RETURN_LEGACIES[$i]}" \
         || return 1
     fi
@@ -826,6 +921,18 @@ teardown_backend_endpoint() {
     herdr) teardown_herdr_endpoint_focus_safe "$target" ;;
     *) fm_backend_kill "$backend" "$target" ;;
   esac
+}
+
+teardown_close_endpoint_transactional() {
+  local backend=$1 target=$2 generation=$3 meta=$4 state
+  teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation" \
+    && return 0
+  teardown_endpoint_generation_matches "$backend" "$target" "$generation" "$meta" state \
+    || return 1
+  [ "$state" = live ] || return 1
+  teardown_stage_endpoint_close "$backend" "$target" "$generation" || return 1
+  teardown_backend_endpoint "$backend" "$target" || return 1
+  teardown_confirm_endpoint_close "$backend" "$target" "$generation"
 }
 
 remove_grok_turnend_auth() {
@@ -1366,7 +1473,7 @@ EOF
 TEARDOWN_SLOT_RETAINED=0
 TEARDOWN_SLOT_RETAIN_VERDICT=
 slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <label> <retire|refuse>
-  local state=$1 id=$2 wt=$3 stamp_home=$4 worker_home=$5 role=$6 label=$7 disposition=$8 verdict
+  local state=$1 id=$2 wt=$3 stamp_home=$4 worker_home=$5 role=$6 label=$7 disposition=$8 verdict key i
   TEARDOWN_SLOT_RETAIN_VERDICT=
   case "$disposition" in
     retire|refuse) ;;
@@ -1375,8 +1482,28 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worke
       return 1
       ;;
   esac
-  verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$stamp_home" "$worker_home" "$role")
-  [ "$verdict" = dispose ] && return 0
+  key="$state|$id|$wt|$stamp_home|$worker_home|$role"
+  if [ "$TEARDOWN_RELEASE_BINDING_MODE" = consume ]; then
+    for ((i=0; i<${#TEARDOWN_RELEASE_KEYS[@]}; i++)); do
+      [ "${TEARDOWN_RELEASE_KEYS[$i]}" = "$key" ] || continue
+      if [ "${TEARDOWN_RELEASE_RESULTS[$i]}" = dispose ]; then
+        return 0
+      fi
+      verdict=${TEARDOWN_RELEASE_VERDICTS[$i]}
+      break
+    done
+    [ -n "${verdict:-}" ] || return 1
+  else
+    verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$stamp_home" "$worker_home" "$role")
+    TEARDOWN_RELEASE_KEYS+=("$key")
+    if [ "$verdict" = dispose ]; then
+      TEARDOWN_RELEASE_RESULTS+=(dispose)
+      TEARDOWN_RELEASE_VERDICTS+=("")
+      return 0
+    fi
+    TEARDOWN_RELEASE_RESULTS+=(retain)
+    TEARDOWN_RELEASE_VERDICTS+=("$verdict")
+  fi
   TEARDOWN_SLOT_RETAINED=1
   echo "teardown: $label $wt lease RETAINED, not returned to the pool: ${verdict#retain: }" >&2
   echo "teardown: the directory is left untouched on disk; --force does not waive this ownership gate." >&2
@@ -1387,6 +1514,54 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worke
     echo "teardown: refusing to continue for $label $wt and leaving every record for $id in place." >&2
   fi
   return 1
+}
+
+teardown_persist_release_verdicts() {
+  local dir i key record tmp
+  dir="$TEARDOWN_TXN_DIR/release-verdicts"
+  mkdir -p "$dir" || return 1
+  for ((i=0; i<${#TEARDOWN_RELEASE_KEYS[@]}; i++)); do
+    key=$(printf '%s' "${TEARDOWN_RELEASE_KEYS[$i]}" \
+      | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    record="$dir/$key"
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      [ -f "$record" ] && [ ! -L "$record" ] || return 1
+      continue
+    fi
+    tmp=$(mktemp "$dir/.verdict.XXXXXX") || return 1
+    printf '%s\n%s\n%s\n' "${TEARDOWN_RELEASE_KEYS[$i]}" \
+      "${TEARDOWN_RELEASE_RESULTS[$i]}" "${TEARDOWN_RELEASE_VERDICTS[$i]}" \
+      > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$record" || {
+      rm -f "$tmp"
+      return 1
+    }
+  done
+  : > "$dir/.complete" || return 1
+  chmod 600 "$dir/.complete"
+}
+
+teardown_load_release_verdicts() {
+  local record key result verdict
+  TEARDOWN_RELEASE_KEYS=()
+  TEARDOWN_RELEASE_RESULTS=()
+  TEARDOWN_RELEASE_VERDICTS=()
+  [ -d "$TEARDOWN_TXN_DIR/release-verdicts" ] \
+    && [ ! -L "$TEARDOWN_TXN_DIR/release-verdicts" ] || return 1
+  [ -f "$TEARDOWN_TXN_DIR/release-verdicts/.complete" ] \
+    && [ ! -L "$TEARDOWN_TXN_DIR/release-verdicts/.complete" ] || return 1
+  for record in "$TEARDOWN_TXN_DIR/release-verdicts/"*; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    [ "$(basename "$record")" != .complete ] || continue
+    [ "$(wc -l < "$record" | tr -d ' ')" -eq 3 ] || return 1
+    key=$(sed -n '1p' "$record")
+    result=$(sed -n '2p' "$record")
+    verdict=$(sed -n '3p' "$record")
+    case "$result" in dispose) [ -z "$verdict" ] || return 1 ;; retain) [ -n "$verdict" ] || return 1 ;; *) return 1 ;; esac
+    TEARDOWN_RELEASE_KEYS+=("$key")
+    TEARDOWN_RELEASE_RESULTS+=("$result")
+    TEARDOWN_RELEASE_VERDICTS+=("$verdict")
+  done
+  return 0
 }
 
 require_secondmate_slot_claim() {
@@ -1540,6 +1715,7 @@ teardown_stage_transaction_evidence() {
   if [ "$TEARDOWN_TXN_REUSED" -eq 1 ]; then
     [ -f "$TEARDOWN_TXN_DIR/active" ] && [ ! -L "$TEARDOWN_TXN_DIR/active" ] \
       && [ "$(sed -n '1p' "$TEARDOWN_TXN_DIR/active")" = "$ID" ] || return 1
+    teardown_load_release_verdicts || return 1
     TEARDOWN_TXN_ACTIVE=1
     return 0
   fi
@@ -1568,6 +1744,7 @@ teardown_stage_transaction_evidence() {
   fi
   mkdir -p "$TEARDOWN_TXN_DIR/evidence/quarantine" \
     "$TEARDOWN_TXN_DIR/evidence/registry" || return 1
+  teardown_persist_release_verdicts || return 1
   for item in "$STATE/.pr-check-quarantine/$ID".*; do
     [ -f "$item" ] && [ ! -L "$item" ] || continue
     printf '%s\n' "$item" > "$TEARDOWN_TXN_DIR/evidence/quarantine/$index.path" || return 1
@@ -1608,10 +1785,7 @@ validate_firstmate_home_children_removal() {
       echo "REFUSED: child $child_id endpoint generation is stale or cannot be verified" >&2
       return 1
     }
-    [ "$child_endpoint_state" = closed ] || {
-      echo "REFUSED: child $child_id endpoint is live and cannot be retired recoverably" >&2
-      return 1
-    }
+    case "$child_endpoint_state" in live|closed) ;; *) return 1 ;; esac
     if [ "$child_kind" = secondmate ]; then
       child_home=$TEARDOWN_CHILD_HOME
       if [ ! -e "$child_home" ] \
@@ -1646,7 +1820,11 @@ validate_firstmate_home_children_removal() {
       esac
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      require_treehouse_return_capability "child worktree" "$child_wt" "$child_id" || return 1
+      if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "$home" \
+        crewmate "child worktree" retire; then
+        require_treehouse_return_capability \
+          "child worktree" "$child_wt" "$child_id" || return 1
+      fi
     fi
   done
 }
@@ -1745,7 +1923,12 @@ cleanup_firstmate_home_children() {
       echo "REFUSED: child $child_id endpoint generation changed before cleanup" >&2
       return 1
     }
-    [ "$child_endpoint_state" = closed ] || return 1
+    if [ "$child_endpoint_state" = live ]; then
+      teardown_close_endpoint_transactional "$child_backend" "$child_t" \
+        "$TEARDOWN_CHILD_ENDPOINT_GENERATION" "$child_meta" || return 1
+    elif [ "$child_endpoint_state" != closed ]; then
+      return 1
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$TEARDOWN_CHILD_HOME
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
@@ -1850,23 +2033,6 @@ if [ "$KIND" = secondmate ]; then
     fi
     PARENT_PENDING_OPEN=1
   fi
-  teardown_stage_hierarchy_evidence || {
-    echo "REFUSED: could not stage durable hierarchy evidence" >&2
-    exit 1
-  }
-  teardown_load_staged_return_claims || {
-    echo "REFUSED: staged hierarchy return claims are ambiguous" >&2
-    exit 1
-  }
-  TEARDOWN_DEFER_RETURN_FINALIZE=1
-  if [ "$PARENT_PENDING_OPEN" -eq 1 ]; then
-    if fm_pending_reply_stage_force_retire_task "$STATE" "$ID"; then
-      FORCE_RETIRE_STAGED=1
-    else
-      echo "REFUSED: secondmate $ID pending reply could not be staged for retirement." >&2
-      exit 1
-    fi
-  fi
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -1936,21 +2102,10 @@ validate_direct_pr_state_cleanup || exit 1
 validate_direct_pr_ref_cleanup || exit 1
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ]; then
   validate_child_worktree_for_removal "$WT" "$PROJ" "worktree" >/dev/null || exit 1
-  require_treehouse_return_capability "worktree" "$WT" "$ID" || exit 1
-fi
-if [ "$BACKEND" != orca ] && [ "$TOP_ENDPOINT_STATE" != closed ]; then
-  echo "REFUSED: live endpoint retirement cannot be rolled back with the remaining worktree and state transaction; preserving endpoint, ownership evidence, and task state" >&2
-  exit 1
-fi
-if [ "$KIND" = secondmate ] && [ -e "${HOME_PATH:-$WT}" ]; then
-  echo "REFUSED: secondmate home retirement is not recoverable; preserving home, endpoint evidence, and task state" >&2
-  exit 1
-fi
-if [ "$KIND" != secondmate ] && [ -d "$WT" ] \
-   && slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
-     crewmate "worktree" refuse; then
-  echo "REFUSED: worktree return is not recoverable; preserving its lease, ownership evidence, and task state" >&2
-  exit 1
+  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
+    crewmate "worktree" retire; then
+    require_treehouse_return_capability "worktree" "$WT" "$ID" || exit 1
+  fi
 fi
 TEARDOWN_DEFER_RETURN_FINALIZE=1
 teardown_load_staged_return_claims || {
@@ -1961,6 +2116,7 @@ teardown_stage_transaction_evidence || {
   echo "REFUSED: could not stage recoverable teardown evidence" >&2
   exit 1
 }
+TEARDOWN_RELEASE_BINDING_MODE=consume
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
@@ -1992,72 +2148,24 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
-if [ "$BACKEND" = herdr ]; then
-  endpoint_state=
+endpoint_state=$TOP_ENDPOINT_STATE
+if [ "$BACKEND" != orca ]; then
   teardown_endpoint_generation_matches \
     "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" endpoint_state || {
     echo "REFUSED: task endpoint generation changed before cleanup; preserving task state" >&2
     exit 1
   }
-  [ "$endpoint_state" = closed ] || exit 1
-  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
-    echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
-  fi
-elif [ "$BACKEND" != orca ]; then
-  endpoint_state=
-  teardown_endpoint_generation_matches \
-    "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$META" endpoint_state || {
-    echo "REFUSED: task endpoint generation changed before cleanup; preserving task state" >&2
-    exit 1
-  }
-  [ "$endpoint_state" = closed ] || exit 1
 fi
 
-if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  if ! cleanup_firstmate_home_children "$HOME_PATH"; then
-    echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent state and home" >&2
-    exit 1
-  fi
-  teardown_commit_staged_returns || {
-    echo "error: child retirement commit could not be recorded" >&2
-    exit 1
-  }
-fi
-
-# Ownership gate first. A retained lease leaves the slot untouched while the
-# rest of teardown retires this task's endpoint and records.
-if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  TOP_SLOT_RETAIN_VERDICT=
-  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
-    crewmate "worktree" retire; then
-    command -v treehouse >/dev/null 2>&1 || {
-      echo "REFUSED: treehouse command not found; preserving worktree $WT and its metadata" >&2
-      exit 1
-    }
-    # Kills remaining processes in the worktree (including the agent), resets, returns
-    # to pool. treehouse resolves the pool from the working directory, so run it from
-    # the project. teardown_treehouse_return tolerates transient and stale git locks
-    # left by a killed crew process; see the script header for retry and stale-lock proof.
-    post_lock_cleanup_check=
-    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-      post_lock_cleanup_check=validate_worktree_teardown_safety
-    fi
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
-      "$STATE" "$ID" "$FM_HOME" || {
-      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-      exit 1
-    }
+if [ "$PARENT_PENDING_OPEN" -eq 1 ]; then
+  if fm_pending_reply_stage_force_retire_task "$STATE" "$ID"; then
+    FORCE_RETIRE_STAGED=1
   else
-    TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
+    echo "REFUSED: secondmate $ID pending reply could not be staged for retirement." >&2
+    exit 1
   fi
 fi
 
-if [ "$KIND" = secondmate ]; then
-  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
-fi
 cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
   exit 1
@@ -2067,11 +2175,22 @@ remove_grok_turnend_auth "$STATE" "$ID"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
-if [ "$KIND" = secondmate ]; then
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  if ! cleanup_firstmate_home_children "$HOME_PATH"; then
+    echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent transaction evidence" >&2
+    exit 1
+  fi
   teardown_commit_staged_returns || {
-    echo "error: secondmate retirement commit could not be recorded" >&2
+    echo "error: child retirement commit could not be recorded" >&2
     exit 1
   }
+fi
+
+if [ "$KIND" = secondmate ]; then
   teardown_finalize_hierarchy_state || {
     echo "error: secondmate hierarchy retirement remains recoverably staged" >&2
     exit 1
@@ -2084,16 +2203,52 @@ if [ "$KIND" = secondmate ]; then
   fi
   remove_secondmate_registry_entry "$ID" || exit 1
 fi
+
+TOP_SLOT_ACTION=none
+if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  TOP_SLOT_RETAIN_VERDICT=
+  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
+    crewmate "worktree" retire; then
+    TOP_SLOT_ACTION=return
+  else
+    TOP_SLOT_ACTION=retain
+    TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
+    fm_slot_stamp_relinquish "$WT" "$ID" "$FM_HOME" \
+      "$TOP_SLOT_RETAIN_VERDICT" || exit 1
+  fi
+fi
+
+if [ "$BACKEND" != orca ] && [ "$endpoint_state" = live ]; then
+  teardown_close_endpoint_transactional \
+    "$BACKEND" "$T" "$ENDPOINT_GENERATION" "$TEARDOWN_TXN_DIR/evidence/top/meta" || {
+    echo "error: endpoint retirement failed; preserving recoverable transaction evidence" >&2
+    exit 1
+  }
+fi
+if [ "$BACKEND" = herdr ]; then
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+    echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+  fi
+fi
+
+if [ "$TOP_SLOT_ACTION" = return ]; then
+  command -v treehouse >/dev/null 2>&1 || exit 1
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "" \
+    "$STATE" "$ID" "$FM_HOME" || {
+    echo "error: treehouse return failed for worktree $WT; teardown remains recoverably staged" >&2
+    exit 1
+  }
+fi
+if [ "$KIND" = secondmate ]; then
+  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1
+fi
 teardown_commit_staged_returns || {
-  echo "error: teardown return commit could not be recorded; preserving ownership evidence and task state" >&2
+  echo "error: teardown return commit could not be recorded; preserving ownership evidence and transaction state" >&2
   exit 1
 }
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"
-if [ -n "${TOP_SLOT_RETAIN_VERDICT:-}" ]; then
-  fm_slot_stamp_relinquish "$WT" "$ID" "$FM_HOME" "$TOP_SLOT_RETAIN_VERDICT" || exit 1
-fi
 teardown_reconcile_staged_returns
 TEARDOWN_COMMIT_TMP=$(mktemp "$TEARDOWN_TXN_DIR/.committed.XXXXXX") || exit 1
 printf '%s\n%s\n' "$ID" "$META_IDENTITY" > "$TEARDOWN_COMMIT_TMP" \

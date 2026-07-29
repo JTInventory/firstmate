@@ -30,6 +30,9 @@ SWEEP="$ROOT/bin/fm-isolation-sweep.sh"
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-isolation)
 unset NO_MISTAKES_GATE
+unset CLAUDECODE PI_CODING_AGENT GROK_AGENT
+CODEX_THREAD_ID=fm-worker-isolation-fixture
+export CODEX_THREAD_ID
 
 # Fixture agents are real long-lived processes, and the code under test finds
 # them by scanning /proc for a declaration marker. Two hygiene rules follow.
@@ -217,6 +220,8 @@ make_launch_case() {
   wt="$case_dir/wt"
   fakebin=$(make_launch_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$home/state/.lock"
+  printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -280,6 +285,7 @@ make_primary_home() {
   fm_git_init_commit "$dir"
   git -C "$dir" branch -M main
   printf '# agents\n' > "$dir/AGENTS.md"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$dir/state/.lock"
   printf '%s\n' "$dir"
 }
 
@@ -288,9 +294,11 @@ test_declared_worker_is_never_a_primary_scope_match() {
   # local, and reusing the name here makes shellcheck read the two as one.
   local primary_home out
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
-  out=$( cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    . "$ROOT/bin/fm-primary-scope-lib.sh" \
-    && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
+  out=$( cd "$primary_home" \
+    && export FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    && . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    && fm_primary_scope_matches "$primary_home" "$primary_home/state" \
+    && printf 'primary' || printf 'not-primary' )
   [ "$out" = primary ] || fail "the fixture is not recognized as a genuine primary at all"
   out=$( export FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
     . "$ROOT/bin/fm-primary-scope-lib.sh" \
@@ -396,6 +404,87 @@ test_primary_role_cannot_override_worker_ancestry() {
   assert_contains "$out" "primary identity is not bound" \
     "self-asserted primary refusal was not actionable"
   pass "primary authority is bound to process ancestry and checkout scope"
+}
+
+test_primary_authority_refuses_unreadable_ancestry() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/unreadable-ancestry")
+  out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    bash -c '
+      . "$1/bin/fm-worker-isolation-lib.sh"
+      fm_worker_process_environment() { return 1; }
+      fm_worker_refuse_primary_operation lock
+    ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "unreadable ancestry must not authorize a primary"
+  assert_contains "$out" "primary identity is not bound" \
+    "unreadable ancestry refusal lost its authority reason"
+  pass "primary authority fails closed when ancestry cannot be read"
+}
+
+test_stale_session_lock_reaches_verified_recovery() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/stale-primary-lock")
+  printf '99999999\n' > "$primary_home/state/.lock"
+  out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    "$LOCK" 2>&1) || status=$?
+  expect_code 0 "$status" "a provably stale session lock must reach verified recovery"
+  assert_contains "$out" "lock acquired" "stale session-lock recovery did not complete"
+  pass "primary authority permits only verified stale session-lock recovery"
+}
+
+test_unregistered_cross_home_primary_is_refused() {
+  local root home out status=0
+  root=$(make_primary_home "$TMP_ROOT/cross-home-root")
+  home=$(make_primary_home "$TMP_ROOT/cross-home-owner")
+  rm -f "$home/state/.primary-checkout" "$home/state/.lock"
+  out=$(cd "$root" && FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation "session lock acquisition"' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "unregistered unrelated checkouts must not claim a fresh home"
+  pass "fresh cross-home authority requires shared registered Git topology"
+}
+
+test_binding_failure_never_installs_new_session_owner() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/atomic-session-binding")
+  rm -f "$primary_home/state/.lock" "$primary_home/state/.primary-checkout"
+  mkdir "$primary_home/state/.primary-checkout"
+  out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    "$LOCK" 2>&1) || status=$?
+  expect_code 1 "$status" "invalid checkout binding must refuse lock acquisition"
+  assert_absent "$primary_home/state/.lock" \
+    "binding failure left a newly installed session owner"
+  pass "session owner publication waits for a valid checkout binding"
+}
+
+test_procargs2_parser_separates_argv_and_environment() {
+  local valid malformed out status=0
+  valid="$TMP_ROOT/procargs-valid.bin"
+  malformed="$TMP_ROOT/procargs-malformed.bin"
+  printf '\002\000\000\000/bin/bash\000\000bash\000script.sh\000FM_AGENT_ROLE=crewmate\000X=1\000' \
+    > "$valid"
+  printf '\001\000\000\000/bin/bash\000bash\000not-an-environment-record\000' \
+    > "$malformed"
+  out=$(bash -c '
+    . "$1/bin/fm-procargs-lib.sh"
+    DUMP=$2
+    fm_procargs2_dump() { command cat "$DUMP"; }
+    fm_procargs2_read 1
+    printf "%s|%s|%s\n" "${FM_PROCARGS_ARGV[*]}" \
+      "${FM_PROCARGS_ENV[0]}" "${FM_PROCARGS_ENV[1]}"
+  ' _ "$ROOT" "$valid") || status=$?
+  expect_code 0 "$status" "valid procargs2 fixture must parse"
+  [ "$out" = "bash script.sh|FM_AGENT_ROLE=crewmate|X=1" ] \
+    || fail "procargs2 argv/environment boundary was wrong: $out"
+  if bash -c '
+    . "$1/bin/fm-procargs-lib.sh"
+    DUMP=$2
+    fm_procargs2_dump() { command cat "$DUMP"; }
+    fm_procargs2_read 1
+  ' _ "$ROOT" "$malformed"; then
+    fail "malformed procargs2 record was accepted"
+  fi
+  pass "one procargs2 parser handles valid and malformed records"
 }
 
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
@@ -546,9 +635,10 @@ ROWS
 }
 
 test_secondmate_primary_operations_require_its_declared_home() {
-  local home foreign alias out status
+  local home foreign alias out status foreign_before
   home=$(make_primary_home "$TMP_ROOT/secondmate-owner-home")
   foreign=$(make_primary_home "$TMP_ROOT/secondmate-foreign-home")
+  foreign_before=$(cat "$foreign/state/.lock")
   printf '%s\n' domain > "$home/.fm-secondmate-home"
   alias="$TMP_ROOT/secondmate-owner-alias"
   ln -s "$home" "$alias"
@@ -566,7 +656,8 @@ test_secondmate_primary_operations_require_its_declared_home() {
   status=$?
   expect_code 1 "$status" "a secondmate must not lock another operational home"
   assert_contains "$out" "secondmate" "the foreign-home lock refusal lost the declared role"
-  [ ! -e "$foreign/state/.lock" ] || fail "a secondmate mutated a foreign session lock"
+  [ "$(cat "$foreign/state/.lock")" = "$foreign_before" ] \
+    || fail "a secondmate mutated a foreign session lock"
 
   out=$(FM_ROOT_OVERRIDE="$foreign" FM_HOME="$foreign" FM_SPAWN_NO_GUARD=1 \
     FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
@@ -793,6 +884,8 @@ make_slot_world() {
   wt="$world/wt"
   other="$world/wt-other"
   mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
+  printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$world/home/state/.lock"
+  printf '%s\n' "$ROOT" > "$world/home/state/.primary-checkout"
   fm_git_worktree "$proj" "$wt" "slot-$name"
   git -C "$proj" worktree add --quiet -b "slot-$name-other" "$other"
   printf '%s\n' "$world|$proj|$wt|$other"
@@ -1328,6 +1421,10 @@ test_stamp_survives_failed_pool_return() {
   fakebin=$(fm_fakebin "$WORLD/fake")
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'treehouse return [--if-lease-holder HOLDER]'
+  exit 0
+fi
 target=${3:-}
 git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
 [ -f "$git_dir/fm-slot-owner" ] || exit 19
@@ -1405,6 +1502,10 @@ test_successful_pool_return_never_mutates_reused_slot() {
   fakebin=$(fm_fakebin "$WORLD/fake")
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'treehouse return [--if-lease-holder HOLDER]'
+  exit 0
+fi
 target=${3:-}
 git_dir=$(git -C "$target" rev-parse --absolute-git-dir)
 [ -f "$git_dir/fm-slot-owner" ] || exit 19
@@ -1462,6 +1563,10 @@ test_failed_pool_return_never_restores_over_a_reused_slot() {
   fakebin=$(fm_fakebin "$WORLD/fake")
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'treehouse return [--if-lease-holder HOLDER]'
+  exit 0
+fi
 target=${3:-}
 git -C "$FM_REUSE_PROJECT" worktree remove --force "$target"
 git -C "$FM_REUSE_PROJECT" worktree add --quiet -b failed-return-replacement "$target"
@@ -1580,7 +1685,7 @@ test_ordinary_teardown_acquires_admission_before_task_lock() {
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   [ "$status" -ne 0 ] || fail "ordinary teardown crossed active spawn admission"$'\n'"$out"
-  assert_contains "$out" "spawn is already publishing work in $WORLD/home/state" \
+  assert_contains "$out" "spawn or an older lifecycle operation is still changing $WORLD/home/state" \
     "ordinary teardown checked its task lock before home admission"
   assert_present "$WORLD/home/state/task-e13.meta" "admission refusal removed task metadata"
   stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
@@ -1712,7 +1817,36 @@ SH
   pass "teardown binds endpoint mutation to the recorded generation"
 }
 
-test_teardown_refuses_unrecoverable_live_endpoint_transaction() {
+test_staged_endpoint_close_is_not_provider_proof() {
+  local rec fakebin key record out status=0
+  rec=$(make_slot_world teardown-staged-close)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" gh-axi gh treehouse
+  write_current_meta "$WORLD/home/state/task-stage.meta" task-stage "$WORLD/home" endpoint-stage \
+    "window=firstmate:fm-task-stage" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
+  key=$(printf '%s' 'tmux|firstmate:fm-task-stage|endpoint-stage' \
+    | cksum | awk '{printf "%s-%s", $1, $2}')
+  record="$WORLD/home/state/.teardown-transactions/task-stage/closing-endpoints/$key"
+  mkdir -p "${record%/*}"
+  printf '%s\n%s\n%s\n' tmux firstmate:fm-task-stage endpoint-stage > "$record"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-stage --force 2>&1) || status=$?
+  expect_code 1 "$status" "a pre-close stage record must not prove endpoint closure"
+  assert_present "$WORLD/home/state/task-stage.meta" \
+    "ambiguous staged close removed task metadata"
+  pass "only a post-provider receipt proves endpoint closure"
+}
+
+test_teardown_finishes_fallible_cleanup_before_provider_boundaries() {
   local rec fakebin log out status stamp
   rec=$(make_slot_world teardown-live-transaction)
   read_slot_world "$rec"
@@ -1723,6 +1857,10 @@ test_teardown_refuses_unrecoverable_live_endpoint_transaction() {
 printf '%s\n' "\$*" >> "$log"
 case "\${1:-}" in
   show-options) printf '%s\n' endpoint-live ;;
+  kill-window)
+    [ ! -e "\$FM_ORDER_STATE/task-live.meta" ] || exit 22
+    printf '%s\n' close >> "$log"
+    ;;
 esac
 exit 0
 SH
@@ -1731,7 +1869,11 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'treehouse return [--if-lease-holder HOLDER]'
+  exit 0
 fi
+[ -n "$(find "$FM_ORDER_STATE/.teardown-transactions/task-live/closed-endpoints" \
+  -type f -print -quit 2>/dev/null)" ] || exit 23
+printf '%s\n' return >> "$FM_ORDER_LOG"
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -1745,21 +1887,17 @@ SH
   set +e
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
     FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
-    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" FM_ORDER_STATE="$WORLD/home/state" \
+    FM_ORDER_LOG="$log" PATH="$fakebin:$PATH" \
     "$TEARDOWN" task-live --force 2>&1)
   status=$?
   set -e
-  [ "$status" -ne 0 ] || fail "teardown crossed an unrecoverable live endpoint boundary"
-  assert_contains "$out" "live endpoint retirement cannot be rolled back" \
-    "unrecoverable transaction refusal lost its reason"
-  assert_no_grep 'kill-window' "$log" \
-    "unrecoverable transaction refusal closed the endpoint"
-  assert_present "$WORLD/home/state/task-live.meta" \
-    "unrecoverable transaction refusal removed task metadata"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
-    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
-  [ "$stamp" = task-live ] || fail "unrecoverable transaction refusal changed ownership evidence"
-  pass "teardown retains live endpoints when full rollback is impossible"
+  expect_code 0 "$status" "recoverable live-endpoint teardown failed"$'\n'"$out"
+  [ "$(grep -E '^(close|return)$' "$log" | tr '\n' ' ')" = "close return " ] \
+    || fail "provider boundaries ran out of order: $(cat "$log")"
+  assert_absent "$WORLD/home/state/task-live.meta" \
+    "successful teardown retained task metadata"
+  pass "teardown completes fallible cleanup before endpoint close and return"
 }
 
 test_verification_capture_includes_lifecycle_clears() {
@@ -2075,6 +2213,11 @@ test_fresh_primary_needs_no_procfs_or_preexisting_state
 test_foreign_session_lock_defeats_primary_topology
 test_linked_main_worktree_can_prove_primary_authority
 test_primary_role_cannot_override_worker_ancestry
+test_primary_authority_refuses_unreadable_ancestry
+test_stale_session_lock_reaches_verified_recovery
+test_unregistered_cross_home_primary_is_refused
+test_binding_failure_never_installs_new_session_owner
+test_procargs2_parser_separates_argv_and_environment
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
@@ -2116,7 +2259,8 @@ test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_teardown_refuses_duplicate_core_metadata_before_mutation
 test_teardown_refuses_stale_endpoint_generation_before_mutation
-test_teardown_refuses_unrecoverable_live_endpoint_transaction
+test_staged_endpoint_close_is_not_provider_proof
+test_teardown_finishes_fallible_cleanup_before_provider_boundaries
 test_verification_capture_includes_lifecycle_clears
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker

@@ -113,26 +113,72 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     esac
   fi
 fi
-if ! { printf '%s\n' "$owner" > "$LOCK"; } 2>/dev/null; then
+ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
+BINDING="$STATE/.primary-checkout"
+OLD_LOCK_PRESENT=0
+OLD_LOCK=
+OLD_BINDING_PRESENT=0
+OLD_BINDING=
+if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
+  OLD_LOCK=$(cat "$LOCK") || exit 1
+  OLD_LOCK_PRESENT=1
+fi
+if [ -e "$BINDING" ] || [ -L "$BINDING" ]; then
+  if [ ! -f "$BINDING" ] || [ -L "$BINDING" ]; then
+    echo "error: cannot bind the session lock to its primary checkout" >&2
+    exit 1
+  fi
+  OLD_BINDING=$(cat "$BINDING") || exit 1
+  OLD_BINDING_PRESENT=1
+fi
+restore_session_authority() {
+  local tmp
+  if [ "$OLD_BINDING_PRESENT" -eq 1 ]; then
+    tmp=$(mktemp "$STATE/.primary-checkout.restore.XXXXXX") || return 1
+    printf '%s\n' "$OLD_BINDING" > "$tmp" && chmod 600 "$tmp" \
+      && mv "$tmp" "$BINDING" || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$BINDING" || return 1
+  fi
+  if [ "$OLD_LOCK_PRESENT" -eq 1 ]; then
+    tmp=$(mktemp "$STATE/.lock.restore.XXXXXX") || return 1
+    printf '%s\n' "$OLD_LOCK" > "$tmp" && chmod 600 "$tmp" \
+      && mv "$tmp" "$LOCK" || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$LOCK" || return 1
+  fi
+}
+BINDING_TMP=$(mktemp "$STATE/.primary-checkout.XXXXXX" 2>/dev/null) || exit 1
+LOCK_TMP=$(mktemp "$STATE/.lock.XXXXXX" 2>/dev/null) || {
+  rm -f "$BINDING_TMP"
+  exit 1
+}
+if ! printf '%s\n' "$ROOT_REAL" > "$BINDING_TMP" \
+   || ! chmod 600 "$BINDING_TMP" \
+   || ! printf '%s\n' "$owner" > "$LOCK_TMP" \
+   || ! chmod 600 "$LOCK_TMP"; then
+  rm -f "$BINDING_TMP" "$LOCK_TMP"
+  echo "error: cannot bind the session lock to its primary checkout" >&2
+  exit 1
+fi
+if ! mv "$BINDING_TMP" "$BINDING"; then
+  rm -f "$BINDING_TMP" "$LOCK_TMP"
+  echo "error: cannot bind the session lock to its primary checkout" >&2
+  exit 1
+fi
+if ! mv "$LOCK_TMP" "$LOCK"; then
+  rm -f "$LOCK_TMP"
+  restore_session_authority || true
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
 fi
-written=$(cat "$LOCK" 2>/dev/null) || {
-  echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
-  exit 1
-}
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
-  echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+if ! written=$(cat "$LOCK" 2>/dev/null); then
+  restore_session_authority || true
   exit 1
 fi
-ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
-BINDING="$STATE/.primary-checkout"
-BINDING_TMP=$(mktemp "$STATE/.primary-checkout.XXXXXX" 2>/dev/null) || exit 1
-if ! printf '%s\n' "$ROOT_REAL" > "$BINDING_TMP" \
-   || ! chmod 600 "$BINDING_TMP" \
-   || ! mv "$BINDING_TMP" "$BINDING"; then
-  rm -f "$BINDING_TMP"
-  echo "error: cannot bind the session lock to its primary checkout" >&2
+if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
+  restore_session_authority || true
+  echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
 release_claim_lock

@@ -64,7 +64,10 @@ fm_update_lock_is_held() {
 }
 
 fm_update_lock_owned_by_process() {
-  fm_lifecycle_admission_lock_owned_by_process "$1"
+  local lock=$1 installed_update="$FM_ROOT/bin/fm-update.sh"
+  fm_lifecycle_admission_lock_owned_by_process "$lock" && return 0
+  fm_lifecycle_admission_adopt_legacy_update_reexec "$lock" "$installed_update" \
+    && fm_lifecycle_admission_lock_owned_by_process "$lock"
 }
 
 fm_ff_target_lock_acquire() {

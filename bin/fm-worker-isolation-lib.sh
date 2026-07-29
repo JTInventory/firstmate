@@ -44,6 +44,7 @@
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
 FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$_FM_WORKER_ISOLATION_LIB_DIR/fm-procargs-lib.sh"
 
 fm_worker_shell_quote() {  # <text>
   printf "'"
@@ -157,9 +158,35 @@ fm_worker_secondmate_effective_scope_matches() {
   done
 }
 
+fm_worker_process_environment() {
+  local pid=$1 value
+  if [ -r "/proc/$pid/environ" ]; then
+    value=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+    return
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+  fm_procargs2_environ "$pid"
+}
+
+fm_worker_linked_primary_topology_matches() {
+  local root=$1 home=$2 root_common home_common root_top home_top
+  root_top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || return 1
+  home_top=$(git -C "$home" rev-parse --show-toplevel 2>/dev/null) || return 1
+  root_common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || return 1
+  home_common=$(git -C "$home" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || return 1
+  [ "$(fm_worker_canonical_path "$root_top")" = "$root" ] \
+    && [ "$(fm_worker_canonical_path "$home_top")" = "$home" ] \
+    && [ "$(fm_worker_canonical_path "$root_common")" = \
+      "$(fm_worker_canonical_path "$home_common")" ]
+}
+
 fm_worker_primary_authority_matches() {
   local operation=${1:-} root home root_real home_real cwd branch default ref
-  local pid ppid env binding
+  local pid ppid env binding old holder_status stop_pid=1
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -182,32 +209,40 @@ fm_worker_primary_authority_matches() {
   [ "$branch" = "$default" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
     || return 1
-  pid=$$
-  while [ "$pid" -gt 1 ] 2>/dev/null; do
-    env=
-    if [ -r "/proc/$pid/environ" ]; then
-      env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null || true)
-    elif command -v ps >/dev/null 2>&1; then
-      env=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null || true)
+  . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+  if [ -e "$home_real/state/.lock" ] || [ -L "$home_real/state/.lock" ]; then
+    [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
+    old=$(cat "$home_real/state/.lock" 2>/dev/null) || return 1
+    if fm_session_lock_owned_by_self "$home_real/state"; then
+      stop_pid=${old%%|*}
+      case "$stop_pid" in ''|*[!0-9]*) return 1 ;; esac
+    else
+      [ "$operation" = "session lock acquisition" ] || return 1
+      if fm_session_lock_holder_state "$old"; then
+        holder_status=0
+      else
+        holder_status=$?
+      fi
+      [ "$holder_status" -eq 1 ] || return 1
     fi
+  fi
+  pid=$$
+  while :; do
+    env=$(fm_worker_process_environment "$pid") || return 1
     if printf '%s\n' "$env" | grep -Eq '(^|[[:space:]])FM_AGENT_ROLE=(crewmate|secondmate)($|[[:space:]])'; then
       return 1
     fi
+    [ "$pid" != "$stop_pid" ] && [ "$pid" -gt 1 ] || break
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
     case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
     [ "$ppid" != "$pid" ] || return 1
     pid=$ppid
   done
-  if [ -e "$home_real/state/.lock" ] || [ -L "$home_real/state/.lock" ]; then
-    [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
-    . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
-    fm_session_lock_owned_by_self "$home_real/state" || return 1
-  fi
   if [ "$root_real" != "$home_real" ]; then
     binding="$home_real/state/.primary-checkout"
     if [ "$operation" = "session lock acquisition" ] \
        && [ ! -e "$binding" ] && [ ! -L "$binding" ]; then
-      :
+      fm_worker_linked_primary_topology_matches "$root_real" "$home_real" || return 1
     else
       [ -f "$binding" ] && [ ! -L "$binding" ] || return 1
       [ "$(cat "$binding" 2>/dev/null || true)" = "$root_real" ] || return 1

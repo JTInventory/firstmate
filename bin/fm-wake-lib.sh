@@ -2,6 +2,7 @@
 # Shared durable wake queue and portable lock helpers.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$FM_WAKE_LIB_DIR/fm-procargs-lib.sh"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -56,6 +57,27 @@ fm_lifecycle_admission_authorize_reexec() {
   fm_lifecycle_admission_lock_owned_by_process "$lock" || return 1
   owner=$(fm_lock_link_owner "$lock") || return 1
   printf '%s\n' "$path" > "$owner/reexec-path"
+}
+
+fm_lifecycle_admission_adopt_legacy_update_reexec() {
+  local lock=$1 path=$2 owner current stored_start stored_identity current_identity
+  [ "${FM_UPDATE_REEXECED:-0}" = 1 ] || return 1
+  case "$path" in /*/bin/fm-update.sh) ;; *) return 1 ;; esac
+  current=${BASHPID:-$$}
+  owner=$(fm_lock_link_owner "$lock" 2>/dev/null) || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$current" ] || return 1
+  stored_start=$(cat "$owner/pid-start" 2>/dev/null || true)
+  [ -n "$stored_start" ] \
+    && fm_pid_start_matches_stored "$current" "$stored_start" || return 1
+  [ ! -e "$owner/process-token" ] && [ ! -L "$owner/process-token" ] || return 1
+  [ ! -e "$owner/reexec-path" ] && [ ! -L "$owner/reexec-path" ] || return 1
+  stored_identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  case "$stored_identity" in *"/fm-update.sh"*) ;; *) return 1 ;; esac
+  fm_pid_command_matches_path "$current" "$path" || return 1
+  current_identity=$(fm_pid_identity "$current") || return 1
+  printf '%s\n' "$current_identity" > "$owner/pid-identity" || return 1
+  printf '%s\n' "$FM_LOCK_PROCESS_TOKEN" > "$owner/process-token"
 }
 
 fm_lifecycle_admission_acquire() {
@@ -242,23 +264,10 @@ fm_lifecycle_read_proc_argv() {
 }
 
 fm_lifecycle_read_fallback_argv() {
-  local pid=$1 arg saw_executable=0 saw_argv=0
+  local pid=$1
   FM_LIFECYCLE_ARGV=()
-  command -v sysctl >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 || return 2
-  sysctl -n kern.procargs2 "$pid" >/dev/null 2>&1 || return 2
-  while IFS= read -r -d '' arg; do
-    if [ "$saw_executable" -eq 0 ]; then
-      [ -n "$arg" ] || continue
-      saw_executable=1
-      continue
-    fi
-    if [ "$saw_argv" -eq 0 ]; then
-      [ -n "$arg" ] || continue
-      saw_argv=1
-    fi
-    FM_LIFECYCLE_ARGV+=("$arg")
-  done < <(sysctl -n kern.procargs2 "$pid" 2>/dev/null | dd bs=4 skip=1 2>/dev/null)
-  [ "${#FM_LIFECYCLE_ARGV[@]}" -gt 0 ] || return 2
+  fm_procargs2_read "$pid" || return 2
+  FM_LIFECYCLE_ARGV=("${FM_PROCARGS_ARGV[@]}")
 }
 
 fm_lifecycle_process_executable() {

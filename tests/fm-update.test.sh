@@ -1063,7 +1063,7 @@ test_fallback_argv_provider_fails_closed_without_boundaries() {
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     sysctl() {
-      printf '\001\000\000\000/usr/bin/bash\000\000bash\000%s\000later argument\000' "$script"
+      printf '\003\000\000\000/usr/bin/bash\000\000bash\000%s\000later argument\000' "$script"
     }
     fm_lifecycle_read_fallback_argv 999
     [ "${FM_LIFECYCLE_ARGV[0]}" = bash ] \
@@ -1208,10 +1208,14 @@ test_acknowledgement_requires_locked_strict_preflight() {
 }
 
 test_reexec_lock_reentry_requires_complete_identity() {
-  local w lock
+  local w lock helper
   w=$(new_world t31-reexec-lock)
   lock="$w/home/state/.reexec-test.lock"
-  bash "$ROOT/tests/fixtures/fm-lock-reexec-helper.sh" "$ROOT" "$lock" \
+  mkdir -p "$w/bin"
+  helper="$w/bin/fm-update.sh"
+  cp "$ROOT/tests/fixtures/fm-lock-reexec-helper.sh" "$helper"
+  chmod +x "$helper"
+  "$helper" "$ROOT" "$lock" \
     || fail "complete reexec identity could not safely reenter its symlink lock"
   pass "reexec lock ownership verifies PID, start, identity, token, and symlink"
 }
