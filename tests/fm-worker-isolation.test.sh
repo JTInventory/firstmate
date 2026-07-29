@@ -1089,7 +1089,7 @@ test_durable_receipts_survive_live_key_rotation() {
 }
 
 test_durable_custodian_is_root_bound_and_scoped() {
-  local home state record first_pid second_pid
+  local home state record first_pid second_pid owner
   if ! fm_session_descriptor_channel_isolated \
     "$FM_SESSION_AUTHORITY_DURABLE_FD"; then
     pass "skip: sibling process access to durable authority is not isolated"
@@ -1099,7 +1099,14 @@ test_durable_custodian_is_root_bound_and_scoped() {
   state="$home/state"
   record="$state/.session-durable-authority"
   mkdir -p "$state"
-  fm_session_durable_custodian_ensure "$state" "$home" "$ROOT" \
+  ! fm_session_durable_custodian_ensure "$state" "$home" "$ROOT" \
+    || fail "a library caller self-authorized durable custodian creation"
+  owner=$(fm_session_lock_owner)
+  fm_session_authority_write_file "$state/.session-authority" \
+    "${owner%%|*}" "$owner" "$home" "$ROOT" \
+    || fail "could not publish the custodian test authority"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$AUTHORITY_EXEC" true \
     || fail "authority could not launch its durable custodian"
   fm_session_durable_custodian_validate "$record" \
     || fail "custodian record was not bound to the durable root"
@@ -1107,10 +1114,13 @@ test_durable_custodian_is_root_bound_and_scoped() {
   if [ "$(uname -s 2>/dev/null)" = Linux ]; then
     [ ! -e "/proc/$first_pid/fd/9" ] \
       || fail "durable custodian retained the live authority descriptor"
+    [ ! -e "/proc/$first_pid/fd/17" ] \
+      || fail "durable custodian retained its launch signing descriptor"
   fi
   sed -i 's/^authority-hmac=.*/authority-hmac=0000000000000000000000000000000000000000000000000000000000000000/' \
     "$record"
-  fm_session_durable_custodian_ensure "$state" "$home" "$ROOT" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$AUTHORITY_EXEC" true \
     || fail "authority could not replace an invalid custodian record"
   fm_session_durable_custodian_validate "$record" \
     || fail "replacement custodian lost durable-root continuity"
@@ -1118,7 +1128,7 @@ test_durable_custodian_is_root_bound_and_scoped() {
   [ "$second_pid" != "$first_pid" ] \
     || fail "invalid custodian record did not trigger authenticated replacement"
   rm -f "$record"
-  pass "durable custodian launch, scope, and replacement stay root-bound"
+  pass "only the production broker can preserve or replace the durable custodian"
 }
 
 test_authority_hmac_needs_only_openssl() {

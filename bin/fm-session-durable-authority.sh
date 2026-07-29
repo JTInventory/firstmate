@@ -9,16 +9,37 @@ home=$2
 checkout=$3
 session_pid=$4
 session_start=$5
+[ "$6" = --custodian-public-key ] || exit 1
+custodian_public=$7
+[ "$8" = --custodian-public-key-sha256 ] || exit 1
+custodian_public_digest=$9
 record="$state/.session-durable-authority"
 requests="$state/.session-durable-authority-requests"
 key=
 live_key=
+custodian_private=
 IFS= read -r key <&18 || exit 1
 IFS= read -r live_key <&9 || exit 1
+IFS= read -r custodian_private <&17 || exit 1
+while IFS= read -r custodian_private_line <&17; do
+  custodian_private="${custodian_private}
+${custodian_private_line}"
+done
 [ "${#key}" -ge 64 ] || exit 1
 case "$key" in *[!0-9a-f]*) exit 1 ;; esac
 [ "${#live_key}" -ge 64 ] || exit 1
 case "$live_key" in *[!0-9a-f]*) exit 1 ;; esac
+derived_public_pem=$(printf '%s\n' "$custodian_private" \
+  | openssl ec -pubout 2>/dev/null) || exit 1
+derived_public=$(printf '%s\n' "$derived_public_pem" \
+  | openssl base64 -A) || exit 1
+[ "$derived_public" = "$custodian_public" ] || exit 1
+derived_public_digest_output=$(printf '%s\n' "$derived_public_pem" \
+  | openssl dgst -sha256 2>/dev/null) || exit 1
+derived_public_digest=${derived_public_digest_output##*= }
+[ "$derived_public_digest" = "$custodian_public_digest" ] || exit 1
+unset derived_public_pem derived_public derived_public_digest_output
+unset derived_public_digest
 launch="${record}.launch.$$"
 attempts=0
 while [ "$attempts" -lt 100 ] \
@@ -27,8 +48,8 @@ while [ "$attempts" -lt 100 ] \
   attempts=$((attempts + 1))
 done
 [ -f "$launch" ] && [ ! -L "$launch" ] \
-  && [ "$(wc -l < "$launch" | tr -d ' ')" -eq 11 ] \
-  && [ "$(sed -n '1p' "$launch")" = version=1 ] \
+  && [ "$(wc -l < "$launch" | tr -d ' ')" -eq 13 ] \
+  && [ "$(sed -n '1p' "$launch")" = version=2 ] \
   && [ "$(sed -n '2s/^pid=//p' "$launch")" = "$$" ] \
   && [ "$(sed -n '3s/^start=//p' "$launch")" \
     = "$(fm_session_process_start "$$" 2>/dev/null)" ] \
@@ -39,10 +60,14 @@ done
   && [ "$(sed -n '7s/^checkout=//p' "$launch")" = "$checkout" ] \
   && [ "$(sed -n '8s/^session-pid=//p' "$launch")" = "$session_pid" ] \
   && [ "$(sed -n '9s/^session-start=//p' "$launch")" = "$session_start" ] \
+  && [ "$(sed -n '10s/^custodian-public-key=//p' "$launch")" \
+    = "$custodian_public" ] \
+  && [ "$(sed -n '11s/^custodian-public-key-sha256=//p' "$launch")" \
+    = "$custodian_public_digest" ] \
   || exit 1
-launch_body=$(sed -n '1,9p' "$launch")$'\n'
-launch_live=$(sed -n '10s/^live-authority-hmac=//p' "$launch")
-launch_durable=$(sed -n '11s/^durable-authority-hmac=//p' "$launch")
+launch_body=$(sed -n '1,11p' "$launch")$'\n'
+launch_live=$(sed -n '12s/^live-authority-hmac=//p' "$launch")
+launch_durable=$(sed -n '13s/^durable-authority-hmac=//p' "$launch")
 [ "$launch_live" = "$(printf '%s' "$launch_body" \
     | fm_session_hmac_sha256_key "$live_key")" ] \
   && [ "$launch_durable" = "$(printf '%s' "$launch_body" \
@@ -50,6 +75,7 @@ launch_durable=$(sed -n '11s/^durable-authority-hmac=//p' "$launch")
 rm -f "$launch"
 exec 9<&-
 exec 18<&-
+exec 17<&-
 unset live_key
 unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
 unset FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
@@ -60,9 +86,9 @@ identity=$(fm_session_process_identity "$$") || exit 1
 tmp=$(mktemp "${record}.XXXXXX") || exit 1
 mkdir -p "$requests" || exit 1
 chmod 700 "$requests" || exit 1
-body=$(printf 'version=2\npid=%s\nstart=%s\nidentity=%s\nsession-pid=%s\nsession-start=%s\nhome=%s\ncheckout=%s\n' \
+body=$(printf 'version=3\npid=%s\nstart=%s\nidentity=%s\nsession-pid=%s\nsession-start=%s\nhome=%s\ncheckout=%s\ncustodian-public-key=%s\ncustodian-public-key-sha256=%s\n' \
   "$$" "$start" "$identity" "$session_pid" "$session_start" "$home" \
-  "$checkout") || exit 1
+  "$checkout" "$custodian_public" "$custodian_public_digest") || exit 1
 body="${body}"$'\n'
 hmac=$(printf '%s' "$body" | fm_session_hmac_sha256_key "$key") || exit 1
 printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
@@ -72,8 +98,69 @@ printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
   }
 
 while :; do
-  [ -f "$record" ] \
-    && [ "$(sed -n '2s/^pid=//p' "$record" 2>/dev/null)" = "$$" ] || exit 0
+  [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ "$(cat "$record" 2>/dev/null)" = \
+      "$(printf '%sauthority-hmac=%s' "$body" "$hmac")" ] || exit 0
+  for challenge in "$requests"/*.recovery-challenge; do
+    [ -e "$challenge" ] || continue
+    challenge_response="${challenge}.response"
+    [ -f "$challenge" ] && [ ! -L "$challenge" ] \
+      && [ ! -e "$challenge_response" ] && [ ! -L "$challenge_response" ] \
+      && [ "$(wc -l < "$challenge" | tr -d ' ')" -eq 6 ] \
+      && [ "$(sed -n '1p' "$challenge")" = version=1 ] \
+      && [ "$(sed -n '3s/^custodian-pid=//p' "$challenge")" = "$$" ] \
+      && [ "$(sed -n '4s/^custodian-start=//p' "$challenge")" = "$start" ] \
+      || {
+        rm -f "$challenge"
+        continue
+      }
+    challenge_requester=$(sed -n '5s/^requester-pid=//p' "$challenge")
+    challenge_requester_start=$(sed -n '6s/^requester-start=//p' "$challenge")
+    case "$challenge_requester" in
+      ''|*[!0-9]*) rm -f "$challenge"; continue ;;
+    esac
+    [ "$(fm_session_process_start "$challenge_requester" 2>/dev/null)" \
+      = "$challenge_requester_start" ] || {
+        rm -f "$challenge"
+        continue
+      }
+    challenge_body=$(cat "$challenge")$'\n'
+    challenge_hmac=$(printf '%s' "$challenge_body" \
+      | fm_session_hmac_sha256_key "$key") || {
+        rm -f "$challenge"
+        continue
+      }
+    challenge_signature=$(mktemp "${TMPDIR:-/tmp}/fm-custodian-signature.XXXXXX") \
+      || {
+        rm -f "$challenge"
+        continue
+      }
+    challenge_body_file=$(mktemp "${TMPDIR:-/tmp}/fm-custodian-body.XXXXXX") \
+      || {
+        rm -f "$challenge" "$challenge_signature"
+        continue
+      }
+    printf '%s' "$challenge_body" > "$challenge_body_file" \
+      && fm_session_enrollment_sign_data \
+        "$custodian_private" "$challenge_signature" "$challenge_body_file" \
+      && challenge_signature_data=$(openssl base64 -A < "$challenge_signature") \
+      || {
+        rm -f "$challenge" "$challenge_signature" "$challenge_body_file"
+        continue
+      }
+    rm -f "$challenge_signature" "$challenge_body_file"
+    challenge_tmp=$(mktemp "${challenge_response}.XXXXXX") || {
+      rm -f "$challenge"
+      continue
+    }
+    printf '%scustodian-signature=%s\nauthority-hmac=%s\n' \
+      "$challenge_body" "$challenge_signature_data" "$challenge_hmac" \
+      > "$challenge_tmp" \
+      && chmod 600 "$challenge_tmp" \
+      && mv "$challenge_tmp" "$challenge_response" \
+      || rm -f "$challenge_tmp"
+    rm -f "$challenge"
+  done
   for challenge in "$requests"/*.challenge; do
     [ -e "$challenge" ] || continue
     challenge_response="${challenge}.response"
@@ -167,8 +254,29 @@ while :; do
           rm -f "$request"
           continue
         }
+    requester_role=$(fm_session_process_environment_value \
+      "$requester" FM_AGENT_ROLE 2>/dev/null || true)
+    requester_task=$(fm_session_process_environment_value \
+      "$requester" FM_AGENT_TASK 2>/dev/null || true)
+    requester_home=$(fm_session_process_environment_value \
+      "$requester" FM_AGENT_OWNER_HOME 2>/dev/null || true)
     role_found=0
-    current=$requester
+    case "$requester_role" in
+      "")
+        current=$requester
+        ;;
+      secondmate)
+        [ -n "$requester_task" ] && [ "$requester_home" = "$home" ] || {
+          rm -f "$request"
+          continue
+        }
+        current=$(fm_session_parent_pid "$requester" 2>/dev/null || printf 1)
+        ;;
+      *)
+        rm -f "$request"
+        continue
+        ;;
+    esac
     while [ "$current" -gt 1 ]; do
       if ! env=$(fm_session_process_environment "$current" 2>/dev/null); then
         role_found=1

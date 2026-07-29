@@ -139,14 +139,27 @@ write_migration_launch_receipt() {
 run_under_replacement_broker() {
   local command=$1
   shift
-  local old_live old_durable
+  local old_live old_durable authority authority_backup status=0
   old_live=$(printf rotation-proof | fm_session_authority_hmac) || return 1
   old_durable=$(printf rotation-proof | fm_session_authority_durable_hmac) \
     || return 1
-  fm_session_durable_custodian_ensure \
-    "$FM_STATE_OVERRIDE" "$FM_HOME" "$ROOT" || return 1
-  sed -i 's/^pid=.*/pid=99999999/' \
-    "$FM_STATE_OVERRIDE/.session-authority" || return 1
+  authority="$FM_STATE_OVERRIDE/.session-authority"
+  authority_backup=$(mktemp "$TMP_ROOT/replacement-authority.XXXXXX") \
+    || return 1
+  cp "$authority" "$authority_backup" || {
+    rm -f "$authority_backup"
+    return 1
+  }
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$FM_STATE_OVERRIDE" \
+    "$ROOT/bin/fm-session-authority-exec.sh" true || {
+      rm -f "$authority_backup"
+      return 1
+    }
+  sed -i 's/^pid=.*/pid=99999999/' "$authority" || {
+    rm -f "$authority_backup"
+    return 1
+  }
   (
     exec 9<&-
     exec 18<&-
@@ -166,7 +179,10 @@ run_under_replacement_broker() {
     [ "$new_durable" = "$old_durable" ] || exit 1
     bash -c "$command" _ "$root" "$@"
     ' _ "$ROOT" "$command" "$old_live" "$old_durable" "$@"
-  )
+  ) || status=$?
+  cp "$authority_backup" "$authority" || status=1
+  rm -f "$authority_backup"
+  return "$status"
 }
 
 new_protocol_migration_world() {

@@ -266,10 +266,37 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     eval "exec ${durable_fd}<&-"
   fi
   unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
-  fm_session_authority_descriptor_create || {
-    echo "error: protected session authority descriptor is unavailable" >&2
-    exit 1
-  }
+  if [ -e "$STATE/.session-durable-authority" ] \
+    || [ -L "$STATE/.session-durable-authority" ]; then
+    [ -f "$STATE/.session-durable-authority" ] \
+      && [ ! -L "$STATE/.session-durable-authority" ] || {
+        echo "error: durable session authority custodian is invalid" >&2
+        exit 1
+      }
+    if [ -z "$durable_recovery" ]; then
+      fm_session_durable_consumer_prepare || {
+        echo "error: durable session authority recovery key is unavailable" >&2
+        exit 1
+      }
+      exec "$SCRIPT_DIR/fm-session-authority-exec.sh" \
+        --durable-recovery "$FM_SESSION_DURABLE_RECOVERY_NONCE" \
+        --durable-consumer-key "$FM_SESSION_DURABLE_CONSUMER_PUBLIC" \
+        --durable-consumer-key-sha256 "$FM_SESSION_DURABLE_CONSUMER_SHA256" \
+        "$@"
+    fi
+    fm_session_durable_authority_recover \
+      "$STATE" "$home_real" "$FM_ROOT" "$durable_recovery" \
+      "$durable_consumer_key" "$durable_consumer_digest" \
+      && fm_session_authority_live_descriptor_rotate || {
+        echo "error: durable session authority recovery failed" >&2
+        exit 1
+      }
+  else
+    fm_session_authority_descriptor_create || {
+      echo "error: protected session authority descriptor is unavailable" >&2
+      exit 1
+    }
+  fi
 elif [ "$enrollment_fd" = 9 ] \
   && fm_session_authority_capability_present; then
   if ! fm_session_authority_durable_capability_present; then
@@ -327,14 +354,14 @@ else
     }
   fi
 fi
-fm_session_durable_custodian_ensure "$STATE" "$home_real" "$FM_ROOT" || {
-  echo "error: durable session authority custodian is unavailable" >&2
-  exit 1
-}
 FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
+fm_session_durable_custodian_ensure "$STATE" "$home_real" "$FM_ROOT" || {
+  echo "error: durable session authority custodian is unavailable" >&2
+  exit 1
+}
 export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
 export FM_SESSION_AUTHORITY_BROKER_PID
 export FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY
