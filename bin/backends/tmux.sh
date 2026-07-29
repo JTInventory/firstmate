@@ -63,15 +63,42 @@ fm_backend_tmux_set_task_option() {  # <target> <option> <value>
   tmux set-window-option -t "$1" "$2" "$3"
 }
 
+fm_backend_tmux_pane_id() {
+  local pane number
+  pane=$(tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null \
+    | tr -d '[:space:]') || return 1
+  case "$pane" in %*) ;; *) return 1 ;; esac
+  number=${pane#%}
+  case "$number" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$pane"
+}
+
+fm_backend_tmux_bind_endpoint_generation() {
+  local pane=$1 generation=$2 number
+  case "$pane" in %*) ;; *) return 1 ;; esac
+  number=${pane#%}
+  case "$number" in ''|*[!0-9]*) return 1 ;; esac
+  tmux set-option -p -t "$pane" @firstmate_endpoint_generation "$generation" \
+    || return 1
+  [ "$(tmux show-options -p -v -t "$pane" \
+    @firstmate_endpoint_generation 2>/dev/null)" = "$generation" ]
+}
+
 fm_backend_tmux_endpoint_generation() {
-  tmux show-options -w -v -t "$1" @firstmate_endpoint_generation 2>/dev/null
+  tmux show-options -p -v -t "$1" @firstmate_endpoint_generation 2>/dev/null
 }
 
 fm_backend_tmux_endpoint_identity() {
-  local target=$1 generation
+  local target=$1 pane window window_number generation
+  pane=$(fm_backend_tmux_pane_id "$target") || return 1
+  window=$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null \
+    | tr -d '[:space:]') || return 1
+  case "$window" in @*) ;; *) return 1 ;; esac
+  window_number=${window#@}
+  case "$window_number" in ''|*[!0-9]*) return 1 ;; esac
   generation=$(fm_backend_tmux_endpoint_generation "$target") || return 1
   [ -n "$generation" ] || return 1
-  printf '%s|%s' "$target" "$generation"
+  printf '%s|%s|%s' "$window" "$pane" "$generation"
 }
 
 fm_backend_tmux_foreground_process_pid() {

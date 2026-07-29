@@ -1286,8 +1286,13 @@ case "$BACKEND" in
       exit 1
     fi
     ENDPOINT_GENERATION="fm-$(date +%s)-$$-$RANDOM"
-    if ! fm_backend_set_task_option \
-      "$BACKEND" "$WID" @firstmate_endpoint_generation "$ENDPOINT_GENERATION"; then
+    SPAWN_ENDPOINT_TARGET=$(fm_backend_tmux_pane_id "$WID") || {
+      cleanup_spawn_window "$WID"
+      echo "error: tmux did not return an exact pane id for $T" >&2
+      exit 1
+    }
+    if ! fm_backend_bind_endpoint_generation \
+      "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$ENDPOINT_GENERATION"; then
       cleanup_spawn_window "$WID"
       echo "error: tmux failed to bind endpoint generation for $T" >&2
       exit 1
@@ -1483,19 +1488,23 @@ EOF
       echo "error: Herdr failed to bind a unique endpoint generation for $T" >&2
       exit 1
     fi
+    SPAWN_ENDPOINT_TARGET="$T"
     ;;
 esac
 SPAWN_EXPECTED_ENDPOINT_IDENTITY=
 if [ "$KIND" = secondmate ]; then
-  case "$BACKEND" in
-    tmux)
-      SPAWN_EXPECTED_ENDPOINT_IDENTITY="$WID|$ENDPOINT_GENERATION"
-      ;;
-    herdr)
-      SPAWN_EXPECTED_ENDPOINT_IDENTITY="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"
-      ;;
-    *) exit 1 ;;
-  esac
+  SPAWN_EXPECTED_ENDPOINT_IDENTITY=$(
+    fm_backend_endpoint_identity "$BACKEND" "$SPAWN_ENDPOINT_TARGET"
+  ) || {
+    echo "error: could not bind the exact endpoint identity for $T" >&2
+    exit 1
+  }
+  if [ "$BACKEND" = herdr ] \
+    && [ "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
+      != "$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION" ]; then
+    echo "error: Herdr endpoint identity changed during spawn" >&2
+    exit 1
+  fi
 fi
 spawn_settle_path() {  # <target>
   local record
@@ -1751,7 +1760,7 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
 if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_ENROLLMENT="$PROJ_ABS/state/.session-authority-enrollment"
   SPAWN_AUTHORITY_LAUNCH=$(fm_session_random_hex 32) || exit 1
-  LAUNCH="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") ${WORKER_ENV_PREFIX}$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
+  LAUNCH="PATH=$(shell_quote "$PATH") GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") ${WORKER_ENV_PREFIX}$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 fi
@@ -1791,7 +1800,7 @@ HERDR_FLAT_ABORT_CLEANUP=0
 if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_ENDPOINT_PID=$(
     fm_backend_launch_trusted_process \
-      "$BACKEND" "$WID" "$ID" "$PROJ_ABS" "$LAUNCH" \
+      "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$ID" "$PROJ_ABS" "$LAUNCH" \
       "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" 2>/dev/null
   ) || SPAWN_AUTHORITY_ENDPOINT_PID=
   [ -n "$SPAWN_AUTHORITY_ENDPOINT_PID" ] || {
@@ -1801,7 +1810,7 @@ if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS=0
   while [ "$SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS" -lt 250 ]; do
     if fm_backend_launch_process_is_current \
-      "$BACKEND" "$WID" "$SPAWN_AUTHORITY_ENDPOINT_PID" \
+      "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$SPAWN_AUTHORITY_ENDPOINT_PID" \
       "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
       && fm_session_process_runs_script \
         "$SPAWN_AUTHORITY_ENDPOINT_PID" \
@@ -1809,7 +1818,8 @@ if [ "$KIND" = secondmate ]; then
       && [ "$(fm_session_process_argument_value \
         "$SPAWN_AUTHORITY_ENDPOINT_PID" --enrollment-launch 2>/dev/null)" \
         = "$SPAWN_AUTHORITY_LAUNCH" ] \
-      && [ "$(fm_backend_endpoint_identity "$BACKEND" "$WID" 2>/dev/null)" \
+      && [ "$(fm_backend_endpoint_identity \
+        "$BACKEND" "$SPAWN_ENDPOINT_TARGET" 2>/dev/null)" \
         = "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" ]; then
       break
     fi
@@ -1841,6 +1851,15 @@ if [ "$KIND" = secondmate ]; then
       echo "error: secondmate $ID did not consume trusted session enrollment" >&2
       exit 1
     }
+  fm_backend_launch_process_is_current \
+    "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$SPAWN_AUTHORITY_ENDPOINT_PID" \
+    "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
+    && [ "$(fm_backend_endpoint_identity \
+      "$BACKEND" "$SPAWN_ENDPOINT_TARGET" 2>/dev/null)" \
+      = "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" ] || {
+    echo "error: trusted endpoint identity changed after secondmate $ID accepted enrollment" >&2
+    exit 1
+  }
 else
   fm_backend_send_key "$BACKEND" "$WID" Enter
 fi

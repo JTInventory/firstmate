@@ -29,14 +29,17 @@ For a secondmate spawn, this declaration precedes
 one-use signed enrollment ticket in that home without exposing the issuer key.
 The signer binds its public-key digest to its live protected process. Spawn
 launches a randomly tagged wrapper through a backend-owned operation and
-resolves that exact PID through tmux's serialized respawn response or Herdr's direct agent-start
-response and pane process-info. Herdr enrollment also compares the complete
-live session/workspace/tab/pane/generation tuple with the recorded endpoint. The ticket
+resolves that exact PID through tmux's exact-pane serialized respawn response
+or Herdr's direct agent-start response and pane process-info. The normalized
+launcher `PATH` is carried into that direct process launch. Both backends compare
+their complete live endpoint identity with the recorded endpoint before ticket
+issue and again after authenticated acceptance. The ticket
 binds the wrapper's start value and executable identity, and the signer accepts
 only that exact process. The
 private signing key stays in shell memory and fresh anonymous pipes, with no
 filesystem pathname, environment export, or terminal command text. Spawn waits
-for the matching acceptance receipt before reporting success.
+for the matching acceptance receipt and the final identity recheck before
+reporting success.
 
 The declaration refuses rather than emitting a partial prefix:
 

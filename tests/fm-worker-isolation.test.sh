@@ -163,6 +163,8 @@ case "${1:-}" in
     ;;
   display-message)
     case "$*" in
+      *"#{pane_id}"*) printf '%s\n' "${FM_FAKE_PANE_ID:-%42}" ;;
+      *"#{window_id}"*) printf '%s\n' "${FM_FAKE_WINDOW_ID:-@42}" ;;
       *"#{window_name}"*) [ ! -f "$FAKE_TMUX_STATE" ] || cat "$FAKE_TMUX_STATE" ;;
       *) printf 'firstmate\n' ;;
     esac
@@ -186,13 +188,13 @@ case "${1:-}" in
     exit 0
     ;;
   set-window-option) exit 0 ;;
+  set-option)
+    printf '%s\n' "${@: -1}" > "${FAKE_TMUX_STATE}.generation"
+    exit 0
+    ;;
   show-options)
-    target=
-    while [ $# -gt 0 ]; do
-      if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
-      shift
-    done
-    printf 'endpoint-%s\n' "${target##*:fm-}"
+    [ -f "${FAKE_TMUX_STATE}.generation" ] \
+      && cat "${FAKE_TMUX_STATE}.generation"
     exit 0
     ;;
   rename-window) printf '%s\n' "${@: -1}" > "$FAKE_TMUX_STATE"; exit 0 ;;
@@ -270,7 +272,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
 }
 
 test_secondmate_child_receives_only_its_own_home() {
-  local expected launch_line ticket_line wrapper_line wait_line clear_line release_line spawned_line
+  local expected launch_line ticket_line wrapper_line wait_line recheck_line clear_line release_line spawned_line
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
     "FM_HOME='/homes/dom' "*) : ;;
@@ -281,7 +283,7 @@ test_secondmate_child_receives_only_its_own_home() {
   launch_line=$(grep -n 'fm_backend_launch_trusted_process' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   ticket_line=$(grep -n 'fm_session_enrollment_ticket_write' "$SPAWN" | tail -1 | cut -d: -f1)
-  wrapper_line=$(grep -n 'LAUNCH="GOTMPDIR=.*fm-session-authority-exec.sh' \
+  wrapper_line=$(grep -n 'LAUNCH="PATH=.*GOTMPDIR=.*fm-session-authority-exec.sh' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   [ -n "$wrapper_line" ] && [ -n "$launch_line" ] && [ -n "$ticket_line" ] \
     && [ "$wrapper_line" -lt "$launch_line" ] \
@@ -295,6 +297,9 @@ test_secondmate_child_receives_only_its_own_home() {
     "secondmate enrollment retained the tmux-only shell-pid proof"
   assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" "respawn-pane -k" \
     "tmux secondmate launch was not serialized with its returned pane pid"
+  assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" \
+    'show-options -p -v -t "$1"' \
+    "tmux endpoint generation was not bound to an exact pane"
   assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" "exec env \$command" \
     "tmux trusted launch placed environment assignments after exec"
   assert_contains "$(cat "$ROOT/bin/backends/herdr.sh")" "agent start" \
@@ -302,13 +307,16 @@ test_secondmate_child_receives_only_its_own_home() {
   assert_contains "$(cat "$ROOT/bin/backends/herdr.sh")" ".result.agent.pane_id" \
     "Herdr secondmate launch did not parse the real agent_started response"
   assert_contains "$(cat "$SPAWN")" \
-    'SPAWN_EXPECTED_ENDPOINT_IDENTITY="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"' \
+    '"$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"' \
     "Herdr enrollment did not bind the complete recorded endpoint identity"
   wait_line=$(grep -n 'fm_session_enrollment_ticket_wait_accepted' "$SPAWN" | tail -1 | cut -d: -f1)
+  recheck_line=$(grep -n 'trusted endpoint identity changed after secondmate' \
+    "$SPAWN" | tail -1 | cut -d: -f1)
   clear_line=$(grep -n '^SPAWN_AUTHORITY_ENROLLMENT=$' "$SPAWN" | tail -1 | cut -d: -f1)
   release_line=$(grep -n 'fm_lock_release "$SPAWN_TASK_LOCK"' "$SPAWN" | tail -1 | cut -d: -f1)
   spawned_line=$(grep -n '^echo "spawned ' "$SPAWN" | tail -1 | cut -d: -f1)
-  [ "$wait_line" -lt "$clear_line" ] && [ "$clear_line" -lt "$release_line" ] \
+  [ "$wait_line" -lt "$recheck_line" ] && [ "$recheck_line" -lt "$clear_line" ] \
+    && [ "$clear_line" -lt "$release_line" ] \
     && [ "$release_line" -lt "$spawned_line" ] \
     || fail "secondmate launch reports success before trusted enrollment is accepted"
   pass "a secondmate child receives its own home and no inherited override"
@@ -1026,15 +1034,22 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     tmux() {
       case "$1" in
         respawn-pane)
-          case "$*" in *"exec env GOTMPDIR=/g wrapper"*) printf "4242\n" ;; *) return 1 ;; esac
+          case "$*" in *"-t %3 "*"exec env PATH=/tools GOTMPDIR=/g wrapper"*) printf "4242\n" ;; *) return 1 ;; esac
           ;;
-        display-message) printf "4242\n" ;;
+        display-message)
+          case "$*" in
+            *"#{pane_id}"*) printf "%%3\n" ;;
+            *"#{window_id}"*) printf "@7\n" ;;
+            *"#{pane_pid}"*) printf "4242\n" ;;
+            *) return 1 ;;
+          esac
+          ;;
         show-options) printf "g7\n" ;;
         *) return 1 ;;
       esac
     }
     fm_backend_tmux_launch_trusted_process \
-      @7 domain /work "GOTMPDIR=/g wrapper" "@7|g7"
+      %3 domain /work "PATH=/tools GOTMPDIR=/g wrapper" "@7|%3|g7"
   ' _ "$ROOT") || fail "tmux serialized launch proof rejected its returned pane pid"
   [ "$out" = 4242 ] || fail "tmux serialized launch proof returned $out"
   out=$(bash -c '
@@ -1043,13 +1058,40 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     tmux() {
       case "$1" in
         respawn-pane) printf "4242\n" ;;
-        display-message) printf "4343\n" ;;
+        display-message)
+          case "$*" in
+            *"#{pane_id}"*) printf "%%3\n" ;;
+            *"#{window_id}"*) printf "@7\n" ;;
+            *"#{pane_pid}"*) printf "4343\n" ;;
+            *) return 1 ;;
+          esac
+          ;;
         show-options) printf "g7\n" ;;
         *) return 1 ;;
       esac
     }
-    ! fm_backend_tmux_launch_trusted_process @7 domain /work "wrapper" "@7|g7"
+    ! fm_backend_tmux_launch_trusted_process %3 domain /work "wrapper" "@7|%3|g7"
   ' _ "$ROOT") || fail "tmux accepted a pane replaced after its serialized launch"
+  out=$(bash -c '
+    FM_BACKEND_LIB_DIR="$1/bin"
+    . "$1/bin/backends/tmux.sh"
+    tmux() {
+      case "$1" in
+        respawn-pane) printf "4242\n" ;;
+        display-message)
+          case "$*" in
+            *"#{pane_id}"*) printf "%%3\n" ;;
+            *"#{window_id}"*) printf "@8\n" ;;
+            *"#{pane_pid}"*) printf "4242\n" ;;
+            *) return 1 ;;
+          esac
+          ;;
+        show-options) printf "g7\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    ! fm_backend_tmux_launch_trusted_process %3 domain /work "wrapper" "@7|%3|g7"
+  ' _ "$ROOT") || fail "tmux accepted an exact pane moved to another window"
   out=$(bash -c '
     . "$1/bin/backends/herdr.sh"
     fm_backend_herdr_endpoint_identity() {
