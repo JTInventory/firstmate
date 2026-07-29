@@ -302,11 +302,12 @@ Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection
 ## Codex session lock lifecycle
 
 Codex primaries use the tracked `SessionStart` hook to claim their home's
-session lock before the first model turn. Launch the primary through
-`bin/fm-session-authority-exec.sh`, which creates an immediately unlinked,
-inherited descriptor capability before it executes the harness. The structured
-owner binds that descriptor's durable process chain to the exact home,
-checkout, process start, executable identity, and `CODEX_THREAD_ID`.
+session lock before the first model turn. An initial trusted launcher supplies
+the enrollment descriptor. `bin/fm-session-authority-exec.sh` accepts only a
+verified live authority belonging to its current ancestor chain, then delegates
+an immediately unlinked descriptor capability before it executes the harness.
+The structured owner binds that descriptor's durable process chain to the exact
+home, checkout, process start, executable identity, and `CODEX_THREAD_ID`.
 Firstmate closes the descriptor before launching a crewmate; each secondmate
 receives a newly generated capability for its own home.
 
@@ -329,7 +330,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_SESSION_AUTHORITY_FD= # inherited anonymous descriptor; set only by fm-session-authority-exec.sh
+FM_SESSION_AUTHORITY_FD= # inherited anonymous descriptor; initially supplied by the trusted launcher, then delegated by fm-session-authority-exec.sh
 FM_BACKEND=tmux          # runtime session-provider override for new spawns; herdr is experimental and opt-in
 FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3   # additional `treehouse return` retries after a matching transient git index.lock error; invalid values use 3

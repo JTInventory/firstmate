@@ -1716,7 +1716,6 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   WORKER_HOME=$PROJ_ABS
   WORKER_ROLE=secondmate
-  LAUNCH="$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
 else
   WORKER_HOME=$(real_path_or_raw "$FM_HOME")
   WORKER_ROLE=crewmate
@@ -1726,6 +1725,9 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
   exit 1
 }
 LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
+if [ "$KIND" = secondmate ]; then
+  LAUNCH="$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

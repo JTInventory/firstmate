@@ -64,38 +64,67 @@ fm_session_descriptor_identity() {
   printf '%s\n' "$value"
 }
 
-fm_session_authority_capability_present() {
-  local fd=${FM_SESSION_AUTHORITY_FD:-}
+fm_session_random_hex() {
+  local bytes=${1:-48} value
+  case "$bytes" in ''|*[!0-9]*|0) return 1 ;; esac
+  value=$(od -An -N "$bytes" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  [ "${#value}" -eq $((bytes * 2)) ] || return 1
+  case "$value" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+fm_session_sha256_file() {
+  local file=$1 output digest
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+  output=$(openssl dgst -sha256 "$file" 2>/dev/null) || return 1
+  digest=${output##*= }
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$digest"
+}
+
+fm_session_hmac_sha256_key_file() {
+  local key_file=$1 key output digest
+  [ -r "$key_file" ] || return 1
+  key=$(tr -d '\n' < "$key_file" 2>/dev/null) || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  command -v openssl >/dev/null 2>&1 || return 1
+  output=$(openssl dgst -sha256 -hmac "$key" 2>/dev/null) || return 1
+  digest=${output##*= }
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$digest"
+}
+
+fm_session_authority_key_path() {
+  local fd=${FM_SESSION_AUTHORITY_FD:-} path
   case "$fd" in ''|*[!0-9]*) return 1 ;; esac
-  FM_SESSION_AUTHORITY_FD_NUMBER=$fd node -e '
-const fs = require("fs");
-const fd = Number(process.env.FM_SESSION_AUTHORITY_FD_NUMBER);
-if (!Number.isInteger(fd) || fd < 0 || fs.fstatSync(fd).size < 32) process.exit(1);
-' >/dev/null 2>&1
+  for path in "/dev/fd/$fd" "/proc/self/fd/$fd"; do
+    [ -r "$path" ] || continue
+    printf '%s\n' "$path"
+    return
+  done
+  return 1
+}
+
+fm_session_authority_capability_present() {
+  local key_path key
+  key_path=$(fm_session_authority_key_path) || return 1
+  key=$(tr -d '\n' < "$key_path" 2>/dev/null) || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
 }
 
 fm_session_authority_hmac() {
-  local fd=${FM_SESSION_AUTHORITY_FD:-}
-  fm_session_authority_capability_present || return 1
-  FM_SESSION_AUTHORITY_FD_NUMBER=$fd node -e '
-const crypto = require("crypto");
-const fs = require("fs");
-const fd = Number(process.env.FM_SESSION_AUTHORITY_FD_NUMBER);
-const size = fs.fstatSync(fd).size;
-const key = Buffer.alloc(size);
-if (fs.readSync(fd, key, 0, size, 0) !== size) process.exit(1);
-let data = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => data += chunk);
-process.stdin.on("end", () => {
-  if (key.length < 32) process.exit(1);
-  process.stdout.write(crypto.createHmac("sha256", key).update(data).digest("hex") + "\n");
-});'
+  local key_path
+  key_path=$(fm_session_authority_key_path) || return 1
+  fm_session_hmac_sha256_key_file "$key_path"
 }
 
 fm_session_authority_token() {
   local pid=$1 start=$2 identity=$3 owner=$4 home=$5 checkout=$6
-  command -v node >/dev/null 2>&1 || return 1
   printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$pid" "$start" "$identity" "$owner" "$home" "$checkout" \
     | fm_session_authority_hmac

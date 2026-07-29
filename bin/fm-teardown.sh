@@ -2546,6 +2546,10 @@ teardown_commit_staged_returns || {
   exit 1
 }
 teardown_reconcile_staged_returns
+teardown_transaction_receipts_complete || {
+  echo "error: teardown receipt validation failed; preserving transaction evidence" >&2
+  exit 1
+}
 TEARDOWN_COMMIT_TMP=$(mktemp "$TEARDOWN_TXN_DIR/.committed.XXXXXX") || exit 1
 printf '%s\n%s\n' "$ID" "$META_IDENTITY" > "$TEARDOWN_COMMIT_TMP" \
   && chmod 600 "$TEARDOWN_COMMIT_TMP" \

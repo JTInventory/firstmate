@@ -24,6 +24,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 LOCK="$ROOT/bin/fm-lock.sh"
+AUTHORITY_EXEC="$ROOT/bin/fm-session-authority-exec.sh"
 SWEEP="$ROOT/bin/fm-isolation-sweep.sh"
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-isolation)
@@ -414,18 +415,64 @@ test_caller_marker_cannot_replace_exact_session_authority() {
 }
 
 test_reparented_markerless_process_has_no_fresh_primary_authority() {
-  local primary_home out status=0
+  local primary_home case_dir child initial_parent final_parent status out attempts=0
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
-  rm -rf "$primary_home/state"
-  out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
-    -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    bash -c '
-      . "$1/bin/fm-worker-isolation-lib.sh"
-      ps() { return 1; }
-      fm_worker_refuse_primary_operation lock
-    ' _ "$ROOT" 2>&1) || status=$?
+  case_dir="$TMP_ROOT/reparented-enrollment"
+  mkdir -p "$case_dir"
+  perl -MPOSIX -e '
+    my ($dir, $home, $authority_exec) = @ARGV;
+    my $pid = fork();
+    die "fork failed" unless defined $pid;
+    if ($pid) {
+      select undef, undef, undef, 0.01 until -f "$dir/initial-parent";
+      exit 0;
+    }
+    open my $child_file, ">", "$dir/child" or die $!;
+    print {$child_file} "$$\n";
+    close $child_file;
+    my $initial = getppid();
+    open my $initial_file, ">", "$dir/initial-parent" or die $!;
+    print {$initial_file} "$initial\n";
+    close $initial_file;
+    select undef, undef, undef, 0.02 while getppid() == $initial;
+    open my $final_file, ">", "$dir/final-parent" or die $!;
+    print {$final_file} getppid() . "\n";
+    close $final_file;
+    open my $key_file, ">", "$dir/forged-key" or die $!;
+    print {$key_file} "f" x 96;
+    close $key_file;
+    open my $key_read, "<", "$dir/forged-key" or die $!;
+    POSIX::dup2(fileno($key_read), 7) >= 0 or die "dup2 failed";
+    $0 = "codex";
+    delete @ENV{qw(FM_AGENT_TASK FM_AGENT_OWNER_HOME)};
+    @ENV{qw(FM_AGENT_ROLE FM_SESSION_AUTHORITY_FD FM_ROOT_OVERRIDE FM_HOME)}
+      = ("primary", "7", $home, $home);
+    open STDOUT, ">", "$dir/output" or die $!;
+    open STDERR, ">&", \*STDOUT or die $!;
+    my $rc = system($authority_exec, "true");
+    my $status = $rc == -1 ? 127 : $rc >> 8;
+    open my $status_file, ">", "$dir/status" or die $!;
+    print {$status_file} "$status\n";
+    close $status_file;
+    exit 0;
+  ' "$case_dir" "$primary_home" "$AUTHORITY_EXEC"
+  child=$(cat "$case_dir/child")
+  BG_PIDS+=("$child")
+  while [ "$attempts" -lt 250 ]; do
+    [ -f "$case_dir/status" ] && break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  assert_present "$case_dir/status" "the reparented worker did not finish enrollment"
+  initial_parent=$(cat "$case_dir/initial-parent")
+  final_parent=$(cat "$case_dir/final-parent")
+  [ "$initial_parent" != "$final_parent" ] || fail "the enrollment worker was not reparented"
+  status=$(cat "$case_dir/status")
+  out=$(cat "$case_dir/output")
   expect_code 1 "$status" "a reparented markerless process must not create primary authority"
-  pass "fresh primary authority cannot be forged by clearing worker markers"
+  assert_contains "$out" "trusted session enrollment capability is missing or invalid" \
+    "reparented enrollment refusal lost its capability reason"
+  pass "a real reparented worker cannot mint enrollment by clearing and forging identity"
 }
 
 test_foreign_session_lock_defeats_primary_topology() {
@@ -596,20 +643,24 @@ test_procargs2_parser_separates_argv_and_environment() {
 write_session_authority_recovery_manifest() {
   local txn=$1 body hmac
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  body=$(printf 'version=1\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=1:1\nnew-binding=1:1\nnew-authority=1:1\n' \
+  fm_session_random_hex 48 > "$txn/key" || return 1
+  chmod 600 "$txn/key" || return 1
+  body=$(printf 'version=2\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=sha256:%064d\nnew-binding=sha256:%064d\nnew-authority=sha256:%064d\n' \
     "$(session_test_signature "$txn/old-lock")" \
     "$(session_test_signature "$txn/old-binding")" \
-    "$(session_test_signature "$txn/old-authority")")
-  hmac=$(printf '%s\n' "$body" | fm_session_authority_hmac) || return 1
+    "$(session_test_signature "$txn/old-authority")" 0 0 0)
+  hmac=$(printf '%s\n' "$body" \
+    | fm_session_hmac_sha256_key_file "$txn/key") || return 1
   printf '%s\nhmac=%s\n' "$body" "$hmac" > "$txn/manifest"
 }
 
 session_test_signature() {
-  local file=$1
+  local file=$1 digest
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     printf '%s\n' absent
   else
-    cksum "$file" | awk '{print $1 ":" $2}'
+    digest=$(fm_session_sha256_file "$file") || return 1
+    printf 'sha256:%s\n' "$digest"
   fi
 }
 
@@ -642,7 +693,7 @@ SH
 }
 
 test_session_authority_recovery_precedes_current_tuple_validation() {
-  local home txn out status=0
+  local home txn wrong_key out status=0
   home=$(make_primary_home "$TMP_ROOT/session-authority-mixed-recovery")
   txn="$home/state/.session-authority-transaction"
   mkdir "$txn"
@@ -653,12 +704,34 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
   printf '%s\n' ready > "$txn/ready"
   printf '%s\n' '999999|codex:foreign|fallback' > "$home/state/.lock"
   printf '%s\n' 'invalid-authority' > "$home/state/.session-authority"
-  out=$(cd "$home" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" "$LOCK" 2>&1) \
-    || status=$?
-  expect_code 0 "$status" "mixed authority state must recover before authority validation"
+  wrong_key="$home/wrong-launcher-key"
+  printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    > "$wrong_key"
+  out=$(cd "$home" && exec 7<"$wrong_key" \
+    && FM_SESSION_AUTHORITY_FD=7 FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+      "$LOCK" 2>&1) || status=$?
+  expect_code 1 "$status" "launcher-key loss must not prevent transaction recovery"
   assert_absent "$txn" "verified authority recovery left its transaction behind"
-  assert_contains "$out" "lock acquired" "recovered authority did not complete acquisition"
-  pass "session authority transaction recovery precedes current tuple validation"
+  [ "$(cat "$home/state/.lock")" != '999999|codex:foreign|fallback' ] \
+    || fail "durable-key recovery did not restore the saved lock"
+  pass "session authority transaction recovery survives launcher-key loss"
+}
+
+test_secondmate_authority_delegation_uses_no_node() {
+  local home fakebin out status=0
+  home=$(make_primary_home "$TMP_ROOT/secondmate-authority-delegation")
+  fakebin="$TMP_ROOT/no-node"
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
+  chmod +x "$fakebin/node"
+  out=$(cd "$home" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain \
+    FM_AGENT_OWNER_HOME="$home" "$AUTHORITY_EXEC" \
+    bash -c '. "$1/bin/fm-session-lock-lib.sh"; fm_session_authority_capability_present' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a declared secondmate must receive delegated session authority"
+  [ -z "$out" ] || fail "secondmate authority delegation emitted unexpected output: $out"
+  pass "secondmate authority delegation works without Node"
 }
 
 test_fresh_enrollment_requires_external_capability() {
@@ -2186,6 +2259,17 @@ test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling() {
   pass "receipt validation rejects symlinked, malformed, and incomplete proof sets"
 }
 
+test_normal_teardown_validates_receipts_before_commit() {
+  local receipt_line commit_line
+  receipt_line=$(grep -n '^teardown_transaction_receipts_complete || {' "$TEARDOWN" \
+    | tail -n 1 | cut -d: -f1)
+  commit_line=$(grep -n '^TEARDOWN_COMMIT_TMP=' "$TEARDOWN" | tail -n 1 | cut -d: -f1)
+  [ -n "$receipt_line" ] && [ -n "$commit_line" ] \
+    && [ "$receipt_line" -lt "$commit_line" ] \
+    || fail "normal teardown can commit before complete receipt validation"
+  pass "normal teardown validates every receipt before commit and evidence removal"
+}
+
 test_teardown_finishes_fallible_cleanup_before_provider_boundaries() {
   local rec fakebin log out status stamp
   rec=$(make_slot_world teardown-live-transaction)
@@ -2564,6 +2648,7 @@ test_procargs2_parser_separates_argv_and_environment
 test_session_authority_recovery_retains_unverified_backup
 test_session_authority_recovery_precedes_current_tuple_validation
 test_fresh_enrollment_requires_external_capability
+test_secondmate_authority_delegation_uses_no_node
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
@@ -2613,6 +2698,7 @@ test_teardown_refuses_duplicate_core_metadata_before_mutation
 test_teardown_refuses_stale_endpoint_generation_before_mutation
 test_staged_endpoint_close_is_not_provider_proof
 test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling
+test_normal_teardown_validates_receipts_before_commit
 test_teardown_finishes_fallible_cleanup_before_provider_boundaries
 test_verification_capture_includes_lifecycle_clears
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
