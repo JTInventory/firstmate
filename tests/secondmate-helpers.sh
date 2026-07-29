@@ -29,8 +29,13 @@ case "${1:-}" in
       [ -e "$FM_FAKE_REQUIRED_LOCK" ] || exit 42
     fi
     if [ "${1:-}" = send-keys ] && [ -n "${FM_FAKE_REPLACE_META_ON_SEND:-}" ]; then
-      sed -i 's/^endpoint_generation=.*/endpoint_generation=recycled/' \
-        "$FM_FAKE_REPLACE_META_ON_SEND"
+      meta_tmp=$(mktemp "${FM_FAKE_REPLACE_META_ON_SEND}.XXXXXX") || exit 1
+      sed 's/^endpoint_generation=.*/endpoint_generation=recycled/' \
+        "$FM_FAKE_REPLACE_META_ON_SEND" > "$meta_tmp" \
+        && mv "$meta_tmp" "$FM_FAKE_REPLACE_META_ON_SEND" || {
+          rm -f "$meta_tmp"
+          exit 1
+        }
     fi
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     if [ "${1:-}" = kill-window ]; then
