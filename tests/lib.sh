@@ -88,17 +88,16 @@ fm_test_tmproot() {
 }
 
 fm_test_session_authority_fd() {
-  local dir=$1 file="$1/.session-authority-key"
+  local dir=$1 key
   mkdir -p "$dir"
-  printf '%s' '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' > "$file"
+  key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   if ( : <&19 ) 2>/dev/null; then
     echo "test setup: descriptor 19 is already in use" >&2
     return 1
   fi
-  exec 19<"$file"
+  exec 19< <(while :; do printf '%s\n' "$key"; done)
   FM_SESSION_AUTHORITY_FD=19
   export FM_SESSION_AUTHORITY_FD
-  rm -f "$file"
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

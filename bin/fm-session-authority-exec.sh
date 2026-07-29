@@ -12,6 +12,11 @@ enrollment_authorized=
 enrollment_confirmed=
 enrollment_ticket_data=
 enrollment_acceptance_data=
+enrollment_ticket=
+cleanup_enrollment_ticket() {
+  [ -z "$enrollment_ticket" ] || rm -f -- "$enrollment_ticket"
+}
+trap cleanup_enrollment_ticket EXIT
 if [ "${1:-}" = --enrollment-confirmed ]; then
   [ "$#" -gt 2 ] || exit 2
   enrollment_confirmed=$2
@@ -118,7 +123,13 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
           "$confirmed_acceptance")" \
       && [ "$(sed -n '4s/^consumer-pid=//p' \
         "$confirmed_acceptance")" = "$$" ]; then
-      authorized=1
+      if fm_session_enrollment_final_write \
+        "${enrollment}.accepted.final" "$confirmed_acceptance" \
+        "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
+        "$(sed -n '6s/^consumer-public-key-sha256=//p' \
+          "$confirmed_acceptance")"; then
+        authorized=1
+      fi
     fi
     rm -f "$confirmed_ticket" "$confirmed_acceptance"
   elif [ -n "$enrollment_authorized" ]; then
@@ -139,6 +150,8 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
       enrollment_acceptance_data=$(
         openssl base64 -A < "${enrollment}.accepted"
       ) || exit 1
+      rm -f -- "$enrollment_ticket" || exit 1
+      enrollment_ticket=
       exec "$SCRIPT_DIR/fm-session-authority-exec.sh" \
         --enrollment-confirmed "$enrollment_authorized" \
         --enrollment-ticket-data "$enrollment_ticket_data" \
@@ -223,15 +236,20 @@ if [ "$enrollment_fd" != 9 ] && ( : <&9 ) 2>/dev/null; then
   echo "error: session authority descriptor 9 is already in use" >&2
   exit 1
 fi
-if [ "$enrollment_fd" = 9 ]; then
-  exec 9<&-
-elif [ -n "$enrollment_fd" ]; then
-  eval "exec ${enrollment_fd}<&-"
+if [ "$enrollment_fd" = 9 ] \
+  && fm_session_authority_capability_present; then
+  :
+else
+  if [ "$enrollment_fd" = 9 ]; then
+    exec 9<&-
+  elif [ -n "$enrollment_fd" ]; then
+    eval "exec ${enrollment_fd}<&-"
+  fi
+  fm_session_authority_descriptor_create || {
+    echo "error: protected session authority descriptor is unavailable" >&2
+    exit 1
+  }
 fi
-fm_session_authority_descriptor_create || {
-  echo "error: protected session authority descriptor is unavailable" >&2
-  exit 1
-}
 FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1

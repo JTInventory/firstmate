@@ -1940,7 +1940,7 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   receipt_dir="$home/state/.teardown-transactions/domain/closed-endpoints"
   mkdir -p "$receipt_dir"
   key=$(printf '%s' 'tmux|firstmate:fm-safe|endpoint-safe' \
-    | cksum | awk '{printf "%s-%s", $1, $2}')
+    | openssl dgst -sha256 | sed 's/^.*= //')
   printf '%s\n%s\n%s\n%s\n' tmux firstmate:fm-safe endpoint-safe \
     'transaction=foreign-transaction' > "$receipt_dir/$key"
   before=$(wc -l < "$log")
@@ -1956,8 +1956,12 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
     || fail "foreign endpoint receipt did not reject the transaction"
 
   rm -f "$home/state/domain.meta"
-  binding=$(cksum "$home/state/.teardown-transactions/domain/identity" \
-    | awk '{print $1 " " $2}')
+  binding=$(
+    {
+      cat "$home/state/.teardown-transactions/domain/identity"
+      printf 'receipt=endpoint|tmux|firstmate:fm-safe|endpoint-safe\n'
+    } | fm_session_authority_hmac
+  )
   printf '%s\n%s\n%s\ntransaction=%s\n' \
     tmux firstmate:fm-safe endpoint-safe "$binding" > "$receipt_dir/$key"
   rm -f "$home/state/domain.meta"
@@ -1976,9 +1980,16 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   rm -rf "$receipt_dir"
   claim="$TMP_ROOT/unstaged-return.claim"
   legacy="${claim}.owner"
-  claim_key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}')
+  claim_key=$(printf '%s' "$claim" \
+    | openssl dgst -sha256 | sed 's/^.*= //')
   committed_dir="$home/state/.teardown-transactions/domain/committed-return-claims"
   mkdir -p "$committed_dir"
+  binding=$(
+    {
+      cat "$home/state/.teardown-transactions/domain/identity"
+      printf 'receipt=return|%s|%s\n' "$claim" "$legacy"
+    } | fm_session_authority_hmac
+  )
   printf '%s\n%s\ntransaction=%s\n' "$claim" "$legacy" "$binding" \
     > "$committed_dir/$claim_key"
   rm -f "$home/state/domain.meta"
@@ -1996,6 +2007,12 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
 
   rm -rf "$committed_dir"
   mkdir -p "$receipt_dir"
+  binding=$(
+    {
+      cat "$home/state/.teardown-transactions/domain/identity"
+      printf 'receipt=endpoint|tmux|firstmate:fm-safe|endpoint-safe\n'
+    } | fm_session_authority_hmac
+  )
   printf '%s\n%s\n%s\ntransaction=%s\n' \
     tmux firstmate:fm-safe endpoint-safe "$binding" > "$receipt_dir/$key"
   mkdir -p "$home/state/.teardown-transactions/domain/closing-endpoints"

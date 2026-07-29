@@ -246,6 +246,7 @@ SPAWN_SLOT_CLAIM_WT=
 SPAWN_SLOT_CLAIM_HOME=
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
+SPAWN_AUTHORITY_LAUNCH_RECEIPT=
 
 claim_spawn_slot() {
   local home
@@ -308,7 +309,10 @@ spawn_abort_cleanup() {
       "${SPAWN_AUTHORITY_ENROLLMENT}.ready" \
       "${SPAWN_AUTHORITY_ENROLLMENT}.consume" \
       "${SPAWN_AUTHORITY_ENROLLMENT}.accepted" \
-      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted.ack"
+      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted.ack" \
+      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted.final"
+  [ -z "$SPAWN_AUTHORITY_LAUNCH_RECEIPT" ] \
+    || rm -f -- "$SPAWN_AUTHORITY_LAUNCH_RECEIPT"
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
   fi
@@ -1873,11 +1877,23 @@ if [ "$KIND" = secondmate ]; then
     echo "error: trusted endpoint identity changed after secondmate $ID accepted enrollment" >&2
     exit 1
   }
+  SPAWN_AUTHORITY_LAUNCH_RECEIPT="$STATE/.secondmate-launch-receipts/$ID"
+  mkdir -p "${SPAWN_AUTHORITY_LAUNCH_RECEIPT%/*}" \
+    && [ -d "${SPAWN_AUTHORITY_LAUNCH_RECEIPT%/*}" ] \
+    && [ ! -L "${SPAWN_AUTHORITY_LAUNCH_RECEIPT%/*}" ] \
+    && fm_session_launch_receipt_write \
+      "$SPAWN_AUTHORITY_LAUNCH_RECEIPT" "$ID" "$PROJ_ABS" \
+      "$SPAWN_AUTHORITY_ENDPOINT_PID" "$SPAWN_AUTHORITY_ENDPOINT_START" \
+      "$SPAWN_AUTHORITY_ENDPOINT_IDENTITY" || {
+        echo "error: could not publish trusted launch receipt for secondmate $ID" >&2
+        exit 1
+      }
 else
   fm_backend_send_key "$BACKEND" "$WID" Enter
 fi
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
+SPAWN_AUTHORITY_LAUNCH_RECEIPT=
 
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_LOCK_HELD=0

@@ -970,7 +970,13 @@ test_secondmate_authority_delegation_uses_no_node() {
     "secondmate enrollment ticket remained reusable"
   assert_present "$home/state/.session-authority-enrollment.accepted.ack" \
     "secondmate wrapper did not acknowledge signed enrollment acceptance"
+  assert_present "$home/state/.session-authority-enrollment.accepted.final" \
+    "confirmed wrapper did not publish final authenticated acceptance"
+  [ -z "$(find "$home/state" -maxdepth 1 -name \
+    '.session-authority-enrollment.consumer.*' -print -quit 2>/dev/null)" ] \
+    || fail "confirmed wrapper leaked its private enrollment ticket"
   rm -f "$home/state/.session-authority-enrollment.accepted.ack"
+  rm -f "$home/state/.session-authority-enrollment.accepted.final"
   : > "$home/state/.session-authority-enrollment.release"
   wait "$ENROLLMENT_ISSUER_PID" 2>/dev/null || true
   pass "secondmate lock acquisition preserves delegated authority without Node"
@@ -2918,7 +2924,7 @@ SH
     "window=firstmate:fm-task-stage" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
   key=$(printf '%s' 'tmux|firstmate:fm-task-stage|endpoint-stage' \
-    | cksum | awk '{printf "%s-%s", $1, $2}')
+    | openssl dgst -sha256 | sed 's/^.*= //')
   record="$WORLD/home/state/.teardown-transactions/task-stage/closing-endpoints/$key"
   mkdir -p "${record%/*}"
   printf '%s\n%s\n%s\n' tmux firstmate:fm-task-stage endpoint-stage > "$record"
@@ -2933,7 +2939,8 @@ SH
 }
 
 test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling() {
-  local txn outside key binding receipt status=0 ID META TEARDOWN_TXN_DIR
+  local txn outside key binding receipt meta_digest status=0
+  local ID META TEARDOWN_TXN_DIR
   txn="$TMP_ROOT/receipt-validation"
   outside="$TMP_ROOT/receipt-stage-outside"
   ID=task-receipt
@@ -2941,21 +2948,25 @@ test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling() {
   TEARDOWN_TXN_DIR="$txn"
   mkdir -p "$txn/closed-endpoints" "$outside"
   printf 'meta\n' > "$META"
-  printf 'task=%s\nmeta=%s\nchecksum=1 1\ngeneration=endpoint-proof\nhome=%s\n' \
-    "$ID" "$META" "$TMP_ROOT" > "$txn/identity"
+  meta_digest=$(openssl dgst -sha256 "$META")
+  meta_digest=${meta_digest##*= }
+  printf 'task=%s\nmeta=%s\nchecksum=%s %s\ngeneration=endpoint-proof\nhome=%s\n' \
+    "$ID" "$META" "$meta_digest" "$(wc -c < "$META" | tr -d ' ')" \
+    "$TMP_ROOT" > "$txn/identity"
   key=$(printf '%s' 'tmux|firstmate:fm-task-receipt|endpoint-proof' \
-    | cksum | awk '{printf "%s-%s", $1, $2}')
+    | openssl dgst -sha256 | sed 's/^.*= //')
   printf '%s\n%s\n%s\n' tmux firstmate:fm-task-receipt endpoint-proof > "$outside/$key"
   ln -s "$outside" "$txn/closing-endpoints"
-  binding=$(cksum "$txn/identity" | awk '{print $1 " " $2}')
-  receipt="$txn/closed-endpoints/$key"
-  printf '%s\n%s\n%s\ntransaction=%s\n' \
-    tmux firstmate:fm-task-receipt endpoint-proof "$binding" > "$receipt"
   eval "$(awk '
     /^teardown_transaction_receipt_binding\(\)/ { emit=1 }
     /^META=/ { emit=0 }
     emit { print }
   ' "$ROOT/bin/fm-teardown.sh")"
+  binding=$(teardown_transaction_receipt_binding \
+    'endpoint|tmux|firstmate:fm-task-receipt|endpoint-proof')
+  receipt="$txn/closed-endpoints/$key"
+  printf '%s\n%s\n%s\ntransaction=%s\n' \
+    tmux firstmate:fm-task-receipt endpoint-proof "$binding" > "$receipt"
   fm_backend_validate() { [ "$1" = tmux ]; }
   teardown_transaction_crossed_irreversible_boundary || status=$?
   expect_code 2 "$status" "a symlinked staging parent must invalidate its receipt"

@@ -258,12 +258,11 @@ fm_session_authority_key_path() {
 }
 
 fm_session_authority_capability_present() {
-  local key_path key
+  local key
   fm_session_descriptor_channel_isolated \
     "${FM_SESSION_AUTHORITY_FD:-}" \
     && fm_session_exec_descriptor_isolation_durable || return 1
-  key_path=$(fm_session_authority_key_path) || return 1
-  key=$(tr -d '\n' < "$key_path" 2>/dev/null) || return 1
+  IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
   [ "${#key}" -ge 64 ] || return 1
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
 }
@@ -348,7 +347,7 @@ fm_session_exec_descriptor_isolation_durable() {
 }
 
 fm_session_authority_descriptor_create() {
-  local authority_file key
+  local key
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null \
     || ( : <&7 ) 2>/dev/null || ( : >&7 ) 2>/dev/null; then
     return 1
@@ -357,25 +356,8 @@ fm_session_authority_descriptor_create() {
     && fm_session_descriptor_channel_isolated 7 \
     && fm_session_exec_descriptor_isolation_durable || return 1
   key=$(fm_session_random_hex 48) || return 1
-  authority_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-authority.XXXXXX") \
-    || return 1
-  chmod 600 "$authority_file" \
-    && exec 9<"$authority_file" \
-    && exec 7>"$authority_file" || {
-      rm -f -- "$authority_file"
-      exec 9<&-
-      exec 7>&-
-      return 1
-    }
-  rm -f -- "$authority_file"
-  printf '%s\n' "$key" >&7 || {
-    unset key
-    exec 7>&-
-    exec 9<&-
-    return 1
-  }
+  exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
   unset key
-  exec 7>&-
   FM_SESSION_AUTHORITY_FD=9
 }
 
@@ -474,7 +456,7 @@ fm_session_enrollment_signer_run() {
   local public_key=${FM_SESSION_ENROLLMENT_PUBLIC_KEY:-}
   local public_digest=${FM_SESSION_ENROLLMENT_PUBLIC_SHA256:-}
   local ready="${file}.ready" consume="${file}.consume" accepted="${file}.accepted"
-  local acknowledged="${file}.accepted.ack"
+  local acknowledged="${file}.accepted.ack" finalized="${file}.accepted.final"
   local consumer consumer_start consumer_identity consume_task consume_home
   local consumer_public_key consumer_public_digest
   local expected_script env_role env_task env_home attempts=0
@@ -522,7 +504,7 @@ fm_session_enrollment_signer_run() {
   esac
   [ "${#public_digest}" -eq 64 ] || return 1
   case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
-  for tmp in "$file" "$ready" "$consume" "$accepted" "$acknowledged"; do
+  for tmp in "$file" "$ready" "$consume" "$accepted" "$acknowledged" "$finalized"; do
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
   done
   body=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-body.XXXXXX") || {
@@ -627,9 +609,9 @@ fm_session_enrollment_signer_run() {
           "$consumer_start" "$consumer_public_key" "$consumer_public_digest" \
           && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
           && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
-          && [ "$(fm_session_process_argument_value \
-            "$consumer" --enrollment-confirmed 2>/dev/null)" \
-            = "$accepted_digest" ]; then
+          && fm_session_enrollment_ack_validate \
+            "$finalized" "$accepted_digest" "$$" "$nonce" "$consumer" \
+            "$consumer_start" "$consumer_public_key" "$consumer_public_digest"; then
           return 0
         fi
         kill -0 "$consumer" 2>/dev/null || return 1
@@ -641,7 +623,7 @@ fm_session_enrollment_signer_run() {
     sleep 0.02
     attempts=$((attempts + 1))
   done
-  rm -f "$file" "$ready" "$consume" "$accepted" "$acknowledged"
+  rm -f "$file" "$ready" "$consume" "$accepted" "$acknowledged" "$finalized"
   return 1
 }
 
@@ -697,7 +679,7 @@ fm_session_enrollment_ticket_write() {
   kill "$signer" 2>/dev/null || true
   wait "$signer" 2>/dev/null || true
   rm -f "$file" "$ready" "${file}.consume" "${file}.accepted" \
-    "${file}.accepted.ack"
+    "${file}.accepted.ack" "${file}.accepted.final"
   return 1
 }
 
@@ -790,7 +772,7 @@ fm_session_enrollment_ack_write() {
   consumer_start=$(fm_session_process_start "$$") || return 1
   accepted_digest=$(fm_session_sha256_file "$accepted") || return 1
   private=$(cat <&8) || return 1
-  exec 8<&-
+  exec 8< <(printf '%s\n' "$private") || return 1
   body=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-ack.XXXXXX") \
     || return 1
   signature=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-ack-signature.XXXXXX") \
@@ -815,6 +797,11 @@ fm_session_enrollment_ack_write() {
       return 1
     }
   rm -f "$body" "$signature"
+}
+
+fm_session_enrollment_final_write() {
+  fm_session_enrollment_ack_write "$@"
+  exec 8<&-
 }
 
 fm_session_enrollment_consumption_request() {
@@ -843,6 +830,7 @@ fm_session_enrollment_consumption_request() {
 fm_session_enrollment_ticket_wait_accepted() {
   local file=$1 signer=$2 nonce=$3 public_key=$4 public_digest=$5
   local attempts=${6:-1500} accepted="${file}.accepted" ack="${file}.accepted.ack"
+  local final="${file}.accepted.final"
   local seen=0
   case "$signer:$attempts" in *[!0-9:]*) return 1 ;; esac
   [ "${#nonce}" -eq 64 ] || return 1
@@ -852,7 +840,7 @@ fm_session_enrollment_ticket_wait_accepted() {
       && fm_session_enrollment_acceptance_validate \
         "$accepted" "$signer" "$nonce" "$public_key" "$public_digest"; then
       wait "$signer" 2>/dev/null || return 1
-      rm -f "$accepted" "$ack" "${file}.ready" "${file}.consume"
+      rm -f "$accepted" "$ack" "$final" "${file}.ready" "${file}.consume"
       return 0
     elif ! kill -0 "$signer" 2>/dev/null; then
       wait "$signer" 2>/dev/null || true
@@ -974,9 +962,63 @@ fm_session_enrollment_ticket_validate() {
 }
 
 fm_session_authority_hmac() {
-  local key_path
-  key_path=$(fm_session_authority_key_path) || return 1
-  fm_session_hmac_sha256_key_file "$key_path"
+  local key output digest
+  fm_session_descriptor_channel_isolated \
+    "${FM_SESSION_AUTHORITY_FD:-}" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  output=$(openssl dgst -sha256 -hmac "$key" 2>/dev/null) || return 1
+  unset key
+  digest=${output##*= }
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$digest"
+}
+
+fm_session_authority_record_write() {
+  local file=$1 body=$2 hmac tmp
+  case "$body" in *$'\r'*) return 1 ;; esac
+  hmac=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  chmod 600 "$tmp" \
+    && printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
+    && mv "$tmp" "$file" || {
+      rm -f "$tmp"
+      return 1
+    }
+}
+
+fm_session_authority_record_validate() {
+  local file=$1 lines=$2 body actual expected
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq "$lines" ] || return 1
+  actual=$(sed -n "${lines}s/^authority-hmac=//p" "$file")
+  [ "${#actual}" -eq 64 ] || return 1
+  case "$actual" in *[!0-9a-f]*) return 1 ;; esac
+  body=$(sed -n "1,$((lines - 1))p" "$file")$'\n'
+  expected=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
+  [ "$actual" = "$expected" ]
+}
+
+fm_session_launch_receipt_write() {
+  local file=$1 task=$2 home=$3 pid=$4 start=$5 identity=$6 body
+  case "$task:$home:$pid:$start:$identity" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  body=$(printf 'version=1\ntask=%s\nhome=%s\npid=%s\nstart=%s\nidentity=%s\n' \
+    "$task" "$home" "$pid" "$start" "$identity") || return 1
+  fm_session_authority_record_write "$file" "${body}"$'\n'
+}
+
+fm_session_launch_receipt_validate() {
+  local file=$1 task=$2 home=$3 pid=$4 start=$5 identity=$6
+  fm_session_authority_record_validate "$file" 7 \
+    && [ "$(sed -n '1p' "$file")" = version=1 ] \
+    && [ "$(sed -n '2s/^task=//p' "$file")" = "$task" ] \
+    && [ "$(sed -n '3s/^home=//p' "$file")" = "$home" ] \
+    && [ "$(sed -n '4s/^pid=//p' "$file")" = "$pid" ] \
+    && [ "$(sed -n '5s/^start=//p' "$file")" = "$start" ] \
+    && [ "$(sed -n '6s/^identity=//p' "$file")" = "$identity" ]
 }
 
 fm_session_authority_token() {

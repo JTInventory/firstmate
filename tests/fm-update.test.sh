@@ -35,8 +35,42 @@ UPDATE_IMPL="$ROOT/bin/fm-update.sh"
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
 
-TMP_ROOT=$(fm_test_tmproot fm-update-tests)
-fm_test_session_authority_fd "$TMP_ROOT"
+if [ "${FM_UPDATE_FOCUS:-}" = exact-pane-delivery ] \
+  && [ "${FM_UPDATE_AUTHORITY_WRAPPED:-}" != 1 ]; then
+  FM_UPDATE_AUTHORITY_TMP=$(fm_test_tmproot fm-update-authority)
+  mkdir -p "$FM_UPDATE_AUTHORITY_TMP/auth/state" "$FM_UPDATE_AUTHORITY_TMP/work"
+  authority_key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  exec 9< <(while :; do printf '%s\n' "$authority_key"; done)
+  FM_SESSION_AUTHORITY_FD=9
+  export FM_SESSION_AUTHORITY_FD
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_descriptor_channel_isolated() { return 0; }
+  fm_session_exec_descriptor_isolation_durable() { return 0; }
+  fm_session_authority_write_file \
+    "$FM_UPDATE_AUTHORITY_TMP/auth/state/.session-authority" \
+    "$PPID" "$PPID" "$FM_UPDATE_AUTHORITY_TMP/auth" "$ROOT"
+  export FM_UPDATE_AUTHORITY_TMP
+  cd "$ROOT" || exit 1
+  exec bash -c '
+    . "$1/bin/fm-session-lock-lib.sh"
+    FM_SESSION_AUTHORITY_BROKER_PID=$$
+    FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$")
+    FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$")
+    FM_SESSION_AUTHORITY_BROKER_SCRIPT=$0
+    export FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
+    export FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
+    FM_UPDATE_AUTHORITY_WRAPPED=1 FM_ROOT_OVERRIDE="$1" \
+      FM_HOME="$2" "$3" "${@:4}"
+  ' "$ROOT/bin/fm-session-authority-exec.sh" "$ROOT" \
+    "$FM_UPDATE_AUTHORITY_TMP/auth" "$0" "$@"
+fi
+if [ "${FM_UPDATE_AUTHORITY_WRAPPED:-}" = 1 ]; then
+  TMP_ROOT="$FM_UPDATE_AUTHORITY_TMP/work"
+  FM_TEST_CLEANUP_DIRS+=("$FM_UPDATE_AUTHORITY_TMP")
+else
+  TMP_ROOT=$(fm_test_tmproot fm-update-tests)
+  fm_test_session_authority_fd "$TMP_ROOT"
+fi
 mkdir -p "$TMP_ROOT"
 UPDATE="$TMP_ROOT/fm-update-primary"
 {
@@ -84,14 +118,52 @@ new_world() {
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
   . "$ROOT/bin/fm-session-lock-lib.sh"
+  if [ "${FM_UPDATE_AUTHORITY_WRAPPED:-}" = 1 ]; then
+    fm_session_descriptor_channel_isolated() { return 0; }
+    fm_session_exec_descriptor_isolation_durable() { return 0; }
+  fi
   local owner
   owner=$(fm_session_lock_owner)
   printf '%s\n' "$owner" > "$w/home/state/.lock"
   printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
   fm_session_authority_write_file "$w/home/state/.session-authority" \
-    "${owner%%|*}" "$owner" "$w/home" "$w/main"
+    "${owner%%|*}" "$owner" "$w/home" "$ROOT"
 
   printf '%s\n' "$w"
+}
+
+write_migration_launch_receipt() {
+  local state=$1 task=$2 home=$3 pid=$4 start identity dir
+  start=$(fm_session_process_start "$pid") || return 1
+  identity=$(fm_session_process_identity "$pid") || return 1
+  dir="$state/.secondmate-launch-receipts"
+  mkdir -p "$dir" || return 1
+  fm_session_launch_receipt_write \
+    "$dir/$task" "$task" "$home" "$pid" "$start" "$identity"
+}
+
+run_under_replacement_broker() {
+  local command=$1
+  shift
+  bash -c '
+    root=$1
+    command=$2
+    shift 2
+    . "$root/bin/fm-session-lock-lib.sh"
+    fm_session_descriptor_channel_isolated() { return 0; }
+    fm_session_exec_descriptor_isolation_durable() { return 0; }
+    fm_session_process_runs_script() {
+      [ "$1" = "$FM_SESSION_AUTHORITY_BROKER_PID" ] \
+        && [ "$2" = "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" ]
+    }
+    FM_SESSION_AUTHORITY_BROKER_PID=$$
+    FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$")
+    FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$")
+    FM_SESSION_AUTHORITY_BROKER_SCRIPT=$0
+    export FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
+    export FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
+    bash -c "$command" _ "$root" "$@"
+  ' "$ROOT/bin/fm-session-authority-exec.sh" "$ROOT" "$command" "$@"
 }
 
 new_protocol_migration_world() {
@@ -1329,10 +1401,14 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
 test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
   local w generation fakebin out runtime resolved meta legacy_meta foreign_meta
   local ownership_meta ownership_fakebin
-  local crash_meta crash_fakebin crash_resolved crash_key
+  local crash_meta crash_fakebin crash_resolved crash_journal_snapshot
   local topology_meta topology_fakebin topology_resolved
   local committed_meta committed_fakebin committed_resolved committed_process
   w=$(new_world t32-exact-pane)
+  if [ "${FM_UPDATE_AUTHORITY_WRAPPED:-}" = 1 ]; then
+    fm_session_descriptor_channel_isolated() { return 0; }
+    fm_session_exec_descriptor_isolation_durable() { return 0; }
+  fi
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
   printf 'tmux_pane_id=%%42\n' >> "$w/home/state/sm1.meta"
@@ -1376,14 +1452,39 @@ SH
   [ "$resolved" = $'tmux\t%42' ] \
     || fail "fm-send selector resolution did not retain the exact tmux pane"
   meta="$w/home/state/sm1.meta"
+  FM_HOME="$w/home"
+  export FM_HOME
   sed -i '/^tmux_pane_id=/d;/^endpoint_generation=/d;/^task=/d' "$meta"
   sed -i 's/^window=.*/window=firstmate:fm-sm1/' "$meta"
   mkdir -p "$w/home/state/.locks"
   mkdir "$w/home/state/.locks/tmux-endpoint-42.migration.lock"
   touch -t 200001010000 \
     "$w/home/state/.locks/tmux-endpoint-42.migration.lock"
+  write_migration_launch_receipt "$w/home/state" sm1 "$w/sm1" "$$" \
+    || fail "could not publish primary-issued sm1 launch receipt"
+  fm_session_process_runs_script() {
+    [ "$1" = "$FM_SESSION_AUTHORITY_BROKER_PID" ] \
+      && [ "$2" = "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" ]
+  }
+  fm_session_authority_capability_present \
+    || fail "migration broker fixture lost its protected capability"
+  fm_session_authority_read "$w/home/state/.session-authority" \
+    || fail "migration broker fixture rejected its authority record"
+  [ "$FM_SESSION_AUTHORITY_HOME" = "$w/home" ] \
+    || fail "migration broker fixture authority home changed"
+  fm_session_authority_is_current_ancestor "$w/home/state/.session-authority" \
+    || fail "migration broker fixture authority owner is not an ancestor"
+  fm_session_authority_broker_present "$ROOT/bin/fm-session-authority-exec.sh" \
+    || fail "migration broker fixture failed production broker identity"
+  fm_backend_tmux_legacy_migration_authorized "$w/home/state" \
+    || fail "production migration authorization rejected the verified broker fixture"
+  sm1_start=$(fm_session_process_start "$$")
+  sm1_identity=$(fm_session_process_identity "$$")
+  fm_session_launch_receipt_validate \
+    "$w/home/state/.secondmate-launch-receipts/sm1" sm1 "$w/sm1" \
+    "$$" "$sm1_start" "$sm1_identity" \
+    || fail "production launch-receipt validation rejected the primary receipt"
   resolved=$(
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/sm1"; }
@@ -1412,8 +1513,9 @@ SH
     printf 'harness=codex\n'
     printf 'home=%s/foreign\n' "$w"
   } > "$foreign_meta"
+  write_migration_launch_receipt "$w/home/state" foreign "$w/foreign" "$$" \
+    || fail "could not publish primary-issued foreign launch receipt"
   if (
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/foreign"; }
@@ -1458,7 +1560,6 @@ SH
     FM_FAKE_PANE_ID=%43
     FM_FAKE_WINDOW_ID=@43
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/sm1"; }
@@ -1481,7 +1582,6 @@ SH
     FM_FAKE_PANE_ID=%43
     FM_FAKE_WINDOW_ID=@43
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/ownership"; }
@@ -1502,6 +1602,8 @@ SH
     printf 'harness=codex\n'
     printf 'home=%s/crash\n' "$w"
   } > "$crash_meta"
+  write_migration_launch_receipt "$w/home/state" crash "$w/crash" "$$" \
+    || fail "could not publish primary-issued crash launch receipt"
   crash_fakebin=$(make_fake_tmux "$w/crash-fake")
   if (
     PATH="$crash_fakebin:$PATH"
@@ -1509,7 +1611,6 @@ SH
     FM_FAKE_PANE_ID=%44
     FM_FAKE_WINDOW_ID=@44
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/crash"; }
@@ -1523,20 +1624,21 @@ SH
     fail "interrupted legacy migration reported success before metadata commit"
   fi
   [ -f "$w/home/state/.tmux-endpoint-44.migration" ] \
-    && [ -f "$w/home/state/.tmux-endpoint-44.migration.key" ] \
-    && [ -f "$w/home/state/.tmux-endpoint-44.migration.key.binding" ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-44.migration.key" ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-44.migration.key.binding" ] \
     && [ -f "$w/crash-fake/tmux.log.endpoint-generation" ] \
     && [ "$(grep -c '^endpoint_generation=' "$crash_meta")" -eq 0 ] \
     || fail "interrupted generation bind did not retain recoverable evidence"
-  crash_key=$(cat "$w/home/state/.tmux-endpoint-44.migration.key")
-  printf '%096d\n' 0 > "$w/home/state/.tmux-endpoint-44.migration.key"
+  crash_journal_snapshot="$w/crash-journal.snapshot"
+  cp "$w/home/state/.tmux-endpoint-44.migration" "$crash_journal_snapshot"
+  sed -i 's/^task=crash$/task=worker-forged/' \
+    "$w/home/state/.tmux-endpoint-44.migration"
   if (
     PATH="$crash_fakebin:$PATH"
     FM_FAKE_TMUX_LOG="$w/crash-fake/tmux.log"
     FM_FAKE_PANE_ID=%44
     FM_FAKE_WINDOW_ID=@44
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/crash"; }
@@ -1546,30 +1648,43 @@ SH
     }
     fm_backend_resolve_selector_with_backend fm-crash "$w/home/state"
   ) >/dev/null 2>&1; then
-    fail "worker-replaced migration key retained trusted provenance"
+    fail "worker-rewritten migration journal retained trusted provenance"
   fi
-  printf '%s\n' "$crash_key" \
-    > "$w/home/state/.tmux-endpoint-44.migration.key"
-  crash_resolved=$(
-    PATH="$crash_fakebin:$PATH"
-    FM_FAKE_TMUX_LOG="$w/crash-fake/tmux.log"
-    FM_FAKE_PANE_ID=%44
-    FM_FAKE_WINDOW_ID=@44
-    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
-    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
-    fm_harness_pid_alive() { return 0; }
-    fm_agent_proc_cwd() { printf '%s' "$w/crash"; }
-    fm_agent_environ() {
-      printf 'FM_AGENT_TASK=crash\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=secondmate\n' \
-        "$w/crash"
-    }
-    fm_backend_resolve_selector_with_backend fm-crash "$w/home/state"
-  )
+  cp "$crash_journal_snapshot" "$w/home/state/.tmux-endpoint-44.migration"
+  crash_resolved=$(cd "$ROOT" \
+    && PATH="$crash_fakebin:$PATH" \
+      FM_FAKE_TMUX_LOG="$w/crash-fake/tmux.log" \
+      FM_FAKE_PANE_ID=%44 FM_FAKE_WINDOW_ID=@44 \
+      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+      FM_STATE_OVERRIDE="$w/home/state" \
+      run_under_replacement_broker '
+        . "$1/bin/fm-backend.sh"
+        fm_session_descriptor_channel_isolated() { return 0; }
+        fm_session_exec_descriptor_isolation_durable() { return 0; }
+        fm_session_process_runs_script() {
+          [ "$1" = "$FM_SESSION_AUTHORITY_BROKER_PID" ] \
+            && [ "$2" = "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" ]
+        }
+        fixture_root=$2
+        fixture_pid=$3
+        fm_backend_tmux_legacy_process_pid() { printf "%s" "$fixture_pid"; }
+        fm_harness_pid_alive() { return 0; }
+        fm_agent_proc_cwd() { printf "%s" "$fixture_root/crash"; }
+        fm_agent_environ() {
+          printf "FM_AGENT_TASK=crash\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=secondmate\n" \
+            "$fixture_root/crash"
+        }
+        fm_backend_tmux_legacy_migration_authorized \
+          "$fixture_root/home/state" \
+          || { echo "replacement broker authorization failed" >&2; exit 1; }
+        fm_session_authority_record_validate \
+          "$fixture_root/home/state/.tmux-endpoint-44.migration" 12 \
+          || { echo "replacement broker rejected migration journal" >&2; exit 1; }
+        fm_backend_resolve_selector_with_backend \
+          fm-crash "$fixture_root/home/state"
+      ' "$w" "$$")
   [ "$crash_resolved" = $'tmux\t%44' ] \
     && [ ! -e "$w/home/state/.tmux-endpoint-44.migration" ] \
-    && [ ! -e "$w/home/state/.tmux-endpoint-44.migration.key" ] \
-    && [ ! -e "$w/home/state/.tmux-endpoint-44.migration.key.binding" ] \
     || fail "legacy migration did not recover bind-before-commit interruption"
   topology_meta="$w/home/state/topology.meta"
   mkdir -p "$w/topology"
@@ -1580,6 +1695,8 @@ SH
     printf 'harness=codex\n'
     printf 'home=%s/topology\n' "$w"
   } > "$topology_meta"
+  write_migration_launch_receipt "$w/home/state" topology "$w/topology" "$$" \
+    || fail "could not publish primary-issued topology launch receipt"
   topology_fakebin=$(make_fake_tmux "$w/topology-fake")
   if (
     PATH="$topology_fakebin:$PATH"
@@ -1587,7 +1704,6 @@ SH
     FM_FAKE_PANE_ID=%45
     FM_FAKE_WINDOW_ID=@45
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/topology"; }
@@ -1606,8 +1722,6 @@ SH
   fi
   [ "$(grep -c '^endpoint_generation=' "$topology_meta")" -eq 0 ] \
     && [ -f "$w/home/state/.tmux-endpoint-45.migration" ] \
-    && [ -f "$w/home/state/.tmux-endpoint-45.migration.key" ] \
-    && [ -f "$w/home/state/.tmux-endpoint-45.migration.key.binding" ] \
     || fail "topology change did not leave recoverable pre-commit evidence"
   topology_resolved=$(
     PATH="$topology_fakebin:$PATH"
@@ -1615,7 +1729,6 @@ SH
     FM_FAKE_PANE_ID=%45
     FM_FAKE_WINDOW_ID=@45
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/topology"; }
@@ -1627,8 +1740,6 @@ SH
   )
   [ "$topology_resolved" = $'tmux\t%45' ] \
     && [ ! -e "$w/home/state/.tmux-endpoint-45.migration" ] \
-    && [ ! -e "$w/home/state/.tmux-endpoint-45.migration.key" ] \
-    && [ ! -e "$w/home/state/.tmux-endpoint-45.migration.key.binding" ] \
     || fail "topology-safe migration evidence did not recover"
   committed_meta="$w/home/state/committed.meta"
   mkdir -p "$w/committed"
@@ -1643,13 +1754,15 @@ SH
   sleep 60 &
   committed_process=$!
   UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $committed_process"
+  write_migration_launch_receipt \
+    "$w/home/state" committed "$w/committed" "$committed_process" \
+    || fail "could not publish primary-issued committed launch receipt"
   if (
     PATH="$committed_fakebin:$PATH"
     FM_FAKE_TMUX_LOG="$w/committed-fake/tmux.log"
     FM_FAKE_PANE_ID=%46
     FM_FAKE_WINDOW_ID=@46
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$committed_process"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/committed"; }
@@ -1668,8 +1781,6 @@ SH
   fi
   [ "$(grep -c '^endpoint_generation=fm-legacy-' "$committed_meta")" -eq 1 ] \
     && [ -f "$w/home/state/.tmux-endpoint-46.migration" ] \
-    && [ -f "$w/home/state/.tmux-endpoint-46.migration.key" ] \
-    && [ -f "$w/home/state/.tmux-endpoint-46.migration.key.binding" ] \
     || fail "post-commit interruption did not retain durable evidence"
   kill "$committed_process" 2>/dev/null || true
   wait "$committed_process" 2>/dev/null || true
@@ -1679,20 +1790,16 @@ SH
     FM_FAKE_PANE_ID=%46
     FM_FAKE_WINDOW_ID=@46
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { return 1; }
     fm_backend_resolve_selector_with_backend fm-committed "$w/home/state"
   )
   [ "$committed_resolved" = $'tmux\t%46' ] \
     && [ ! -e "$w/home/state/.tmux-endpoint-46.migration" ] \
-    && [ ! -e "$w/home/state/.tmux-endpoint-46.migration.key" ] \
-    && [ ! -e "$w/home/state/.tmux-endpoint-46.migration.key.binding" ] \
     || fail "committed migration journal required the dead legacy process"
   legacy_meta="$w/home/state/legacy-ambiguous.meta"
   printf 'window=firstmate:fm-legacy-ambiguous\nkind=secondmate\n' \
     > "$legacy_meta"
   if (
-    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     FM_FAKE_PANE_ID=$'%42\n%43' \
       fm_backend_resolve_selector_with_backend \
         fm-legacy-ambiguous "$w/home/state"

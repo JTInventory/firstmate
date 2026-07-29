@@ -35,9 +35,11 @@ launcher `PATH` is carried into that direct process launch. Both backends compar
 their complete live endpoint identity with the recorded endpoint before ticket
 issue and again after authenticated acceptance. New tmux metadata persists the
 exact pane. A legacy record without endpoint fields is accepted for migration
-only when its live process already has the complete secondmate declaration.
-Pre-port processes without that declaration fail closed and require a
-coordinated primary and secondmate restart. Ambiguity refuses.
+only when its live process has the complete secondmate declaration and a
+primary-issued authority-authenticated launch receipt matching its PID, start
+value, executable identity, task, and home. Declaration, marker, cwd, or pane
+evidence alone is insufficient. Pre-port processes without that receipt fail
+closed and require a coordinated primary and secondmate restart. Ambiguity refuses.
 Older window-scoped records that already have a generation are accepted only
 with one stable pane.
 The ticket
@@ -49,11 +51,15 @@ the broker, signer, and wrapper each use a real same-credential child open
 attempt to prove that procfs cannot expose any authority-bearing descriptor
 before creating its secret; readable or unrecognized isolation refuses
 startup. Darwin has no corresponding procfs descriptor path. The wrapper then
-creates an anonymous consumer key, publishes only its
-public key through its immutable exact-process arguments, and signs an
-acknowledgment bound to the accepted receipt. A rename or copied signer receipt
-is not an acknowledgment. Spawn waits for the signer to verify that consumer
-signature and for the final identity recheck before reporting success. Tmux
+creates an anonymous consumer key and publishes its public key and exact live
+process identity in `${enrollment}.consume`. The signer validates that request
+and publishes a signed `${enrollment}.accepted` record. The wrapper validates
+it, signs `${enrollment}.accepted.ack`, captures the ticket and acceptance,
+removes its private consumer ticket, and re-execs into the confirmed stage.
+That stage validates both captured records and publishes the final
+consumer-signed `${enrollment}.accepted.final` receipt. A rename or copied
+signer receipt is not an acknowledgment. Spawn waits for the signer to validate
+the final receipt and rechecks the backend endpoint before reporting success. Tmux
 lifecycle operations and ordinary `fm-<id>` selectors share one strict parser
 that rejects duplicate or malformed pane data and proves the persisted exact
 pane still belongs to the recorded window and generation before transport.

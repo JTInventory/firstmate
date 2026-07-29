@@ -230,7 +230,7 @@ FM_BACKEND_TMUX_LEGACY_PROCESS_IDENTITY=
 fm_backend_tmux_legacy_process_owned() {
   local meta=$1 pane=$2 id=$3 home task kind harness home_real marker
   local pid start identity cwd env declared_task declared_home declared_home_real
-  local declared_role task_count home_count role_count
+  local declared_role task_count home_count role_count launch_receipt
   FM_BACKEND_TMUX_LEGACY_PROCESS=
   FM_BACKEND_TMUX_LEGACY_PROCESS_START=
   FM_BACKEND_TMUX_LEGACY_PROCESS_IDENTITY=
@@ -272,6 +272,9 @@ fm_backend_tmux_legacy_process_owned() {
     && [ "$(fm_session_process_start "$pid" 2>/dev/null)" = "$start" ] \
     && [ "$(fm_session_process_identity "$pid" 2>/dev/null)" = "$identity" ] \
     || return 1
+  launch_receipt="$(dirname "$meta")/.secondmate-launch-receipts/$id"
+  fm_session_launch_receipt_validate \
+    "$launch_receipt" "$id" "$home_real" "$pid" "$start" "$identity" || return 1
   FM_BACKEND_TMUX_LEGACY_PROCESS=$pid
   FM_BACKEND_TMUX_LEGACY_PROCESS_START=$start
   FM_BACKEND_TMUX_LEGACY_PROCESS_IDENTITY=$identity
@@ -319,99 +322,30 @@ fm_backend_tmux_legacy_process_snapshot() {
     && [ "$(fm_session_process_identity "$pid" 2>/dev/null)" = "$identity" ]
 }
 
-fm_backend_tmux_migration_hmac() {
-  printf '%s' "$1" | fm_session_hmac_sha256_key_file "$2"
-}
-
-fm_backend_tmux_migration_key_binding_write() {
-  local journal=$1 key=$2 binding=$3 digest body hmac tmp
-  digest=$(fm_session_sha256_file "$key") || return 1
-  body=$(printf 'version=1\njournal=%s\nkey-sha256=%s\n' \
-    "$journal" "$digest") || return 1
-  body="${body}"$'\n'
-  hmac=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
-  tmp=$(mktemp "${binding}.XXXXXX") || return 1
-  chmod 600 "$tmp" \
-    && printf '%sauthority-hmac=%s\n' "$body" "$hmac" > "$tmp" \
-    && mv "$tmp" "$binding" || {
-      rm -f "$tmp"
-      return 1
-    }
-}
-
-fm_backend_tmux_migration_key_binding_valid() {
-  local journal=$1 key="${1}.key" binding="${1}.key.binding"
-  local digest body expected actual
-  [ -f "$key" ] && [ ! -L "$key" ] \
-    && [ -f "$binding" ] && [ ! -L "$binding" ] || return 1
-  [ "$(wc -l < "$binding" | tr -d ' ')" -eq 4 ] \
-    && [ "$(sed -n '1p' "$binding")" = version=1 ] \
-    && [ "$(sed -n '2s/^journal=//p' "$binding")" = "$journal" ] \
-    || return 1
-  digest=$(fm_session_sha256_file "$key") || return 1
-  [ "$(sed -n '3s/^key-sha256=//p' "$binding")" = "$digest" ] || return 1
-  actual=$(sed -n '4s/^authority-hmac=//p' "$binding")
-  [ "${#actual}" -eq 64 ] || return 1
-  case "$actual" in *[!0-9a-f]*) return 1 ;; esac
-  body=$(sed -n '1,3p' "$binding")$'\n'
-  expected=$(printf '%s' "$body" | fm_session_authority_hmac) || return 1
-  [ "$actual" = "$expected" ]
-}
-
 fm_backend_tmux_migration_write() {
   local journal=$1 meta=$2 meta_sha=$3 id=$4 pane=$5 window=$6
   local generation=$7 state=$8 process=$9 process_start=${10}
-  local process_identity=${11} body hmac tmp key="${journal}.key" key_tmp=
-  local binding="${journal}.key.binding"
+  local process_identity=${11} body
   case "$meta:$meta_sha:$id:$pane:$window:$generation:$state:$process:$process_start:$process_identity" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
-  body=$(printf 'version=2\nmeta=%s\nmeta-sha256=%s\ntask=%s\npane=%s\nwindow=%s\ngeneration=%s\nstate=%s\nprocess=%s\nprocess-start=%s\nprocess-identity=%s\n' \
+  body=$(printf 'version=3\nmeta=%s\nmeta-sha256=%s\ntask=%s\npane=%s\nwindow=%s\ngeneration=%s\nstate=%s\nprocess=%s\nprocess-start=%s\nprocess-identity=%s\n' \
     "$meta" "$meta_sha" "$id" "$pane" "$window" "$generation" "$state" \
     "$process" "$process_start" "$process_identity") \
     || return 1
   body="${body}"$'\n'
-  if [ ! -e "$journal" ] && [ ! -L "$journal" ]; then
-    for tmp in "$key" "$binding"; do
-      if [ -e "$tmp" ] || [ -L "$tmp" ]; then
-        [ -f "$tmp" ] && [ ! -L "$tmp" ] || return 1
-        rm -f "$tmp" || return 1
-      fi
-    done
-    key_tmp=$(mktemp "${key}.XXXXXX") || return 1
-    fm_session_random_hex 48 > "$key_tmp" && chmod 600 "$key_tmp" || {
-      rm -f "$key_tmp"
-      return 1
-    }
-  else
-    fm_backend_tmux_migration_key_binding_valid "$journal" || return 1
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fm_session_authority_record_validate "$journal" 12 || return 1
   fi
-  hmac=$(fm_backend_tmux_migration_hmac "$body" "${key_tmp:-$key}") || {
-    [ -z "$key_tmp" ] || rm -f "$key_tmp"
-    return 1
-  }
-  tmp=$(mktemp "${journal}.XXXXXX") || {
-    [ -z "$key_tmp" ] || rm -f "$key_tmp"
-    return 1
-  }
-  chmod 600 "$tmp" && printf '%shmac=%s\n' "$body" "$hmac" > "$tmp" \
-    && { [ -z "$key_tmp" ] || mv "$key_tmp" "$key"; } \
-    && { [ -z "$key_tmp" ] \
-      || fm_backend_tmux_migration_key_binding_write \
-        "$journal" "$key" "$binding"; } \
-    && mv "$tmp" "$journal" || {
-      rm -f "$tmp"
-      [ -z "$key_tmp" ] || rm -f "$key_tmp"
-      return 1
-    }
+  fm_session_authority_record_write "$journal" "$body"
 }
 
 fm_backend_tmux_migration_read() {
-  local journal=$1 body expected actual key="${1}.key"
+  local journal=$1
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
-  fm_backend_tmux_migration_key_binding_valid "$journal" || return 1
+  fm_session_authority_record_validate "$journal" 12 || return 1
   [ "$(wc -l < "$journal" | tr -d ' ')" -eq 12 ] || return 1
-  [ "$(sed -n '1p' "$journal")" = version=2 ] || return 1
+  [ "$(sed -n '1p' "$journal")" = version=3 ] || return 1
   FM_BACKEND_TMUX_MIGRATION_META=$(sed -n '2s/^meta=//p' "$journal")
   FM_BACKEND_TMUX_MIGRATION_META_SHA=$(sed -n '3s/^meta-sha256=//p' "$journal")
   FM_BACKEND_TMUX_MIGRATION_ID=$(sed -n '4s/^task=//p' "$journal")
@@ -422,13 +356,9 @@ fm_backend_tmux_migration_read() {
   FM_BACKEND_TMUX_MIGRATION_PROCESS=$(sed -n '9s/^process=//p' "$journal")
   FM_BACKEND_TMUX_MIGRATION_PROCESS_START=$(sed -n '10s/^process-start=//p' "$journal")
   FM_BACKEND_TMUX_MIGRATION_PROCESS_IDENTITY=$(sed -n '11s/^process-identity=//p' "$journal")
-  actual=$(sed -n '12s/^hmac=//p' "$journal")
   case "$FM_BACKEND_TMUX_MIGRATION_META" in /*) ;; *) return 1 ;; esac
-  [ "${#FM_BACKEND_TMUX_MIGRATION_META_SHA}" -eq 64 ] \
-    && [ "${#actual}" -eq 64 ] || return 1
-  case "$FM_BACKEND_TMUX_MIGRATION_META_SHA:$actual" in
-    *[!0-9a-f:]*) return 1 ;;
-  esac
+  [ "${#FM_BACKEND_TMUX_MIGRATION_META_SHA}" -eq 64 ] || return 1
+  case "$FM_BACKEND_TMUX_MIGRATION_META_SHA" in *[!0-9a-f]*) return 1 ;; esac
   case "$FM_BACKEND_TMUX_MIGRATION_ID" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   case "$FM_BACKEND_TMUX_MIGRATION_PANE" in %*) ;; *) return 1 ;; esac
   case "${FM_BACKEND_TMUX_MIGRATION_PANE#%}" in ''|*[!0-9]*) return 1 ;; esac
@@ -442,9 +372,6 @@ fm_backend_tmux_migration_read() {
   case "$FM_BACKEND_TMUX_MIGRATION_PROCESS" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$FM_BACKEND_TMUX_MIGRATION_PROCESS_START" ] \
     && [ -n "$FM_BACKEND_TMUX_MIGRATION_PROCESS_IDENTITY" ] || return 1
-  body=$(sed -n '1,11p' "$journal")$'\n'
-  expected=$(fm_backend_tmux_migration_hmac "$body" "$key") || return 1
-  [ "$actual" = "$expected" ]
 }
 
 fm_backend_tmux_migration_topology_matches() {
@@ -493,7 +420,7 @@ fm_backend_tmux_migration_recover() {
         = "$FM_BACKEND_TMUX_MIGRATION_GENERATION" ] \
       && fm_backend_tmux_endpoint_matches "$canonical" "$pane" \
         "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
-    rm -f "$journal" "${journal}.key" "${journal}.key.binding"
+    rm -f "$journal"
     return 0
   fi
   fm_backend_tmux_legacy_process_snapshot \
@@ -525,7 +452,7 @@ fm_backend_tmux_migration_recover() {
     "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
   fm_backend_tmux_endpoint_matches "$canonical" "$pane" \
     "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
-  rm -f "$journal" "${journal}.key" "${journal}.key.binding"
+  rm -f "$journal"
 }
 
 fm_backend_tmux_migration_retire_committed() {

@@ -93,6 +93,10 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-slot-owner-lib.sh
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
+fm_session_authority_capability_present || {
+  echo "REFUSED: protected session authority is required for teardown receipts" >&2
+  exit 1
+}
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -201,7 +205,10 @@ teardown_locks_release() {
 }
 
 teardown_transaction_receipt_binding() {
-  local identity task meta checksum checksum_value checksum_size generation home
+  local receipt=$1 identity task meta checksum checksum_value checksum_size generation home
+  local body
+  [ -n "$receipt" ] || return 1
+  case "$receipt" in *$'\n'*|*$'\r'*) return 1 ;; esac
   identity="$TEARDOWN_TXN_DIR/identity"
   [ -f "$identity" ] && [ ! -L "$identity" ] && [ -r "$identity" ] || return 1
   [ "$(wc -l < "$identity" | tr -d ' ')" -eq 5 ] || return 1
@@ -219,17 +226,28 @@ teardown_transaction_receipt_binding() {
   checksum_value=${checksum%% *}
   checksum_size=${checksum#* }
   [ "$checksum" = "$checksum_value $checksum_size" ] || return 1
-  case "$checksum_value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#checksum_value}" -eq 64 ] || return 1
+  case "$checksum_value" in *[!0-9a-f]*) return 1 ;; esac
   case "$checksum_size" in ''|*[!0-9]*) return 1 ;; esac
   case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 1 ;; esac
   case "$home" in /*) ;; *) return 1 ;; esac
-  cksum "$identity" | awk '{print $1 " " $2}'
+  body=$(cat "$identity")$'\n'
+  printf '%sreceipt=%s\n' "$body" "$receipt" | fm_session_authority_hmac
+}
+
+teardown_digest_text() {
+  local output digest
+  output=$(openssl dgst -sha256 2>/dev/null) || return 1
+  digest=${output##*= }
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$digest"
 }
 
 teardown_receipt_endpoint_stage_matches() {
   local backend=$1 target=$2 generation=$3 key record stage_dir
   key=$(printf '%s' "$backend|$target|$generation" \
-    | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    | teardown_digest_text) || return 1
   stage_dir="$TEARDOWN_TXN_DIR/closing-endpoints"
   [ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] || return 1
   record="$stage_dir/$key"
@@ -242,7 +260,7 @@ teardown_receipt_endpoint_stage_matches() {
 
 teardown_receipt_return_stage_matches() {
   local claim=$1 legacy=$2 key record stage_dir
-  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  key=$(printf '%s' "$claim" | teardown_digest_text) || return 1
   stage_dir="$TEARDOWN_TXN_DIR/return-claims"
   [ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] || return 1
   record="$stage_dir/$key"
@@ -278,10 +296,10 @@ teardown_transaction_crossed_irreversible_boundary() {
     [ -n "$target" ] || return 2
     case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 2 ;; esac
     key=$(printf '%s' "$backend|$target|$generation" \
-      | cksum | awk '{printf "%s-%s", $1, $2}') || return 2
+      | teardown_digest_text) || return 2
     [ "$item" = "$TEARDOWN_TXN_DIR/closed-endpoints/$key" ] || return 2
-    [ -n "$expected_binding" ] \
-      || expected_binding=$(teardown_transaction_receipt_binding) || return 2
+    expected_binding=$(teardown_transaction_receipt_binding \
+      "endpoint|$backend|$target|$generation") || return 2
     [ "$binding" = "$expected_binding" ] || return 2
     teardown_receipt_endpoint_stage_matches "$backend" "$target" "$generation" || return 2
     found=1
@@ -301,10 +319,10 @@ teardown_transaction_crossed_irreversible_boundary() {
     binding=$(sed -n 's/^transaction=//p' "$item")
     case "$claim:$legacy" in /*:/*) ;; *) return 2 ;; esac
     [ "$legacy" = "${claim}.owner" ] || return 2
-    key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 2
+    key=$(printf '%s' "$claim" | teardown_digest_text) || return 2
     [ "$item" = "$TEARDOWN_TXN_DIR/committed-return-claims/$key" ] || return 2
-    [ -n "$expected_binding" ] \
-      || expected_binding=$(teardown_transaction_receipt_binding) || return 2
+    expected_binding=$(teardown_transaction_receipt_binding \
+      "return|$claim|$legacy") || return 2
     [ "$binding" = "$expected_binding" ] || return 2
     teardown_receipt_return_stage_matches "$claim" "$legacy" || return 2
     found=1
@@ -318,7 +336,6 @@ teardown_transaction_receipts_complete() {
   teardown_transaction_crossed_irreversible_boundary
   status=$?
   [ "$status" -ne 2 ] || return 1
-  expected_binding=$(teardown_transaction_receipt_binding) || return 1
   for stage_dir in "$TEARDOWN_TXN_DIR/closing-endpoints" \
     "$TEARDOWN_TXN_DIR/return-claims"; do
     [ ! -e "$stage_dir" ] && [ ! -L "$stage_dir" ] && continue
@@ -336,8 +353,10 @@ teardown_transaction_receipts_complete() {
     backend=$(sed -n '1p' "$record")
     target=$(sed -n '2p' "$record")
     generation=$(sed -n '3p' "$record")
+    expected_binding=$(teardown_transaction_receipt_binding \
+      "endpoint|$backend|$target|$generation") || return 1
     key=$(printf '%s' "$backend|$target|$generation" \
-      | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+      | teardown_digest_text) || return 1
     [ "$record" = "$TEARDOWN_TXN_DIR/closing-endpoints/$key" ] || return 1
     record="$TEARDOWN_TXN_DIR/closed-endpoints/$key"
     [ -f "$record" ] && [ ! -L "$record" ] \
@@ -359,7 +378,9 @@ teardown_transaction_receipts_complete() {
       && [ "$(wc -l < "$record" | tr -d ' ')" -eq 2 ] || return 1
     claim=$(sed -n '1p' "$record")
     legacy=$(sed -n '2p' "$record")
-    key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    expected_binding=$(teardown_transaction_receipt_binding \
+      "return|$claim|$legacy") || return 1
+    key=$(printf '%s' "$claim" | teardown_digest_text) || return 1
     [ "$record" = "$TEARDOWN_TXN_DIR/return-claims/$key" ] || return 1
     record="$TEARDOWN_TXN_DIR/committed-return-claims/$key"
     [ -f "$record" ] && [ ! -L "$record" ] \
@@ -384,7 +405,11 @@ teardown_transaction_has_committed_return() {
 META="$STATE/$ID.meta"
 
 teardown_file_identity() {
-  cksum "$1" 2>/dev/null | awk '{print $1 " " $2}'
+  local digest size
+  digest=$(fm_session_sha256_file "$1" 2>/dev/null) || return 1
+  size=$(wc -c < "$1" | tr -d ' ') || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s %s\n' "$digest" "$size"
 }
 
 teardown_stored_identity_value() {
@@ -628,7 +653,7 @@ fi
 teardown_endpoint_transaction_path() {
   local backend=$1 target=$2 generation=$3 key
   key=$(printf '%s' "$backend|$target|$generation" \
-    | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    | teardown_digest_text) || return 1
   printf '%s/closing-endpoints/%s' "$TEARDOWN_TXN_DIR" "$key"
 }
 
@@ -675,7 +700,7 @@ teardown_stage_endpoint_close() {
 teardown_endpoint_close_receipt_path() {
   local backend=$1 target=$2 generation=$3 key
   key=$(printf '%s' "$backend|$target|$generation" \
-    | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    | teardown_digest_text) || return 1
   printf '%s/closed-endpoints/%s' "$TEARDOWN_TXN_DIR" "$key"
 }
 
@@ -683,7 +708,8 @@ teardown_endpoint_close_is_confirmed() {
   local backend=$1 target=$2 generation=$3 record binding
   record=$(teardown_endpoint_close_receipt_path "$backend" "$target" "$generation") \
     || return 1
-  binding=$(teardown_transaction_receipt_binding) || return 1
+  binding=$(teardown_transaction_receipt_binding \
+    "endpoint|$backend|$target|$generation") || return 1
   [ -f "$record" ] && [ ! -L "$record" ] \
     && [ "$(sed -n '1p' "$record")" = "$backend" ] \
     && [ "$(sed -n '2p' "$record")" = "$target" ] \
@@ -700,7 +726,8 @@ teardown_confirm_endpoint_close() {
     teardown_endpoint_close_is_confirmed "$backend" "$target" "$generation"
     return
   fi
-  binding=$(teardown_transaction_receipt_binding) || return 1
+  binding=$(teardown_transaction_receipt_binding \
+    "endpoint|$backend|$target|$generation") || return 1
   dir=${record%/*}
   teardown_real_transaction_directory "$dir" || return 1
   tmp=$(mktemp "$dir/.closed.XXXXXX") || return 1
@@ -714,7 +741,7 @@ teardown_confirm_endpoint_close() {
 
 teardown_home_transaction_path() {
   local id=$1 home=$2 key
-  key=$(printf '%s' "$id|$home" | cksum | awk '{printf "%s-%s", $1, $2}') \
+  key=$(printf '%s' "$id|$home" | teardown_digest_text) \
     || return 1
   printf '%s/removing-homes/%s' "$TEARDOWN_TXN_DIR" "$key"
 }
@@ -914,7 +941,7 @@ teardown_stage_return_claim_record() {
   case "$claim:$legacy" in *$'\n'*|*$'\r'*) return 1 ;; esac
   dir="$TEARDOWN_TXN_DIR/return-claims"
   teardown_real_transaction_directory "$dir" || return 1
-  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  key=$(printf '%s' "$claim" | teardown_digest_text) || return 1
   record="$dir/$key"
   if [ -e "$record" ] || [ -L "$record" ]; then
     [ -f "$record" ] && [ ! -L "$record" ] \
@@ -932,7 +959,7 @@ teardown_stage_return_claim_record() {
 
 teardown_unstage_return_claim_record() {
   local claim=$1 key record
-  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  key=$(printf '%s' "$claim" | teardown_digest_text) || return 1
   record="$TEARDOWN_TXN_DIR/return-claims/$key"
   [ ! -e "$record" ] && [ ! -L "$record" ] || rm -f "$record"
 }
@@ -959,7 +986,7 @@ teardown_load_staged_return_claims() {
     legacy=$(sed -n '2p' "$record")
     case "$claim:$legacy" in /*:/*) ;; *) return 1 ;; esac
     [ "$legacy" = "${claim}.owner" ] || return 1
-    key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+    key=$(printf '%s' "$claim" | teardown_digest_text) || return 1
     [ "$record" = "$TEARDOWN_TXN_DIR/return-claims/$key" ] || return 1
     teardown_return_transaction_is_committed "$claim" "$legacy" || return 1
     seen=0
@@ -975,14 +1002,15 @@ teardown_load_staged_return_claims() {
 
 teardown_return_commit_transaction_path() {
   local claim=$1 key
-  key=$(printf '%s' "$claim" | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+  key=$(printf '%s' "$claim" | teardown_digest_text) || return 1
   printf '%s/committed-return-claims/%s' "$TEARDOWN_TXN_DIR" "$key"
 }
 
 teardown_return_transaction_is_committed() {
   local claim=$1 legacy=$2 record binding
   record=$(teardown_return_commit_transaction_path "$claim") || return 1
-  binding=$(teardown_transaction_receipt_binding) || return 1
+  binding=$(teardown_transaction_receipt_binding \
+    "return|$claim|$legacy") || return 1
   [ -f "$record" ] && [ ! -L "$record" ] \
     && [ "$(sed -n '1p' "$record")" = "$claim" ] \
     && [ "$(sed -n '2p' "$record")" = "$legacy" ] \
@@ -997,7 +1025,8 @@ teardown_mark_return_transaction_committed() {
     teardown_return_transaction_is_committed "$claim" "$legacy"
     return
   fi
-  binding=$(teardown_transaction_receipt_binding) || return 1
+  binding=$(teardown_transaction_receipt_binding \
+    "return|$claim|$legacy") || return 1
   dir=${record%/*}
   teardown_real_transaction_directory "$dir" || return 1
   tmp=$(mktemp "$dir/.commit.XXXXXX") || return 1
@@ -1777,7 +1806,7 @@ teardown_persist_release_verdicts() {
   mkdir -p "$dir" || return 1
   for ((i=0; i<${#TEARDOWN_RELEASE_KEYS[@]}; i++)); do
     key=$(printf '%s' "${TEARDOWN_RELEASE_KEYS[$i]}" \
-      | cksum | awk '{printf "%s-%s", $1, $2}') || return 1
+      | teardown_digest_text) || return 1
     record="$dir/$key"
     if [ -e "$record" ] || [ -L "$record" ]; then
       [ -f "$record" ] && [ ! -L "$record" ] || return 1
