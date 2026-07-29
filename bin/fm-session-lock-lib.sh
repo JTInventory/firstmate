@@ -260,7 +260,8 @@ fm_session_authority_key_path() {
 fm_session_authority_capability_present() {
   local key_path key
   fm_session_descriptor_channel_isolated \
-    "${FM_SESSION_AUTHORITY_FD:-}" || return 1
+    "${FM_SESSION_AUTHORITY_FD:-}" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
   key_path=$(fm_session_authority_key_path) || return 1
   key=$(tr -d '\n' < "$key_path" 2>/dev/null) || return 1
   [ "${#key}" -ge 64 ] || return 1
@@ -327,6 +328,25 @@ fm_session_descriptor_channel_isolated() {
   esac
 }
 
+fm_session_exec_descriptor_isolation_durable() {
+  local system value
+  system=$(uname -s 2>/dev/null) || return 1
+  case "$system" in
+    Darwin)
+      return 0
+      ;;
+    Linux)
+      [ -r /proc/sys/kernel/yama/ptrace_scope ] || return 1
+      value=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null) || return 1
+      case "$value" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$value" -ge 1 ]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 fm_session_authority_descriptor_create() {
   local authority_file key
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null \
@@ -334,7 +354,8 @@ fm_session_authority_descriptor_create() {
     return 1
   fi
   fm_session_descriptor_channel_isolated 9 \
-    && fm_session_descriptor_channel_isolated 7 || return 1
+    && fm_session_descriptor_channel_isolated 7 \
+    && fm_session_exec_descriptor_isolation_durable || return 1
   key=$(fm_session_random_hex 48) || return 1
   authority_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-authority.XXXXXX") \
     || return 1
@@ -359,8 +380,7 @@ fm_session_authority_descriptor_create() {
 }
 
 fm_session_enrollment_signer_prepare() {
-  local script=$1 private public output public_digest public_key
-  shift
+  local private public output public_digest public_key
   if ( : <&10 ) 2>/dev/null || ( : >&10 ) 2>/dev/null; then
     return 1
   fi
@@ -369,6 +389,7 @@ fm_session_enrollment_signer_prepare() {
       || return 1
   fi
   fm_session_descriptor_channel_isolated 10 || return 1
+  fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
   public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
@@ -386,16 +407,15 @@ fm_session_enrollment_signer_prepare() {
   FM_SESSION_ENROLLMENT_PUBLIC_SHA256=$public_digest
   export FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD
   export FM_SESSION_ENROLLMENT_PUBLIC_KEY FM_SESSION_ENROLLMENT_PUBLIC_SHA256
-  exec "$script" "$@"
 }
 
 fm_session_enrollment_consumer_prepare() {
-  local script=$1 launch=$2 private public output public_digest public_key
-  shift 2
+  local private public output public_digest public_key
   if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
     return 1
   fi
   fm_session_descriptor_channel_isolated 8 || return 1
+  fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
   public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
@@ -409,10 +429,11 @@ fm_session_enrollment_consumer_prepare() {
   exec 8< <(printf '%s\n' "$private") || return 1
   unset private public
   FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD=8
+  FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY=$public_key
+  FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256=$public_digest
   export FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD
-  exec "$script" --enrollment-launch "$launch" \
-    --enrollment-consumer-key "$public_key" \
-    --enrollment-consumer-key-sha256 "$public_digest" "$@"
+  export FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY
+  export FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256
 }
 
 fm_session_enrollment_public_key_validate() {

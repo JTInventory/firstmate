@@ -1046,6 +1046,20 @@ test_authority_fds_reprove_isolation_after_exec() {
     ! fm_session_authority_capability_present
   ) || fail "post-exec authority use skipped descriptor isolation proof"
   (
+    exec 10<&-
+    fm_session_descriptor_channel_isolated() { return 0; }
+    fm_session_exec_descriptor_isolation_durable() { return 1; }
+    ! fm_session_enrollment_signer_prepare
+    ! ( : <&10 ) 2>/dev/null
+  ) || fail "signer created a key without durable process isolation"
+  (
+    exec 8<&-
+    fm_session_descriptor_channel_isolated() { return 0; }
+    fm_session_exec_descriptor_isolation_durable() { return 1; }
+    ! fm_session_enrollment_consumer_prepare
+    ! ( : <&8 ) 2>/dev/null
+  ) || fail "consumer created a key without durable process isolation"
+  (
     exec 10< <(printf 'private\n')
     FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD=10
     fm_session_descriptor_channel_isolated() { return 1; }
@@ -1061,7 +1075,7 @@ test_authority_fds_reprove_isolation_after_exec() {
   ) || fail "post-exec consumer consumed its key before isolation proof"
   exec 9<&-
   FM_SESSION_AUTHORITY_FD=$original_fd
-  pass "authority keys reprove descriptor isolation after exec"
+  pass "authority secrets never cross unproven exec isolation"
 }
 
 test_unrelated_process_cannot_consume_endpoint_enrollment() {

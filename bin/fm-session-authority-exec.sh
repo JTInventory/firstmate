@@ -63,8 +63,9 @@ if fm_session_authority_read "$authority" \
   authorized=1
 elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   if [ -z "$enrollment_consumer_key" ]; then
-    fm_session_enrollment_consumer_prepare \
-      "$SCRIPT_DIR/fm-session-authority-exec.sh" "$enrollment_launch" "$@"
+    fm_session_enrollment_consumer_prepare || exit 1
+    enrollment_consumer_key=$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY
+    enrollment_consumer_digest=$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256
   fi
   fm_session_enrollment_consumer_key_validate \
     "$enrollment_consumer_key" "$enrollment_consumer_digest" || exit 1

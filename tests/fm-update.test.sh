@@ -1328,7 +1328,7 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
 
 test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
   local w generation fakebin out runtime resolved meta legacy_meta foreign_meta
-  local ownership_meta ownership_fakebin
+  local ownership_meta ownership_fakebin crash_meta crash_fakebin crash_resolved
   w=$(new_world t32-exact-pane)
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
@@ -1375,9 +1375,12 @@ SH
   meta="$w/home/state/sm1.meta"
   sed -i '/^tmux_pane_id=/d;/^endpoint_generation=/d;/^task=/d' "$meta"
   sed -i 's/^window=.*/window=firstmate:fm-sm1/' "$meta"
-  mkdir "$meta.endpoint-migration.lock"
-  touch -t 200001010000 "$meta.endpoint-migration.lock"
+  mkdir -p "$w/home/state/.locks"
+  mkdir "$w/home/state/.locks/tmux-endpoint-42.migration.lock"
+  touch -t 200001010000 \
+    "$w/home/state/.locks/tmux-endpoint-42.migration.lock"
   resolved=$(
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/sm1"; }
@@ -1389,8 +1392,8 @@ SH
   )
   [ "$resolved" = $'tmux\t%42' ] \
     || fail "pre-port tmux metadata did not migrate to its exact live pane"
-  [ ! -e "$meta.endpoint-migration.lock" ] \
-    && [ ! -L "$meta.endpoint-migration.lock" ] \
+  [ ! -e "$w/home/state/.locks/tmux-endpoint-42.migration.lock" ] \
+    && [ ! -L "$w/home/state/.locks/tmux-endpoint-42.migration.lock" ] \
     || fail "legacy tmux migration left its recovered lifecycle lock behind"
   [ "$(grep -c '^window=@42$' "$meta")" -eq 1 ] \
     && [ "$(grep -c '^tmux_pane_id=%42$' "$meta")" -eq 1 ] \
@@ -1407,6 +1410,7 @@ SH
     printf 'home=%s/foreign\n' "$w"
   } > "$foreign_meta"
   if (
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/foreign"; }
@@ -1435,6 +1439,7 @@ SH
     PATH="$ownership_fakebin:$PATH"
     FM_FAKE_TMUX_LOG="$w/ownership-fake/tmux.log"
     export PATH FM_FAKE_TMUX_LOG
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/sm1"; }
@@ -1451,12 +1456,83 @@ SH
   [ "$(grep -c '^tmux_pane_id=' "$ownership_meta")" -eq 0 ] \
     && [ "$(grep -c '^endpoint_generation=' "$ownership_meta")" -eq 0 ] \
     || fail "unowned legacy metadata was partially migrated"
+  if (
+    PATH="$ownership_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/ownership-fake/tmux.log"
+    export PATH FM_FAKE_TMUX_LOG
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/ownership"; }
+    fm_agent_environ() { return 0; }
+    fm_backend_resolve_selector_with_backend fm-ownership "$w/home/state"
+  ) >/dev/null 2>&1; then
+    fail "legacy migration accepted a process without an exact task declaration"
+  fi
+  [ "$(grep -c '^tmux_pane_id=' "$ownership_meta")" -eq 0 ] \
+    && [ "$(grep -c '^endpoint_generation=' "$ownership_meta")" -eq 0 ] \
+    || fail "undeclared legacy process partially migrated metadata"
+  crash_meta="$w/home/state/crash.meta"
+  mkdir -p "$w/crash"
+  printf 'crash\n' > "$w/crash/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-crash\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s/crash\n' "$w"
+  } > "$crash_meta"
+  crash_fakebin=$(make_fake_tmux "$w/crash-fake")
+  if (
+    PATH="$crash_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/crash-fake/tmux.log"
+    FM_FAKE_PANE_ID=%44
+    FM_FAKE_WINDOW_ID=@44
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/crash"; }
+    fm_agent_environ() {
+      printf 'FM_AGENT_TASK=crash\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=secondmate\n' \
+        "$w/crash"
+    }
+    fm_backend_tmux_migration_commit_meta() { return 1; }
+    fm_backend_resolve_selector_with_backend fm-crash "$w/home/state"
+  ) >/dev/null 2>&1; then
+    fail "interrupted legacy migration reported success before metadata commit"
+  fi
+  [ -f "$w/home/state/.tmux-endpoint-44.migration" ] \
+    && [ -f "$w/crash-fake/tmux.log.endpoint-generation" ] \
+    && [ "$(grep -c '^endpoint_generation=' "$crash_meta")" -eq 0 ] \
+    || fail "interrupted generation bind did not retain recoverable evidence"
+  crash_resolved=$(
+    PATH="$crash_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/crash-fake/tmux.log"
+    FM_FAKE_PANE_ID=%44
+    FM_FAKE_WINDOW_ID=@44
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/crash"; }
+    fm_agent_environ() {
+      printf 'FM_AGENT_TASK=crash\nFM_AGENT_OWNER_HOME=%s\nFM_AGENT_ROLE=secondmate\n' \
+        "$w/crash"
+    }
+    fm_backend_resolve_selector_with_backend fm-crash "$w/home/state"
+  )
+  [ "$crash_resolved" = $'tmux\t%44' ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-44.migration" ] \
+    || fail "legacy migration did not recover bind-before-commit interruption"
   legacy_meta="$w/home/state/legacy-ambiguous.meta"
   printf 'window=firstmate:fm-legacy-ambiguous\nkind=secondmate\n' \
     > "$legacy_meta"
-  if FM_FAKE_PANE_ID=$'%42\n%43' \
-    fm_backend_resolve_selector_with_backend \
-      fm-legacy-ambiguous "$w/home/state" >/dev/null 2>&1; then
+  if (
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    FM_FAKE_PANE_ID=$'%42\n%43' \
+      fm_backend_resolve_selector_with_backend \
+        fm-legacy-ambiguous "$w/home/state"
+  ) >/dev/null 2>&1; then
     fail "pre-port tmux migration accepted an ambiguous multi-pane window"
   fi
   [ "$(grep -c '^tmux_pane_id=' "$legacy_meta")" -eq 0 ] \

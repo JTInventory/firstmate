@@ -223,9 +223,17 @@ fm_backend_tmux_legacy_process_pid() {
   fm_agent_harness_pid_below "$shell"
 }
 
+FM_BACKEND_TMUX_LEGACY_PROCESS=
+FM_BACKEND_TMUX_LEGACY_PROCESS_START=
+FM_BACKEND_TMUX_LEGACY_PROCESS_IDENTITY=
+
 fm_backend_tmux_legacy_process_owned() {
   local meta=$1 pane=$2 id=$3 home task kind harness home_real marker
-  local pid cwd env declared_task declared_home declared_home_real declared_role
+  local pid start identity cwd env declared_task declared_home declared_home_real
+  local declared_role
+  FM_BACKEND_TMUX_LEGACY_PROCESS=
+  FM_BACKEND_TMUX_LEGACY_PROCESS_START=
+  FM_BACKEND_TMUX_LEGACY_PROCESS_IDENTITY=
   home=$(fm_backend_meta_value_exact "$meta" home required) || return 1
   task=$(fm_backend_meta_value_exact "$meta" task optional) || return 1
   kind=$(fm_backend_meta_value_exact "$meta" kind required) || return 1
@@ -239,6 +247,8 @@ fm_backend_tmux_legacy_process_owned() {
     && [ "$(cat "$marker" 2>/dev/null)" = "$id" ] || return 1
   pid=$(fm_backend_tmux_legacy_process_pid "$pane") || return 1
   fm_harness_pid_alive "$pid" || return 1
+  start=$(fm_session_process_start "$pid") || return 1
+  identity=$(fm_session_process_identity "$pid") || return 1
   cwd=$(fm_agent_proc_cwd "$pid") || return 1
   cwd=$(cd "$cwd" 2>/dev/null && pwd -P) || return 1
   [ "$cwd" = "$home_real" ] || return 1
@@ -250,17 +260,36 @@ fm_backend_tmux_legacy_process_owned() {
     && [ "$(printf '%s\n' "$declared_home" | sed '/^$/d' | wc -l | tr -d ' ')" -le 1 ] \
     && [ "$(printf '%s\n' "$declared_role" | sed '/^$/d' | wc -l | tr -d ' ')" -le 1 ] \
     || return 1
-  if [ -n "$declared_task$declared_home$declared_role" ]; then
-    declared_home_real=$(cd "$declared_home" 2>/dev/null && pwd -P) || return 1
-    [ "$declared_task" = "$id" ] \
-      && [ "$declared_home_real" = "$home_real" ] \
-      && [ "$declared_role" = secondmate ] || return 1
-  fi
+  [ -n "$declared_task" ] \
+    && [ -n "$declared_home" ] \
+    && [ -n "$declared_role" ] || return 1
+  declared_home_real=$(cd "$declared_home" 2>/dev/null && pwd -P) || return 1
+  [ "$declared_task" = "$id" ] \
+    && [ "$declared_home_real" = "$home_real" ] \
+    && [ "$declared_role" = secondmate ] \
+    && [ "$(fm_backend_tmux_legacy_process_pid "$pane" 2>/dev/null)" = "$pid" ] \
+    && [ "$(fm_session_process_start "$pid" 2>/dev/null)" = "$start" ] \
+    && [ "$(fm_session_process_identity "$pid" 2>/dev/null)" = "$identity" ] \
+    || return 1
+  FM_BACKEND_TMUX_LEGACY_PROCESS=$pid
+  FM_BACKEND_TMUX_LEGACY_PROCESS_START=$start
+  FM_BACKEND_TMUX_LEGACY_PROCESS_IDENTITY=$identity
+}
+
+fm_backend_tmux_legacy_migration_authorized() {
+  local state=${1:-${FM_STATE_OVERRIDE:-$FM_HOME/state}}
+  local authority="$state/.session-authority" script home_real
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  fm_session_authority_capability_present \
+    && fm_session_authority_read "$authority" \
+    && [ "$FM_SESSION_AUTHORITY_HOME" = "$home_real" ] \
+    && fm_session_authority_is_current_ancestor "$authority" || return 1
+  script="$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh"
+  fm_session_authority_broker_present "$script"
 }
 
 fm_backend_tmux_legacy_pane_unclaimed() {
   local meta=$1 pane=$2 other count
-  fm_backend_tmux_pane_generation_unset "$pane" || return 1
   for other in "$(dirname "$meta")"/*.meta; do
     [ -e "$other" ] || continue
     [ "$other" != "$meta" ] || continue
@@ -269,11 +298,176 @@ fm_backend_tmux_legacy_pane_unclaimed() {
   done
 }
 
+FM_BACKEND_TMUX_MIGRATION_META=
+FM_BACKEND_TMUX_MIGRATION_META_SHA=
+FM_BACKEND_TMUX_MIGRATION_ID=
+FM_BACKEND_TMUX_MIGRATION_PANE=
+FM_BACKEND_TMUX_MIGRATION_WINDOW=
+FM_BACKEND_TMUX_MIGRATION_GENERATION=
+FM_BACKEND_TMUX_MIGRATION_STATE=
+FM_BACKEND_TMUX_MIGRATION_PROCESS=
+FM_BACKEND_TMUX_MIGRATION_PROCESS_START=
+FM_BACKEND_TMUX_MIGRATION_PROCESS_IDENTITY=
+
+fm_backend_tmux_legacy_process_snapshot() {
+  local pane=$1 pid=$2 start=$3 identity=$4
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] \
+    && [ "$(fm_backend_tmux_legacy_process_pid "$pane" 2>/dev/null)" = "$pid" ] \
+    && [ "$(fm_session_process_start "$pid" 2>/dev/null)" = "$start" ] \
+    && [ "$(fm_session_process_identity "$pid" 2>/dev/null)" = "$identity" ]
+}
+
+fm_backend_tmux_migration_hmac() {
+  printf '%s' "$1" | fm_session_authority_hmac
+}
+
+fm_backend_tmux_migration_write() {
+  local journal=$1 meta=$2 meta_sha=$3 id=$4 pane=$5 window=$6
+  local generation=$7 state=$8 process=$9 process_start=${10}
+  local process_identity=${11} body hmac tmp
+  case "$meta:$meta_sha:$id:$pane:$window:$generation:$state:$process:$process_start:$process_identity" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  body=$(printf 'version=2\nmeta=%s\nmeta-sha256=%s\ntask=%s\npane=%s\nwindow=%s\ngeneration=%s\nstate=%s\nprocess=%s\nprocess-start=%s\nprocess-identity=%s\n' \
+    "$meta" "$meta_sha" "$id" "$pane" "$window" "$generation" "$state" \
+    "$process" "$process_start" "$process_identity") \
+    || return 1
+  body="${body}"$'\n'
+  hmac=$(fm_backend_tmux_migration_hmac "$body") || return 1
+  tmp=$(mktemp "${journal}.XXXXXX") || return 1
+  chmod 600 "$tmp" \
+    && printf '%shmac=%s\n' "$body" "$hmac" > "$tmp" \
+    && mv "$tmp" "$journal" || {
+      rm -f "$tmp"
+      return 1
+    }
+}
+
+fm_backend_tmux_migration_read() {
+  local journal=$1 body expected actual
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  [ "$(wc -l < "$journal" | tr -d ' ')" -eq 12 ] || return 1
+  [ "$(sed -n '1p' "$journal")" = version=2 ] || return 1
+  FM_BACKEND_TMUX_MIGRATION_META=$(sed -n '2s/^meta=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_META_SHA=$(sed -n '3s/^meta-sha256=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_ID=$(sed -n '4s/^task=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_PANE=$(sed -n '5s/^pane=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_WINDOW=$(sed -n '6s/^window=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_GENERATION=$(sed -n '7s/^generation=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_STATE=$(sed -n '8s/^state=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_PROCESS=$(sed -n '9s/^process=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_PROCESS_START=$(sed -n '10s/^process-start=//p' "$journal")
+  FM_BACKEND_TMUX_MIGRATION_PROCESS_IDENTITY=$(sed -n '11s/^process-identity=//p' "$journal")
+  actual=$(sed -n '12s/^hmac=//p' "$journal")
+  case "$FM_BACKEND_TMUX_MIGRATION_META" in /*) ;; *) return 1 ;; esac
+  [ "${#FM_BACKEND_TMUX_MIGRATION_META_SHA}" -eq 64 ] \
+    && [ "${#actual}" -eq 64 ] || return 1
+  case "$FM_BACKEND_TMUX_MIGRATION_META_SHA:$actual" in
+    *[!0-9a-f:]*) return 1 ;;
+  esac
+  case "$FM_BACKEND_TMUX_MIGRATION_ID" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$FM_BACKEND_TMUX_MIGRATION_PANE" in %*) ;; *) return 1 ;; esac
+  case "${FM_BACKEND_TMUX_MIGRATION_PANE#%}" in ''|*[!0-9]*) return 1 ;; esac
+  case "$FM_BACKEND_TMUX_MIGRATION_WINDOW" in @*) ;; *) return 1 ;; esac
+  case "${FM_BACKEND_TMUX_MIGRATION_WINDOW#@}" in ''|*[!0-9]*) return 1 ;; esac
+  case "$FM_BACKEND_TMUX_MIGRATION_GENERATION" in
+    fm-legacy-[A-Za-z0-9._-]*) ;;
+    *) return 1 ;;
+  esac
+  case "$FM_BACKEND_TMUX_MIGRATION_STATE" in prepared|bound) ;; *) return 1 ;; esac
+  case "$FM_BACKEND_TMUX_MIGRATION_PROCESS" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$FM_BACKEND_TMUX_MIGRATION_PROCESS_START" ] \
+    && [ -n "$FM_BACKEND_TMUX_MIGRATION_PROCESS_IDENTITY" ] || return 1
+  body=$(sed -n '1,11p' "$journal")$'\n'
+  expected=$(fm_backend_tmux_migration_hmac "$body") || return 1
+  [ "$actual" = "$expected" ]
+}
+
+fm_backend_tmux_migration_commit_meta() {
+  local meta=$1 meta_sha=$2 id=$3 pane=$4 canonical=$5 generation=$6
+  local tmp task_count
+  fm_backend_tmux_meta_read "$meta" \
+    && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 1 ] \
+    && [ "$(fm_session_sha256_file "$meta")" = "$meta_sha" ] || return 1
+  task_count=$(grep -c '^task=' "$meta" 2>/dev/null || true)
+  [ "$task_count" -le 1 ] || return 1
+  tmp=$(mktemp "${meta}.migration.XXXXXX") || return 1
+  chmod 600 "$tmp" \
+    && awk -v window="$canonical" '
+        /^window=/ { print "window=" window; next }
+        { print }
+      ' "$meta" > "$tmp" \
+    && printf 'tmux_pane_id=%s\nendpoint_generation=%s\n' \
+      "$pane" "$generation" >> "$tmp" \
+    && { [ "$task_count" -eq 1 ] || printf 'task=%s\n' "$id" >> "$tmp"; } \
+    && mv "$tmp" "$meta" || {
+      rm -f "$tmp"
+      return 1
+    }
+}
+
+fm_backend_tmux_migration_recover() {
+  local journal=$1 pane=$2 canonical=$3 live
+  fm_backend_tmux_migration_read "$journal" || return 1
+  [ "$FM_BACKEND_TMUX_MIGRATION_PANE" = "$pane" ] \
+    && [ "$FM_BACKEND_TMUX_MIGRATION_WINDOW" = "$canonical" ] || return 1
+  fm_backend_tmux_legacy_process_snapshot \
+    "$pane" \
+    "$FM_BACKEND_TMUX_MIGRATION_PROCESS" \
+    "$FM_BACKEND_TMUX_MIGRATION_PROCESS_START" \
+    "$FM_BACKEND_TMUX_MIGRATION_PROCESS_IDENTITY" || return 1
+  if fm_backend_tmux_meta_read "$FM_BACKEND_TMUX_MIGRATION_META" \
+    && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ]; then
+    [ "$FM_BACKEND_TMUX_META_PANE" = "$pane" ] \
+      && [ "$FM_BACKEND_TMUX_META_WINDOW" = "$canonical" ] \
+      && [ "$FM_BACKEND_TMUX_META_GENERATION" \
+        = "$FM_BACKEND_TMUX_MIGRATION_GENERATION" ] \
+      && fm_backend_tmux_endpoint_matches "$canonical" "$pane" \
+        "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
+    rm -f "$journal"
+    return 0
+  fi
+  [ "$(fm_session_sha256_file "$FM_BACKEND_TMUX_MIGRATION_META" 2>/dev/null)" \
+    = "$FM_BACKEND_TMUX_MIGRATION_META_SHA" ] || return 1
+  if live=$(fm_backend_tmux_pane_generation_recorded "$pane" 2>/dev/null); then
+    [ "$live" = "$FM_BACKEND_TMUX_MIGRATION_GENERATION" ] || return 1
+  else
+    fm_backend_tmux_pane_generation_unset "$pane" || return 1
+    fm_backend_tmux_bind_endpoint_generation \
+      "$pane" "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
+  fi
+  fm_backend_tmux_migration_write "$journal" \
+    "$FM_BACKEND_TMUX_MIGRATION_META" "$FM_BACKEND_TMUX_MIGRATION_META_SHA" \
+    "$FM_BACKEND_TMUX_MIGRATION_ID" "$pane" "$canonical" \
+    "$FM_BACKEND_TMUX_MIGRATION_GENERATION" bound \
+    "$FM_BACKEND_TMUX_MIGRATION_PROCESS" \
+    "$FM_BACKEND_TMUX_MIGRATION_PROCESS_START" \
+    "$FM_BACKEND_TMUX_MIGRATION_PROCESS_IDENTITY" || return 1
+  fm_backend_tmux_migration_commit_meta \
+    "$FM_BACKEND_TMUX_MIGRATION_META" "$FM_BACKEND_TMUX_MIGRATION_META_SHA" \
+    "$FM_BACKEND_TMUX_MIGRATION_ID" "$pane" "$canonical" \
+    "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
+  fm_backend_tmux_endpoint_matches "$canonical" "$pane" \
+    "$FM_BACKEND_TMUX_MIGRATION_GENERATION" || return 1
+  rm -f "$journal"
+}
+
 fm_backend_tmux_meta_migrate_legacy() {  # <meta-file>
-  local meta=$1 lock="${1}.endpoint-migration.lock" pane current generation
-  local identity canonical tmp id task_count attempts=0 status=1
+  local meta=$1 pane current canonical state lock journal generation meta_sha id
+  local process process_start process_identity attempts=0 status=1
+  meta=$(cd "$(dirname "$meta")" 2>/dev/null && pwd -P)/${meta##*/} || return 1
   fm_backend_tmux_meta_read "$meta" || return 1
   [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 1 ] || return 0
+  state=$(dirname "$meta")
+  fm_backend_tmux_legacy_migration_authorized "$state" || return 1
+  fm_backend_source tmux || return 1
+  pane=$(fm_backend_tmux_single_pane_id \
+    "$FM_BACKEND_TMUX_META_WINDOW" 2>/dev/null) || return 1
+  canonical=$(fm_backend_tmux_pane_window_id "$pane") || return 1
+  mkdir -p "$state/.locks" || return 1
+  lock="$state/.locks/tmux-endpoint-${canonical#@}.migration.lock"
+  journal="$state/.tmux-endpoint-${canonical#@}.migration"
   while ! fm_lock_try_acquire "$lock"; do
     fm_backend_tmux_meta_read "$meta" \
       && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] \
@@ -289,6 +483,23 @@ fm_backend_tmux_meta_migrate_legacy() {  # <meta-file>
     fm_lock_release "$lock"
     return 1
   fi
+  fm_backend_tmux_legacy_migration_authorized "$state" || {
+    fm_lock_release "$lock"
+    return 1
+  }
+  current=$(fm_backend_tmux_single_pane_id \
+    "$FM_BACKEND_TMUX_META_WINDOW" 2>/dev/null) || current=
+  [ "$current" = "$pane" ] \
+    && [ "$(fm_backend_tmux_pane_window_id "$pane" 2>/dev/null)" = "$canonical" ] || {
+      fm_lock_release "$lock"
+      return 1
+    }
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fm_backend_tmux_migration_recover "$journal" "$pane" "$canonical" || {
+      fm_lock_release "$lock"
+      return 1
+    }
+  fi
   if ! fm_backend_tmux_meta_read "$meta"; then
     fm_lock_release "$lock"
     return 1
@@ -297,59 +508,35 @@ fm_backend_tmux_meta_migrate_legacy() {  # <meta-file>
     fm_lock_release "$lock"
     return 0
   fi
-  if ! fm_backend_source tmux; then
-    fm_lock_release "$lock"
-    return 1
-  fi
-  pane=$(fm_backend_tmux_single_pane_id \
-    "$FM_BACKEND_TMUX_META_WINDOW" 2>/dev/null) || pane=
   id=${meta##*/}
   id=${id%.meta}
   case "$id" in ''|*[!A-Za-z0-9._-]*) pane= ;; esac
   if [ -n "$pane" ]; then
-    fm_backend_tmux_legacy_process_owned "$meta" "$pane" "$id" \
-      && fm_backend_tmux_legacy_pane_unclaimed "$meta" "$pane" || pane=
+    if fm_backend_tmux_legacy_process_owned "$meta" "$pane" "$id" \
+      && fm_backend_tmux_legacy_pane_unclaimed "$meta" "$pane"; then
+      process=$FM_BACKEND_TMUX_LEGACY_PROCESS
+      process_start=$FM_BACKEND_TMUX_LEGACY_PROCESS_START
+      process_identity=$FM_BACKEND_TMUX_LEGACY_PROCESS_IDENTITY
+    else
+      pane=
+    fi
   fi
   if [ -n "$pane" ]; then
     generation="fm-legacy-$(date +%s)-$$-$RANDOM-$RANDOM"
-    fm_backend_tmux_bind_endpoint_generation "$pane" "$generation" \
-      >/dev/null 2>&1 || pane=
+    meta_sha=$(fm_session_sha256_file "$meta") || pane=
   fi
-  if [ -n "$pane" ]; then
-    identity=$(fm_backend_tmux_endpoint_identity "$pane" 2>/dev/null) \
-      || identity=
-    canonical=${identity%%|*}
-    current=$(fm_backend_tmux_single_pane_id \
-      "$FM_BACKEND_TMUX_META_WINDOW" 2>/dev/null) || current=
-    [ "$identity" = "$canonical|$pane|$generation" ] \
-      && [ "$current" = "$pane" ] || pane=
-  fi
-  case "${canonical:-}" in
-    @*) case "${canonical#@}" in ''|*[!0-9]*) pane= ;; esac ;;
-    *) pane= ;;
-  esac
-  task_count=$(grep -c '^task=' "$meta" 2>/dev/null || true)
-  [ "$task_count" -le 1 ] || pane=
-  if [ -n "$pane" ]; then
-    tmp=$(mktemp "${meta}.migration.XXXXXX") || tmp=
-    if [ -n "$tmp" ] && chmod 600 "$tmp" \
-      && awk -v window="$canonical" '
-          /^window=/ { print "window=" window; next }
-          { print }
-        ' "$meta" > "$tmp" \
-      && printf 'tmux_pane_id=%s\nendpoint_generation=%s\n' \
-        "$pane" "$generation" >> "$tmp" \
-      && { [ "$task_count" -eq 1 ] || printf 'task=%s\n' "$id" >> "$tmp"; } \
-      && mv "$tmp" "$meta" \
-      && fm_backend_tmux_meta_read "$meta" \
-      && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] \
-      && fm_backend_tmux_endpoint_matches \
-        "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
-        "$FM_BACKEND_TMUX_META_GENERATION"; then
-      status=0
-    else
-      [ -z "${tmp:-}" ] || rm -f "$tmp"
-    fi
+  if [ -n "$pane" ] \
+    && fm_backend_tmux_pane_generation_unset "$pane" \
+    && fm_backend_tmux_migration_write "$journal" "$meta" "$meta_sha" "$id" \
+      "$pane" "$canonical" "$generation" prepared \
+      "$process" "$process_start" "$process_identity" \
+    && fm_backend_tmux_migration_recover "$journal" "$pane" "$canonical" \
+    && fm_backend_tmux_meta_read "$meta" \
+    && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] \
+    && fm_backend_tmux_endpoint_matches \
+      "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
+      "$FM_BACKEND_TMUX_META_GENERATION"; then
+    status=0
   fi
   fm_lock_release "$lock"
   return "$status"
