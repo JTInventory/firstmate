@@ -1869,7 +1869,8 @@ test_parse_target() {
 }
 
 test_endpoint_generation_is_provider_bound_and_recycle_safe() {
-  local token= out
+  local token= live_workspace=w1 out identity
+  . "$ROOT/bin/backends/herdr.sh"
   fm_backend_herdr_cli() {
     local _session=$1
     shift
@@ -1882,7 +1883,7 @@ test_endpoint_generation_is_provider_bound_and_recycle_safe() {
         printf '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","tokens":{"firstmate_endpoint_generation":"%s"}}}}\n' "$token"
         ;;
       "tab get")
-        printf '{"result":{"tab":{"tab_id":"w1:t2","workspace_id":"w1"}}}\n'
+        printf '{"result":{"tab":{"tab_id":"w1:t2","workspace_id":"%s"}}}\n' "$live_workspace"
         ;;
       *) return 1 ;;
     esac
@@ -1891,11 +1892,18 @@ test_endpoint_generation_is_provider_bound_and_recycle_safe() {
     || fail "provider endpoint generation binding failed"
   out=$(fm_backend_herdr_endpoint_generation default:w1:p2)
   [ "$out" = herdr-nonce-a ] || fail "provider generation did not round-trip"
+  identity=$(fm_backend_herdr_endpoint_identity default:w1:p2)
+  [ "$identity" = 'default|w1|w1:t2|w1:p2|herdr-nonce-a' ] \
+    || fail "provider identity did not bind the full live tuple: $identity"
+  live_workspace=w9
+  identity=$(fm_backend_herdr_endpoint_identity default:w1:p2)
+  [ "$identity" = 'default|w9|w1:t2|w1:p2|herdr-nonce-a' ] \
+    || fail "provider identity hid a moved endpoint: $identity"
   token=
   if fm_backend_herdr_endpoint_generation default:w1:p2 >/dev/null 2>&1; then
     fail "recycled provider ids without the creation token retained generation identity"
   fi
-  pass "Herdr endpoint generation uses a provider-bound creation nonce"
+  pass "Herdr endpoint identity binds session, workspace, tab, pane, and nonce"
 }
 
 test_normalize_key() {
@@ -3004,7 +3012,11 @@ test_scripts_route_explicit_target_through_meta_backend() {
   local dir state log resp fb neutral script_root out
   dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
-  neutral="$dir/neutral-root"; mkdir -p "$neutral"
+  neutral="$dir/neutral-root"
+  git init -q -b main "$neutral"
+  printf 'neutral\n' > "$neutral/README.md"
+  git -C "$neutral" add README.md
+  git -C "$neutral" commit -qm neutral
   script_root="$dir/repo"
   mkdir -p "$script_root"
   cp -a "$ROOT/bin" "$script_root/bin"

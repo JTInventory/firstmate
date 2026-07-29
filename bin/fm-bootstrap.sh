@@ -110,6 +110,8 @@ export FM_WAKE_LIB_READ_ONLY
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-delivery-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-secondmate-delivery-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
@@ -207,33 +209,14 @@ fleet_sync() {
 }
 
 secondmate_sync() {
-  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
   local -a bootstrap_admission_locks=()
   fm_ff_target_lock_acquire() {
-    local state_dir=$1 _label=${2:-target} target_home=${3:-} lock
-    bootstrap_admission_locks=()
-    while IFS= read -r lock; do
-      [ -n "$lock" ] || continue
-      mkdir -p "$(dirname "$lock")" || return 1
-      if ! fm_lock_try_acquire "$lock"; then
-        fm_ff_target_lock_release
-        return 1
-      fi
-      bootstrap_admission_locks+=("$lock")
-    done < <(fm_spawn_admission_lock_paths "$state_dir")
-    if fm_spawn_legacy_task_lock_busy "$state_dir" \
-      || ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir"; then
-      fm_ff_target_lock_release
-      return 1
-    fi
+    local state_dir=$1 _label=${2:-target} target_home=${3:-}
+    fm_lifecycle_admission_acquire bootstrap_admission_locks \
+      "$state_dir" "$target_home" "${BASHPID:-$$}"
   }
   fm_ff_target_lock_release() {
-    local i
-    for ((i=${#bootstrap_admission_locks[@]} - 1; i >= 0; i--)); do
-      fm_lock_release "${bootstrap_admission_locks[$i]}" || true
-    done
-    bootstrap_admission_locks=()
+    fm_lifecycle_admission_release bootstrap_admission_locks
   }
   # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
@@ -599,6 +582,9 @@ secondmate_liveness_sweep() {
           fm_ff_target_lock_release
           return 1
         }
+        if fm_lifecycle_admission_lock_owned_by_process "$lock"; then
+          continue
+        fi
         if ! fm_lock_try_acquire "$lock"; then
           fm_ff_target_lock_release
           return 1
@@ -1013,6 +999,21 @@ crew_dispatch_validate() {
   ' "$file"
   fi
 }
+
+FM_BOOTSTRAP_FLEET_LOCKS=()
+bootstrap_locks_release() {
+  local status=$?
+  fm_lifecycle_admission_release FM_BOOTSTRAP_FLEET_LOCKS
+  return "$status"
+}
+trap bootstrap_locks_release EXIT
+if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
+  fm_lifecycle_admission_acquire FM_BOOTSTRAP_FLEET_LOCKS \
+    "$STATE" "$FM_HOME" "${BASHPID:-$$}" || {
+    echo "REFUSED: fleet lifecycle serialization is busy; bootstrap made no changes" >&2
+    exit 1
+  }
+fi
 
 isolation_status=0
 "$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null || isolation_status=$?

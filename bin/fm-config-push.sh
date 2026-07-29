@@ -69,31 +69,15 @@ SECONDMATES_MD="$DATA/secondmates.md"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 FM_CONFIG_PUSH_ADMISSION_LOCKS=()
+FM_CONFIG_PUSH_FLEET_LOCKS=()
 fm_ff_target_lock_acquire() {
-  local state_dir=$1 _label=${2:-target} target_home=${3:-} lock
-  FM_CONFIG_PUSH_ADMISSION_LOCKS=()
-  while IFS= read -r lock; do
-    [ -n "$lock" ] || continue
-    mkdir -p "$(dirname "$lock")" || return 1
-    if ! fm_lock_try_acquire "$lock"; then
-      fm_ff_target_lock_release
-      return 1
-    fi
-    FM_CONFIG_PUSH_ADMISSION_LOCKS+=("$lock")
-  done < <(fm_spawn_admission_lock_paths "$state_dir")
-  if fm_spawn_legacy_task_lock_busy "$state_dir" \
-    || ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir"; then
-    fm_ff_target_lock_release
-    return 1
-  fi
+  local state_dir=$1 _label=${2:-target} target_home=${3:-}
+  fm_lifecycle_admission_acquire FM_CONFIG_PUSH_ADMISSION_LOCKS \
+    "$state_dir" "$target_home" "${BASHPID:-$$}"
 }
 
 fm_ff_target_lock_release() {
-  local i
-  for ((i=${#FM_CONFIG_PUSH_ADMISSION_LOCKS[@]} - 1; i >= 0; i--)); do
-    fm_lock_release "${FM_CONFIG_PUSH_ADMISSION_LOCKS[$i]}" || true
-  done
-  FM_CONFIG_PUSH_ADMISSION_LOCKS=()
+  fm_lifecycle_admission_release FM_CONFIG_PUSH_ADMISSION_LOCKS
 }
 
 print_item_report() {
@@ -113,6 +97,8 @@ reports=""
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local report_file
+  fm_ff_target_lock_release
+  fm_lifecycle_admission_release FM_CONFIG_PUSH_FLEET_LOCKS
   rm -f "$records"
   for report_file in $reports; do
     rm -f "$report_file"
@@ -120,7 +106,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-live_secondmate_meta_records "$STATE" "$SECONDMATES_MD" > "$records"
+fm_lifecycle_admission_acquire FM_CONFIG_PUSH_FLEET_LOCKS \
+  "$STATE" "$FM_HOME" "${BASHPID:-$$}" || {
+  echo "REFUSED: fleet lifecycle serialization is busy; config push made no changes" >&2
+  exit 1
+}
+fm_secondmate_lifecycle_preflight "$STATE" "$SECONDMATES_MD" || {
+  echo "REFUSED: secondmate lifecycle preflight failed; config push made no changes" >&2
+  exit 1
+}
+live_secondmate_meta_records "$STATE" "$SECONDMATES_MD" > "$records" || exit 1
 if [ ! -s "$records" ]; then
   echo "config-push: no live secondmate homes found"
   exit 0
@@ -211,18 +206,18 @@ errors=0
 while IFS='|' read -r id home window meta endpoint_generation provider_identity; do
   [ -n "$id" ] || continue
   if [ -z "$home" ]; then
-    printf 'secondmate %s: skipped - no home= in %s and no registry home\n' "$id" "$meta"
-    continue
+    printf 'secondmate %s: error - no home= in %s and no registry home\n' "$id" "$meta"
+    exit 1
   fi
   if ! validate_secondmate_home "$id" "$home"; then
-    printf 'secondmate %s (%s): skipped - unsafe home: %s\n' "$id" "$home" "$VALIDATION_ERROR"
-    continue
+    printf 'secondmate %s (%s): error - unsafe home: %s\n' "$id" "$home" "$VALIDATION_ERROR"
+    exit 1
   fi
   home_real="$VALIDATED_HOME"
   case " $seen_homes " in
     *" $home_real "*)
-      printf 'secondmate %s (%s): skipped - already processed for another live meta\n' "$id" "$home_real"
-      continue
+      printf 'secondmate %s (%s): error - duplicate live home ownership\n' "$id" "$home_real"
+      exit 1
       ;;
   esac
   seen_homes="$seen_homes $home_real"

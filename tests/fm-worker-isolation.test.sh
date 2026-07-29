@@ -337,6 +337,33 @@ test_real_primary_needs_no_ambient_role() {
   pass "real primary authority is proven by process and checkout identity"
 }
 
+test_fresh_primary_needs_no_procfs_or_preexisting_state() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/fresh-primary")
+  rm -rf "$primary_home/state"
+  out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a fresh primary must not require procfs or preexisting state"
+  [ -z "$out" ] || fail "fresh primary authority emitted unexpected output: $out"
+  pass "fresh primary authority is portable and topology-bound"
+}
+
+test_foreign_session_lock_defeats_primary_topology() {
+  local primary_home out status=0
+  primary_home=$(make_primary_home "$TMP_ROOT/foreign-primary-lock")
+  printf '%s\n' '999999|codex:foreign-thread|fallback' > "$primary_home/state/.lock"
+  out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "a foreign #82 session lock must defeat primary topology"
+  assert_contains "$out" "primary identity is not bound" \
+    "foreign session-lock refusal lost its authority reason"
+  pass "primary authority respects the home session-lock owner"
+}
+
 test_linked_main_worktree_can_prove_primary_authority() {
   local repo primary out status=0
   repo="$TMP_ROOT/linked-primary-repo"
@@ -1685,6 +1712,56 @@ SH
   pass "teardown binds endpoint mutation to the recorded generation"
 }
 
+test_teardown_refuses_unrecoverable_live_endpoint_transaction() {
+  local rec fakebin log out status stamp
+  rec=$(make_slot_world teardown-live-transaction)
+  read_slot_world "$rec"
+  fakebin=$(fm_fakebin "$WORLD/fake")
+  log="$WORLD/tmux.log"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+case "\${1:-}" in
+  show-options) printf '%s\n' endpoint-live ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'treehouse return [--if-lease-holder HOLDER]'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  write_current_meta "$WORLD/home/state/task-live.meta" task-live "$WORLD/home" endpoint-live \
+    "window=firstmate:fm-task-live" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-live "$WORLD/home" ) \
+    || fail "live transaction fixture could not be stamped"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+    FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
+    FM_CONFIG_OVERRIDE="$WORLD/home/config" PATH="$fakebin:$PATH" \
+    "$TEARDOWN" task-live --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "teardown crossed an unrecoverable live endpoint boundary"
+  assert_contains "$out" "live endpoint retirement cannot be rolled back" \
+    "unrecoverable transaction refusal lost its reason"
+  assert_no_grep 'kill-window' "$log" \
+    "unrecoverable transaction refusal closed the endpoint"
+  assert_present "$WORLD/home/state/task-live.meta" \
+    "unrecoverable transaction refusal removed task metadata"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = task-live ] || fail "unrecoverable transaction refusal changed ownership evidence"
+  pass "teardown retains live endpoints when full rollback is impossible"
+}
+
 test_verification_capture_includes_lifecycle_clears() {
   local doc prefix count
   doc="$ROOT/docs/verification/worker-isolation.md"
@@ -1968,6 +2045,24 @@ test_sweep_evaluates_every_matching_root_process() {
   pass "the resume sweep evaluates every root process for the complete worker identity"
 }
 
+test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
+  local world out id
+  require_procfs || { pass "skip: this host has no readable procfs for collapsed-conflict proof"; return 0; }
+  world=$(make_sweep_home sweep-collapsed-conflict)
+  id="task-f10-$RUN_TAG"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  start_declared_agent "$world/wt" "$id" "$world/home" crewmate >/dev/null
+  start_declared_agent "$world/project" "$id" "$world/home" secondmate >/dev/null
+  out=$(run_sweep "$world")
+  assert_contains "$out" "ISOLATION: task $id has conflicting worker identity" \
+    "a correct worker hid a wrong-role process collapsed into primary"
+  assert_contains "$out" "role=secondmate" \
+    "the collapsed conflicting identity lost its wrong role"
+  pass "the sweep reports collapsed conflicts even beside a correct worker"
+}
+
 test_crewmate_declaration_clears_every_inherited_home
 test_secondmate_declaration_pins_only_its_own_home
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
@@ -1976,6 +2071,8 @@ test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
 test_unbound_identity_has_no_primary_mutation_authority
 test_real_primary_needs_no_ambient_role
+test_fresh_primary_needs_no_procfs_or_preexisting_state
+test_foreign_session_lock_defeats_primary_topology
 test_linked_main_worktree_can_prove_primary_authority
 test_primary_role_cannot_override_worker_ancestry
 test_project_local_startup_adapter_stays_inert_for_a_worker
@@ -2019,6 +2116,7 @@ test_ordinary_teardown_acquires_admission_before_task_lock
 test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation
 test_teardown_refuses_duplicate_core_metadata_before_mutation
 test_teardown_refuses_stale_endpoint_generation_before_mutation
+test_teardown_refuses_unrecoverable_live_endpoint_transaction
 test_verification_capture_includes_lifecycle_clears
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
@@ -2030,6 +2128,7 @@ test_sweep_is_silent_for_a_healthy_secondmate
 test_sweep_still_reports_a_secondmate_running_for_a_foreign_home
 test_sweep_evaluates_every_matching_root_process
 test_sweep_reports_a_worker_declared_with_the_wrong_role
+test_sweep_reports_collapsed_conflict_alongside_correct_worker
 test_spawn_claim_abort_clears_only_a_new_exact_claim
 test_spawn_refuses_a_foreign_claim_before_slot_mutation
 

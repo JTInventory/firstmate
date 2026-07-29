@@ -1820,7 +1820,7 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
-fm_backend_herdr_endpoint_generation() {
+fm_backend_herdr_endpoint_identity() {
   local target=$1 session pane pane_info tab tab_info workspace generation
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
@@ -1836,7 +1836,13 @@ fm_backend_herdr_endpoint_generation() {
   generation=$(printf '%s' "$pane_info" \
     | jq -r '.result.pane.tokens.firstmate_endpoint_generation // empty' 2>/dev/null) || return 1
   case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 1 ;; esac
-  printf '%s' "$generation"
+  printf '%s|%s|%s|%s|%s' "$session" "$workspace" "$tab" "$pane" "$generation"
+}
+
+fm_backend_herdr_endpoint_generation() {
+  local identity
+  identity=$(fm_backend_herdr_endpoint_identity "$1") || return 1
+  printf '%s' "${identity##*|}"
 }
 
 fm_backend_herdr_bind_endpoint_generation() {

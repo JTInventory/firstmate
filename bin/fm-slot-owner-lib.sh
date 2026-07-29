@@ -27,8 +27,8 @@
 # waived by --force: --force is the captain's authority to discard THIS task's
 # work, never authority to release another task's slot.
 #
-# Absence of evidence is not evidence: a slot with no stamp (every task spawned
-# before stamping existed) and no conflicting reference still disposes normally.
+# Absence of evidence is not evidence: a slot with no stamp has ambiguous
+# ownership and is retained.
 #
 # Retention must not be a one-way door either. A task that retains on rule 1 AND
 # still completes its own teardown gives up its own stamp as it goes

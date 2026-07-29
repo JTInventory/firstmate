@@ -21,6 +21,51 @@ fm_spawn_admission_lock_paths() {
   fm_spawn_admission_lock_path "$1"
 }
 
+fm_lifecycle_admission_lock_owned_by_process() {
+  local lock=$1 current
+  current=${BASHPID:-$$}
+  [ -d "$lock" ] \
+    && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$current" ]
+}
+
+fm_lifecycle_admission_acquire() {
+  local list_name=$1 state_dir=$2 target_home=$3 exclude_pids=${4:-}
+  local lock quoted
+  eval "$list_name=()"
+  while IFS= read -r lock; do
+    [ -n "$lock" ] || continue
+    mkdir -p "$(dirname "$lock")" || {
+      fm_lifecycle_admission_release "$list_name"
+      return 1
+    }
+    if fm_lifecycle_admission_lock_owned_by_process "$lock"; then
+      continue
+    fi
+    if ! fm_lock_try_acquire "$lock"; then
+      fm_lifecycle_admission_release "$list_name"
+      return 1
+    fi
+    printf -v quoted '%q' "$lock"
+    eval "$list_name+=( $quoted )"
+  done < <(fm_spawn_admission_lock_paths "$state_dir")
+  if fm_spawn_legacy_task_lock_busy "$state_dir" \
+    || ! fm_spawn_legacy_lifecycle_quiescent \
+      "$target_home" "$state_dir" "$exclude_pids"; then
+    fm_lifecycle_admission_release "$list_name"
+    return 1
+  fi
+}
+
+fm_lifecycle_admission_release() {
+  local list_name=$1 i count lock
+  eval "count=\${#$list_name[@]}"
+  for ((i=count - 1; i >= 0; i--)); do
+    eval "lock=\${$list_name[$i]}"
+    fm_lock_release "$lock" || true
+  done
+  eval "$list_name=()"
+}
+
 fm_spawn_legacy_task_lock_busy_except() {
   local state=$1 excluded=${2:-} lock
   for lock in "$state"/.spawn-*.lock; do

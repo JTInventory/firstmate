@@ -125,9 +125,17 @@ for meta in "$STATE"/*.meta; do
     while IFS= read -r conflict_pid; do
       [ -n "$conflict_pid" ] || continue
       conflict_cwd=$(fm_agent_proc_cwd "$conflict_pid" 2>/dev/null || true)
-      [ -n "$conflict_cwd" ] || continue
+      if [ -z "$conflict_cwd" ]; then
+        echo "ISOLATION: task $id is unproven for conflicting process $conflict_pid: home=$conflict_home role=$conflict_role and authoritative process cwd is unavailable"
+        ISOLATION_FAILED=1
+        continue
+      fi
       conflict_cwd_real=$(fm_agent_canonical_dir "$conflict_cwd") || conflict_cwd_real=$conflict_cwd
-      fm_agent_path_within "$recorded_real" "$conflict_cwd_real" || continue
+      if ! fm_agent_path_within "$recorded_real" "$conflict_cwd_real" \
+        && ! fm_agent_path_within "$ROOT_REAL" "$conflict_cwd_real" \
+        && ! fm_agent_path_within "$HOME_REAL" "$conflict_cwd_real"; then
+        continue
+      fi
       echo "ISOLATION: task $id has conflicting worker identity at process $conflict_pid: home=$conflict_home role=$conflict_role, expected home=$expected_home role=$role; stop it before it acts on either home's records"
       ISOLATION_FAILED=1
     done <<EOF

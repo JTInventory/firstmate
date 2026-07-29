@@ -135,37 +135,20 @@ teardown_task_lock_acquire() {
 }
 
 teardown_admission_lock_acquire() {
-  local state_dir=$1 target_home=$2 lock held lock_dir already acquired=0 current_pid
+  local state_dir=$1 target_home=$2 lock held current_pid
+  local -a admission_locks=()
   current_pid=${BASHPID:-$$}
-  while IFS= read -r lock; do
-    [ -n "$lock" ] || continue
-    already=0
+  if ! fm_lifecycle_admission_acquire admission_locks \
+    "$state_dir" "$target_home" "$$ $current_pid"; then
+    echo "REFUSED: spawn or an older lifecycle operation is still changing $state_dir" >&2
+    return 1
+  fi
+  for lock in "${admission_locks[@]}"; do
     for held in "${TEARDOWN_LOCKS[@]}"; do
-      [ "$held" != "$lock" ] || already=1
+      [ "$held" != "$lock" ] || continue 2
     done
-    [ "$already" = 1 ] && continue
-    lock_dir=$(dirname "$lock")
-    if [ ! -d "$lock_dir" ]; then
-      mkdir -p "$lock_dir" || return 1
-      TEARDOWN_LOCK_DIRS_CREATED+=("$lock_dir")
-    fi
-    if ! fm_lock_try_acquire "$lock"; then
-      echo "REFUSED: spawn is already publishing work in $state_dir" >&2
-      return 1
-    fi
     TEARDOWN_LOCKS+=("$lock")
-    acquired=1
-  done < <(fm_spawn_admission_lock_paths "$state_dir")
-  [ "$acquired" = 1 ] || return 0
-  if fm_spawn_legacy_task_lock_busy "$state_dir"; then
-    echo "REFUSED: an older spawn or teardown is still changing $state_dir" >&2
-    return 1
-  fi
-  if ! fm_spawn_legacy_lifecycle_quiescent \
-    "$target_home" "$state_dir" "$$ $current_pid"; then
-    echo "REFUSED: an older spawn or teardown is still starting in $target_home" >&2
-    return 1
-  fi
+  done
 }
 
 teardown_locks_release() {
@@ -465,6 +448,7 @@ teardown_stage_home_removal() {
 
 teardown_endpoint_generation_matches() {
   local backend=$1 target=$2 generation=$3 meta=$4 actual session workspace tab pane
+  local live_identity expected_identity
   TEARDOWN_ENDPOINT_ALREADY_CLOSED=0
   case "$backend" in
     tmux)
@@ -477,14 +461,16 @@ teardown_endpoint_generation_matches() {
       fi
       ;;
     herdr)
+      fm_backend_source herdr || return 1
       session=$(teardown_meta_value_exact "$meta" herdr_session required) || return 1
       workspace=$(teardown_meta_value_exact "$meta" herdr_workspace_id required) || return 1
       tab=$(teardown_meta_value_exact "$meta" herdr_tab_id required) || return 1
       pane=$(teardown_meta_value_exact "$meta" herdr_pane_id required) || return 1
       [ "$target" = "$session:$pane" ] || return 1
-      actual=$(fm_backend_endpoint_generation herdr "$target" 2>/dev/null || true)
-      if [ -n "$actual" ]; then
-        [ "$actual" = "$generation" ]
+      live_identity=$(fm_backend_herdr_endpoint_identity "$target" 2>/dev/null || true)
+      expected_identity="$session|$workspace|$tab|$pane|$generation"
+      if [ -n "$live_identity" ]; then
+        [ "$live_identity" = "$expected_identity" ]
       else
         teardown_endpoint_close_is_staged "$backend" "$target" "$generation" \
           && TEARDOWN_ENDPOINT_ALREADY_CLOSED=1
@@ -1654,7 +1640,7 @@ validate_firstmate_home_children_removal() {
       esac
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      require_treehouse_return_capability "child worktree" "$child_wt" || return 1
+      require_treehouse_return_capability "child worktree" "$child_wt" "$child_id" || return 1
     fi
   done
 }
@@ -1951,7 +1937,11 @@ validate_direct_pr_state_cleanup || exit 1
 validate_direct_pr_ref_cleanup || exit 1
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ]; then
   validate_child_worktree_for_removal "$WT" "$PROJ" "worktree" >/dev/null || exit 1
-  require_treehouse_return_capability "worktree" "$WT" || exit 1
+  require_treehouse_return_capability "worktree" "$WT" "$ID" || exit 1
+fi
+if [ "$BACKEND" != orca ] && [ "$TEARDOWN_ENDPOINT_ALREADY_CLOSED" -ne 1 ]; then
+  echo "REFUSED: live endpoint retirement cannot be rolled back with the remaining worktree and state transaction; preserving endpoint, ownership evidence, and task state" >&2
+  exit 1
 fi
 TEARDOWN_DEFER_RETURN_FINALIZE=1
 teardown_load_staged_return_claims || {

@@ -158,33 +158,37 @@ fm_worker_secondmate_effective_scope_matches() {
 }
 
 fm_worker_primary_authority_matches() {
-  local root home root_real home_real pid ppid env role task cwd
+  local root home root_real home_real cwd branch default ref lock_owned=0
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   home=${FM_HOME:-$root}
   root_real=$(fm_worker_canonical_path "$root") || return 1
   home_real=$(fm_worker_canonical_path "$home") || return 1
-  [ -d "$home_real/state" ] || return 1
-  [ -d /proc ] || return 1
-  pid=$$
-  while [ "$pid" -gt 1 ] 2>/dev/null; do
-    env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
-    task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
-    if [ "$pid" != "$$" ]; then
-      case "$role" in crewmate|secondmate) return 1 ;; esac
-      [ -z "$task" ] || return 1
-    fi
-    ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null) || return 1
-    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
-    pid=$ppid
-  done
-  cwd=$(readlink -f "/proc/$$/cwd" 2>/dev/null) || return 1
-  [ "$cwd" = "$root_real" ] || return 1
+  cwd=$(pwd -P) || return 1
   git -C "$root_real" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  branch=$(git -C "$root_real" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  ref=$(git -C "$root_real" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    default=${ref#origin/}
+  elif git -C "$root_real" show-ref --verify --quiet refs/heads/main; then
+    default=main
+  elif git -C "$root_real" show-ref --verify --quiet refs/heads/master; then
+    default=master
+  else
+    return 1
+  fi
+  [ "$branch" = "$default" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
     || return 1
+  if [ -e "$home_real/state/.lock" ] || [ -L "$home_real/state/.lock" ]; then
+    [ -f "$home_real/state/.lock" ] && [ ! -L "$home_real/state/.lock" ] || return 1
+    . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+    fm_session_lock_owned_by_self "$home_real/state" || return 1
+    lock_owned=1
+  fi
+  { [ "$root_real" = "$home_real" ] && [ "$cwd" = "$root_real" ]; } \
+    || [ "$lock_owned" = 1 ]
 }
 
 # fm_worker_refuse_primary_operation <operation>

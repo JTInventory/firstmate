@@ -82,6 +82,8 @@ new_world() {
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_lock_owner > "$w/home/state/.lock"
 
   printf '%s\n' "$w"
 }

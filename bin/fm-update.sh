@@ -69,26 +69,9 @@ fm_update_lock_owned_by_process() {
 }
 
 fm_ff_target_lock_acquire() {
-  local state_dir=$1 _label=${2:-target} target_home=${3:-} lock
-  FM_UPDATE_ADMISSION_LOCKS=()
-  while IFS= read -r lock; do
-    [ -n "$lock" ] || continue
-    fm_update_lock_is_held "$lock" && continue
-    mkdir -p "$(dirname "$lock")" || return 1
-    if ! fm_lock_try_acquire "$lock"; then
-      fm_ff_target_lock_release
-      return 1
-    fi
-    FM_UPDATE_ADMISSION_LOCKS+=("$lock")
-  done < <(fm_spawn_admission_lock_paths "$state_dir")
-  if fm_spawn_legacy_task_lock_busy "$state_dir"; then
-    fm_ff_target_lock_release
-    return 1
-  fi
-  if ! fm_spawn_legacy_lifecycle_quiescent "$target_home" "$state_dir"; then
-    fm_ff_target_lock_release
-    return 1
-  fi
+  local state_dir=$1 _label=${2:-target} target_home=${3:-}
+  fm_lifecycle_admission_acquire FM_UPDATE_ADMISSION_LOCKS \
+    "$state_dir" "$target_home" "${BASHPID:-$$}"
 }
 
 fm_update_fleet_lock_acquire() {
@@ -132,11 +115,7 @@ $home/state|$home" ;;
 }
 
 fm_ff_target_lock_release() {
-  local i
-  for ((i=${#FM_UPDATE_ADMISSION_LOCKS[@]} - 1; i >= 0; i--)); do
-    fm_lock_release "${FM_UPDATE_ADMISSION_LOCKS[$i]}" || true
-  done
-  FM_UPDATE_ADMISSION_LOCKS=()
+  fm_lifecycle_admission_release FM_UPDATE_ADMISSION_LOCKS
 }
 
 fm_update_locks_release() {

@@ -249,13 +249,22 @@ make_seeded_home() {
 # detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
 # non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
 spawn_secondmate() {
-  local world=$1 id=$2 home=$3 harness=${4:-} fakebin
+  local world=$1 id=$2 home=$3 harness=${4:-} fakebin primary
   shift 3
   if [ $# -gt 0 ]; then
     harness=$1
     shift
   fi
   mkdir -p "$world/home/state" "$world/home/data/$id"
+  primary="${home}.seed"
+  if [ ! -x "$primary/bin/fm-spawn.sh" ]; then
+    cp -a "$ROOT/bin/." "$primary/bin/"
+    cp "$ROOT/AGENTS.md" "$primary/AGENTS.md"
+    git -C "$primary" add bin AGENTS.md
+    git -C "$primary" commit -qm primary
+  fi
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  CLAUDECODE=1 fm_session_lock_owner > "$world/home/state/.lock"
   printf 'secondmate fixture\n' > "$world/home/data/$id/brief.md"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
@@ -264,12 +273,15 @@ spawn_secondmate() {
   [ -n "$harness" ] && spawn_args+=("$harness")
   spawn_args+=("$@")
   spawn_args+=(--secondmate)
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
-    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
-    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
-    FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1 || true
+  (
+    cd "$primary" || exit 1
+    env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+      FM_ROOT_OVERRIDE="$primary" FM_HOME="$world/home" \
+      FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+      FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+      FM_SPAWN_NO_GUARD=1 \
+      "$primary/bin/fm-spawn.sh" "${spawn_args[@]}"
+  ) >/dev/null 2>"$world/spawn.stderr" || true
 }
 
 meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
@@ -295,7 +307,7 @@ test_spawn_split_and_inherit() {
   spawn_secondmate "$w" sm "$sm"
 
   meta="$w/home/state/sm.meta"
-  [ -f "$meta" ] || fail "split: no meta written"
+  [ -f "$meta" ] || fail "split: no meta written: $(cat "$w/spawn.stderr" 2>/dev/null)"
   [ "$(meta_harness "$meta")" = codex ] \
     || fail "split: secondmate launched on '$(meta_harness "$meta")', expected codex"
   [ "$(cat "$sm/config/crew-harness" 2>/dev/null)" = claude ] \
@@ -414,7 +426,7 @@ test_spawn_secondmate_profile_reread_and_explicit_axes_win() {
 }
 
 test_spawn_invalid_secondmate_profile_refused() {
-  local w sm fakebin err rc
+  local w sm err
   w="$TMP_ROOT/spawn-profile-invalid"
   sm="$w/sm"
   mkdir -p "$w/home/config" "$w/home/state" "$w/home/data/sm"
@@ -422,17 +434,8 @@ test_spawn_invalid_secondmate_profile_refused() {
   printf '{"model":"gpt-5.5","effort":"turbo"}\n' > "$w/home/config/secondmate-profile.json"
   printf 'secondmate fixture\n' > "$w/home/data/sm/brief.md"
   make_seeded_home "$sm" sm
-  fakebin=$(make_noop_tmux "$w/tmux")
-  err="$w/spawn.err"
-  rc=0
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
-    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
-    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
-    FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
-
-  [ "$rc" -ne 0 ] || fail "invalid profile: spawn should have failed"
+  spawn_secondmate "$w" sm "$sm"
+  err="$w/spawn.stderr"
   assert_contains "$(cat "$err")" "invalid config/secondmate-profile.json - invalid effort: turbo" \
     "invalid profile: error did not explain the bad effort"
   [ -e "$w/home/state/sm.meta" ] && fail "invalid profile: a meta was written despite the abort"
@@ -442,24 +445,15 @@ test_spawn_invalid_secondmate_profile_refused() {
 # The unverified-adapter guard holds on the resolved secondmate path: an unknown
 # config/secondmate-harness aborts the spawn (no meta written) and names the source.
 test_spawn_unverified_secondmate_harness_refused() {
-  local w sm fakebin err rc
+  local w sm err
   w="$TMP_ROOT/spawn-unverified"
   sm="$w/sm"
   mkdir -p "$w/home/config" "$w/home/state" "$w/home/data/sm"
   printf 'bogus\n' > "$w/home/config/secondmate-harness"
   printf 'secondmate fixture\n' > "$w/home/data/sm/brief.md"
   make_seeded_home "$sm" sm
-  fakebin=$(make_noop_tmux "$w/tmux")
-  err="$w/spawn.err"
-  rc=0
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
-    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
-    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
-    FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
-
-  [ "$rc" -ne 0 ] || fail "unverified: spawn should have failed"
+  spawn_secondmate "$w" sm "$sm"
+  err="$w/spawn.stderr"
   assert_contains "$(cat "$err")" "no launch template for harness 'bogus'" \
     "unverified: error names the rejected harness"
   assert_contains "$(cat "$err")" "config/secondmate-harness" \
@@ -545,6 +539,8 @@ SH
 run_bootstrap() {
   local w=$1 fakebin
   fakebin=$(make_fake_toolchain "$w")
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_lock_owner > "$w/home/state/.lock"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
@@ -552,6 +548,8 @@ run_bootstrap() {
 run_config_push() {
   local w=$1 fakebin
   fakebin=$(make_fake_toolchain "$w")
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_lock_owner > "$w/home/state/.lock"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_CONFIG_PUSH_NO_GUARD=1 \
     "$ROOT/bin/fm-config-push.sh"
 }
@@ -836,19 +834,13 @@ test_delivery_binding_finds_archived_transactions() {
   pass "delivery recovery finds transactions after pending-reply archival"
 }
 
-test_config_push_reports_skips_dirty_and_invalid_home() {
-  local w head out err status stale_real dirty_real bad_home err_text tmp
+test_config_push_refuses_all_homes_on_ambiguous_record() {
+  local w head out err status bad_home dirty_before stale_before
   w=$(new_world config-push-warnings)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" dirty "$head"
   add_sm_worktree "$w" stale "$head"
-  dirty_real=$(cd "$w/dirty" && pwd -P)
-  stale_real=$(cd "$w/stale" && pwd -P)
-
   printf 'local edit\n' >> "$w/dirty/README.md"
-  tmp="$w/stale/.gitignore.tmp"
-  grep -v '^config/crew-dispatch.json$' "$w/stale/.gitignore" > "$tmp"
-  mv "$tmp" "$w/stale/.gitignore"
 
   bad_home="$w/not-secondmate"
   mkdir -p "$bad_home"
@@ -861,25 +853,25 @@ test_config_push_reports_skips_dirty_and_invalid_home() {
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
+  dirty_before=$(git -C "$w/dirty" status --porcelain)
+  stale_before=$(git -C "$w/stale" status --porcelain)
   err="$w/config-push-warnings.err"
   out=$(run_config_push "$w" 2>"$err"); status=$?
 
-  expect_code 0 "$status" "warnings-only config push should exit zero"
-  assert_contains "$out" "secondmate dirty ($dirty_real):" \
-    "config push did not report dirty home"
-  assert_contains "$out" "home: dirty working tree - inheritance-only push continuing" \
-    "config push did not surface dirty state"
-  assert_contains "$out" "secondmate stale ($stale_real):" \
-    "config push did not report stale home"
-  assert_contains "$out" "crew-dispatch.json: skipped - destination does not allow inherited item" \
-    "config push did not report non-allowing item skip"
-  assert_not_contains "$out" "secondmate bad (" \
-    "config push resolved an incomplete lifecycle record"
+  expect_code 1 "$status" "ambiguous config push must fail before every mutation"
+  assert_contains "$(cat "$err")" "secondmate lifecycle preflight failed" \
+    "config push did not report its strict fleet refusal"
+  [ ! -e "$w/dirty/config/crew-harness" ] \
+    || fail "config push mutated a valid home before refusing ambiguity"
+  [ ! -e "$w/stale/config/crew-harness" ] \
+    || fail "config push mutated another valid home before refusing ambiguity"
+  [ "$(git -C "$w/dirty" status --porcelain)" = "$dirty_before" ] \
+    || fail "config push changed the dirty home before refusing ambiguity"
+  [ "$(git -C "$w/stale" status --porcelain)" = "$stale_before" ] \
+    || fail "config push changed the stale home before refusing ambiguity"
   [ -d "$bad_home" ] || fail "config push mutated an incomplete lifecycle record's home"
-  err_text=$(cat "$err")
-  assert_contains "$err_text" "fm-config-inherit: warning: skipped crew-dispatch.json" \
-    "config push did not inherit the lib's skip stderr warning"
-  pass "B13 config-push reports warnings and refuses incomplete lifecycle records"
+  [ -z "$out" ] || fail "config push began per-home reporting before strict refusal: $out"
+  pass "B13 config-push refuses the whole fleet on ambiguous lifecycle metadata"
 }
 
 test_config_push_exits_nonzero_on_copy_error() {
@@ -1047,7 +1039,7 @@ test_bootstrap_sweep_surfaces_config_propagation_failure
 test_config_push_propagates_reports_without_ff_and_sends_reread
 test_config_reread_terminal_cleanup_is_idempotent_after_receipt_removal
 test_delivery_binding_finds_archived_transactions
-test_config_push_reports_skips_dirty_and_invalid_home
+test_config_push_refuses_all_homes_on_ambiguous_record
 test_config_push_exits_nonzero_on_copy_error
 test_config_push_respects_secondmate_lifecycle_lock
 test_bootstrap_liveness_refuses_ambiguous_provider_identity
