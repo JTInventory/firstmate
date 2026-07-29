@@ -304,17 +304,20 @@ Ship/scout panes export `FM_CBM_TASK_ID` and `FM_CBM_CLI` when CBM env injection
 Codex primaries use the tracked `SessionStart` hook to claim their home's
 session lock before the first model turn. `bin/fm-session-authority-exec.sh`
 is the broker. On a fresh clone it accepts only an empty authority state from
-the default-branch checkout when its real ancestry still reaches the launching
-session and contains no worker declaration. On later launches it requires the
-current live keyed authority or the same primary-only recovery proof. It keeps
-the broker process alive as the harness parent and delegates an immediately
-unlinked descriptor. `bin/fm-lock.sh` accepts that descriptor only while the
-exact broker process, start, executable, script, ancestry, and descriptor
-identity remain live. The structured owner binds the broker's process chain to
-the exact home, checkout, process start, executable identity, and
-`CODEX_THREAD_ID`. Firstmate closes the descriptor and clears the broker before
-launching a crewmate. A secondmate keeps its newly delegated descriptor and
-broker through its own first lock acquisition.
+the default-branch checkout when its real ancestry reaches the clone-owning
+session, contains no worker declaration, and that session predates the Git
+common directory. A worker-created clean session cannot backdate that kernel
+process identity. On later launches the broker requires current live keyed
+authority or the same primary-only recovery proof. It stays alive as the
+harness parent and delegates an immediately unlinked descriptor.
+`bin/fm-lock.sh` accepts that descriptor only while the exact broker process,
+start, executable, script, ancestry, and descriptor identity remain live. The
+structured owner binds the broker's process chain to the exact home, checkout,
+process start, executable identity, and `CODEX_THREAD_ID`. Firstmate closes the
+descriptor and clears the broker before launching a crewmate. An authorized
+home issues a one-use keyed enrollment ticket for a fresh secondmate; the
+secondmate declaration and home are applied before its wrapper consumes that
+ticket and creates its own broker descriptor.
 
 The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose
 keyed authority is live, belongs to an ancestor of the hook, and has the exact
@@ -339,6 +342,7 @@ FM_SESSION_AUTHORITY_FD= # anonymous descriptor delegated by fm-session-authorit
 FM_SESSION_AUTHORITY_BROKER_PID=       # exact live authority broker pid
 FM_SESSION_AUTHORITY_BROKER_START=     # broker process-start identity
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=  # broker executable identity
+FM_SESSION_AUTHORITY_BROKER_SCRIPT=    # exact broker script path
 FM_BACKEND=tmux          # runtime session-provider override for new spawns; herdr is experimental and opt-in
 FM_TOOL_PATH_HOME=       # optional HOME override for shared NVM and user-local tool discovery
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3   # additional `treehouse return` retries after a matching transient git index.lock error; invalid values use 3

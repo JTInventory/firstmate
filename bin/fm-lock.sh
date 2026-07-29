@@ -317,13 +317,15 @@ chmod 700 "$AUTH_TXN_TMP" || exit 1
 [ "$OLD_AUTHORITY_PRESENT" -eq 0 ] \
   || cp -p "$AUTHORITY" "$AUTH_TXN_TMP/old-authority" || exit 1
 fm_session_random_hex 48 > "$AUTH_TXN_TMP/key" && chmod 600 "$AUTH_TXN_TMP/key" || exit 1
+AUTH_OLD_LOCK=$(session_authority_file_signature "$AUTH_TXN_TMP/old-lock") || exit 1
+AUTH_OLD_BINDING=$(session_authority_file_signature "$AUTH_TXN_TMP/old-binding") || exit 1
+AUTH_OLD_AUTHORITY=$(session_authority_file_signature "$AUTH_TXN_TMP/old-authority") || exit 1
+AUTH_NEW_LOCK=$(session_authority_file_signature "$LOCK_TMP") || exit 1
+AUTH_NEW_BINDING=$(session_authority_file_signature "$BINDING_TMP") || exit 1
+AUTH_NEW_AUTHORITY=$(session_authority_file_signature "$AUTHORITY_TMP") || exit 1
 AUTH_MANIFEST_BODY=$(printf 'version=2\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=%s\nnew-binding=%s\nnew-authority=%s\n' \
-  "$(session_authority_file_signature "$AUTH_TXN_TMP/old-lock")" \
-  "$(session_authority_file_signature "$AUTH_TXN_TMP/old-binding")" \
-  "$(session_authority_file_signature "$AUTH_TXN_TMP/old-authority")" \
-  "$(session_authority_file_signature "$LOCK_TMP")" \
-  "$(session_authority_file_signature "$BINDING_TMP")" \
-  "$(session_authority_file_signature "$AUTHORITY_TMP")") || exit 1
+  "$AUTH_OLD_LOCK" "$AUTH_OLD_BINDING" "$AUTH_OLD_AUTHORITY" \
+  "$AUTH_NEW_LOCK" "$AUTH_NEW_BINDING" "$AUTH_NEW_AUTHORITY") || exit 1
 AUTH_MANIFEST_HMAC=$(printf '%s\n' "$AUTH_MANIFEST_BODY" \
   | fm_session_hmac_sha256_key_file "$AUTH_TXN_TMP/key") || exit 1
 printf '%s\nhmac=%s\n' "$AUTH_MANIFEST_BODY" "$AUTH_MANIFEST_HMAC" \
@@ -365,6 +367,13 @@ if ! fm_session_authority_read "$AUTHORITY" \
   || [ "$FM_SESSION_AUTHORITY_CHECKOUT" != "$ROOT_REAL" ]; then
   restore_session_authority || true
   echo "error: session authority verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
+if [ "$(session_authority_file_signature "$LOCK")" != "$AUTH_NEW_LOCK" ] \
+  || [ "$(session_authority_file_signature "$BINDING")" != "$AUTH_NEW_BINDING" ] \
+  || [ "$(session_authority_file_signature "$AUTHORITY")" != "$AUTH_NEW_AUTHORITY" ]; then
+  restore_session_authority || true
+  echo "error: session authority publication is incomplete; operate read-only until resolved" >&2
   exit 1
 fi
 AUTH_COMMIT_TMP=$(mktemp "$AUTH_TXN/.committed.XXXXXX") || {

@@ -34,6 +34,20 @@ if fm_session_authority_read "$authority" \
   && [ "$FM_SESSION_AUTHORITY_HOME" = "$home_real" ] \
   && fm_session_authority_is_current_ancestor "$authority"; then
   authorized=1
+elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
+  enrollment="$STATE/.session-authority-enrollment"
+  enrollment_claim="$enrollment.claim.$$"
+  if [ -f "$enrollment" ] && [ ! -L "$enrollment" ] \
+    && [ ! -e "$enrollment_claim" ] && [ ! -L "$enrollment_claim" ] \
+    && mv "$enrollment" "$enrollment_claim"; then
+    if fm_session_enrollment_ticket_validate \
+      "$enrollment_claim" "$FM_AGENT_TASK" "$home_real"; then
+      rm -f "$enrollment_claim"
+      authorized=1
+    else
+      rm -f "$enrollment_claim"
+    fi
+  fi
 elif fm_worker_primary_bootstrap_matches; then
   if [ ! -e "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] \
     && [ ! -e "$STATE/.primary-checkout" ] && [ ! -L "$STATE/.primary-checkout" ] \
@@ -76,8 +90,10 @@ FM_SESSION_AUTHORITY_FD=9
 FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
+FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
 export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_BROKER_PID
 export FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY
+export FM_SESSION_AUTHORITY_BROKER_SCRIPT
 rm -f -- "$authority_file"
 trap - EXIT HUP INT TERM
 child_pid=

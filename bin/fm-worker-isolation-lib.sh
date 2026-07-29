@@ -43,7 +43,7 @@
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
 FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN"
-FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY"
+FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-procargs-lib.sh"
 
@@ -198,6 +198,7 @@ fm_worker_linked_primary_topology_matches() {
 
 fm_worker_primary_bootstrap_matches() {
   local root home root_real home_real cwd branch default ref pid ppid sid env
+  local common common_real common_birth sid_start
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -222,8 +223,14 @@ fm_worker_primary_bootstrap_matches() {
   [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
     || return 1
   . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+  common=$(git -C "$root_real" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || return 1
+  common_real=$(fm_worker_canonical_path "$common") || return 1
+  common_birth=$(fm_session_path_birth_epoch "$common_real") || return 1
   sid=$(fm_session_process_session_id "$$") || return 1
   [ "$sid" != "$$" ] || return 1
+  sid_start=$(fm_session_process_start_epoch "$sid") || return 1
+  [ "$sid_start" -lt "$common_birth" ] || return 1
   pid=$$
   while [ "$pid" -gt 1 ]; do
     env=$(fm_worker_process_environment "$pid") || return 1

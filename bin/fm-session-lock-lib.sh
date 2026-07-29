@@ -65,6 +65,40 @@ fm_session_process_session_id() {
   printf '%s\n' "$sid"
 }
 
+fm_session_process_start_epoch() {
+  local pid=$1 stat start ticks boot raw
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ] && [ -r /proc/stat ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    stat=${stat##*) }
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    start=${20}
+    ticks=$(getconf CLK_TCK 2>/dev/null) || return 1
+    boot=$(sed -n 's/^btime //p' /proc/stat | head -n 1) || return 1
+    case "$start:$ticks:$boot" in *[!0-9:]*|:*|*::*|*:) return 1 ;; esac
+    [ "$ticks" -gt 0 ] || return 1
+    printf '%s\n' "$((boot + start / ticks))"
+    return
+  fi
+  raw=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  date -j -f '%a %b %e %T %Y' "$raw" '+%s' 2>/dev/null
+}
+
+fm_session_path_birth_epoch() {
+  local path=$1 value
+  [ -e "$path" ] || return 1
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    value=$(stat -f '%B' "$path" 2>/dev/null) || return 1
+  else
+    value=$(stat -c '%W' "$path" 2>/dev/null) || return 1
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -gt 0 ] || return 1
+  printf '%s\n' "$value"
+}
+
 fm_session_ancestry_reaches_session_leader() {
   local pid=$$ sid ppid
   sid=$(fm_session_process_session_id "$pid") || return 1
@@ -175,6 +209,133 @@ fm_session_authority_broker_present() {
   broker_target=$(fm_session_descriptor_identity \
     "$broker" "$FM_SESSION_AUTHORITY_FD") || return 1
   [ "$caller_target" = "$broker_target" ]
+}
+
+fm_session_enrollment_ticket_write() {
+  local file=$1 task=$2 home=$3 issuer=$4 home_real issuer_real marker
+  local authority lock binding key_path key authority_digest nonce hmac tmp
+  local broker broker_start broker_identity broker_script
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  issuer_real=$(cd "$issuer" 2>/dev/null && pwd -P) || return 1
+  marker="$home_real/.fm-secondmate-home"
+  [ -f "$marker" ] && [ ! -L "$marker" ] \
+    && [ "$(cat "$marker" 2>/dev/null)" = "$task" ] || return 1
+  authority="$issuer_real/state/.session-authority"
+  lock="$issuer_real/state/.lock"
+  binding="$issuer_real/state/.primary-checkout"
+  fm_session_authority_read "$authority" \
+    && fm_session_authority_is_current_ancestor "$authority" \
+    && [ "$FM_SESSION_AUTHORITY_HOME" = "$issuer_real" ] \
+    && [ -f "$lock" ] && [ ! -L "$lock" ] \
+    && [ "$(cat "$lock" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_OWNER" ] \
+    && [ -f "$binding" ] && [ ! -L "$binding" ] \
+    && [ "$(cat "$binding" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_CHECKOUT" ] || return 1
+  broker_script=${FM_SESSION_AUTHORITY_BROKER_SCRIPT:-}
+  [ "$broker_script" = \
+    "$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh" ] || return 1
+  fm_session_authority_broker_present "$broker_script" || return 1
+  broker=$FM_SESSION_AUTHORITY_BROKER_PID
+  broker_start=$FM_SESSION_AUTHORITY_BROKER_START
+  broker_identity=$FM_SESSION_AUTHORITY_BROKER_IDENTITY
+  key_path=$(fm_session_authority_key_path) || return 1
+  key=$(tr -d '\n' < "$key_path" 2>/dev/null) || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  authority_digest=$(fm_session_sha256_file "$authority") || return 1
+  nonce=$(fm_session_random_hex 32) || return 1
+  [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
+  mkdir -p "${file%/*}" || return 1
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  chmod 600 "$tmp" && printf 'version=1\nrole=secondmate\ntask=%s\nhome=%s\nissuer-home=%s\nissuer-authority=%s\nnonce=%s\nkey=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nbroker-script=%s\n' \
+    "$task" "$home_real" "$issuer_real" "$authority_digest" "$nonce" "$key" \
+    "$broker" "$broker_start" "$broker_identity" "$broker_script" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+  hmac=$(sed -n '1,12p' "$tmp" | fm_session_authority_hmac) || {
+    rm -f "$tmp"
+    return 1
+  }
+  printf 'hmac=%s\n' "$hmac" >> "$tmp" && mv "$tmp" "$file" || {
+      rm -f "$tmp"
+      return 1
+    }
+}
+
+fm_session_enrollment_ticket_validate() {
+  local file=$1 task=$2 home=$3 home_real version role ticket_task ticket_home
+  local issuer authority_digest nonce key hmac body key_file old_fd expected
+  local issuer_real authority lock binding current_digest status=1
+  local broker broker_start broker_identity broker_script
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq 13 ] || return 1
+  version=$(sed -n '1s/^version=//p' "$file")
+  role=$(sed -n '2s/^role=//p' "$file")
+  ticket_task=$(sed -n '3s/^task=//p' "$file")
+  ticket_home=$(sed -n '4s/^home=//p' "$file")
+  issuer=$(sed -n '5s/^issuer-home=//p' "$file")
+  authority_digest=$(sed -n '6s/^issuer-authority=//p' "$file")
+  nonce=$(sed -n '7s/^nonce=//p' "$file")
+  key=$(sed -n '8s/^key=//p' "$file")
+  broker=$(sed -n '9s/^broker-pid=//p' "$file")
+  broker_start=$(sed -n '10s/^broker-start=//p' "$file")
+  broker_identity=$(sed -n '11s/^broker-identity=//p' "$file")
+  broker_script=$(sed -n '12s/^broker-script=//p' "$file")
+  hmac=$(sed -n '13s/^hmac=//p' "$file")
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  [ "$version" = 1 ] && [ "$role" = secondmate ] \
+    && [ "$ticket_task" = "$task" ] && [ "$ticket_home" = "$home_real" ] \
+    && [ "${#authority_digest}" -eq 64 ] && [ "${#nonce}" -eq 64 ] \
+    && [ "${#key}" -ge 64 ] && [ "${#hmac}" -eq 64 ] \
+    && [ -n "$broker_start" ] && [ -n "$broker_identity" ] \
+    && [ -n "$broker_script" ] || return 1
+  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  case "$authority_digest:$nonce:$key:$hmac" in *[!0-9a-f:]*) return 1 ;; esac
+  issuer_real=$(cd "$issuer" 2>/dev/null && pwd -P) || return 1
+  [ "$issuer_real" != "$home_real" ] || return 1
+  body=$(sed -n '1,12p' "$file")$'\n'
+  key_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-key.XXXXXX") || return 1
+  chmod 600 "$key_file" && printf '%s' "$key" > "$key_file" || {
+    rm -f "$key_file"
+    return 1
+  }
+  old_fd=${FM_SESSION_AUTHORITY_FD:-}
+  if [ "$old_fd" = 8 ] || ( : <&8 ) 2>/dev/null; then
+    rm -f "$key_file"
+    return 1
+  fi
+  exec 8<"$key_file"
+  rm -f "$key_file"
+  FM_SESSION_AUTHORITY_FD=8
+  export FM_SESSION_AUTHORITY_FD
+  expected=$(printf '%s' "$body" | fm_session_authority_hmac) || expected=
+  authority="$issuer_real/state/.session-authority"
+  lock="$issuer_real/state/.lock"
+  binding="$issuer_real/state/.primary-checkout"
+  current_digest=$(fm_session_sha256_file "$authority" 2>/dev/null || true)
+  if [ "$hmac" = "$expected" ] && [ "$current_digest" = "$authority_digest" ] \
+    && fm_session_authority_read "$authority" \
+    && fm_session_authority_process_state "$authority" \
+    && [ "$FM_SESSION_AUTHORITY_HOME" = "$issuer_real" ] \
+    && [ -f "$lock" ] && [ ! -L "$lock" ] \
+    && [ "$(cat "$lock" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_OWNER" ] \
+    && [ -f "$binding" ] && [ ! -L "$binding" ] \
+    && [ "$(cat "$binding" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_CHECKOUT" ] \
+    && [ "$broker_script" = \
+      "$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh" ] \
+    && [ "$(fm_session_process_start "$broker" 2>/dev/null)" = "$broker_start" ] \
+    && [ "$(fm_session_process_identity "$broker" 2>/dev/null)" = "$broker_identity" ] \
+    && fm_session_process_runs_script "$broker" "$broker_script"; then
+    status=0
+  fi
+  exec 8<&-
+  if [ -n "$old_fd" ]; then
+    FM_SESSION_AUTHORITY_FD=$old_fd
+    export FM_SESSION_AUTHORITY_FD
+  else
+    unset FM_SESSION_AUTHORITY_FD
+  fi
+  return "$status"
 }
 
 fm_session_authority_hmac() {

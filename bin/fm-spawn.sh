@@ -112,6 +112,7 @@ fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "spawn" || exit 1
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -243,6 +244,7 @@ SPAWN_SLOT_CLAIMED=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
 SPAWN_SLOT_CLAIM_WT=
 SPAWN_SLOT_CLAIM_HOME=
+SPAWN_AUTHORITY_ENROLLMENT=
 
 claim_spawn_slot() {
   local home
@@ -296,6 +298,7 @@ spawn_herdr_flat_uncertainty_record() {
 
 spawn_abort_cleanup() {
   local status=$? cleanup_session i
+  [ -z "$SPAWN_AUTHORITY_ENROLLMENT" ] || rm -f "$SPAWN_AUTHORITY_ENROLLMENT"
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
   fi
@@ -1724,9 +1727,16 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
   echo "error: could not build the home declaration for $ID; refusing to launch a task child that would inherit this home" >&2
   exit 1
 }
-LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 if [ "$KIND" = secondmate ]; then
-  LAUNCH="$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
+  SPAWN_AUTHORITY_ENROLLMENT="$PROJ_ABS/state/.session-authority-enrollment"
+  fm_session_enrollment_ticket_write \
+    "$SPAWN_AUTHORITY_ENROLLMENT" "$ID" "$PROJ_ABS" "$FM_HOME" || {
+      echo "error: could not issue trusted session enrollment for secondmate $ID" >&2
+      exit 1
+    }
+  LAUNCH="$WORKER_ENV_PREFIX$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") sh -c $(shell_quote "$LAUNCH")"
+else
+  LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
@@ -1760,6 +1770,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 HERDR_FLAT_ABORT_CLEANUP=0
 fm_backend_send_key "$BACKEND" "$WID" Enter
+SPAWN_AUTHORITY_ENROLLMENT=
 
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_LOCK_HELD=0

@@ -101,7 +101,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -270,7 +270,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
 }
 
 test_secondmate_child_receives_only_its_own_home() {
-  local expected
+  local expected ticket_line wrapper_line
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
     "FM_HOME='/homes/dom' "*) : ;;
@@ -278,6 +278,10 @@ test_secondmate_child_receives_only_its_own_home() {
   esac
   assert_not_contains "$expected" "FM_ROOT_OVERRIDE='" \
     "secondmate declaration passed an inherited root override through"
+  ticket_line=$(grep -n 'fm_session_enrollment_ticket_write' "$SPAWN" | tail -1 | cut -d: -f1)
+  wrapper_line=$(grep -n 'LAUNCH="$WORKER_ENV_PREFIX$(shell_quote' "$SPAWN" | tail -1 | cut -d: -f1)
+  [ -n "$ticket_line" ] && [ -n "$wrapper_line" ] && [ "$ticket_line" -lt "$wrapper_line" ] \
+    || fail "secondmate launch did not issue enrollment before applying role and home to the wrapper"
   pass "a secondmate child receives its own home and no inherited override"
 }
 
@@ -418,7 +422,7 @@ run_reparented_lock_attempt() {
   local case_dir=$1 primary_home=$2 child attempts=0
   mkdir -p "$case_dir"
   perl -MPOSIX -e '
-    my ($dir, $home, $lock) = @ARGV;
+    my ($dir, $home, $authority_exec, $lock) = @ARGV;
     my $pid = fork();
     die "fork failed" unless defined $pid;
     if ($pid) {
@@ -436,6 +440,10 @@ run_reparented_lock_attempt() {
     open my $final_file, ">", "$dir/final-parent" or die $!;
     print {$final_file} getppid() . "\n";
     close $final_file;
+    POSIX::setsid() >= 0 or die "setsid failed";
+    open my $session_file, ">", "$dir/session" or die $!;
+    print {$session_file} getpgrp(0) . "\n";
+    close $session_file;
     open my $key_file, ">", "$dir/forged-key" or die $!;
     print {$key_file} "f" x 96;
     close $key_file;
@@ -449,13 +457,13 @@ run_reparented_lock_attempt() {
       = ("primary", "7", $home, $home, "$$", "proc:1", "exe:/bin/bash");
     open STDOUT, ">", "$dir/output" or die $!;
     open STDERR, ">&", \*STDOUT or die $!;
-    my $rc = system($lock);
+    my $rc = system($authority_exec, $lock);
     my $status = $rc == -1 ? 127 : $rc >> 8;
     open my $status_file, ">", "$dir/status" or die $!;
     print {$status_file} "$status\n";
     close $status_file;
     exit 0;
-  ' "$case_dir" "$primary_home" "$LOCK"
+  ' "$case_dir" "$primary_home" "$AUTHORITY_EXEC" "$LOCK"
   child=$(cat "$case_dir/child")
   BG_PIDS+=("$child")
   while [ "$attempts" -lt 250 ]; do
@@ -467,18 +475,21 @@ run_reparented_lock_attempt() {
 }
 
 test_reparented_markerless_process_has_no_fresh_primary_authority() {
-  local primary_home case_dir initial_parent final_parent status out
+  local primary_home case_dir child session initial_parent final_parent status out
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
   rm -rf "$primary_home/state"
   case_dir="$TMP_ROOT/reparented-enrollment"
   run_reparented_lock_attempt "$case_dir" "$primary_home"
   initial_parent=$(cat "$case_dir/initial-parent")
   final_parent=$(cat "$case_dir/final-parent")
+  child=$(cat "$case_dir/child")
+  session=$(cat "$case_dir/session")
   [ "$initial_parent" != "$final_parent" ] || fail "the enrollment worker was not reparented"
+  [ "$child" = "$session" ] || fail "the reparented worker did not create its own session"
   status=$(cat "$case_dir/status")
   out=$(cat "$case_dir/output")
   expect_code 1 "$status" "a reparented markerless process must not create primary authority"
-  assert_contains "$out" "trusted session authority broker is missing or invalid" \
+  assert_contains "$out" "trusted session enrollment capability is missing or invalid" \
     "reparented enrollment refusal lost its capability reason"
   assert_absent "$primary_home/state/.lock" \
     "reparented direct enrollment published a session lock"
@@ -505,7 +516,7 @@ test_reparented_worker_cannot_trigger_forged_authority_recovery() {
   status=$(cat "$case_dir/status")
   out=$(cat "$case_dir/output")
   expect_code 1 "$status" "a reparented worker must not trigger transaction recovery"
-  assert_contains "$out" "trusted session authority broker is missing or invalid" \
+  assert_contains "$out" "trusted session enrollment capability is missing or invalid" \
     "forged recovery was inspected before independent authorization"
   [ "$(cat "$primary_home/state/.lock")" = "$before_lock" ] \
     || fail "forged recovery changed the session lock"
@@ -634,6 +645,33 @@ test_binding_failure_never_installs_new_session_owner() {
   pass "session owner publication waits for a valid checkout binding"
 }
 
+test_binding_publication_is_verified_before_commit() {
+  local home fakebin real_mv out status=0
+  home=$(make_primary_home "$TMP_ROOT/binding-publication-verification")
+  rm -rf "$home/state"
+  fakebin="$TMP_ROOT/binding-publication-fakebin"
+  mkdir -p "$fakebin"
+  real_mv=$(command -v mv)
+  printf '%s\n' '#!/usr/bin/env bash' \
+    '"$FM_REAL_MV" "$@" || exit $?' \
+    'destination=${@: -1}' \
+    '[ "$destination" != "$FM_CORRUPT_BINDING" ] || printf "corrupt\n" > "$destination"' \
+    > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  out=$(cd "$home" && PATH="$fakebin:$PATH" FM_REAL_MV="$real_mv" \
+    FM_CORRUPT_BINDING="$home/state/.primary-checkout" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+  expect_code 1 "$status" "corrupt published binding must fail before commit"
+  assert_contains "$out" "session authority publication is incomplete" \
+    "binding publication failure lost its transaction reason"
+  assert_present "$home/state/.session-authority-transaction" \
+    "binding publication failure deleted recovery evidence"
+  assert_absent "$home/state/.lock" \
+    "binding publication failure left a new session lock installed"
+  pass "normal authority commit verifies the published binding digest"
+}
+
 test_procargs2_parser_separates_argv_and_environment() {
   local valid malformed calls snapshots out status=0
   valid="$TMP_ROOT/procargs-valid.bin"
@@ -754,21 +792,93 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
   pass "session authority transaction recovery survives launcher-key loss"
 }
 
+issue_secondmate_enrollment() {
+  local issuer=$1 home=$2 task=$3 owner ready release attempts=0
+  owner=$(cat "$issuer/state/.lock") || return 1
+  printf '%s\n' "$ROOT" > "$issuer/state/.primary-checkout" || return 1
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_session_authority_write_file \
+    "$issuer/state/.session-authority" "$$" "$owner" "$issuer" "$ROOT" || return 1
+  ready="$home/state/.session-authority-enrollment.ready"
+  release="$home/state/.session-authority-enrollment.release"
+  (
+    cd "$ROOT" || exit 1
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$issuer" \
+      "$AUTHORITY_EXEC" bash -c '
+        . "$1/bin/fm-session-lock-lib.sh"
+        owner=$FM_SESSION_AUTHORITY_BROKER_PID
+        printf "%s\n" "$owner" > "$2/state/.lock"
+        printf "%s\n" "$1" > "$2/state/.primary-checkout"
+        fm_session_authority_write_file "$2/state/.session-authority" \
+          "$FM_SESSION_AUTHORITY_BROKER_PID" "$owner" "$2" "$1" \
+          && fm_session_enrollment_ticket_write "$3" "$4" "$5" "$2" \
+          && : > "$6" || exit 1
+        while [ ! -e "$7" ]; do sleep 0.02; done
+      ' _ "$ROOT" "$issuer" "$home/state/.session-authority-enrollment" \
+        "$task" "$home" "$ready" "$release"
+  ) >/dev/null 2>&1 &
+  ENROLLMENT_ISSUER_PID=$!
+  BG_PIDS+=("$ENROLLMENT_ISSUER_PID")
+  while [ "$attempts" -lt 250 ]; do
+    [ -f "$ready" ] && return 0
+    kill -0 "$ENROLLMENT_ISSUER_PID" 2>/dev/null || return 1
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
 test_secondmate_authority_delegation_uses_no_node() {
-  local home fakebin out status=0
-  home=$(make_primary_home "$TMP_ROOT/secondmate-authority-delegation")
+  local issuer home fakebin out status=0
+  issuer=$(make_primary_home "$TMP_ROOT/secondmate-authority-issuer")
+  home="$TMP_ROOT/secondmate-authority-delegation"
+  mkdir -p "$home/state"
+  fm_git_init_commit "$home"
+  git -C "$home" branch -M main
   printf '%s\n' domain > "$home/.fm-secondmate-home"
+  issue_secondmate_enrollment "$issuer" "$home" domain \
+    || fail "could not issue fresh secondmate enrollment"
   fakebin="$TMP_ROOT/no-node"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
   chmod +x "$fakebin/node"
-  out=$(cd "$home" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain \
-    FM_AGENT_OWNER_HOME="$home" "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
+    -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
+    -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
+    PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_AGENT_ROLE=secondmate \
+    FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
+    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
   expect_code 0 "$status" "a declared secondmate must acquire its session lock"
   assert_contains "$out" "lock acquired" \
     "secondmate authority delegation did not reach lock acquisition"
+  assert_absent "$home/state/.session-authority-enrollment" \
+    "secondmate enrollment ticket remained reusable"
+  : > "$home/state/.session-authority-enrollment.release"
+  wait "$ENROLLMENT_ISSUER_PID" 2>/dev/null || true
   pass "secondmate lock acquisition preserves delegated authority without Node"
+}
+
+test_forged_key_cannot_issue_secondmate_enrollment() {
+  local issuer home key ticket
+  issuer=$(make_primary_home "$TMP_ROOT/forged-secondmate-issuer")
+  home="$TMP_ROOT/forged-secondmate-home"
+  ticket="$home/state/.session-authority-enrollment"
+  key="$TMP_ROOT/forged-secondmate-key"
+  mkdir -p "$home/state"
+  printf '%s\n' domain > "$home/.fm-secondmate-home"
+  printf '%096d' 0 > "$key"
+  (
+    exec 7<"$key"
+    FM_SESSION_AUTHORITY_FD=7
+    export FM_SESSION_AUTHORITY_FD
+    unset FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
+    unset FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    ! fm_session_enrollment_ticket_write "$ticket" domain "$home" "$issuer"
+  ) || fail "a forged descriptor issued a secondmate enrollment ticket"
+  assert_absent "$ticket" "forged secondmate enrollment left a reusable ticket"
+  pass "secondmate enrollment tickets require the live issuer authority key"
 }
 
 test_fresh_enrollment_requires_external_capability() {
@@ -2682,11 +2792,13 @@ test_primary_authority_refuses_unreadable_ancestry
 test_stale_session_lock_reaches_verified_recovery
 test_unregistered_cross_home_primary_is_refused
 test_binding_failure_never_installs_new_session_owner
+test_binding_publication_is_verified_before_commit
 test_procargs2_parser_separates_argv_and_environment
 test_session_authority_recovery_retains_unverified_backup
 test_session_authority_recovery_precedes_current_tuple_validation
 test_fresh_enrollment_requires_external_capability
 test_secondmate_authority_delegation_uses_no_node
+test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
