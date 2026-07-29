@@ -1327,7 +1327,7 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
 }
 
 test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
-  local w generation fakebin out runtime resolved
+  local w generation fakebin out runtime resolved meta
   w=$(new_world t32-exact-pane)
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
@@ -1335,6 +1335,12 @@ test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
   generation=$(git -C "$w/sm1" rev-parse HEAD)
   fakebin=$(make_fake_tmux "$w/exact-pane-send-fake")
   runtime="$w/exact-pane-send-runtime"
+  local PATH="$fakebin:$PATH"
+  local FM_FAKE_TMUX_LOG="$w/exact-pane-send-fake/tmux.log"
+  local FM_FAKE_TMUX_CAPTURE="$w/exact-pane-send-fake/pane.txt"
+  local FM_FAKE_ENDPOINT_GENERATION=endpoint-sm1
+  export PATH FM_FAKE_TMUX_LOG FM_FAKE_TMUX_CAPTURE
+  export FM_FAKE_ENDPOINT_GENERATION
   mkdir -p "$runtime"
   cat > "$runtime/fm-send.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1365,6 +1371,26 @@ SH
     fm-sm1 "$w/home/state")
   [ "$resolved" = $'tmux\t%42' ] \
     || fail "fm-send selector resolution did not retain the exact tmux pane"
+  meta="$w/home/state/sm1.meta"
+  printf 'tmux_pane_id=%%43\n' >> "$meta"
+  ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
+    >/dev/null 2>&1 \
+    || fail "ordinary selector accepted duplicate tmux pane metadata"
+  sed -i '$d' "$meta"
+  sed -i 's/^tmux_pane_id=.*/tmux_pane_id=42/' "$meta"
+  ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
+    >/dev/null 2>&1 \
+    || fail "ordinary selector accepted malformed tmux pane metadata"
+  sed -i 's/^tmux_pane_id=.*/tmux_pane_id=%42/' "$meta"
+  sed -i 's/^window=.*/window=@43/' "$meta"
+  ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
+    >/dev/null 2>&1 \
+    || fail "ordinary selector accepted a pane outside the recorded window"
+  sed -i 's/^window=.*/window=@42/' "$meta"
+  sed -i 's/^endpoint_generation=.*/endpoint_generation=recycled/' "$meta"
+  ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
+    >/dev/null 2>&1 \
+    || fail "ordinary selector accepted a recycled tmux pane generation"
   pass "T32a secondmate delivery stays bound to its exact tmux pane"
 }
 

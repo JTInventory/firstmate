@@ -113,8 +113,79 @@ fm_backend_of_meta() {  # <meta-file>
   printf '%s' "${value:-tmux}"
 }
 
-fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend session pane window tmux_pane
+FM_BACKEND_TMUX_META_WINDOW=
+FM_BACKEND_TMUX_META_PANE=
+FM_BACKEND_TMUX_META_GENERATION=
+FM_BACKEND_TMUX_META_TARGET=
+FM_BACKEND_TMUX_META_PROVIDER_IDENTITY=
+
+fm_backend_tmux_meta_read() {  # <meta-file>
+  local meta=$1 line key value
+  local backend_count=0 window_count=0 pane_count=0 generation_count=0
+  local herdr_count=0 backend= window= pane= generation=
+  FM_BACKEND_TMUX_META_WINDOW=
+  FM_BACKEND_TMUX_META_PANE=
+  FM_BACKEND_TMUX_META_GENERATION=
+  FM_BACKEND_TMUX_META_TARGET=
+  FM_BACKEND_TMUX_META_PROVIDER_IDENTITY=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) continue ;;
+    esac
+    case "$key" in
+      backend) backend_count=$((backend_count + 1)); backend=$value ;;
+      window) window_count=$((window_count + 1)); window=$value ;;
+      tmux_pane_id) pane_count=$((pane_count + 1)); pane=$value ;;
+      endpoint_generation)
+        generation_count=$((generation_count + 1))
+        generation=$value
+        ;;
+      herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id)
+        herdr_count=$((herdr_count + 1))
+        ;;
+    esac
+  done < "$meta" || return 1
+  [ "$backend_count" -le 1 ] && [ "$window_count" -eq 1 ] \
+    && [ "$pane_count" -le 1 ] && [ "$generation_count" -eq 1 ] \
+    && [ "$herdr_count" -eq 0 ] || return 1
+  [ "${backend:-tmux}" = tmux ] && [ -n "$window" ] || return 1
+  case "$window" in *'|'*) return 1 ;; esac
+  case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 1 ;; esac
+  if [ "$pane_count" -eq 1 ]; then
+    case "$pane" in %*) ;; *) return 1 ;; esac
+    case "${pane#%}" in ''|*[!0-9]*) return 1 ;; esac
+    case "$window" in @*) ;; *) return 1 ;; esac
+    case "${window#@}" in ''|*[!0-9]*) return 1 ;; esac
+    FM_BACKEND_TMUX_META_TARGET=$pane
+    FM_BACKEND_TMUX_META_PROVIDER_IDENTITY="tmux:$window:$pane"
+  else
+    FM_BACKEND_TMUX_META_TARGET=$window
+    FM_BACKEND_TMUX_META_PROVIDER_IDENTITY="tmux:$window"
+  fi
+  FM_BACKEND_TMUX_META_WINDOW=$window
+  FM_BACKEND_TMUX_META_PANE=$pane
+  FM_BACKEND_TMUX_META_GENERATION=$generation
+}
+
+fm_backend_tmux_endpoint_matches() {  # <window> <pane-or-empty> <generation>
+  local window=$1 pane=$2 generation=$3 live
+  if [ -n "$pane" ]; then
+    live=$(fm_backend_endpoint_identity tmux "$pane" 2>/dev/null) || return 1
+    [ "$live" = "$window|$pane|$generation" ]
+  else
+    live=$(fm_backend_endpoint_generation \
+      tmux "$window" legacy-window 2>/dev/null) || return 1
+    [ "$live" = "$generation" ]
+  fi
+}
+
+fm_backend_recorded_target_of_meta() {  # <meta-file>
+  local meta=$1 backend session pane window backend_count
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  backend_count=$(grep -c '^backend=' "$meta" 2>/dev/null || true)
+  [ "$backend_count" -le 1 ] || return 1
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = herdr ]; then
     session=$(fm_meta_get "$meta" herdr_session)
@@ -124,14 +195,25 @@ fm_backend_target_of_meta() {  # <meta-file>
       return 0
     fi
   elif [ "$backend" = tmux ]; then
-    tmux_pane=$(fm_meta_get "$meta" tmux_pane_id)
-    if [ -n "$tmux_pane" ]; then
-      printf '%s' "$tmux_pane"
-      return 0
-    fi
+    fm_backend_tmux_meta_read "$meta" || return 1
+    printf '%s' "$FM_BACKEND_TMUX_META_TARGET"
+    return 0
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
+}
+
+fm_backend_target_of_meta() {  # <meta-file>
+  local meta=$1 backend target
+  target=$(fm_backend_recorded_target_of_meta "$meta") || return 1
+  backend=$(fm_backend_of_meta "$meta")
+  if [ "$backend" = tmux ]; then
+    fm_backend_tmux_meta_read "$meta" || return 1
+    fm_backend_tmux_endpoint_matches \
+      "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
+      "$FM_BACKEND_TMUX_META_GENERATION" || return 1
+  fi
+  printf '%s' "$target"
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>

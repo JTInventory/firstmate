@@ -1072,7 +1072,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   HERDR_RECOVERY_TAB_ID=""
   HERDR_RECOVERY_PANE_ID=""
   old_backend=$(fm_backend_of_meta "$meta")
-  old_target=$(fm_backend_target_of_meta "$meta")
+  old_target=$(fm_backend_recorded_target_of_meta "$meta")
   [ -n "$old_target" ] || {
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
     return 1

@@ -318,6 +318,7 @@ fm_session_enrollment_consumer_prepare() {
   if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
     return 1
   fi
+  fm_session_enrollment_consumer_channel_isolated || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
   public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
@@ -335,6 +336,32 @@ fm_session_enrollment_consumer_prepare() {
   exec "$script" --enrollment-launch "$launch" \
     --enrollment-consumer-key "$public_key" \
     --enrollment-consumer-key-sha256 "$public_digest" "$@"
+}
+
+fm_session_enrollment_consumer_channel_isolated() {
+  local system parent=$$
+  if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
+    return 1
+  fi
+  system=$(uname -s 2>/dev/null) || return 1
+  case "$system" in
+    Darwin)
+      return 0
+      ;;
+    Linux)
+      exec 8</dev/null || return 1
+      if [ ! -e "/proc/$parent/fd/8" ] \
+        || (exec 8<&-; : < "/proc/$parent/fd/8") 2>/dev/null; then
+        exec 8<&-
+        return 1
+      fi
+      exec 8<&-
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 fm_session_enrollment_public_key_validate() {

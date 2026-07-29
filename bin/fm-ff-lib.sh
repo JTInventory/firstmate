@@ -450,20 +450,18 @@ fm_secondmate_lifecycle_meta_read() {
         FM_SECONDMATE_META_ERROR="provider fields do not match lifecycle backend"
         return 1
       fi
-      if [ "$tmux_pane_count" -eq 1 ]; then
-        case "$tmux_pane" in
-          %*) ;;
-          *) FM_SECONDMATE_META_ERROR="unsafe tmux pane identity"; return 1 ;;
-        esac
-        case "${tmux_pane#%}" in
-          ''|*[!0-9]*) FM_SECONDMATE_META_ERROR="unsafe tmux pane identity"; return 1 ;;
-        esac
-        target=$tmux_pane
-        provider_identity="tmux:$window:$tmux_pane"
-      else
-        target=$window
-        provider_identity="tmux:$window"
-      fi
+      fm_backend_tmux_meta_read "$meta" || {
+        FM_SECONDMATE_META_ERROR="ambiguous or unsafe tmux endpoint"
+        return 1
+      }
+      [ "$FM_BACKEND_TMUX_META_WINDOW" = "$window" ] \
+        && [ "$FM_BACKEND_TMUX_META_PANE" = "$tmux_pane" ] \
+        && [ "$FM_BACKEND_TMUX_META_GENERATION" = "$generation" ] || {
+          FM_SECONDMATE_META_ERROR="conflicting tmux endpoint representations"
+          return 1
+        }
+      target=$FM_BACKEND_TMUX_META_TARGET
+      provider_identity=$FM_BACKEND_TMUX_META_PROVIDER_IDENTITY
       ;;
     herdr)
       if [ "$session_count" -ne 1 ] || [ "$workspace_count" -ne 1 ] \
@@ -522,19 +520,12 @@ fm_secondmate_lifecycle_identity_matches() {
 }
 
 fm_secondmate_live_endpoint_matches() {
-  local live_generation live_identity expected_identity
+  local live_identity expected_identity
   case "$FM_SECONDMATE_META_BACKEND" in
     tmux)
-      if [ -n "$FM_SECONDMATE_META_TMUX_PANE" ]; then
-        live_identity=$(fm_backend_endpoint_identity \
-          tmux "$FM_SECONDMATE_META_TMUX_PANE" 2>/dev/null) || return 1
-        expected_identity="$FM_SECONDMATE_META_WINDOW|$FM_SECONDMATE_META_TMUX_PANE|$FM_SECONDMATE_META_ENDPOINT_GENERATION"
-        [ "$live_identity" = "$expected_identity" ]
-      else
-        live_generation=$(fm_backend_endpoint_generation \
-          tmux "$FM_SECONDMATE_META_WINDOW" legacy-window 2>/dev/null) || return 1
-        [ "$live_generation" = "$FM_SECONDMATE_META_ENDPOINT_GENERATION" ]
-      fi
+      fm_backend_tmux_endpoint_matches \
+        "$FM_SECONDMATE_META_WINDOW" "$FM_SECONDMATE_META_TMUX_PANE" \
+        "$FM_SECONDMATE_META_ENDPOINT_GENERATION"
       ;;
     herdr)
       fm_backend_source herdr || return 1

@@ -882,13 +882,17 @@ issue_secondmate_enrollment() {
 test_secondmate_authority_delegation_uses_no_node() {
   local issuer home fakebin out status=0 ticket launch consumer attempts=0
   local forged private public body signature digest
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  if ! fm_session_enrollment_consumer_channel_isolated; then
+    pass "skip: sibling process access to the consumer descriptor is not isolated"
+    return 0
+  fi
   issuer=$(make_primary_home "$TMP_ROOT/secondmate-authority-issuer")
   home="$TMP_ROOT/secondmate-authority-delegation"
   mkdir -p "$home/state"
   fm_git_init_commit "$home"
   git -C "$home" branch -M main
   printf '%s\n' domain > "$home/.fm-secondmate-home"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
   fakebin="$TMP_ROOT/no-node"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
@@ -967,6 +971,36 @@ test_secondmate_authority_delegation_uses_no_node() {
   : > "$home/state/.session-authority-enrollment.release"
   wait "$ENROLLMENT_ISSUER_PID" 2>/dev/null || true
   pass "secondmate lock acquisition preserves delegated authority without Node"
+}
+
+test_consumer_private_fd_requires_sibling_proc_isolation() {
+  local parent=$$ sibling_can_open=0
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  case "$(uname -s 2>/dev/null)" in
+    Linux)
+      exec 8</dev/null
+      if (exec 8<&-; : < "/proc/$parent/fd/8") 2>/dev/null; then
+        sibling_can_open=1
+      fi
+      exec 8<&-
+      if [ "$sibling_can_open" -eq 1 ]; then
+        ! fm_session_enrollment_consumer_channel_isolated \
+          || fail "consumer enrollment trusted a descriptor readable through sibling procfs"
+      else
+        fm_session_enrollment_consumer_channel_isolated \
+          || fail "consumer enrollment rejected a kernel-isolated descriptor"
+      fi
+      ;;
+    Darwin)
+      fm_session_enrollment_consumer_channel_isolated \
+        || fail "consumer enrollment rejected the procfs-free Darwin boundary"
+      ;;
+    *)
+      ! fm_session_enrollment_consumer_channel_isolated \
+        || fail "consumer enrollment trusted an unrecognized process-isolation boundary"
+      ;;
+  esac
+  pass "consumer enrollment proves sibling descriptor isolation before key creation"
 }
 
 test_unrelated_process_cannot_consume_endpoint_enrollment() {
@@ -3206,6 +3240,7 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_secondmate_child_receives_only_its_own_home
+  test_consumer_private_fd_requires_sibling_proc_isolation
   test_secondmate_authority_delegation_uses_no_node
   test_unrelated_process_cannot_consume_endpoint_enrollment
   test_backend_owned_launch_proof_covers_tmux_and_herdr
