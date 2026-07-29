@@ -306,6 +306,7 @@ spawn_abort_cleanup() {
   [ -z "$SPAWN_AUTHORITY_ENROLLMENT" ] \
     || rm -f "$SPAWN_AUTHORITY_ENROLLMENT" \
       "${SPAWN_AUTHORITY_ENROLLMENT}.ready" \
+      "${SPAWN_AUTHORITY_ENROLLMENT}.consume" \
       "${SPAWN_AUTHORITY_ENROLLMENT}.accepted"
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
@@ -1779,6 +1780,15 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 HERDR_FLAT_ABORT_CLEANUP=0
 fm_backend_send_key "$BACKEND" "$WID" Enter
+if [ "$KIND" = secondmate ]; then
+  fm_session_enrollment_ticket_wait_accepted \
+    "$SPAWN_AUTHORITY_ENROLLMENT" "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" \
+    "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+    "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" || {
+      echo "error: secondmate $ID did not consume trusted session enrollment" >&2
+      exit 1
+    }
+fi
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 

@@ -316,10 +316,14 @@ structured owner binds the broker's process chain to the exact home, checkout,
 process start, executable identity, and `CODEX_THREAD_ID`. Firstmate closes the
 descriptor and clears the broker before launching a crewmate. An authorized
 home issues a one-use asymmetric enrollment ticket for a fresh secondmate
-without copying the live authority key. A rolling launcher derives the verified
-broker script from the authority checkout when an older live broker lacks that
-export. The secondmate declaration and home are applied before its wrapper
-consumes the ticket and creates its own broker descriptor.
+without copying the live authority key. The signer's live protected descriptor
+and process environment bind the ticket's public-key digest. A rolling launcher
+derives the verified broker script from the authority checkout when an older
+live broker lacks that export. The secondmate declaration and home are applied
+before its wrapper consumes the ticket and creates its own broker descriptor.
+Spawn waits for the matching acceptance receipt before releasing lifecycle
+locks or reporting success. On macOS, `getsid(2)` must identify a live session
+leader in the caller's ancestry; leaderless or unreadable sessions refuse.
 
 The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose
 keyed authority is live, belongs to an ancestor of the hook, and has the exact

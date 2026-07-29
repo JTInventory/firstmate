@@ -41,21 +41,29 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     && [ ! -e "$enrollment_claim" ] && [ ! -L "$enrollment_claim" ] \
     && mv "$enrollment" "$enrollment_claim"; then
     if fm_session_enrollment_ticket_validate \
-      "$enrollment_claim" "$FM_AGENT_TASK" "$home_real"; then
-      enrollment_accepted="${enrollment}.accepted"
-      enrollment_accepted_tmp=$(mktemp "${enrollment_accepted}.XXXXXX") || exit 1
-      chmod 600 "$enrollment_accepted_tmp" \
-        && printf 'signer-pid=%s\nnonce=%s\n' \
-          "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
-          > "$enrollment_accepted_tmp" \
-        && mv "$enrollment_accepted_tmp" "$enrollment_accepted" || {
-          rm -f "$enrollment_accepted_tmp"
-          exit 1
-        }
-      rm -f "$enrollment_claim"
-      authorized=1
+      "$enrollment_claim" "$FM_AGENT_TASK" "$home_real" \
+      && fm_session_enrollment_consumption_request \
+        "$enrollment" "$FM_AGENT_TASK" "$home_real"; then
+      enrollment_attempts=0
+      while [ "$enrollment_attempts" -lt 250 ]; do
+        if fm_session_enrollment_acceptance_validate \
+          "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+          "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+          "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
+          && [ "$(sed -n '4s/^consumer-pid=//p' "${enrollment}.accepted")" = "$$" ]; then
+          rm -f "$enrollment_claim" "${enrollment}.consume"
+          authorized=1
+          break
+        fi
+        kill -0 "$FM_SESSION_ENROLLMENT_SIGNER_PID" 2>/dev/null || break
+        sleep 0.02
+        enrollment_attempts=$((enrollment_attempts + 1))
+      done
+      if [ "$authorized" -ne 1 ]; then
+        rm -f "$enrollment_claim" "${enrollment}.consume" "${enrollment}.accepted"
+      fi
     else
-      rm -f "$enrollment_claim"
+      rm -f "$enrollment_claim" "${enrollment}.consume"
     fi
   fi
 elif fm_worker_primary_bootstrap_matches; then

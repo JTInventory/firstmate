@@ -270,7 +270,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
 }
 
 test_secondmate_child_receives_only_its_own_home() {
-  local expected ticket_line wrapper_line
+  local expected ticket_line wrapper_line wait_line clear_line release_line spawned_line
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
     "FM_HOME='/homes/dom' "*) : ;;
@@ -282,6 +282,13 @@ test_secondmate_child_receives_only_its_own_home() {
   wrapper_line=$(grep -n 'LAUNCH="$WORKER_ENV_PREFIX$(shell_quote' "$SPAWN" | tail -1 | cut -d: -f1)
   [ -n "$ticket_line" ] && [ -n "$wrapper_line" ] && [ "$ticket_line" -lt "$wrapper_line" ] \
     || fail "secondmate launch did not issue enrollment before applying role and home to the wrapper"
+  wait_line=$(grep -n 'fm_session_enrollment_ticket_wait_accepted' "$SPAWN" | tail -1 | cut -d: -f1)
+  clear_line=$(grep -n '^SPAWN_AUTHORITY_ENROLLMENT=$' "$SPAWN" | tail -1 | cut -d: -f1)
+  release_line=$(grep -n 'fm_lock_release "$SPAWN_TASK_LOCK"' "$SPAWN" | tail -1 | cut -d: -f1)
+  spawned_line=$(grep -n '^echo "spawned ' "$SPAWN" | tail -1 | cut -d: -f1)
+  [ "$wait_line" -lt "$clear_line" ] && [ "$clear_line" -lt "$release_line" ] \
+    && [ "$release_line" -lt "$spawned_line" ] \
+    || fail "secondmate launch reports success before trusted enrollment is accepted"
   pass "a secondmate child receives its own home and no inherited override"
 }
 
@@ -830,7 +837,7 @@ issue_secondmate_enrollment() {
 }
 
 test_secondmate_authority_delegation_uses_no_node() {
-  local issuer home fakebin out status=0 ticket
+  local issuer home fakebin out status=0 ticket forged private public body signature digest
   issuer=$(make_primary_home "$TMP_ROOT/secondmate-authority-issuer")
   home="$TMP_ROOT/secondmate-authority-delegation"
   mkdir -p "$home/state"
@@ -844,6 +851,27 @@ test_secondmate_authority_delegation_uses_no_node() {
     || fail "secondmate enrollment exposed the issuer authority key"
   assert_contains "$(cat "$ticket")" "signature=" \
     "secondmate enrollment did not carry a scoped signature"
+  forged="$ticket.forged"
+  private="$TMP_ROOT/forged-enrollment-private"
+  public="$TMP_ROOT/forged-enrollment-public"
+  body="$TMP_ROOT/forged-enrollment-body"
+  signature="$TMP_ROOT/forged-enrollment-signature"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$private" 2>/dev/null \
+    && openssl ec -in "$private" -pubout -out "$public" 2>/dev/null \
+    || fail "could not create forged enrollment signing fixture"
+  digest=$(openssl dgst -sha256 "$public" 2>/dev/null)
+  digest=${digest##*= }
+  sed -n '1,16p' "$ticket" > "$body"
+  printf 'public-key=%s\npublic-key-sha256=%s\n' \
+    "$(openssl base64 -A < "$public")" "$digest" >> "$body"
+  openssl dgst -sha256 -sign "$private" -out "$signature" "$body" 2>/dev/null \
+    || fail "could not sign forged enrollment fixture"
+  cp "$body" "$forged"
+  printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$forged"
+  (
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    ! fm_session_enrollment_ticket_validate "$forged" domain "$home"
+  ) || fail "a ticket self-signed by an unbound public key was accepted"
   fakebin="$TMP_ROOT/no-node"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 99' > "$fakebin/node"
@@ -855,11 +883,15 @@ test_secondmate_authority_delegation_uses_no_node() {
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_AGENT_ROLE=secondmate \
     FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" \
     "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
-  expect_code 0 "$status" "a declared secondmate must acquire its session lock"
+  expect_code 0 "$status" \
+    "a declared secondmate must acquire its session lock"$'\n'"$out"
   assert_contains "$out" "lock acquired" \
     "secondmate authority delegation did not reach lock acquisition"
   assert_absent "$home/state/.session-authority-enrollment" \
     "secondmate enrollment ticket remained reusable"
+  assert_present "$home/state/.session-authority-enrollment.accepted" \
+    "secondmate wrapper did not publish enrollment acceptance"
+  rm -f "$home/state/.session-authority-enrollment.accepted"
   : > "$home/state/.session-authority-enrollment.release"
   wait "$ENROLLMENT_ISSUER_PID" 2>/dev/null || true
   pass "secondmate lock acquisition preserves delegated authority without Node"
@@ -870,6 +902,7 @@ test_darwin_session_identity_uses_supported_fields() {
   out=$(bash -c '
     . "$1/bin/fm-session-lock-lib.sh"
     uname() { printf "Darwin\n"; }
+    fm_session_darwin_getsid() { printf "987652\n"; }
     fm_session_parent_pid() {
       case "$1" in
         987654) printf "987653\n" ;;
@@ -878,17 +911,58 @@ test_darwin_session_identity_uses_supported_fields() {
         *) return 1 ;;
       esac
     }
-    ps() {
-      case "$*" in
-        *"-p 987654 -o sess="*|*"-p 987653 -o sess="*|*"-p 987652 -o sess="*) printf "0xabc\n" ;;
-        *"-p 1 -o sess="*) printf "0xdef\n" ;;
-        *) return 91 ;;
-      esac
-    }
     fm_session_process_session_id 987654
-  ' _ "$ROOT") || fail "Darwin session identity rejected supported sess output"
+  ' _ "$ROOT") || fail "Darwin session identity rejected a live numeric session leader"
   [ "$out" = 987652 ] || fail "Darwin session identity did not resolve the numeric leader: $out"
-  pass "Darwin session identity derives a numeric leader from supported sess output"
+  (
+    bash -c '
+      . "$1/bin/fm-session-lock-lib.sh"
+      uname() { printf "Darwin\n"; }
+      fm_session_darwin_getsid() { printf "987650\n"; }
+      fm_session_parent_pid() {
+        case "$1" in
+          987654) printf "987653\n" ;;
+          987653) printf "1\n" ;;
+          *) return 1 ;;
+        esac
+      }
+      ! fm_session_process_session_id 987654
+    ' _ "$ROOT"
+  ) || fail "Darwin session identity promoted a surviving process after leader exit"
+  pass "Darwin session identity requires the real live session leader"
+}
+
+test_secondmate_spawn_waits_for_enrollment_acceptance() {
+  local dir ticket nonce signer private public public_key public_digest
+  dir="$TMP_ROOT/enrollment-acceptance"
+  ticket="$dir/.session-authority-enrollment"
+  nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mkdir -p "$dir"
+  private="$dir/private"
+  public="$dir/public"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$private" 2>/dev/null \
+    && openssl ec -in "$private" -pubout -out "$public" 2>/dev/null \
+    || fail "could not create acceptance signing fixture"
+  public_key=$(openssl base64 -A < "$public")
+  public_digest=$(openssl dgst -sha256 "$public" 2>/dev/null)
+  public_digest=${public_digest##*= }
+  bash -c '
+    sleep 0.05
+    body="$1.body"
+    signature="$1.signature"
+    printf "version=1\nsigner-pid=%s\nnonce=%s\nconsumer-pid=42\nconsumer-start=fixture\n" \
+      "$$" "$2" > "$body"
+    openssl dgst -sha256 -sign "$3" -out "$signature" "$body" 2>/dev/null
+    cat "$body" > "$1"
+    printf "signature=%s\n" "$(openssl base64 -A < "$signature")" >> "$1"
+  ' _ "${ticket}.accepted" "$nonce" "$private" &
+  signer=$!
+  BG_PIDS+=("$signer")
+  fm_session_enrollment_ticket_wait_accepted \
+    "$ticket" "$signer" "$nonce" "$public_key" "$public_digest" 100 \
+    || fail "spawn acceptance wait rejected a matching receipt"
+  assert_absent "${ticket}.accepted" "accepted enrollment receipt was not retired"
+  pass "secondmate spawn waits for verified enrollment consumption"
 }
 
 test_forged_key_cannot_issue_secondmate_enrollment() {
@@ -2804,6 +2878,15 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
   pass "the sweep reports collapsed conflicts even beside a correct worker"
 }
 
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
+  test_secondmate_child_receives_only_its_own_home
+  test_secondmate_authority_delegation_uses_no_node
+  test_darwin_session_identity_uses_supported_fields
+  test_secondmate_spawn_waits_for_enrollment_acceptance
+  echo "# focused session-authority tests passed"
+  exit 0
+fi
+
 test_crewmate_declaration_clears_every_inherited_home
 test_secondmate_declaration_pins_only_its_own_home
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
@@ -2831,6 +2914,7 @@ test_session_authority_recovery_precedes_current_tuple_validation
 test_fresh_enrollment_requires_external_capability
 test_secondmate_authority_delegation_uses_no_node
 test_darwin_session_identity_uses_supported_fields
+test_secondmate_spawn_waits_for_enrollment_acceptance
 test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker
