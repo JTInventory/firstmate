@@ -883,8 +883,11 @@ test_secondmate_authority_delegation_uses_no_node() {
   local issuer home fakebin out status=0 ticket launch consumer attempts=0
   local forged private public body signature digest
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  if ! fm_session_enrollment_consumer_channel_isolated; then
-    pass "skip: sibling process access to the consumer descriptor is not isolated"
+  if ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
+    || ! fm_session_descriptor_channel_isolated 8 \
+    || ! fm_session_descriptor_channel_isolated 9 \
+    || ! fm_session_descriptor_channel_isolated 10; then
+    pass "skip: sibling process access to authority descriptors is not isolated"
     return 0
   fi
   issuer=$(make_primary_home "$TMP_ROOT/secondmate-authority-issuer")
@@ -973,9 +976,10 @@ test_secondmate_authority_delegation_uses_no_node() {
   pass "secondmate lock acquisition preserves delegated authority without Node"
 }
 
-test_consumer_private_fd_requires_sibling_proc_isolation() {
-  local parent=$$ sibling_can_open=0
+test_authority_fds_require_sibling_proc_isolation() {
+  local parent=$$ sibling_can_open=0 fd original_fd
   . "$ROOT/bin/fm-session-lock-lib.sh"
+  original_fd=$FM_SESSION_AUTHORITY_FD
   case "$(uname -s 2>/dev/null)" in
     Linux)
       exec 8</dev/null
@@ -983,28 +987,59 @@ test_consumer_private_fd_requires_sibling_proc_isolation() {
         sibling_can_open=1
       fi
       exec 8<&-
+      for fd in 7 8 9 10 "$FM_SESSION_AUTHORITY_FD"; do
+        if [ "$sibling_can_open" -eq 1 ]; then
+          ! fm_session_descriptor_channel_isolated "$fd" \
+            || fail "authority descriptor $fd remained usable through sibling procfs"
+        else
+          fm_session_descriptor_channel_isolated "$fd" \
+            || fail "authority descriptor $fd rejected a kernel-isolated channel"
+        fi
+      done
       if [ "$sibling_can_open" -eq 1 ]; then
-        ! fm_session_enrollment_consumer_channel_isolated \
-          || fail "consumer enrollment trusted a descriptor readable through sibling procfs"
+        ! fm_session_authority_descriptor_create \
+          || fail "primary authority creation ignored readable sibling procfs"
+        ! ( : <&9 ) 2>/dev/null \
+          || fail "refused primary authority creation left descriptor 9 open"
       else
-        fm_session_enrollment_consumer_channel_isolated \
-          || fail "consumer enrollment rejected a kernel-isolated descriptor"
+        fm_session_authority_descriptor_create \
+          || fail "primary authority creation rejected isolated descriptors"
+        fm_session_authority_capability_present \
+          || fail "protected primary authority descriptor was unreadable"
+        exec 9<&-
+        FM_SESSION_AUTHORITY_FD=$original_fd
       fi
       ;;
     Darwin)
-      fm_session_enrollment_consumer_channel_isolated \
-        || fail "consumer enrollment rejected the procfs-free Darwin boundary"
+      for fd in 7 8 9 10 "$FM_SESSION_AUTHORITY_FD"; do
+        fm_session_descriptor_channel_isolated "$fd" \
+          || fail "authority descriptor $fd rejected the procfs-free Darwin boundary"
+      done
+      fm_session_authority_descriptor_create \
+        || fail "primary authority creation rejected Darwin descriptors"
+      fm_session_authority_capability_present \
+        || fail "Darwin primary authority descriptor was unreadable"
+      exec 9<&-
+      FM_SESSION_AUTHORITY_FD=$original_fd
       ;;
     *)
-      ! fm_session_enrollment_consumer_channel_isolated \
-        || fail "consumer enrollment trusted an unrecognized process-isolation boundary"
+      for fd in 7 8 9 10 "$FM_SESSION_AUTHORITY_FD"; do
+        ! fm_session_descriptor_channel_isolated "$fd" \
+          || fail "authority descriptor $fd trusted an unrecognized isolation boundary"
+      done
       ;;
   esac
-  pass "consumer enrollment proves sibling descriptor isolation before key creation"
+  pass "every authority descriptor proves sibling isolation before key creation"
 }
 
 test_unrelated_process_cannot_consume_endpoint_enrollment() {
   local issuer home endpoint signer out status=0 launch
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  if ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
+    || ! fm_session_descriptor_channel_isolated 10; then
+    pass "skip: sibling process access to authority descriptors is not isolated"
+    return 0
+  fi
   issuer=$(make_primary_home "$TMP_ROOT/endpoint-bound-issuer")
   home="$TMP_ROOT/endpoint-bound-secondmate"
   mkdir -p "$home/state"
@@ -3240,7 +3275,7 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_secondmate_child_receives_only_its_own_home
-  test_consumer_private_fd_requires_sibling_proc_isolation
+  test_authority_fds_require_sibling_proc_isolation
   test_secondmate_authority_delegation_uses_no_node
   test_unrelated_process_cannot_consume_endpoint_enrollment
   test_backend_owned_launch_proof_covers_tmux_and_herdr

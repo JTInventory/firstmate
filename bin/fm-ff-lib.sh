@@ -378,6 +378,12 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_HERDR_TAB=
   FM_SECONDMATE_META_HERDR_PANE=
   FM_SECONDMATE_META_ERROR=
+  fm_backend_tmux_meta_migrate_legacy "$meta" || {
+    [ "$(fm_backend_of_meta "$meta")" != tmux ] || {
+      FM_SECONDMATE_META_ERROR="legacy tmux endpoint migration failed"
+      return 1
+    }
+  }
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     FM_SECONDMATE_META_ERROR="metadata is missing, unreadable, or not a regular file"
     return 1

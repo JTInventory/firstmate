@@ -118,6 +118,7 @@ FM_BACKEND_TMUX_META_PANE=
 FM_BACKEND_TMUX_META_GENERATION=
 FM_BACKEND_TMUX_META_TARGET=
 FM_BACKEND_TMUX_META_PROVIDER_IDENTITY=
+FM_BACKEND_TMUX_META_LEGACY=0
 
 fm_backend_tmux_meta_read() {  # <meta-file>
   local meta=$1 line key value
@@ -128,6 +129,7 @@ fm_backend_tmux_meta_read() {  # <meta-file>
   FM_BACKEND_TMUX_META_GENERATION=
   FM_BACKEND_TMUX_META_TARGET=
   FM_BACKEND_TMUX_META_PROVIDER_IDENTITY=
+  FM_BACKEND_TMUX_META_LEGACY=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -148,11 +150,16 @@ fm_backend_tmux_meta_read() {  # <meta-file>
     esac
   done < "$meta" || return 1
   [ "$backend_count" -le 1 ] && [ "$window_count" -eq 1 ] \
-    && [ "$pane_count" -le 1 ] && [ "$generation_count" -eq 1 ] \
+    && [ "$pane_count" -le 1 ] && [ "$generation_count" -le 1 ] \
     && [ "$herdr_count" -eq 0 ] || return 1
   [ "${backend:-tmux}" = tmux ] && [ -n "$window" ] || return 1
   case "$window" in *'|'*) return 1 ;; esac
-  case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 1 ;; esac
+  if [ "$generation_count" -eq 0 ]; then
+    [ "$pane_count" -eq 0 ] || return 1
+    FM_BACKEND_TMUX_META_LEGACY=1
+  else
+    case "$generation" in *[!A-Za-z0-9._-]*|""|*/*) return 1 ;; esac
+  fi
   if [ "$pane_count" -eq 1 ]; then
     case "$pane" in %*) ;; *) return 1 ;; esac
     case "${pane#%}" in ''|*[!0-9]*) return 1 ;; esac
@@ -167,6 +174,97 @@ fm_backend_tmux_meta_read() {  # <meta-file>
   FM_BACKEND_TMUX_META_WINDOW=$window
   FM_BACKEND_TMUX_META_PANE=$pane
   FM_BACKEND_TMUX_META_GENERATION=$generation
+}
+
+fm_backend_tmux_meta_migrate_legacy() {  # <meta-file>
+  local meta=$1 lock="${1}.endpoint-migration.lock" pane current generation
+  local identity canonical tmp id task_count attempts=0 status=1
+  fm_backend_tmux_meta_read "$meta" || return 1
+  [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 1 ] || return 0
+  if ! mkdir "$lock" 2>/dev/null; then
+    while [ "$attempts" -lt 100 ]; do
+      sleep 0.02
+      fm_backend_tmux_meta_read "$meta" \
+        && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] \
+        && fm_backend_tmux_endpoint_matches \
+          "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
+          "$FM_BACKEND_TMUX_META_GENERATION" \
+        && return 0
+      attempts=$((attempts + 1))
+    done
+    return 1
+  fi
+  fm_backend_tmux_meta_read "$meta" || {
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  }
+  if [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ]; then
+    rmdir "$lock" 2>/dev/null || true
+    return 0
+  fi
+  fm_backend_source tmux || {
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  }
+  pane=$(fm_backend_tmux_single_pane_id \
+    "$FM_BACKEND_TMUX_META_WINDOW" 2>/dev/null) || pane=
+  if [ -n "$pane" ]; then
+    generation="fm-legacy-$(date +%s)-$$-$RANDOM-$RANDOM"
+    fm_backend_tmux_bind_endpoint_generation "$pane" "$generation" \
+      >/dev/null 2>&1 || pane=
+  fi
+  if [ -n "$pane" ]; then
+    identity=$(fm_backend_tmux_endpoint_identity "$pane" 2>/dev/null) \
+      || identity=
+    canonical=${identity%%|*}
+    current=$(fm_backend_tmux_single_pane_id \
+      "$FM_BACKEND_TMUX_META_WINDOW" 2>/dev/null) || current=
+    [ "$identity" = "$canonical|$pane|$generation" ] \
+      && [ "$current" = "$pane" ] || pane=
+  fi
+  case "$canonical" in
+    @*) case "${canonical#@}" in ''|*[!0-9]*) pane= ;; esac ;;
+    *) pane= ;;
+  esac
+  id=${meta##*/}
+  id=${id%.meta}
+  case "$id" in ''|*[!A-Za-z0-9._-]*) pane= ;; esac
+  task_count=$(grep -c '^task=' "$meta" 2>/dev/null || true)
+  [ "$task_count" -le 1 ] || pane=
+  if [ -n "$pane" ]; then
+    tmp=$(mktemp "${meta}.migration.XXXXXX") || tmp=
+    if [ -n "$tmp" ] && chmod 600 "$tmp" \
+      && awk -v window="$canonical" '
+          /^window=/ { print "window=" window; next }
+          { print }
+        ' "$meta" > "$tmp" \
+      && printf 'tmux_pane_id=%s\nendpoint_generation=%s\n' \
+        "$pane" "$generation" >> "$tmp" \
+      && { [ "$task_count" -eq 1 ] || printf 'task=%s\n' "$id" >> "$tmp"; } \
+      && mv "$tmp" "$meta" \
+      && fm_backend_tmux_meta_read "$meta" \
+      && [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] \
+      && fm_backend_tmux_endpoint_matches \
+        "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
+        "$FM_BACKEND_TMUX_META_GENERATION"; then
+      status=0
+    else
+      [ -z "${tmp:-}" ] || rm -f "$tmp"
+    fi
+  fi
+  rmdir "$lock" 2>/dev/null || true
+  return "$status"
+}
+
+fm_backend_tmux_meta_ensure_live_bound() {  # <meta-file>
+  fm_backend_tmux_meta_read "$1" || return 1
+  if [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 1 ]; then
+    fm_backend_tmux_meta_migrate_legacy "$1" || return 1
+    fm_backend_tmux_meta_read "$1" || return 1
+  fi
+  fm_backend_tmux_endpoint_matches \
+    "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
+    "$FM_BACKEND_TMUX_META_GENERATION"
 }
 
 fm_backend_tmux_endpoint_matches() {  # <window> <pane-or-empty> <generation>
@@ -208,10 +306,8 @@ fm_backend_target_of_meta() {  # <meta-file>
   target=$(fm_backend_recorded_target_of_meta "$meta") || return 1
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = tmux ]; then
-    fm_backend_tmux_meta_read "$meta" || return 1
-    fm_backend_tmux_endpoint_matches \
-      "$FM_BACKEND_TMUX_META_WINDOW" "$FM_BACKEND_TMUX_META_PANE" \
-      "$FM_BACKEND_TMUX_META_GENERATION" || return 1
+    fm_backend_tmux_meta_ensure_live_bound "$meta" || return 1
+    target=$FM_BACKEND_TMUX_META_TARGET
   fi
   printf '%s' "$target"
 }

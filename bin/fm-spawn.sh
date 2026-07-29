@@ -1695,7 +1695,11 @@ mkdir -p "$STATE"
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 {
-  echo "window=$T"
+  if [ "$BACKEND" = tmux ]; then
+    echo "window=$WID"
+  else
+    echo "window=$T"
+  fi
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"

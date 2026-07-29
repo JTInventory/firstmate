@@ -330,18 +330,23 @@ generated terminal command, or in a sibling-readable environment. A rolling laun
 derives the verified broker script from the authority checkout when an older
 live broker lacks that export. The secondmate declaration and home are applied
 before its wrapper consumes the ticket and creates its own broker descriptor.
-On Linux, the wrapper proves with a real same-credential child open attempt
-that procfs cannot expose the consumer descriptor before creating its private
-key; readable or unrecognized isolation refuses enrollment. Darwin has no
-corresponding procfs descriptor path. The wrapper signs an acknowledgment
+On Linux, the broker, signer, and wrapper each prove with a real
+same-credential child open attempt that procfs cannot expose any
+authority-bearing descriptor before creating its secret. Readable or
+unrecognized isolation refuses startup. Darwin has no corresponding procfs
+descriptor path. The wrapper signs an acknowledgment
 bound to the matching acceptance digest. The signer binds the public key to
 that exact launched process and verifies the consumer signature before spawn
 releases lifecycle locks or reports success. New tmux task metadata keeps the
 exact pane and pane-scoped generation. Lifecycle operations and ordinary
 `fm-<id>` selectors share one strict parser that rejects duplicate or malformed
 pane data and proves the live pane still belongs to the recorded window and
-generation before transport. Older window-scoped records remain usable only
-while the recorded window has one stable pane. On macOS, `getsid(2)` must identify a live session
+generation before transport. A pre-port tmux record without endpoint fields is
+migrated only after its recorded window resolves twice to one stable pane; the
+migration binds a fresh pane generation and atomically records the canonical
+window, pane, generation, and task. Ambiguity refuses. Older window-scoped
+records that already have a generation remain usable only while the recorded
+window has one stable pane. On macOS, `getsid(2)` must identify a live session
 leader in the caller's ancestry; leaderless or unreadable sessions refuse.
 
 The tracked `SessionEnd` hook releases only a regular, non-symlink lock whose

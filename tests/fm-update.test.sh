@@ -1327,7 +1327,7 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
 }
 
 test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
-  local w generation fakebin out runtime resolved meta
+  local w generation fakebin out runtime resolved meta legacy_meta
   w=$(new_world t32-exact-pane)
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
@@ -1372,6 +1372,28 @@ SH
   [ "$resolved" = $'tmux\t%42' ] \
     || fail "fm-send selector resolution did not retain the exact tmux pane"
   meta="$w/home/state/sm1.meta"
+  sed -i '/^tmux_pane_id=/d;/^endpoint_generation=/d;/^task=/d' "$meta"
+  sed -i 's/^window=.*/window=firstmate:fm-sm1/' "$meta"
+  resolved=$(fm_backend_resolve_selector_with_backend \
+    fm-sm1 "$w/home/state")
+  [ "$resolved" = $'tmux\t%42' ] \
+    || fail "pre-port tmux metadata did not migrate to its exact live pane"
+  [ "$(grep -c '^window=@42$' "$meta")" -eq 1 ] \
+    && [ "$(grep -c '^tmux_pane_id=%42$' "$meta")" -eq 1 ] \
+    && [ "$(grep -c '^endpoint_generation=fm-legacy-' "$meta")" -eq 1 ] \
+    && [ "$(grep -c '^task=sm1$' "$meta")" -eq 1 ] \
+    || fail "pre-port tmux metadata migration was incomplete or ambiguous"
+  legacy_meta="$w/home/state/legacy-ambiguous.meta"
+  printf 'window=firstmate:fm-legacy-ambiguous\nkind=secondmate\n' \
+    > "$legacy_meta"
+  if FM_FAKE_PANE_ID=$'%42\n%43' \
+    fm_backend_resolve_selector_with_backend \
+      fm-legacy-ambiguous "$w/home/state" >/dev/null 2>&1; then
+    fail "pre-port tmux migration accepted an ambiguous multi-pane window"
+  fi
+  [ "$(grep -c '^tmux_pane_id=' "$legacy_meta")" -eq 0 ] \
+    && [ "$(grep -c '^endpoint_generation=' "$legacy_meta")" -eq 0 ] \
+    || fail "ambiguous pre-port tmux metadata was partially migrated"
   printf 'tmux_pane_id=%%43\n' >> "$meta"
   ! fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state" \
     >/dev/null 2>&1 \

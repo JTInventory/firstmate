@@ -286,12 +286,87 @@ fm_session_authority_broker_present() {
   [ "$caller_target" = "$broker_target" ]
 }
 
+fm_session_descriptor_channel_isolated() {
+  local fd=$1 system parent=$$ opened=0 status=0
+  case "$fd" in ''|*[!0-9]*) return 1 ;; esac
+  system=$(uname -s 2>/dev/null) || return 1
+  case "$system" in
+    Darwin)
+      return 0
+      ;;
+    Linux)
+      if [ ! -e "/proc/$parent/fd/$fd" ]; then
+        case "$fd" in
+          7) exec 7</dev/null ;;
+          8) exec 8</dev/null ;;
+          9) exec 9</dev/null ;;
+          10) exec 10</dev/null ;;
+          *) return 1 ;;
+        esac
+        opened=1
+      fi
+      if [ ! -e "/proc/$parent/fd/$fd" ] \
+        || (: < "/proc/$parent/fd/$fd") 2>/dev/null; then
+        status=1
+      fi
+      if [ "$opened" -eq 1 ]; then
+        case "$fd" in
+          7) exec 7<&- ;;
+          8) exec 8<&- ;;
+          9) exec 9<&- ;;
+          10) exec 10<&- ;;
+        esac
+      fi
+      return "$status"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+fm_session_authority_descriptor_create() {
+  local authority_file key
+  if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null \
+    || ( : <&7 ) 2>/dev/null || ( : >&7 ) 2>/dev/null; then
+    return 1
+  fi
+  fm_session_descriptor_channel_isolated 9 \
+    && fm_session_descriptor_channel_isolated 7 || return 1
+  key=$(fm_session_random_hex 48) || return 1
+  authority_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-authority.XXXXXX") \
+    || return 1
+  chmod 600 "$authority_file" \
+    && exec 9<"$authority_file" \
+    && exec 7>"$authority_file" || {
+      rm -f -- "$authority_file"
+      exec 9<&-
+      exec 7>&-
+      return 1
+    }
+  rm -f -- "$authority_file"
+  printf '%s\n' "$key" >&7 || {
+    unset key
+    exec 7>&-
+    exec 9<&-
+    return 1
+  }
+  unset key
+  exec 7>&-
+  FM_SESSION_AUTHORITY_FD=9
+}
+
 fm_session_enrollment_signer_prepare() {
   local script=$1 private public output public_digest public_key
   shift
   if ( : <&10 ) 2>/dev/null || ( : >&10 ) 2>/dev/null; then
     return 1
   fi
+  if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ]; then
+    fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
+      || return 1
+  fi
+  fm_session_descriptor_channel_isolated 10 || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
   public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
@@ -318,7 +393,7 @@ fm_session_enrollment_consumer_prepare() {
   if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
     return 1
   fi
-  fm_session_enrollment_consumer_channel_isolated || return 1
+  fm_session_descriptor_channel_isolated 8 || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
   public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
@@ -336,32 +411,6 @@ fm_session_enrollment_consumer_prepare() {
   exec "$script" --enrollment-launch "$launch" \
     --enrollment-consumer-key "$public_key" \
     --enrollment-consumer-key-sha256 "$public_digest" "$@"
-}
-
-fm_session_enrollment_consumer_channel_isolated() {
-  local system parent=$$
-  if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
-    return 1
-  fi
-  system=$(uname -s 2>/dev/null) || return 1
-  case "$system" in
-    Darwin)
-      return 0
-      ;;
-    Linux)
-      exec 8</dev/null || return 1
-      if [ ! -e "/proc/$parent/fd/8" ] \
-        || (exec 8<&-; : < "/proc/$parent/fd/8") 2>/dev/null; then
-        exec 8<&-
-        return 1
-      fi
-      exec 8<&-
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
 }
 
 fm_session_enrollment_public_key_validate() {

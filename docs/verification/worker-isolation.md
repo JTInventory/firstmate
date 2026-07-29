@@ -34,16 +34,21 @@ or Herdr's direct agent-start response and pane process-info. The normalized
 launcher `PATH` is carried into that direct process launch. Both backends compare
 their complete live endpoint identity with the recorded endpoint before ticket
 issue and again after authenticated acceptance. New tmux metadata persists the
-exact pane; older window-scoped records are accepted only with one stable pane.
+exact pane. A pre-port record without endpoint fields is accepted only when its
+window resolves twice to one stable pane; migration then binds a fresh pane
+generation and atomically records the canonical endpoint. Ambiguity refuses.
+Older window-scoped records that already have a generation are accepted only
+with one stable pane.
 The ticket
 binds the wrapper's start value and executable identity, and the signer accepts
 only that exact process. The
 private signing key stays in shell memory and fresh anonymous pipes, with no
 filesystem pathname, environment export, or terminal command text. On Linux,
-the wrapper first uses a real same-credential child open attempt to prove that
-procfs cannot expose its consumer descriptor; readable or unrecognized
-isolation refuses enrollment. Darwin has no corresponding procfs descriptor
-path. The wrapper then creates an anonymous consumer key, publishes only its
+the broker, signer, and wrapper each use a real same-credential child open
+attempt to prove that procfs cannot expose any authority-bearing descriptor
+before creating its secret; readable or unrecognized isolation refuses
+startup. Darwin has no corresponding procfs descriptor path. The wrapper then
+creates an anonymous consumer key, publishes only its
 public key through its immutable exact-process arguments, and signs an
 acknowledgment bound to the accepted receipt. A rename or copied signer receipt
 is not an acknowledgment. Spawn waits for the signer to verify that consumer
