@@ -1033,7 +1033,7 @@ test_authority_fds_require_sibling_proc_isolation() {
 }
 
 test_authority_fds_reprove_isolation_after_exec() {
-  local original_fd authority_tmp
+  local original_fd authority_tmp consume
   . "$ROOT/bin/fm-session-lock-lib.sh"
   original_fd=$FM_SESSION_AUTHORITY_FD
   authority_tmp=$(mktemp "$TMP_ROOT/post-exec-authority.XXXXXX")
@@ -1059,6 +1059,21 @@ test_authority_fds_reprove_isolation_after_exec() {
     ! fm_session_enrollment_consumer_prepare
     ! ( : <&8 ) 2>/dev/null
   ) || fail "consumer created a key without durable process isolation"
+  consume="$TMP_ROOT/in-process-consumer-key"
+  (
+    exec 8<&-
+    fm_session_descriptor_channel_isolated() { return 0; }
+    fm_session_exec_descriptor_isolation_durable() { return 0; }
+    fm_session_enrollment_consumer_prepare
+    FM_SESSION_ENROLLMENT_SIGNER_PID=123
+    FM_SESSION_ENROLLMENT_NONCE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    fm_session_enrollment_consumption_request "$consume" task "$TMP_ROOT"
+    grep -q '^consumer-public-key=.' "$consume.consume"
+    grep -qx "consumer-public-key-sha256=$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256" \
+      "$consume.consume"
+    exec 8<&-
+  ) || fail "in-process consumer public key did not reach the signer request"
+  rm -f "$consume.consume"
   (
     exec 10< <(printf 'private\n')
     FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD=10

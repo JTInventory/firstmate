@@ -1328,7 +1328,10 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
 
 test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
   local w generation fakebin out runtime resolved meta legacy_meta foreign_meta
-  local ownership_meta ownership_fakebin crash_meta crash_fakebin crash_resolved
+  local ownership_meta ownership_fakebin legacy_resolved
+  local crash_meta crash_fakebin crash_resolved
+  local topology_meta topology_fakebin topology_resolved
+  local committed_meta committed_fakebin committed_resolved committed_process
   w=$(new_world t32-exact-pane)
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
@@ -1438,7 +1441,9 @@ SH
   if (
     PATH="$ownership_fakebin:$PATH"
     FM_FAKE_TMUX_LOG="$w/ownership-fake/tmux.log"
-    export PATH FM_FAKE_TMUX_LOG
+    FM_FAKE_PANE_ID=%43
+    FM_FAKE_WINDOW_ID=@43
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
     fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
@@ -1456,22 +1461,23 @@ SH
   [ "$(grep -c '^tmux_pane_id=' "$ownership_meta")" -eq 0 ] \
     && [ "$(grep -c '^endpoint_generation=' "$ownership_meta")" -eq 0 ] \
     || fail "unowned legacy metadata was partially migrated"
-  if (
+  legacy_resolved=$(
     PATH="$ownership_fakebin:$PATH"
     FM_FAKE_TMUX_LOG="$w/ownership-fake/tmux.log"
-    export PATH FM_FAKE_TMUX_LOG
+    FM_FAKE_PANE_ID=%43
+    FM_FAKE_WINDOW_ID=@43
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
     fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
     fm_agent_proc_cwd() { printf '%s' "$w/ownership"; }
     fm_agent_environ() { return 0; }
     fm_backend_resolve_selector_with_backend fm-ownership "$w/home/state"
-  ) >/dev/null 2>&1; then
-    fail "legacy migration accepted a process without an exact task declaration"
-  fi
-  [ "$(grep -c '^tmux_pane_id=' "$ownership_meta")" -eq 0 ] \
-    && [ "$(grep -c '^endpoint_generation=' "$ownership_meta")" -eq 0 ] \
-    || fail "undeclared legacy process partially migrated metadata"
+  )
+  [ "$legacy_resolved" = $'tmux\t%43' ] \
+    && [ "$(grep -c '^tmux_pane_id=%43$' "$ownership_meta")" -eq 1 ] \
+    && [ "$(grep -c '^endpoint_generation=fm-legacy-' "$ownership_meta")" -eq 1 ] \
+    || fail "genuine declaration-less pre-port task did not migrate securely"
   crash_meta="$w/home/state/crash.meta"
   mkdir -p "$w/crash"
   printf 'crash\n' > "$w/crash/.fm-secondmate-home"
@@ -1502,6 +1508,7 @@ SH
     fail "interrupted legacy migration reported success before metadata commit"
   fi
   [ -f "$w/home/state/.tmux-endpoint-44.migration" ] \
+    && [ -f "$w/home/state/.tmux-endpoint-44.migration.key" ] \
     && [ -f "$w/crash-fake/tmux.log.endpoint-generation" ] \
     && [ "$(grep -c '^endpoint_generation=' "$crash_meta")" -eq 0 ] \
     || fail "interrupted generation bind did not retain recoverable evidence"
@@ -1511,6 +1518,10 @@ SH
     FM_FAKE_PANE_ID=%44
     FM_FAKE_WINDOW_ID=@44
     export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
+    exec 18< <(printf '%s' \
+      fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210)
+    FM_SESSION_AUTHORITY_FD=18
+    export FM_SESSION_AUTHORITY_FD
     fm_backend_tmux_legacy_migration_authorized() { return 0; }
     fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
     fm_harness_pid_alive() { return 0; }
@@ -1523,7 +1534,112 @@ SH
   )
   [ "$crash_resolved" = $'tmux\t%44' ] \
     && [ ! -e "$w/home/state/.tmux-endpoint-44.migration" ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-44.migration.key" ] \
     || fail "legacy migration did not recover bind-before-commit interruption"
+  topology_meta="$w/home/state/topology.meta"
+  mkdir -p "$w/topology"
+  printf 'topology\n' > "$w/topology/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-topology\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s/topology\n' "$w"
+  } > "$topology_meta"
+  topology_fakebin=$(make_fake_tmux "$w/topology-fake")
+  if (
+    PATH="$topology_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/topology-fake/tmux.log"
+    FM_FAKE_PANE_ID=%45
+    FM_FAKE_WINDOW_ID=@45
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/topology"; }
+    fm_agent_environ() { return 0; }
+    topology_checks=0
+    fm_backend_tmux_migration_topology_matches() {
+      topology_checks=$((topology_checks + 1))
+      [ "$topology_checks" -eq 1 ]
+    }
+    fm_backend_resolve_selector_with_backend fm-topology "$w/home/state"
+  ) >/dev/null 2>&1; then
+    fail "legacy migration committed after its endpoint topology moved"
+  fi
+  [ "$(grep -c '^endpoint_generation=' "$topology_meta")" -eq 0 ] \
+    && [ -f "$w/home/state/.tmux-endpoint-45.migration" ] \
+    && [ -f "$w/home/state/.tmux-endpoint-45.migration.key" ] \
+    || fail "topology change did not leave recoverable pre-commit evidence"
+  topology_resolved=$(
+    PATH="$topology_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/topology-fake/tmux.log"
+    FM_FAKE_PANE_ID=%45
+    FM_FAKE_WINDOW_ID=@45
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$$"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/topology"; }
+    fm_agent_environ() { return 0; }
+    fm_backend_resolve_selector_with_backend fm-topology "$w/home/state"
+  )
+  [ "$topology_resolved" = $'tmux\t%45' ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-45.migration" ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-45.migration.key" ] \
+    || fail "topology-safe migration evidence did not recover"
+  committed_meta="$w/home/state/committed.meta"
+  mkdir -p "$w/committed"
+  printf 'committed\n' > "$w/committed/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-committed\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s/committed\n' "$w"
+  } > "$committed_meta"
+  committed_fakebin=$(make_fake_tmux "$w/committed-fake")
+  sleep 60 &
+  committed_process=$!
+  UPDATE_TEST_PIDS="$UPDATE_TEST_PIDS $committed_process"
+  if (
+    PATH="$committed_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/committed-fake/tmux.log"
+    FM_FAKE_PANE_ID=%46
+    FM_FAKE_WINDOW_ID=@46
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    fm_backend_tmux_legacy_process_pid() { printf '%s' "$committed_process"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_agent_proc_cwd() { printf '%s' "$w/committed"; }
+    fm_agent_environ() { return 0; }
+    endpoint_checks=0
+    fm_backend_tmux_endpoint_matches() {
+      endpoint_checks=$((endpoint_checks + 1))
+      [ "$endpoint_checks" -eq 1 ]
+    }
+    fm_backend_resolve_selector_with_backend fm-committed "$w/home/state"
+  ) >/dev/null 2>&1; then
+    fail "legacy migration hid a crash after metadata commit"
+  fi
+  [ "$(grep -c '^endpoint_generation=fm-legacy-' "$committed_meta")" -eq 1 ] \
+    && [ -f "$w/home/state/.tmux-endpoint-46.migration" ] \
+    && [ -f "$w/home/state/.tmux-endpoint-46.migration.key" ] \
+    || fail "post-commit interruption did not retain durable evidence"
+  kill "$committed_process" 2>/dev/null || true
+  wait "$committed_process" 2>/dev/null || true
+  committed_resolved=$(
+    PATH="$committed_fakebin:$PATH"
+    FM_FAKE_TMUX_LOG="$w/committed-fake/tmux.log"
+    FM_FAKE_PANE_ID=%46
+    FM_FAKE_WINDOW_ID=@46
+    export PATH FM_FAKE_TMUX_LOG FM_FAKE_PANE_ID FM_FAKE_WINDOW_ID
+    fm_backend_tmux_legacy_migration_authorized() { return 0; }
+    fm_backend_tmux_legacy_process_pid() { return 1; }
+    fm_backend_resolve_selector_with_backend fm-committed "$w/home/state"
+  )
+  [ "$committed_resolved" = $'tmux\t%46' ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-46.migration" ] \
+    && [ ! -e "$w/home/state/.tmux-endpoint-46.migration.key" ] \
+    || fail "committed migration journal required the dead legacy process"
   legacy_meta="$w/home/state/legacy-ambiguous.meta"
   printf 'window=firstmate:fm-legacy-ambiguous\nkind=secondmate\n' \
     > "$legacy_meta"

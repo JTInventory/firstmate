@@ -567,7 +567,7 @@ fm_session_enrollment_signer_run() {
   rm -f "$body" "$signature"
   while [ "$attempts" -lt 1500 ]; do
     if [ -f "$consume" ] && [ ! -L "$consume" ] \
-      && [ "$(wc -l < "$consume" | tr -d ' ')" -eq 7 ] \
+      && [ "$(wc -l < "$consume" | tr -d ' ')" -eq 9 ] \
       && [ "$(sed -n '1s/^signer-pid=//p' "$consume")" = "$$" ] \
       && [ "$(sed -n '2s/^nonce=//p' "$consume")" = "$nonce" ]; then
       consumer=$(sed -n '3s/^consumer-pid=//p' "$consume")
@@ -575,6 +575,8 @@ fm_session_enrollment_signer_run() {
       consumer_identity=$(sed -n '5s/^consumer-identity=//p' "$consume")
       consume_task=$(sed -n '6s/^task=//p' "$consume")
       consume_home=$(sed -n '7s/^home=//p' "$consume")
+      consumer_public_key=$(sed -n '8s/^consumer-public-key=//p' "$consume")
+      consumer_public_digest=$(sed -n '9s/^consumer-public-key-sha256=//p' "$consume")
       case "$consumer" in ''|*[!0-9]*) return 1 ;; esac
       expected_script="$broker_script"
       env_role=$(fm_session_process_environment_value \
@@ -583,10 +585,6 @@ fm_session_enrollment_signer_run() {
         "$consumer" FM_AGENT_TASK 2>/dev/null || true)
       env_home=$(fm_session_process_environment_value \
         "$consumer" FM_AGENT_OWNER_HOME 2>/dev/null || true)
-      consumer_public_key=$(fm_session_process_argument_value \
-        "$consumer" --enrollment-consumer-key 2>/dev/null || true)
-      consumer_public_digest=$(fm_session_process_argument_value \
-        "$consumer" --enrollment-consumer-key-sha256 2>/dev/null || true)
       [ "$consume_task" = "$task" ] && [ "$consume_home" = "$home_real" ] \
         && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
         && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
@@ -811,16 +809,22 @@ fm_session_enrollment_ack_write() {
 }
 
 fm_session_enrollment_consumption_request() {
-  local file=$1 task=$2 home=$3 tmp start identity
+  local file=$1 task=$2 home=$3 tmp start identity public_key public_digest
   local consume="${file}.consume"
   [ ! -e "$consume" ] && [ ! -L "$consume" ] || return 1
   start=$(fm_session_process_start "$$") || return 1
   identity=$(fm_session_process_identity "$$") || return 1
+  public_key=${FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY:-}
+  public_digest=${FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256:-}
+  fm_session_enrollment_public_key_validate "$public_key" "$public_digest" \
+    || return 1
+  case "$public_key:$public_digest" in *$'\n'*|*$'\r'*) return 1 ;; esac
   tmp=$(mktemp "${consume}.XXXXXX") || return 1
   chmod 600 "$tmp" \
-    && printf 'signer-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nconsumer-identity=%s\ntask=%s\nhome=%s\n' \
+    && printf 'signer-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nconsumer-identity=%s\ntask=%s\nhome=%s\nconsumer-public-key=%s\nconsumer-public-key-sha256=%s\n' \
       "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
-      "$$" "$start" "$identity" "$task" "$home" > "$tmp" \
+      "$$" "$start" "$identity" "$task" "$home" "$public_key" \
+      "$public_digest" > "$tmp" \
     && mv "$tmp" "$consume" || {
       rm -f "$tmp"
       return 1
