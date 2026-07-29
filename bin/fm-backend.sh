@@ -541,6 +541,16 @@ fm_backend_endpoint_generation() {
   esac
 }
 
+fm_backend_endpoint_identity() {
+  local backend=$1; shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_identity "$@" ;;
+    herdr) fm_backend_herdr_endpoint_identity "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_foreground_process_pid() {
   local backend=$1; shift
   fm_backend_source "$backend" || return 1

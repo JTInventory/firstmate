@@ -1485,6 +1485,18 @@ EOF
     fi
     ;;
 esac
+SPAWN_EXPECTED_ENDPOINT_IDENTITY=
+if [ "$KIND" = secondmate ]; then
+  case "$BACKEND" in
+    tmux)
+      SPAWN_EXPECTED_ENDPOINT_IDENTITY="$WID|$ENDPOINT_GENERATION"
+      ;;
+    herdr)
+      SPAWN_EXPECTED_ENDPOINT_IDENTITY="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"
+      ;;
+    *) exit 1 ;;
+  esac
+fi
 spawn_settle_path() {  # <target>
   local record
   record=$(fm_agent_cwd_verdict "" "" "" "$BACKEND" "$1")
@@ -1779,7 +1791,8 @@ HERDR_FLAT_ABORT_CLEANUP=0
 if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_ENDPOINT_PID=$(
     fm_backend_launch_trusted_process \
-      "$BACKEND" "$WID" "$ID" "$PROJ_ABS" "$LAUNCH" 2>/dev/null
+      "$BACKEND" "$WID" "$ID" "$PROJ_ABS" "$LAUNCH" \
+      "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" 2>/dev/null
   ) || SPAWN_AUTHORITY_ENDPOINT_PID=
   [ -n "$SPAWN_AUTHORITY_ENDPOINT_PID" ] || {
     echo "error: could not verify the exact launch process for secondmate $ID" >&2
@@ -1789,14 +1802,15 @@ if [ "$KIND" = secondmate ]; then
   while [ "$SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS" -lt 250 ]; do
     if fm_backend_launch_process_is_current \
       "$BACKEND" "$WID" "$SPAWN_AUTHORITY_ENDPOINT_PID" \
+      "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
       && fm_session_process_runs_script \
         "$SPAWN_AUTHORITY_ENDPOINT_PID" \
         "$PROJ_ABS/bin/fm-session-authority-exec.sh" \
       && [ "$(fm_session_process_argument_value \
         "$SPAWN_AUTHORITY_ENDPOINT_PID" --enrollment-launch 2>/dev/null)" \
         = "$SPAWN_AUTHORITY_LAUNCH" ] \
-      && [ "$(fm_backend_endpoint_generation "$BACKEND" "$WID" 2>/dev/null)" \
-        = "$ENDPOINT_GENERATION" ]; then
+      && [ "$(fm_backend_endpoint_identity "$BACKEND" "$WID" 2>/dev/null)" \
+        = "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" ]; then
       break
     fi
     sleep 0.02

@@ -295,8 +295,15 @@ test_secondmate_child_receives_only_its_own_home() {
     "secondmate enrollment retained the tmux-only shell-pid proof"
   assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" "respawn-pane -k" \
     "tmux secondmate launch was not serialized with its returned pane pid"
+  assert_contains "$(cat "$ROOT/bin/backends/tmux.sh")" "exec env \$command" \
+    "tmux trusted launch placed environment assignments after exec"
   assert_contains "$(cat "$ROOT/bin/backends/herdr.sh")" "agent start" \
     "Herdr secondmate launch did not use the authoritative agent API"
+  assert_contains "$(cat "$ROOT/bin/backends/herdr.sh")" ".result.agent.pane_id" \
+    "Herdr secondmate launch did not parse the real agent_started response"
+  assert_contains "$(cat "$SPAWN")" \
+    'SPAWN_EXPECTED_ENDPOINT_IDENTITY="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"' \
+    "Herdr enrollment did not bind the complete recorded endpoint identity"
   wait_line=$(grep -n 'fm_session_enrollment_ticket_wait_accepted' "$SPAWN" | tail -1 | cut -d: -f1)
   clear_line=$(grep -n '^SPAWN_AUTHORITY_ENROLLMENT=$' "$SPAWN" | tail -1 | cut -d: -f1)
   release_line=$(grep -n 'fm_lock_release "$SPAWN_TASK_LOCK"' "$SPAWN" | tail -1 | cut -d: -f1)
@@ -991,11 +998,15 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
       case "$*" in
         *"pane get"*)
           printf "%s\n" \
-            "{\"result\":{\"pane\":{\"pane_id\":\"w1:p2\",\"tab_id\":\"w1:t2\"}}}"
+            "{\"result\":{\"pane\":{\"pane_id\":\"w1:p2\",\"tab_id\":\"w1:t2\",\"tokens\":{\"firstmate_endpoint_generation\":\"g7\"}}}}"
+          ;;
+        *"tab get"*)
+          printf "%s\n" \
+            "{\"result\":{\"tab\":{\"tab_id\":\"w1:t2\",\"workspace_id\":\"w1\"}}}"
           ;;
         *"agent start"*)
           printf "%s\n" \
-            "{\"result\":{\"type\":\"agent_started\",\"panes\":[{\"pane_id\":\"w1:p2\"}]}}"
+            "{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"w1:p2\"},\"argv\":[\"sh\",\"-c\",\"exec env GOTMPDIR=/g wrapper\"]}}"
           ;;
         *"pane process-info"*)
           printf "%s\n" \
@@ -1004,7 +1015,9 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
         *) return 1 ;;
       esac
     }
-    fm_backend_herdr_launch_trusted_process default:w1:p2 domain /work "wrapper"
+    fm_backend_herdr_launch_trusted_process \
+      default:w1:p2 domain /work "GOTMPDIR=/g wrapper" \
+      "default|w1|w1:t2|w1:p2|g7"
   ' _ "$ROOT") || fail "Herdr direct launch proof rejected its response pane"
   [ "$out" = 4242 ] || fail "Herdr direct launch proof returned $out"
   out=$(bash -c '
@@ -1012,11 +1025,16 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     . "$1/bin/backends/tmux.sh"
     tmux() {
       case "$1" in
-        respawn-pane|display-message) printf "4242\n" ;;
+        respawn-pane)
+          case "$*" in *"exec env GOTMPDIR=/g wrapper"*) printf "4242\n" ;; *) return 1 ;; esac
+          ;;
+        display-message) printf "4242\n" ;;
+        show-options) printf "g7\n" ;;
         *) return 1 ;;
       esac
     }
-    fm_backend_tmux_launch_trusted_process @7 domain /work "wrapper"
+    fm_backend_tmux_launch_trusted_process \
+      @7 domain /work "GOTMPDIR=/g wrapper" "@7|g7"
   ' _ "$ROOT") || fail "tmux serialized launch proof rejected its returned pane pid"
   [ "$out" = 4242 ] || fail "tmux serialized launch proof returned $out"
   out=$(bash -c '
@@ -1026,11 +1044,38 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
       case "$1" in
         respawn-pane) printf "4242\n" ;;
         display-message) printf "4343\n" ;;
+        show-options) printf "g7\n" ;;
         *) return 1 ;;
       esac
     }
-    ! fm_backend_tmux_launch_trusted_process @7 domain /work "wrapper"
+    ! fm_backend_tmux_launch_trusted_process @7 domain /work "wrapper" "@7|g7"
   ' _ "$ROOT") || fail "tmux accepted a pane replaced after its serialized launch"
+  out=$(bash -c '
+    . "$1/bin/backends/herdr.sh"
+    fm_backend_herdr_endpoint_identity() {
+      printf "default|other-workspace|w9:t9|w1:p2|g7"
+    }
+    fm_backend_herdr_cli() { return 1; }
+    ! fm_backend_herdr_launch_trusted_process \
+      default:w1:p2 domain /work "wrapper" "default|w1|w1:t2|w1:p2|g7"
+  ' _ "$ROOT") || fail "Herdr accepted a moved pane with only a matching generation"
+  out=$(bash -c '
+    . "$1/bin/backends/herdr.sh"
+    fm_backend_herdr_endpoint_identity() {
+      printf "default|w1|w1:t2|w1:p2|g7"
+    }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"agent start"*)
+          printf "%s\n" \
+            "{\"result\":{\"type\":\"agent_started\",\"panes\":[{\"pane_id\":\"w1:p2\"}],\"argv\":[\"sh\",\"-c\",\"exec env wrapper\"]}}"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    ! fm_backend_herdr_launch_trusted_process \
+      default:w1:p2 domain /work "wrapper" "default|w1|w1:t2|w1:p2|g7"
+  ' _ "$ROOT") || fail "Herdr accepted the obsolete plural agent_started response"
   pass "tmux and Herdr bind enrollment to backend-owned launch processes"
 }
 

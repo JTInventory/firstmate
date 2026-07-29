@@ -67,6 +67,13 @@ fm_backend_tmux_endpoint_generation() {
   tmux show-options -w -v -t "$1" @firstmate_endpoint_generation 2>/dev/null
 }
 
+fm_backend_tmux_endpoint_identity() {
+  local target=$1 generation
+  generation=$(fm_backend_tmux_endpoint_generation "$target") || return 1
+  [ -n "$generation" ] || return 1
+  printf '%s|%s' "$target" "$generation"
+}
+
 fm_backend_tmux_foreground_process_pid() {
   local target=$1 shell foreground current
   shell=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
@@ -83,22 +90,28 @@ fm_backend_tmux_foreground_process_pid() {
 }
 
 fm_backend_tmux_launch_trusted_process() {
-  local target=$1 name=$2 cwd=$3 command=$4 pid current
-  pid=$(tmux respawn-pane -k -t "$target" -c "$cwd" "exec $command" \; \
+  local target=$1 name=$2 cwd=$3 command=$4 expected=$5 pid current identity
+  identity=$(fm_backend_tmux_endpoint_identity "$target") || return 1
+  [ "$identity" = "$expected" ] || return 1
+  pid=$(tmux respawn-pane -k -t "$target" -c "$cwd" "exec env $command" \; \
     display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
     | tr -d '[:space:]') || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   current=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
     | tr -d '[:space:]') || return 1
   [ "$current" = "$pid" ] || return 1
+  identity=$(fm_backend_tmux_endpoint_identity "$target") || return 1
+  [ "$identity" = "$expected" ] || return 1
   printf '%s' "$pid"
 }
 
 fm_backend_tmux_launch_process_is_current() {
-  local target=$1 expected=$2 current
+  local target=$1 expected=$2 expected_identity=$3 current identity
   current=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
     | tr -d '[:space:]') || return 1
-  [ "$current" = "$expected" ]
+  [ "$current" = "$expected" ] || return 1
+  identity=$(fm_backend_tmux_endpoint_identity "$target") || return 1
+  [ "$identity" = "$expected_identity" ]
 }
 
 fm_backend_tmux_rename_task() {  # <target> <name>

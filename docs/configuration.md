@@ -320,7 +320,9 @@ without copying the live authority key. The signer's live protected descriptor
 and process environment bind the ticket's public-key digest. Spawn submits a
 randomly tagged wrapper through a backend-owned launch. A serialized tmux
 respawn returns the exact pane PID; Herdr's direct agent-start response and
-exact pane process-info identify that wrapper PID. The ticket
+exact pane process-info identify that wrapper PID. Before the ticket is issued,
+the live Herdr session, workspace, tab, pane, and generation must all equal the
+recorded endpoint identity. The ticket
 binds that exact live PID, start value, and executable identity, and only that
 process can consume it. The signing key exists only
 in shell memory and anonymous pipes, never at a filesystem pathname, in the

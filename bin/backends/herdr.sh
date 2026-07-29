@@ -1871,38 +1871,46 @@ fm_backend_herdr_foreground_process_pid() {
 }
 
 fm_backend_herdr_launch_trusted_process() {
-  local target=$1 name=$2 cwd=$3 command=$4 session pane pane_info tab out returned count pid
+  local target=$1 name=$2 cwd=$3 command=$4 expected=$5
+  local session pane identity live_session workspace tab live_pane generation
+  local out returned response_command pid
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) \
+  identity=$(fm_backend_herdr_endpoint_identity "$target") || return 1
+  [ "$identity" = "$expected" ] || return 1
+  IFS='|' read -r live_session workspace tab live_pane generation <<EOF
+$identity
+EOF
+  [ "$live_session" = "$session" ] && [ "$live_pane" = "$pane" ] \
+    && [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$generation" ] \
     || return 1
-  [ "$(printf '%s' "$pane_info" \
-    | jq -r '.result.pane.pane_id // empty' 2>/dev/null)" = "$pane" ] || return 1
-  tab=$(printf '%s' "$pane_info" \
-    | jq -r '.result.pane.tab_id // empty' 2>/dev/null) || return 1
-  [ -n "$tab" ] || return 1
+  response_command="exec env $command"
   out=$(fm_backend_herdr_cli "$session" agent start "$name" \
     --tab "$tab" \
-    --cwd "$cwd" --no-focus -- sh -c "exec $command" 2>/dev/null) || return 1
-  count=$(printf '%s' "$out" | jq -r '
-    if .result.type == "agent_started"
-      and (.result.panes | type) == "array"
-    then (.result.panes | length)
-    else 0 end
-  ' 2>/dev/null) || return 1
-  [ "$count" = 1 ] || return 1
+    --cwd "$cwd" --no-focus -- sh -c "$response_command" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e \
+    --arg pane "$pane" --arg command "$response_command" '
+      .result.type == "agent_started"
+      and (.result.agent | type) == "object"
+      and .result.agent.pane_id == $pane
+      and .result.argv == ["sh", "-c", $command]
+    ' >/dev/null 2>&1 || return 1
   returned=$(printf '%s' "$out" \
-    | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null) || return 1
+    | jq -r '.result.agent.pane_id // empty' 2>/dev/null) || return 1
   [ "$returned" = "$pane" ] || return 1
+  identity=$(fm_backend_herdr_endpoint_identity "$target") || return 1
+  [ "$identity" = "$expected" ] || return 1
   pid=$(fm_backend_herdr_foreground_process_pid "$target") || return 1
   printf '%s' "$pid"
 }
 
 fm_backend_herdr_launch_process_is_current() {
-  local target=$1 expected=$2 current
+  local target=$1 expected=$2 expected_identity=$3 current identity
   current=$(fm_backend_herdr_foreground_process_pid "$target") || return 1
-  [ "$current" = "$expected" ]
+  [ "$current" = "$expected" ] || return 1
+  identity=$(fm_backend_herdr_endpoint_identity "$target") || return 1
+  [ "$identity" = "$expected_identity" ]
 }
 
 fm_backend_herdr_bind_endpoint_generation() {
