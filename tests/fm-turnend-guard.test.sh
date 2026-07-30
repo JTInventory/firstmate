@@ -36,7 +36,9 @@ make_secondmate_linked_home() {
 make_path_without_jq() {
   local dir=$1 tool
   mkdir -p "$dir"
-  for tool in bash cat date dirname git mkdir ps stat uname; do
+  for tool in awk bash basename cat chmod cut date dirname env git grep head id \
+    getconf kill ln mkdir mktemp mv od openssl perl ps readlink rm rmdir sed sha256sum sleep sort \
+    stat tail touch tr uname wc; do
     ln -s "$(command -v "$tool")" "$dir/$tool"
   done
   printf '%s\n' "$dir"
@@ -64,6 +66,16 @@ run_guard_with_path_nul() {
     PATH="$path" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$GUARD" 2>&1 || status=$?
   return "$status"
+}
+
+bind_primary_fixture() {
+  local home=$1
+  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  fm_worker_test_authority_capability_present || return 1
+  FM_SESSION_AUTHORITY_FD=$FM_WORKER_TEST_AUTHORITY_FD
+  FM_SESSION_AUTHORITY_DURABLE_FD=$FM_WORKER_TEST_DURABLE_AUTHORITY_FD
+  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+  fm_worker_test_primary_identity_bind "$home" "$home" "$home/state"
 }
 
 test_main_primary_blocks_with_child_in_flight() {
@@ -103,7 +115,9 @@ test_secondmate_child_worktree_is_exempt() {
   [ ! -e "$child/.fm-secondmate-home" ] || fail "child worktree inherited secondmate marker"
   mkdir -p "$child/state"
   : > "$child/state/child.meta"
-  out=$(run_guard "$child" '{"stop_hook_active":false}'); status=$?
+  out=$(FM_AGENT_ROLE=crewmate FM_AGENT_TASK=child \
+    FM_AGENT_OWNER_HOME="$home" run_guard "$child" \
+    '{"stop_hook_active":false}'); status=$?
   expect_code 0 "$status" "linked child crew worktree must be exempt"
   [ -z "$out" ] || fail "linked child worktree was not silent: $out"
   pass "fm-turnend-guard: linked child worktree is exempt by git-dir/common-dir topology"
@@ -150,6 +164,7 @@ test_missing_jq_blocks_primary_with_in_flight() {
   local home path out status
   home=$(make_primary_repo "$TMP_ROOT/missing-jq-primary")
   path=$(make_path_without_jq "$TMP_ROOT/path-without-jq")
+  bind_primary_fixture "$home" || fail "could not bind missing-jq primary fixture"
   : > "$home/state/child.meta"
   out=$(run_guard_with_path "$path" "$home" '{"stop_hook_active":false}'); status=$?
   expect_code 2 "$status" "missing jq must not bypass an in-flight primary guard"
@@ -161,6 +176,7 @@ test_missing_jq_preserves_stop_hook_retry() {
   local home path out status
   home=$(make_primary_repo "$TMP_ROOT/missing-jq-retry")
   path=$(make_path_without_jq "$TMP_ROOT/path-without-jq-retry")
+  bind_primary_fixture "$home" || fail "could not bind missing-jq retry fixture"
   : > "$home/state/child.meta"
   out=$(run_guard_with_path "$path" "$home" '{"note":"café","stop_hook_active":true}'); status=$?
   expect_code 0 "$status" "missing jq fallback must preserve valid UTF-8 string values"
@@ -178,6 +194,7 @@ test_missing_jq_rejects_invalid_stop_payload() {
   local home path out status
   home=$(make_primary_repo "$TMP_ROOT/missing-jq-invalid")
   path=$(make_path_without_jq "$TMP_ROOT/path-without-jq-invalid")
+  bind_primary_fixture "$home" || fail "could not bind missing-jq invalid fixture"
   : > "$home/state/child.meta"
   out=$(run_guard_with_path "$path" "$home" '{"session_id":"abc","stop_hook_active":true'); status=$?
   expect_code 2 "$status" "missing jq fallback must reject malformed stop payload"

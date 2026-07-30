@@ -20,6 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {
   local dir=$1 fakebin
+  mkdir -p "$dir/home/state"
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi quota-axi
   cat > "$fakebin/gh" <<'SH'

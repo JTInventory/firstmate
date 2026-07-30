@@ -44,7 +44,8 @@ case "${1:-}" in
   display-message)
     for arg in "$@"; do
       case "$arg" in
-        *pane_id*) printf 'pane-1\n'; exit 0 ;;
+        *pane_id*) printf '%%1\n'; exit 0 ;;
+        *window_id*) printf '@1\n'; exit 0 ;;
         *cursor_y*) printf '0\n'; exit 0 ;;
         '#S') printf 'firstmate\n'; exit 0 ;;
         *pane_current_path*) printf '/tmp/worktree\n'; exit 0 ;;
@@ -52,6 +53,12 @@ case "${1:-}" in
       esac
     done
     printf 'firstmate\n' ;;
+  list-panes) printf '%%1\n' ;;
+  show-options)
+    case "$*" in
+      *firstmate_endpoint_generation*) printf 'endpoint-kill-fail\n' ;;
+    esac
+    ;;
   kill-window)
     [ "${FM_FAKE_TMUX_KILL_FAIL:-0}" = 1 ] && exit 1
     ;;
@@ -268,8 +275,15 @@ SH
   ln -s "$ROOT/bin/fm-backend.sh" "$fake_root/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake_root/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake_root/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake_root/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake_root/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake_root/bin/fm-pr-lib.sh"
+  ln -s "$ROOT/bin/fm-worker-isolation-lib.sh" "$fake_root/bin/fm-worker-isolation-lib.sh"
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake_root/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-procargs-lib.sh" "$fake_root/bin/fm-procargs-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake_root/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-slot-owner-lib.sh" "$fake_root/bin/fm-slot-owner-lib.sh"
+  ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake_root/bin/fm-agent-cwd-lib.sh"
   : > "$fake_root/bin/fm-pending-reply-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake_root/bin/fm-gate-refuse-lib.sh"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
@@ -290,7 +304,11 @@ fm_assert_task_branch_matches_meta() { return 0; }
 SH
 
   fm_write_meta "$state/kill-fail.meta" \
-    "window=firstmate:fm-demo" \
+    "task=kill-fail" \
+    "window=@1" \
+    "tmux_pane_id=%1" \
+    "endpoint_generation=endpoint-kill-fail" \
+    "home=$fake_root" \
     "worktree=$worktree" \
     "project=$project" \
     "kind=ship" \
@@ -305,7 +323,7 @@ SH
     fail "teardown swallowed a backend kill failure"
   fi
   assert_contains "$out" \
-    "REFUSED: could not kill task kill-fail window firstmate:fm-demo; refusing to delete task state" \
+    "error: endpoint retirement failed; preserving recoverable transaction evidence" \
     "teardown did not report the failed backend kill"
   [ -f "$state/kill-fail.meta" ] || fail "teardown deleted metadata after kill failure"
   [ -f "$state/kill-fail.status" ] || fail "teardown deleted status after kill failure"

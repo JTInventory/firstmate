@@ -88,14 +88,15 @@ test_verified_restart_requires_tracked_rearm() {
   : > "$arm_out"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 \
     FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" >"$arm_out" &
+    FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" >"$arm_out" 2>&1 &
   second_arm=$!
   for _ in $(seq 1 80); do
     grep -qF 'watcher: started pid=' "$arm_out" 2>/dev/null && break
     sleep 0.1
   done
   new=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  [ -n "$new" ] && [ "$new" != "$old" ] || fail "restart did not replace the legacy watcher"
+  [ -n "$new" ] && [ "$new" != "$old" ] \
+    || fail "restart did not replace the legacy watcher: arm=$(cat "$arm_out"); watch=$(cat "$state/.watch.out" 2>/dev/null); migration=$(cat "$state/.pr-check-migration.log" 2>/dev/null)"
   [ "$(cat "$state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v3 ] \
     || fail "replacement watcher did not publish protocol proof"
   [ ! -f "$state/.watch-protocol-required" ] || fail "replacement watcher left the durable fence"

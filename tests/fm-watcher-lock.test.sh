@@ -1104,7 +1104,7 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "v1:stale watcher identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" 2>&1 &
   pid=$!
   # The honest arm launches the fresh watcher detached and follows it, so the lock
   # names that watcher, not the arm invocation. The property is the same: the
@@ -1119,7 +1119,7 @@ test_watch_restart_rejects_reused_pid() {
   done
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
-    || fail "restart did not replace stale reused-pid lock with a live watcher (got '$lock_pid')"
+    || fail "restart did not replace stale reused-pid lock with a live watcher (got '$lock_pid'): arm=$(cat "$out"); watch=$(cat "$state/.watch.out" 2>/dev/null); migration=$(cat "$state/.pr-check-migration.log" 2>/dev/null)"
   grep -F "watcher: started pid=$lock_pid" "$out" >/dev/null || fail "restart did not report the fresh watcher it confirmed"
   is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
   kill "$pid" "$lock_pid" "$live" 2>/dev/null || true

@@ -46,7 +46,7 @@ assert_no_mistakes_daemon_rule() {
 test_ship_brief_has_cognee_rules() {
   local home brief
   home="$TMP_ROOT/ship-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" cognee-ship alpha >/dev/null 2>&1 \
     || fail "ship brief scaffold failed"
@@ -61,7 +61,7 @@ test_ship_brief_has_cognee_rules() {
 test_scout_brief_has_cognee_rules() {
   local home brief
   home="$TMP_ROOT/scout-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" cognee-scout alpha --scout >/dev/null 2>&1 \
     || fail "scout brief scaffold failed"
@@ -76,7 +76,7 @@ test_scout_brief_has_cognee_rules() {
 test_secondmate_brief_has_cognee_rules() {
   local home brief
   home="$TMP_ROOT/secondmate-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
 
   FM_HOME="$home" FM_SECONDMATE_CHARTER='ops domain' "$ROOT/bin/fm-brief.sh" cognee-sm --secondmate alpha >/dev/null 2>&1 \
     || fail "secondmate brief scaffold failed"

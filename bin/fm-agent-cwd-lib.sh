@@ -134,7 +134,17 @@ fm_agent_proc_env() {
 # Returns 1 when procfs is unavailable or no live process declares a task.
 fm_agent_task_pid_index() {
   local entry pid task home role env found=1 pids comm args
-  if [ -d /proc ]; then
+  if [ -n "${FM_TEST_AGENT_PIDS:-}" ]; then
+    [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
+    # A bounded process list is a test-only performance fixture. The protected
+    # broker capability prevents an ordinary same-UID worker from enabling it.
+    . "$_FM_AGENT_CWD_LIB_DIR/fm-session-lock-lib.sh"
+    fm_session_test_authority_broker_present || return 1
+    pids=$FM_TEST_AGENT_PIDS
+    for pid in $pids; do
+      fm_agent_pid_is_numeric "$pid" || return 1
+    done
+  elif [ -d /proc ]; then
     pids=$(printf '%s\n' /proc/[0-9]* | sed 's#.*/##')
   else
     pids=$(LC_ALL=C ps -A -o pid= 2>/dev/null) || return 1

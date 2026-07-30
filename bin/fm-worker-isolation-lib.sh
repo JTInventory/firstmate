@@ -43,7 +43,7 @@
 # a call site, when a new home override is introduced.
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
 FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN"
-FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT"
+FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID FM_TEST_SESSION_LOCK_STABLE_OWNER"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-procargs-lib.sh"
 
@@ -59,7 +59,8 @@ fm_worker_shell_quote() {  # <text>
 # unknown role, an empty id, or a non-absolute home rather than emitting a
 # partial prefix that would leave the child inheriting a home.
 fm_worker_launch_env_prefix() {
-  local role=$1 id=$2 home=$3 var
+  local role=$1 id=$2 home=$3 var authority_fd closed_fds= strip_authority=0
+  local current_home target_home
   case "$role" in
     crewmate|secondmate) ;;
     *) echo "error: unknown agent role '$role'; expected crewmate or secondmate" >&2; return 1 ;;
@@ -70,15 +71,31 @@ fm_worker_launch_env_prefix() {
     *) echo "error: agent role $role requires an absolute owning home, got '${home:-<empty>}'" >&2; return 1 ;;
   esac
   if [ "$role" = crewmate ]; then
-    for var in FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD; do
+    strip_authority=1
+  else
+    current_home=$(fm_worker_canonical_path "${FM_HOME:-}")
+    target_home=$(fm_worker_canonical_path "$home")
+    [ -n "$current_home" ] && [ "$current_home" = "$target_home" ] \
+      || strip_authority=1
+  fi
+  if [ "$strip_authority" -eq 1 ]; then
+    for var in FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD \
+      FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD; do
       eval "authority_fd=\${$var:-}"
       case "$authority_fd" in
         ''|*[!0-9]*) ;;
         *)
-          [ "$var" != FM_SESSION_AUTHORITY_DURABLE_FD ] \
-            || [ "$authority_fd" != "${FM_SESSION_AUTHORITY_FD:-}" ] \
-            || continue
+          case " $closed_fds " in *" $authority_fd "*) continue ;; esac
+          case "$var" in
+            FM_SESSION_AUTHORITY_DURABLE_FD)
+              [ "$authority_fd" != "${FM_SESSION_AUTHORITY_FD:-}" ] || continue
+              ;;
+            FM_TEST_DURABLE_AUTHORITY_FD)
+              [ "$authority_fd" != "${FM_TEST_AUTHORITY_FD:-}" ] || continue
+              ;;
+          esac
           printf 'exec %s>&-; ' "$authority_fd"
+          closed_fds="$closed_fds $authority_fd"
           ;;
       esac
     done
@@ -93,7 +110,7 @@ fm_worker_launch_env_prefix() {
   for var in $FM_WORKER_ISOLATION_LIFECYCLE_VARS; do
     printf '%s= ' "$var"
   done
-  if [ "$role" = crewmate ]; then
+  if [ "$strip_authority" -eq 1 ]; then
     for var in $FM_WORKER_ISOLATION_AUTHORITY_VARS; do
       printf '%s= ' "$var"
     done
@@ -204,6 +221,87 @@ fm_worker_linked_primary_topology_matches() {
       "$(fm_worker_canonical_path "$home_common")" ]
 }
 
+fm_worker_test_authority_capability_present() {
+  local live_fd durable_fd key live_identity test_live_identity
+  [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
+  case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
+  . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+  fm_session_test_authority_broker_present || return 1
+  live_fd=${FM_SESSION_AUTHORITY_FD:-${FM_TEST_AUTHORITY_FD:-}}
+  durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-${FM_TEST_DURABLE_AUTHORITY_FD:-}}
+  fm_session_descriptor_channel_isolated "$live_fd" \
+    && fm_session_descriptor_channel_isolated "$durable_fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  live_identity=$(fm_session_descriptor_identity "$$" "$live_fd" 2>/dev/null) \
+    || return 1
+  test_live_identity=$(
+    fm_session_descriptor_identity "$$" "$FM_TEST_AUTHORITY_FD" 2>/dev/null
+  ) || return 1
+  if [ "$live_identity" != "$test_live_identity" ]; then
+    [ -n "${FM_SESSION_AUTHORITY_BROKER_SCRIPT:-}" ] \
+      && fm_session_authority_broker_present \
+        "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" || return 1
+  fi
+  [ "$(fm_session_descriptor_identity "$$" "$durable_fd" 2>/dev/null || true)" = \
+    "$(fm_session_descriptor_identity "$$" "$FM_TEST_DURABLE_AUTHORITY_FD" 2>/dev/null || true)" ] \
+    || return 1
+  IFS= read -r key <&"$live_fd" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  IFS= read -r key <&"$durable_fd" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  FM_WORKER_TEST_AUTHORITY_FD=$live_fd
+  FM_WORKER_TEST_DURABLE_AUTHORITY_FD=$durable_fd
+}
+
+fm_worker_test_primary_identity_bind() {
+  local root=$1 home=$2 state=${3:-$2/state} binding lock authority owner broker
+  local binding_tmp lock_tmp authority_tmp
+  binding="$state/.primary-checkout"
+  lock="$state/.lock"
+  authority="$state/.session-authority"
+  broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
+  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  owner=$(fm_session_lock_owner) || return 1
+  if [ -e "$binding" ] || [ -L "$binding" ] \
+    || [ -e "$lock" ] || [ -L "$lock" ] \
+    || [ -e "$authority" ] || [ -L "$authority" ]; then
+    [ -f "$binding" ] && [ ! -L "$binding" ] \
+      && [ "$(cat "$binding" 2>/dev/null)" = "$root" ] \
+      && [ -f "$lock" ] && [ ! -L "$lock" ] \
+      && [ "$(cat "$lock" 2>/dev/null)" = "$owner" ] \
+      && fm_session_authority_read "$authority" \
+      && { [ "$FM_SESSION_AUTHORITY_PID" = "$broker" ] \
+        || fm_session_authority_is_current_ancestor "$authority"; } \
+      && [ "$FM_SESSION_AUTHORITY_OWNER" = "$owner" ] \
+      && [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] \
+      && [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$root" ]
+    return
+  fi
+  mkdir -p "$state" && [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  binding_tmp=$(command -p mktemp "$state/.primary-checkout.XXXXXX") || return 1
+  lock_tmp=$(command -p mktemp "$state/.lock.XXXXXX") || {
+    rm -f "$binding_tmp"
+    return 1
+  }
+  authority_tmp=$(command -p mktemp "$state/.session-authority.XXXXXX") || {
+    rm -f "$binding_tmp" "$lock_tmp"
+    return 1
+  }
+  chmod 600 "$binding_tmp" "$lock_tmp" "$authority_tmp" \
+    && printf '%s\n' "$root" > "$binding_tmp" \
+    && printf '%s\n' "$owner" > "$lock_tmp" \
+    && fm_session_authority_write_file \
+      "$authority_tmp" "$broker" "$owner" "$home" "$root" \
+    && mv "$binding_tmp" "$binding" \
+    && mv "$lock_tmp" "$lock" \
+    && mv "$authority_tmp" "$authority" || {
+      rm -f "$binding_tmp" "$lock_tmp" "$authority_tmp"
+      return 1
+    }
+}
+
 fm_worker_primary_bootstrap_matches() {
   local root home root_real home_real cwd branch default ref pid ppid sid env
   local common common_real common_birth sid_start
@@ -256,6 +354,7 @@ fm_worker_primary_bootstrap_matches() {
 fm_worker_primary_authority_matches() {
   local operation=${1:-} root home root_real home_real cwd branch default ref
   local pid ppid env binding lock authority old marker authority_state binding_bound=0
+  local test_tmp test_state test_bind_state= legacy_test_state root_top
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -263,6 +362,75 @@ fm_worker_primary_authority_matches() {
   root_real=$(fm_worker_canonical_path "$root") || return 1
   home_real=$(fm_worker_canonical_path "$home") || return 1
   cwd=$(pwd -P) || return 1
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
+    test_tmp=$(fm_worker_canonical_path "${TMPDIR:-}") || return 1
+    if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+      test_state=$(fm_worker_canonical_path "$FM_STATE_OVERRIDE") || return 1
+      case "$test_state" in "$test_tmp"/*) ;; *) return 1 ;; esac
+      test_bind_state=$test_state
+      if [ -z "${FM_HOME:-}" ]; then
+        home_real=$(fm_worker_canonical_path "${test_state%/*}") || return 1
+      fi
+    fi
+    case "$root_real:$home_real" in
+      "$cwd:$cwd") ;;
+      "$cwd:$test_tmp") ;;
+      "$cwd:$test_tmp"/*) ;;
+      "$test_tmp"/*:"$test_tmp"/*) ;;
+      *:"$test_tmp"/*) ;;
+      *) return 1 ;;
+    esac
+    root_top=$(git -C "$root_real" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ "$root_real" = "$home_real" ] \
+      && [ "$(fm_worker_canonical_path "$root_top" 2>/dev/null || true)" \
+        = "$root_real" ] \
+      && [ -z "${FM_ROOT_OVERRIDE:-}" ] \
+      && [ -z "${FM_HOME:-}" ] \
+      && [ -z "${FM_STATE_OVERRIDE:-}" ]; then
+      fm_worker_test_authority_capability_present
+      return
+    fi
+    legacy_test_state=${test_bind_state:-$home_real/state}
+    if [ "$operation" = "session lock acquisition" ] \
+      && [ -f "$legacy_test_state/.primary-checkout" ] \
+      && [ ! -L "$legacy_test_state/.primary-checkout" ] \
+      && [ "$(cat "$legacy_test_state/.primary-checkout" 2>/dev/null)" \
+        = "$root_real" ] \
+      && [ -f "$legacy_test_state/.lock" ] \
+      && [ ! -L "$legacy_test_state/.lock" ] \
+      && [ ! -e "$legacy_test_state/.session-authority" ] \
+      && [ ! -L "$legacy_test_state/.session-authority" ]; then
+      . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+      fm_session_test_authority_broker_present
+      return
+    fi
+    if [ -n "$test_bind_state" ] \
+      || [ "$root_real" != "$home_real" ] \
+      || [ "$(fm_worker_canonical_path "$root_top" 2>/dev/null || true)" \
+        != "$root_real" ]; then
+      if [ -z "$test_bind_state" ]; then
+        test_bind_state="$home_real/state"
+      fi
+      fm_worker_test_authority_capability_present || return 1
+      if [ ! -e "$test_bind_state" ] && [ ! -L "$test_bind_state" ]; then
+        return 1
+      fi
+      if [ -e "$test_bind_state" ] || [ -L "$test_bind_state" ]; then
+        if [ -f "$test_bind_state" ] && [ ! -L "$test_bind_state" ]; then
+          return 0
+        fi
+        [ -d "$test_bind_state" ] && [ ! -L "$test_bind_state" ] || return 1
+      fi
+      FM_SESSION_AUTHORITY_FD=$FM_WORKER_TEST_AUTHORITY_FD
+      FM_SESSION_AUTHORITY_DURABLE_FD=$FM_WORKER_TEST_DURABLE_AUTHORITY_FD
+      export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+      if fm_worker_test_primary_identity_bind \
+        "$root_real" "$home_real" "$test_bind_state"; then
+        return 0
+      fi
+      [ "$operation" = "session lock acquisition" ] || return 1
+    fi
+  fi
   git -C "$root_real" rev-parse --git-dir >/dev/null 2>&1 || return 1
   branch=$(git -C "$root_real" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   ref=$(git -C "$root_real" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -300,19 +468,21 @@ fm_worker_primary_authority_matches() {
     [ "$FM_SESSION_AUTHORITY_OWNER" = "$old" ] \
       && [ "$FM_SESSION_AUTHORITY_HOME" = "$home_real" ] \
       && [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$root_real" ] || return 1
-    if ! fm_session_authority_read "$authority"; then
+    if fm_session_authority_read "$authority"; then
+      authority_state=0
+      fm_session_authority_process_state "$authority" || authority_state=$?
+      if [ "$authority_state" -eq 0 ]; then
+        fm_session_authority_is_current_ancestor "$authority" || return 1
+      else
+        [ "$authority_state" -eq 1 ] \
+          && [ "$operation" = "session lock acquisition" ] \
+          && fm_session_authority_capability_present || return 1
+      fi
+    else
       authority_state=0
       fm_session_authority_process_state "$authority" || authority_state=$?
       [ "$authority_state" -eq 1 ] && [ "$operation" = "session lock acquisition" ] \
         && fm_session_authority_capability_present || return 1
-    fi
-    if marker=$(fm_codex_owner_marker "$old" 2>/dev/null); then
-      if ! fm_codex_thread_active || [ "$CODEX_THREAD_ID" != "$marker" ]; then
-        authority_state=0
-        fm_session_authority_process_state "$authority" || authority_state=$?
-        [ "$authority_state" -eq 1 ] \
-          && [ "$operation" = "session lock acquisition" ] || return 1
-      fi
     fi
   else
     [ ! -e "$authority" ] && [ ! -L "$authority" ] || return 1

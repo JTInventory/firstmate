@@ -223,6 +223,21 @@ dump_wait_diagnostics() {
   sed 's/^/  /' "$LOG_FILE" >&2
   echo "daemon log tail:" >&2
   tail -40 "$STATE_DIR/.supervise-daemon.log" 2>/dev/null | sed 's/^/  /' >&2 || true
+  echo "watcher stderr:" >&2
+  tail -40 "$STATE_DIR/.supervise-daemon.watcher.err" 2>/dev/null | sed 's/^/  /' >&2 || true
+  echo "authority state:" >&2
+  for _fd in 18 19; do
+    printf '  daemon-fd-%s=%s\n' "$_fd" \
+      "$(readlink "/proc/${DAEMON_PID:-0}/fd/$_fd" 2>/dev/null || echo absent)" >&2
+  done
+  for _authority_file in .primary-checkout .lock .session-authority; do
+    if [ -e "$STATE_DIR/$_authority_file" ]; then
+      printf '  %s:\n' "$_authority_file" >&2
+      sed 's/^/    /' "$STATE_DIR/$_authority_file" >&2
+    else
+      printf '  %s: absent\n' "$_authority_file" >&2
+    fi
+  done
   echo "daemon state:" >&2
   {
     printf '  pid_alive=%s\n' "$(kill -0 "${DAEMON_PID:-0}" 2>/dev/null && echo yes || echo no)"

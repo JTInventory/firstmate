@@ -287,8 +287,14 @@ EOF
 }
 trap cleanup_all EXIT
 
-PATH="$HERDR_ORIGINAL_PATH" \
-  "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+(
+  exec 18<&- 19<&-
+  unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD \
+    FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD \
+    FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID
+  PATH="$HERDR_ORIGINAL_PATH" \
+    "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+) \
   || fail "could not provision the isolated Herdr lab"
 LAB_READY=1
 
@@ -413,6 +419,7 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
+    -e 's|^endpoint_generation=.*$|endpoint_generation=<herdr-container-id>|' \
     "$1"
 }
 
@@ -456,6 +463,11 @@ assert_no_projection_mutation_since() {  # <line-count> <case-name>
 
 HOME_DIR="$TMP_ROOT/home"
 PROJECT_DIR="$TMP_ROOT/project"
+ORDER_A_PROJECT_DIR="$TMP_ROOT/order-a-project"
+ORDER_B_PROJECT_DIR="$TMP_ROOT/order-b-project"
+ORDER_FAIL_PROJECT_DIR="$TMP_ROOT/order-fail-project"
+ABORT_A_PROJECT_DIR="$TMP_ROOT/abort-a-project"
+ABORT_B_PROJECT_DIR="$TMP_ROOT/abort-b-project"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/anchor" "$HOME_DIR/data/shape" \
   "$HOME_DIR/data/order-a" "$HOME_DIR/data/order-b" \
@@ -476,6 +488,11 @@ printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
 printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
 make_project "$PROJECT_DIR"
+make_project "$ORDER_A_PROJECT_DIR"
+make_project "$ORDER_B_PROJECT_DIR"
+make_project "$ORDER_FAIL_PROJECT_DIR"
+make_project "$ABORT_A_PROJECT_DIR"
+make_project "$ABORT_B_PROJECT_DIR"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
 # first and remains present while disposable workers are projected around it.
@@ -669,16 +686,16 @@ normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs between flag-off and projected paths"
 
-# Two real concurrent primary spawns share the bounded presentation-order lock.
-# Their final relative order must match Herdr's actual serialized create order,
-# rather than a task-name or priority guess.
+# Home admission serializes primary spawns before the presentation-order lock.
+# Their final relative order must match Herdr's actual create order rather than
+# a task-name or priority guess.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
-spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
-ORDER_A_PID=$!
-spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
-ORDER_B_PID=$!
-wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
-wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
+spawn_task order-a "$HOME_DIR" "$ORDER_A_PROJECT_DIR" \
+  > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" \
+  || fail "projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
+spawn_task order-b "$HOME_DIR" "$ORDER_B_PROJECT_DIR" \
+  > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" \
+  || fail "projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected spawns"
 assert_raw_presentation_mutations_preserved_since "$CONCURRENT_FOCUS_AUDIT_START" "concurrent projected spawns"
 ORDER_A_META="$HOME_DIR/state/order-a.meta"
@@ -722,7 +739,7 @@ chmod +x "$FAIL_MOVER"
 FAIL_START=$(log_line_count)
 FAIL_FOCUS_AUDIT_START=$(focus_audit_line_count)
 FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAIL_MOVER" \
-  spawn_task order-fail "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-fail.out" 2> "$TMP_ROOT/order-fail.err" \
+  spawn_task order-fail "$HOME_DIR" "$ORDER_FAIL_PROJECT_DIR" > "$TMP_ROOT/order-fail.out" 2> "$TMP_ROOT/order-fail.err" \
   || fail "move-failure projected spawn should still succeed: $(cat "$TMP_ROOT/order-fail.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "failed presentation ordering"
 assert_raw_presentation_mutations_preserved_since "$FAIL_FOCUS_AUDIT_START" "failed presentation ordering"
@@ -748,16 +765,16 @@ pass "real Herdr lab: forced workspace.move failure leaves a successful worker i
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
-spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
-ABORT_A_PID=$!
-spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
-ABORT_B_PID=$!
-if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi
-if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
+if spawn_task abort-a "$HOME_DIR" "$ABORT_A_PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err"; then
+  fail "post-create abort fixture A unexpectedly succeeded"
+fi
+if spawn_task abort-b "$HOME_DIR" "$ABORT_B_PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err"; then
+  fail "post-create abort fixture B unexpectedly succeeded"
+fi
 grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
+  || fail "post-create abort fixture A did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-a.err")"
 grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+  || fail "post-create abort fixture B did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-b.err")"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
@@ -804,37 +821,39 @@ lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
 [ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
 pass "real Herdr lab: exact task-pane close restores the exact captain workspace/tab after Herdr's raw focus steal"
 
-teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" &
-ORDER_A_TEARDOWN_PID=$!
-teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" &
-ORDER_B_TEARDOWN_PID=$!
-wait "$ORDER_A_TEARDOWN_PID" || fail "projected ordering fixture A teardown failed"
-wait "$ORDER_B_TEARDOWN_PID" || fail "projected ordering fixture B teardown failed"
-assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected teardowns"
+teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" \
+  || fail "projected ordering fixture A teardown failed: $(cat "$TMP_ROOT/order-a-teardown.err")"
+teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" \
+  || fail "projected ordering fixture B teardown failed: $(cat "$TMP_ROOT/order-b-teardown.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "projected teardowns"
 teardown_task order-fail "$HOME_DIR" > "$TMP_ROOT/order-fail-teardown.out" 2> "$TMP_ROOT/order-fail-teardown.err" \
   || fail "projected ordering failure fixture teardown failed"
 assert_focus_is "$CAPTAIN_FOCUS" "failed-order projection teardown"
-pass "real Herdr lab: concurrent projected cleanup is serialized and leaves active workspace/tab unchanged"
+pass "real Herdr lab: projected cleanup leaves active workspace/tab unchanged"
 
 # Repeat full two-worker create, order, and cleanup waves.
 # This exercises the focus guard after the original regression sequence and
-# proves the shared presentation lock keeps concurrent operations composable.
+# proves repeated same-home operations remain composable under home admission.
 for ROUND in 1 2 3; do
+  WAVE_A_PROJECT="$TMP_ROOT/focus-$ROUND-a-project"
+  WAVE_B_PROJECT="$TMP_ROOT/focus-$ROUND-b-project"
+  make_project "$WAVE_A_PROJECT"
+  make_project "$WAVE_B_PROJECT"
   mkdir -p "$HOME_DIR/data/focus-$ROUND-a" "$HOME_DIR/data/focus-$ROUND-b"
   printf 'Projection focus wave %s fixture A.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-a/brief.md"
   printf 'Projection focus wave %s fixture B.\n' "$ROUND" > "$HOME_DIR/data/focus-$ROUND-b/brief.md"
   WAVE_LOG_START=$(log_line_count)
   WAVE_FOCUS_START=$(focus_audit_line_count)
-  spawn_task "focus-$ROUND-a" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-a.out" 2> "$TMP_ROOT/focus-$ROUND-a.err" &
-  WAVE_A_PID=$!
-  spawn_task "focus-$ROUND-b" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" &
-  WAVE_B_PID=$!
-  wait "$WAVE_A_PID" || fail "focus wave $ROUND spawn A failed: $(cat "$TMP_ROOT/focus-$ROUND-a.err")"
-  wait "$WAVE_B_PID" || fail "focus wave $ROUND spawn B failed: $(cat "$TMP_ROOT/focus-$ROUND-b.err")"
+  spawn_task "focus-$ROUND-a" "$HOME_DIR" "$WAVE_A_PROJECT" \
+    > "$TMP_ROOT/focus-$ROUND-a.out" 2> "$TMP_ROOT/focus-$ROUND-a.err" \
+    || fail "focus wave $ROUND spawn A failed: $(cat "$TMP_ROOT/focus-$ROUND-a.err")"
+  spawn_task "focus-$ROUND-b" "$HOME_DIR" "$WAVE_B_PROJECT" \
+    > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" \
+    || fail "focus wave $ROUND spawn B failed: $(cat "$TMP_ROOT/focus-$ROUND-b.err")"
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-a.meta" >/dev/null
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-b.meta" >/dev/null
-  assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent spawns"
-  assert_raw_presentation_mutations_preserved_since "$WAVE_FOCUS_START" "focus wave $ROUND concurrent spawns"
+  assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND spawns"
+  assert_raw_presentation_mutations_preserved_since "$WAVE_FOCUS_START" "focus wave $ROUND spawns"
   WAVE_LABELS=$(projection_labels_from_log "$WAVE_LOG_START")
   WAVE_EXPECTED=$(printf 'firstmate\n%s\n2ndmate-alpha\n2ndmate-bravo' "$WAVE_LABELS")
   WAVE_ACTUAL=$(lab workspace list | jq -r '.result.workspaces[] | select(.label == "firstmate" or (.label | startswith("└ ")) or (.label | startswith("2ndmate-"))) | .label')
@@ -844,18 +863,16 @@ for ROUND in 1 2 3; do
   [ "$WAVE_SECOND_ORDER" = "$SECOND_ORDER_BEFORE" ] \
     || fail "focus wave $ROUND changed secondmate relative order"
 
-  teardown_task "focus-$ROUND-a" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-a-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-a-teardown.err" &
-  WAVE_A_TEARDOWN_PID=$!
-  teardown_task "focus-$ROUND-b" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-b-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-b-teardown.err" &
-  WAVE_B_TEARDOWN_PID=$!
-  wait "$WAVE_A_TEARDOWN_PID" || fail "focus wave $ROUND teardown A failed"
-  wait "$WAVE_B_TEARDOWN_PID" || fail "focus wave $ROUND teardown B failed"
-  assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent teardowns"
+  teardown_task "focus-$ROUND-a" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-a-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-a-teardown.err" \
+    || fail "focus wave $ROUND teardown A failed: $(cat "$TMP_ROOT/focus-$ROUND-a-teardown.err")"
+  teardown_task "focus-$ROUND-b" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-b-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-b-teardown.err" \
+    || fail "focus wave $ROUND teardown B failed: $(cat "$TMP_ROOT/focus-$ROUND-b-teardown.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND teardowns"
   WAVE_REMAINING=$(lab workspace list | jq -r '.result.workspaces[].label')
   [ "$WAVE_REMAINING" = $'firstmate\n2ndmate-alpha\n2ndmate-bravo' ] \
     || fail "focus wave $ROUND cleanup left a projected workspace behind: $WAVE_REMAINING"
 done
-pass "real Herdr lab: three repeated concurrent create/order/cleanup waves have zero active workspace or tab drift"
+pass "real Herdr lab: three repeated create/order/cleanup waves have zero active workspace or tab drift"
 
 # ------------------------------------------------------------------
 # Multi-home topology: real secondmate FM_HOME spawn paths, inheritance,
@@ -863,24 +880,25 @@ pass "real Herdr lab: three repeated concurrent create/order/cleanup waves have 
 # ------------------------------------------------------------------
 SECOND_HOME_A="$TMP_ROOT/home-2ndmate-alpha"
 SECOND_HOME_B="$TMP_ROOT/home-2ndmate-bravo"
+git clone -q "$ROOT" "$SECOND_HOME_A" || fail "could not clone secondmate A fixture"
+git clone -q "$ROOT" "$SECOND_HOME_B" || fail "could not clone secondmate B fixture"
+for SECOND_FIXTURE_HOME in "$SECOND_HOME_A" "$SECOND_HOME_B"; do
+  for AUTHORITY_FILE in \
+    fm-session-authority-exec.sh \
+    fm-session-enrollment-signer.sh \
+    fm-session-lock-lib.sh \
+    fm-worker-isolation-lib.sh
+  do
+    cp "$ROOT/bin/$AUTHORITY_FILE" "$SECOND_FIXTURE_HOME/bin/$AUTHORITY_FILE"
+    git -C "$SECOND_FIXTURE_HOME" update-index --assume-unchanged -- "bin/$AUTHORITY_FILE"
+  done
+done
 mkdir -p "$SECOND_HOME_A/state" "$SECOND_HOME_A/config" "$SECOND_HOME_A/data" \
   "$SECOND_HOME_B/state" "$SECOND_HOME_B/config" "$SECOND_HOME_B/data"
 printf 'alpha\n' > "$SECOND_HOME_A/.fm-secondmate-home"
 printf 'bravo\n' > "$SECOND_HOME_B/.fm-secondmate-home"
 touch "$SECOND_HOME_A/state/.last-watcher-beat" "$SECOND_HOME_B/state/.last-watcher-beat"
-# Ensure the secondmate homes look like gitignored firstmate homes so inheritance
-# may write config/herdr-presentation-spaces.
-git -C "$SECOND_HOME_A" init -q
-git -C "$SECOND_HOME_B" init -q
-printf 'config/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\n' \
-  > "$SECOND_HOME_A/.gitignore"
-cp "$SECOND_HOME_A/.gitignore" "$SECOND_HOME_B/.gitignore"
-git -C "$SECOND_HOME_A" add .gitignore
-git -C "$SECOND_HOME_B" add .gitignore
-git -C "$SECOND_HOME_A" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm init
-git -C "$SECOND_HOME_B" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm init
 mkdir -p "$SECOND_HOME_A/bin"
-printf '# Firstmate secondmate fixture\n' > "$SECOND_HOME_A/AGENTS.md"
 printf 'Secondmate alpha charter.\n' > "$SECOND_HOME_A/data/charter.md"
 
 # Primary flag only; real inheritance must push presence into both secondmate homes.

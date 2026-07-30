@@ -22,10 +22,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # task worker cannot even publish a probe file into the home it inherited.
 # Read-only `status` keeps its documented always-exit-0 contract.
 if [ "${1:-}" != status ]; then
+  recovery_pending=0
   case "${FM_AGENT_ROLE:-}" in
-    ""|primary) ;;
-    *) fm_worker_refuse_primary_operation "session lock acquisition" || exit 1 ;;
+    ""|primary)
+    recovery_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-}}
+    recovery_state=${FM_STATE_OVERRIDE:-${recovery_home:+$recovery_home/state}}
+    recovery_txn=${recovery_state:+$recovery_state/.session-authority-transaction}
+      if [ -n "$recovery_txn" ] \
+        && [ -d "$recovery_txn" ] && [ ! -L "$recovery_txn" ] \
+        && [ -f "$recovery_txn/ready" ] \
+        && [ ! -L "$recovery_txn/ready" ]; then
+        recovery_pending=1
+      fi
+      ;;
   esac
+  [ "$recovery_pending" -eq 1 ] \
+    || fm_worker_refuse_primary_operation "session lock acquisition" || exit 1
 fi
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"

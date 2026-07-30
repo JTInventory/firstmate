@@ -56,8 +56,21 @@ case "$cmd $sub" in
     fi
     printf '{"result":{"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n'
     ;;
+  "pane report-metadata")
+    token=
+    args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+      [ "${args[$i]}" != --token ] || token=${args[$((i+1))]:-}
+    done
+    printf '%s\n' "${token#firstmate_endpoint_generation=}" > "$state/endpoint-generation"
+    ;;
   "pane get")
-    printf '{"result":{"pane":{"pane_id":"w1:p1","foreground_cwd":"%s"}}}\n' "${FM_FAKE_WORKTREE:?}"
+    generation=$(cat "$state/endpoint-generation" 2>/dev/null || true)
+    printf '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","foreground_cwd":"%s","tokens":{"firstmate_endpoint_generation":"%s"}}}}\n' \
+      "${FM_FAKE_WORKTREE:?}" "$generation"
+    ;;
+  "tab get")
+    printf '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}\n'
     ;;
   "pane run"|"pane send-text"|"pane send-keys")
     ;;

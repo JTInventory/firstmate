@@ -33,6 +33,16 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
+SM_FIXTURE_PIDS=()
+cleanup_secondmate_fixtures() {
+  local pid
+  for pid in "${SM_FIXTURE_PIDS[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap cleanup_secondmate_fixtures EXIT
 
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
@@ -215,9 +225,14 @@ case "${1:-}" in
   display-message)
     case "$*" in
       *"#{window_name}"*) cat "$state" ;;
+      *"#{pane_id}"*) printf '%s\n' '%42' ;;
+      *"#{window_id}"*) printf '%s\n' '@42' ;;
       *) printf 'firstmate\n' ;;
     esac
     ;;
+  list-panes) printf '%s\n' '%42' ;;
+  set-option) printf '%s\n' "${@: -1}" > "$state.endpoint" ;;
+  show-options) cat "$state.endpoint" ;;
 esac
 exit 0
 SH
@@ -263,10 +278,12 @@ spawn_secondmate() {
     git -C "$primary" add bin AGENTS.md
     git -C "$primary" commit -qm primary
   fi
-  printf 'claude\n' > "$world/home/config/crew-harness"
-  printf '%s|codex:%s|fallback\n' "$$" fm-secondmate-fixture \
-    > "$world/home/state/.lock"
+  local owner
+  CODEX_THREAD_ID=fm-secondmate-fixture owner=$(fm_session_lock_owner)
+  printf '%s\n' "$owner" > "$world/home/state/.lock"
   printf '%s\n' "$primary" > "$world/home/state/.primary-checkout"
+  fm_session_authority_write_file "$world/home/state/.session-authority" \
+    "${owner%%|*}" "$owner" "$world/home" "$primary"
   printf 'secondmate fixture\n' > "$world/home/data/$id/brief.md"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
@@ -348,7 +365,7 @@ test_spawn_backward_compat_crew_fallback() {
 }
 
 # Bare backward-compat: no config at all. The secondmate falls through to its own
-# harness (claude here), and with no inheritable file the home is left untouched -
+# harness (codex here), and with no inheritable file the home is left untouched -
 # no config/ side effects.
 test_spawn_bare_backward_compat() {
   local w sm meta
@@ -359,8 +376,8 @@ test_spawn_bare_backward_compat() {
   spawn_secondmate "$w" sm "$sm"
 
   meta="$w/home/state/sm.meta"
-  [ "$(meta_harness "$meta")" = claude ] \
-    || fail "bare: secondmate launched on '$(meta_harness "$meta")', expected own harness claude"
+  [ "$(meta_harness "$meta")" = codex ] \
+    || fail "bare: secondmate launched on '$(meta_harness "$meta")', expected own harness codex"
   [ -e "$sm/config/crew-dispatch.json" ] && fail "bare: an unset primary still created a home crew-dispatch.json"
   [ -e "$sm/config/crew-harness" ] && fail "bare: an unset primary still created a home crew-harness"
   pass "B4 spawn: no config at all -> own harness and no propagation side effects"
@@ -500,20 +517,51 @@ add_sm_worktree() {
   git -C "$w/main" worktree add -q --detach "$w/$id" "$commit"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
   {
-    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'window=@9\n'
+    printf 'tmux_pane_id=%%9\n'
     printf 'kind=secondmate\n'
     printf 'harness=codex\n'
     printf 'home=%s/%s\n' "$w" "$id"
+    printf 'worktree=%s/%s\n' "$w" "$id"
+    printf 'project=%s/%s\n' "$w" "$id"
     printf 'task=%s\n' "$id"
+    printf 'backend=tmux\n'
     printf 'endpoint_generation=endpoint-%s\n' "$id"
   } > "$w/home/state/$id.meta"
+  (
+    cd "$w/$id" || exit 1
+    exec env FM_AGENT_ROLE=secondmate FM_AGENT_TASK="$id" \
+      FM_AGENT_OWNER_HOME="$w/$id" sleep 600
+  ) &
+  SM_FIXTURE_PIDS+=("$!")
+  FM_TEST_AGENT_PIDS="${SM_FIXTURE_PIDS[*]}"
+  export FM_TEST_AGENT_PIDS
 }
 
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_id}"*) printf '%%9\n' ;;
+      *"#{window_id}"*) printf '@9\n' ;;
+      *"#{pane_current_command}"*) printf 'codex\n' ;;
+      *"cursor_y"*) printf '0\n' ;;
+    esac
+    ;;
+  list-panes) printf '%%9\n' ;;
+  show-options) printf 'endpoint-sm\n' ;;
+  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n' ;;
+  send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -540,19 +588,28 @@ SH
 }
 
 run_bootstrap() {
-  local w=$1 fakebin
+  local w=$1 fakebin owner
   fakebin=$(make_fake_toolchain "$w")
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  fm_session_lock_owner > "$w/home/state/.lock"
+  owner=$(fm_session_lock_owner)
+  printf '%s\n' "$owner" > "$w/home/state/.lock"
+  printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
+  fm_session_authority_write_file "$w/home/state/.session-authority" \
+    "${owner%%|*}" "$owner" "$w/home" "$w/main"
+  cd "$w/main" || return 1
   PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
 run_config_push() {
-  local w=$1 fakebin
+  local w=$1 fakebin owner
   fakebin=$(make_fake_toolchain "$w")
   . "$ROOT/bin/fm-session-lock-lib.sh"
-  fm_session_lock_owner > "$w/home/state/.lock"
+  owner=$(fm_session_lock_owner)
+  printf '%s\n' "$owner" > "$w/home/state/.lock"
+  printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
+  fm_session_authority_write_file "$w/home/state/.session-authority" \
+    "${owner%%|*}" "$owner" "$w/home" "$w/main"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_CONFIG_PUSH_NO_GUARD=1 \
     "$ROOT/bin/fm-config-push.sh"
 }
@@ -909,10 +966,8 @@ test_config_push_respects_secondmate_lifecycle_lock() {
   lock="$w/sm/state/.spawn-admission.lock"
   mkdir -p "$w/sm/state"
   fm_lock_try_acquire "$lock" || fail "could not hold config-push lifecycle fixture lock"
-  set +e
   out=$(run_config_push "$w" 2>&1)
   status=$?
-  set -e
   fm_lock_release "$lock"
   [ "$status" -ne 0 ] || fail "config push crossed an active lifecycle lock"
   [ ! -e "$w/sm/config/crew-harness" ] \
@@ -935,9 +990,11 @@ test_bootstrap_liveness_refuses_ambiguous_provider_identity() {
 
   [ "$after" = "$before" ] \
     || fail "ambiguous liveness metadata was killed or respawned"
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm: refused:" \
+  assert_contains "$out" "secondmate sm: refused: ambiguous lifecycle metadata" \
     "ambiguous liveness metadata did not refuse before endpoint resolution"
-  pass "B16 bootstrap liveness refuses ambiguous provider identity"
+  assert_contains "$out" "bootstrap remains read-only" \
+    "ambiguous lifecycle metadata did not hold bootstrap read-only"
+  pass "B16 bootstrap preflight refuses ambiguous provider identity"
 }
 
 test_bootstrap_liveness_holds_lifecycle_lock_through_kill_and_respawn() {

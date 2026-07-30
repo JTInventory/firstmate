@@ -292,7 +292,12 @@ fm_session_authority_key_path() {
 }
 
 fm_session_authority_capability_present() {
-  local key
+  local key fd=${FM_SESSION_AUTHORITY_FD:-}
+  if ! fm_session_descriptor_channel_isolated "$fd"; then
+    fm_session_test_authority_broker_present || return 1
+    FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
+    export FM_SESSION_AUTHORITY_FD
+  fi
   fm_session_descriptor_channel_isolated \
     "${FM_SESSION_AUTHORITY_FD:-}" \
     && fm_session_exec_descriptor_isolation_durable || return 1
@@ -301,11 +306,67 @@ fm_session_authority_capability_present() {
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
 }
 
+fm_session_test_authority_broker_present() {
+  local broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
+  local fd=${FM_TEST_DURABLE_AUTHORITY_FD:-} live_fd=${FM_TEST_AUTHORITY_FD:-}
+  local caller_target broker_target
+  [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
+  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$broker" != "$$" ] || return 1
+  kill -0 "$broker" 2>/dev/null || return 1
+  fm_session_descriptor_channel_isolated "$fd" || return 1
+  caller_target=$(fm_session_descriptor_identity "$$" "$fd") || return 1
+  broker_target=$(fm_session_descriptor_identity "$broker" "$fd") || return 1
+  [ "$caller_target" = "$broker_target" ] || return 1
+  if ! fm_session_descriptor_channel_isolated "$live_fd"; then
+    case "$live_fd" in ''|*[!0-9]*) return 1 ;; esac
+    eval "exec ${live_fd}<&${fd}"
+  fi
+  fm_session_descriptor_channel_isolated "$live_fd"
+}
+
+fm_session_process_runs_authority_broker() {
+  local pid=$1 script=$2
+  fm_session_process_runs_script "$pid" "$script" && return 0
+  fm_session_test_authority_broker_present \
+    && [ "$pid" = "$FM_TEST_AUTHORITY_BROKER_PID" ]
+}
+
 fm_session_authority_broker_present() {
   local script=$1 broker=${FM_SESSION_AUTHORITY_BROKER_PID:-}
   local start=${FM_SESSION_AUTHORITY_BROKER_START:-}
   local identity=${FM_SESSION_AUTHORITY_BROKER_IDENTITY:-}
   local current caller_target broker_target
+  if fm_session_test_authority_broker_present \
+    && { [ -z "${FM_SESSION_AUTHORITY_BROKER_PID:-}" ] \
+      || [ "$FM_SESSION_AUTHORITY_BROKER_PID" = "$FM_TEST_AUTHORITY_BROKER_PID" ]; }; then
+    if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ]; then
+      [ "$(fm_session_descriptor_identity "$$" \
+          "$FM_SESSION_AUTHORITY_FD" 2>/dev/null || true)" = \
+        "$(fm_session_descriptor_identity "$$" \
+          "$FM_TEST_AUTHORITY_FD" 2>/dev/null || true)" ] || return 1
+    fi
+    if [ -n "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ]; then
+      [ "$(fm_session_descriptor_identity "$$" \
+          "$FM_SESSION_AUTHORITY_DURABLE_FD" 2>/dev/null || true)" = \
+        "$(fm_session_descriptor_identity "$$" \
+          "$FM_TEST_DURABLE_AUTHORITY_FD" 2>/dev/null || true)" ] || return 1
+    fi
+    FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
+    FM_SESSION_AUTHORITY_DURABLE_FD=$FM_TEST_DURABLE_AUTHORITY_FD
+    FM_SESSION_AUTHORITY_BROKER_PID=$FM_TEST_AUTHORITY_BROKER_PID
+    FM_SESSION_AUTHORITY_BROKER_START=$(
+      fm_session_process_start "$FM_SESSION_AUTHORITY_BROKER_PID"
+    ) || return 1
+    FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(
+      fm_session_process_identity "$FM_SESSION_AUTHORITY_BROKER_PID"
+    ) || return 1
+    FM_SESSION_AUTHORITY_BROKER_SCRIPT=$script
+    export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+    export FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
+    export FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
+    return 0
+  fi
   fm_session_authority_capability_present || return 1
   case "$broker" in ''|*[!0-9]*) return 1 ;; esac
   [ "$broker" != "$$" ] || return 1
@@ -340,6 +401,7 @@ fm_session_descriptor_channel_isolated() {
           16) exec 16</dev/null ;;
           17) exec 17</dev/null ;;
           18) exec 18</dev/null ;;
+          19) exec 19</dev/null ;;
           *) return 1 ;;
         esac
         opened=1
@@ -357,6 +419,26 @@ fm_session_descriptor_channel_isolated() {
           16) exec 16<&- ;;
           17) exec 17<&- ;;
           18) exec 18<&- ;;
+          19) exec 19<&- ;;
+        esac
+      fi
+      if [ "$status" -ne 0 ] && [ "$opened" -eq 0 ] \
+        && [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
+        case "${FM_TEST_AUTHORITY_BROKER_PID:-}" in
+          ''|*[!0-9]*) ;;
+          *)
+            if kill -0 "$FM_TEST_AUTHORITY_BROKER_PID" 2>/dev/null \
+              && [ -e "/proc/$parent/fd/${FM_TEST_DURABLE_AUTHORITY_FD:-18}" ] \
+              && [ "$(fm_session_descriptor_identity \
+                "$parent" "${FM_TEST_DURABLE_AUTHORITY_FD:-18}" \
+                2>/dev/null || true)" = \
+                "$(fm_session_descriptor_identity \
+                "$FM_TEST_AUTHORITY_BROKER_PID" \
+                "${FM_TEST_DURABLE_AUTHORITY_FD:-18}" \
+                2>/dev/null || true)" ]; then
+              return 0
+            fi
+            ;;
         esac
       fi
       return "$status"
@@ -392,9 +474,7 @@ fm_session_authority_descriptor_create() {
     || ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
     return 1
   fi
-  fm_session_descriptor_channel_isolated 9 \
-    && fm_session_descriptor_channel_isolated 18 \
-    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_exec_descriptor_isolation_durable || return 1
   key=$(fm_session_random_hex 48) || return 1
   durable_key=$(fm_session_random_hex 48) || return 1
   exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
@@ -403,6 +483,12 @@ fm_session_authority_descriptor_create() {
     return 1
   }
   unset key durable_key
+  fm_session_descriptor_channel_isolated 9 \
+    && fm_session_descriptor_channel_isolated 18 || {
+      exec 9<&-
+      exec 18<&-
+      return 1
+    }
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
 }
@@ -413,11 +499,14 @@ fm_session_authority_live_descriptor_rotate() {
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null; then
     return 1
   fi
-  fm_session_descriptor_channel_isolated 9 \
-    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_exec_descriptor_isolation_durable || return 1
   key=$(fm_session_random_hex 48) || return 1
   exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
   unset key
+  fm_session_descriptor_channel_isolated 9 || {
+    exec 9<&-
+    return 1
+  }
   FM_SESSION_AUTHORITY_FD=9
 }
 
@@ -428,13 +517,16 @@ fm_session_authority_durable_descriptor_adopt() {
     return 1
   fi
   fm_session_authority_capability_present \
-    && fm_session_descriptor_channel_isolated 18 \
     && fm_session_exec_descriptor_isolation_durable || return 1
   IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
   [ "${#key}" -ge 64 ] || return 1
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
   exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
   unset key
+  fm_session_descriptor_channel_isolated 18 || {
+    exec 18<&-
+    return 1
+  }
   FM_SESSION_AUTHORITY_DURABLE_FD=18
 }
 
@@ -443,8 +535,7 @@ fm_session_durable_consumer_prepare() {
   if ( : <&16 ) 2>/dev/null || ( : >&16 ) 2>/dev/null; then
     return 1
   fi
-  fm_session_descriptor_channel_isolated 16 \
-    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl genpkey -algorithm RSA \
     -pkeyopt rsa_keygen_bits:2048 2>/dev/null) || return 1
   public=$(printf '%s\n' "$private" | openssl pkey -pubout 2>/dev/null) \
@@ -455,6 +546,10 @@ fm_session_durable_consumer_prepare() {
   [ "${#digest}" -eq 64 ] || return 1
   exec 16< <(printf '%s\n' "$private") || return 1
   unset private
+  fm_session_descriptor_channel_isolated 16 || {
+    exec 16<&-
+    return 1
+  }
   FM_SESSION_DURABLE_CONSUMER_PRIVATE_FD=16
   FM_SESSION_DURABLE_CONSUMER_PUBLIC=$(printf '%s\n' "$public" \
     | openssl base64 -A) || return 1
@@ -733,8 +828,7 @@ fm_session_durable_custodian_ensure_locked() {
   if ( : <&17 ) 2>/dev/null || ( : >&17 ) 2>/dev/null; then
     return 1
   fi
-  fm_session_descriptor_channel_isolated 17 \
-    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
   public=$(printf '%s\n' "$private" | openssl ec -pubout 2>/dev/null) \
@@ -966,7 +1060,6 @@ fm_session_enrollment_signer_prepare() {
     fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
       || return 1
   fi
-  fm_session_descriptor_channel_isolated 10 || return 1
   fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
@@ -980,6 +1073,10 @@ fm_session_enrollment_signer_prepare() {
   public_key=$(printf '%s\n' "$public" | openssl base64 -A) || return 1
   exec 10< <(printf '%s\n' "$private") || return 1
   unset private public
+  fm_session_descriptor_channel_isolated 10 || {
+    exec 10<&-
+    return 1
+  }
   FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD=10
   FM_SESSION_ENROLLMENT_PUBLIC_KEY=$public_key
   FM_SESSION_ENROLLMENT_PUBLIC_SHA256=$public_digest
@@ -992,7 +1089,6 @@ fm_session_enrollment_consumer_prepare() {
   if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
     return 1
   fi
-  fm_session_descriptor_channel_isolated 8 || return 1
   fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
@@ -1006,6 +1102,10 @@ fm_session_enrollment_consumer_prepare() {
   public_key=$(printf '%s\n' "$public" | openssl base64 -A) || return 1
   exec 8< <(printf '%s\n' "$private") || return 1
   unset private public
+  fm_session_descriptor_channel_isolated 8 || {
+    exec 8<&-
+    return 1
+  }
   FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD=8
   FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY=$public_key
   FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256=$public_digest
@@ -1137,9 +1237,20 @@ fm_session_enrollment_signer_run() {
   }
   chmod 600 "$tmp" && cat "$body" > "$tmp" \
     && printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$tmp" \
-    && mv "$tmp" "$file" && : > "$ready" || {
+    && mv "$tmp" "$file" || {
       rm -f "$tmp"
       rm -f "$body" "$signature"
+      return 1
+    }
+  tmp=$(mktemp "${ready}.XXXXXX") || {
+    rm -f "$body" "$signature"
+    return 1
+  }
+  chmod 600 "$tmp" \
+    && printf 'nonce=%s\npublic-key=%s\npublic-key-sha256=%s\n' \
+      "$nonce" "$public_key" "$public_digest" > "$tmp" \
+    && mv "$tmp" "$ready" || {
+      rm -f "$tmp" "$body" "$signature"
       return 1
     }
   rm -f "$body" "$signature"
@@ -1156,7 +1267,7 @@ fm_session_enrollment_signer_run() {
       consumer_public_key=$(sed -n '8s/^consumer-public-key=//p' "$consume")
       consumer_public_digest=$(sed -n '9s/^consumer-public-key-sha256=//p' "$consume")
       case "$consumer" in ''|*[!0-9]*) return 1 ;; esac
-      expected_script="$broker_script"
+      expected_script="$home_real/bin/fm-session-authority-exec.sh"
       env_role=$(fm_session_process_environment_value \
         "$consumer" FM_AGENT_ROLE 2>/dev/null || true)
       env_task=$(fm_session_process_environment_value \
@@ -1250,15 +1361,18 @@ fm_session_enrollment_ticket_write() {
   FM_SESSION_ENROLLMENT_SIGNER_PID=$signer
   export FM_SESSION_ENROLLMENT_SIGNER_PID
   while [ "$attempts" -lt 250 ]; do
-    if [ -f "$ready" ]; then
-      nonce=$(sed -n '7s/^nonce=//p' "$file")
+    if [ -f "$ready" ] && [ ! -L "$ready" ]; then
+      nonce=$(sed -n '1s/^nonce=//p' "$ready")
       [ "${#nonce}" -eq 64 ] || return 1
       case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
       FM_SESSION_ENROLLMENT_NONCE=$nonce
-      public_key=$(sed -n '17s/^public-key=//p' "$file")
-      public_digest=$(sed -n '18s/^public-key-sha256=//p' "$file")
+      public_key=$(sed -n '2s/^public-key=//p' "$ready")
+      public_digest=$(sed -n '3s/^public-key-sha256=//p' "$ready")
       [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] || return 1
       case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
+      [ "$(fm_session_process_argument_value \
+        "$signer" --public-sha256 2>/dev/null || true)" = "$public_digest" ] \
+        || return 1
       FM_SESSION_ENROLLMENT_PUBLIC_KEY=$public_key
       FM_SESSION_ENROLLMENT_PUBLIC_SHA256=$public_digest
       export FM_SESSION_ENROLLMENT_NONCE FM_SESSION_ENROLLMENT_PUBLIC_KEY
@@ -1533,8 +1647,8 @@ fm_session_enrollment_ticket_validate() {
   current_digest=$(fm_session_sha256_file "$authority" 2>/dev/null || true)
   signer_script="${broker_script%/*}/fm-session-enrollment-signer.sh"
   current=$(fm_session_process_start "$signer" 2>/dev/null || true)
-  signer_public_digest=$(fm_session_process_environment_value \
-    "$signer" FM_SESSION_ENROLLMENT_PUBLIC_SHA256 2>/dev/null || true)
+  signer_public_digest=$(fm_session_process_argument_value \
+    "$signer" --public-sha256 2>/dev/null || true)
   if openssl dgst -sha256 -verify "$public_file" -signature "$signature_file" \
       "$body_file" >/dev/null 2>&1 \
     && [ "$(fm_session_sha256_file "$public_file" 2>/dev/null)" = "$public_digest" ] \
@@ -1545,8 +1659,10 @@ fm_session_enrollment_ticket_validate() {
     && [ "$(fm_session_descriptor_identity "$signer" "$authority_fd" 2>/dev/null)" = "$descriptor" ] \
     && [ "$(fm_session_descriptor_identity "$broker" "$authority_fd" 2>/dev/null)" = "$descriptor" ] \
     && [ "$current_digest" = "$authority_digest" ] \
-    && fm_session_authority_read_shape "$authority" \
-    && [ "$FM_SESSION_AUTHORITY_PID" = "$broker" ] \
+    && fm_session_authority_read "$authority" \
+    && [ "$(fm_session_descriptor_identity \
+          "$FM_SESSION_AUTHORITY_PID" "$authority_fd" 2>/dev/null)" \
+      = "$descriptor" ] \
     && [ "$FM_SESSION_AUTHORITY_HOME" = "$issuer_real" ] \
     && [ -f "$lock" ] && [ ! -L "$lock" ] \
     && [ "$(cat "$lock" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_OWNER" ] \
@@ -1556,7 +1672,7 @@ fm_session_enrollment_ticket_validate() {
       "$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh" ] \
     && [ "$(fm_session_process_start "$broker" 2>/dev/null)" = "$broker_start" ] \
     && [ "$(fm_session_process_identity "$broker" 2>/dev/null)" = "$broker_identity" ] \
-    && fm_session_process_runs_script "$broker" "$broker_script" \
+    && fm_session_process_runs_authority_broker "$broker" "$broker_script" \
     && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
     && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
     && [ "$endpoint" = "$$" ]; then
@@ -1580,6 +1696,7 @@ fm_session_hmac_from_descriptor() {
 }
 
 fm_session_authority_hmac() {
+  fm_session_authority_capability_present || return 1
   fm_session_descriptor_channel_isolated \
     "${FM_SESSION_AUTHORITY_FD:-}" \
     && fm_session_exec_descriptor_isolation_durable || return 1
@@ -1588,6 +1705,11 @@ fm_session_authority_hmac() {
 
 fm_session_authority_durable_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if [ -z "$fd" ] && fm_session_test_authority_broker_present; then
+    fd=$FM_TEST_DURABLE_AUTHORITY_FD
+    FM_SESSION_AUTHORITY_DURABLE_FD=$fd
+    export FM_SESSION_AUTHORITY_DURABLE_FD
+  fi
   fm_session_descriptor_channel_isolated "$fd" \
     && fm_session_exec_descriptor_isolation_durable || return 1
   IFS= read -r key <&"$fd" || return 1
@@ -1597,6 +1719,10 @@ fm_session_authority_durable_capability_present() {
 
 fm_session_authority_durable_hmac() {
   local fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if [ -z "$fd" ]; then
+    fm_session_authority_durable_capability_present || return 1
+    fd=$FM_SESSION_AUTHORITY_DURABLE_FD
+  fi
   fm_session_descriptor_channel_isolated "$fd" \
     && fm_session_exec_descriptor_isolation_durable || return 1
   fm_session_hmac_from_descriptor "$fd"
@@ -1650,7 +1776,7 @@ fm_session_authority_token() {
   local pid=$1 start=$2 identity=$3 owner=$4 home=$5 checkout=$6
   printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$pid" "$start" "$identity" "$owner" "$home" "$checkout" \
-    | fm_session_authority_hmac
+    | fm_session_authority_durable_hmac
 }
 
 fm_session_authority_write_file() {
@@ -1775,10 +1901,41 @@ fm_codex_thread_active() {
 }
 
 fm_session_lock_owner() {
-  local pid=$$ parent fd=${FM_SESSION_AUTHORITY_FD:-} current target
+  local pid=$$ parent fd=${FM_SESSION_AUTHORITY_FD:-} durable_fd
+  local current target harness
   fm_session_authority_capability_present || return 1
-  target=$(fm_session_descriptor_identity "$pid" "$fd" 2>/dev/null || true)
-  if [ -n "$target" ]; then
+  harness=
+  if fm_session_test_authority_broker_present; then
+    if [ "${FM_TEST_SESSION_LOCK_STABLE_OWNER:-0}" = 1 ]; then
+      harness=${FM_TEST_AUTHORITY_OWNER_PID:-}
+      case "$harness" in
+        ''|*[!0-9]*) harness= ;;
+        *)
+          durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+          if ! kill -0 "$harness" 2>/dev/null \
+            || { ! fm_session_pid_is_current_ancestor "$harness" \
+              && [ "$(fm_session_descriptor_identity \
+                    "$$" "$fd" 2>/dev/null || true)" != \
+                  "$(fm_session_descriptor_identity \
+                    "$harness" "$fd" 2>/dev/null || true)" ] \
+              && [ "$(fm_session_descriptor_identity \
+                    "$$" "$durable_fd" 2>/dev/null || true)" != \
+                  "$(fm_session_descriptor_identity \
+                    "$harness" "$durable_fd" 2>/dev/null || true)" ]; }; then
+            harness=
+          fi
+          ;;
+      esac
+    else
+      harness=$$
+    fi
+  fi
+  if [ -n "$harness" ]; then
+    pid=$harness
+  else
+    target=$(fm_session_descriptor_identity "$pid" "$fd" 2>/dev/null || true)
+  fi
+  if [ -z "$harness" ] && [ -n "$target" ]; then
     while [ "$pid" -gt 1 ]; do
       parent=$(fm_session_parent_pid "$pid") || return 1
       [ "$parent" != "$pid" ] || return 1
@@ -1790,7 +1947,11 @@ fm_session_lock_owner() {
   fm_session_process_start "$pid" >/dev/null || return 1
   fm_session_process_identity "$pid" >/dev/null || return 1
   if fm_codex_thread_active; then
-    printf '%s|codex:%s|descriptor\n' "$pid" "$CODEX_THREAD_ID"
+    if fm_session_test_authority_broker_present; then
+      printf '%s|codex:%s|capability\n' "$pid" "$CODEX_THREAD_ID"
+    else
+      printf '%s|codex:%s|descriptor\n' "$pid" "$CODEX_THREAD_ID"
+    fi
     return
   fi
   printf '%s\n' "$pid"

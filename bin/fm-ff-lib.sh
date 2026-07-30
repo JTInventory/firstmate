@@ -510,7 +510,7 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_HERDR_PANE=$pane
 }
 
-fm_secondmate_lifecycle_identity_matches() {
+fm_secondmate_lifecycle_record_matches() {
   local state=$1 id=$2 expected_home=$3 expected_window=$4 expected_generation=$5
   local expected_provider=${6:-}
   fm_secondmate_lifecycle_meta_read "$state/$id.meta" "$id" || return 1
@@ -520,9 +520,13 @@ fm_secondmate_lifecycle_identity_matches() {
   [ -z "$expected_provider" ] \
     || [ "$FM_SECONDMATE_META_PROVIDER_IDENTITY" = "$expected_provider" ] \
     || return 1
-  fm_secondmate_live_endpoint_matches || return 1
   validate_secondmate_home "$id" "$FM_SECONDMATE_META_HOME" || return 1
   [ "$VALIDATED_HOME" = "$expected_home" ]
+}
+
+fm_secondmate_lifecycle_identity_matches() {
+  fm_secondmate_lifecycle_record_matches "$@" \
+    && fm_secondmate_live_endpoint_matches
 }
 
 fm_secondmate_live_endpoint_matches() {
@@ -563,7 +567,7 @@ live_secondmate_meta_records() {
 
 fm_secondmate_lifecycle_preflight() {
   local state=$1 registry=${2:-} meta id line home seen="" status=0 kind_count kind
-  local registry_home
+  local registry_home agent_state
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
@@ -596,11 +600,28 @@ fm_secondmate_lifecycle_preflight() {
         status=1
         continue
       fi
-      fm_secondmate_live_endpoint_matches || {
-        echo "secondmate $id: refused: live endpoint generation or provider identity is unverifiable" >&2
-        status=1
-        continue
-      }
+      agent_state=$(fm_backend_agent_state \
+        "$FM_SECONDMATE_META_BACKEND" "$FM_SECONDMATE_META_TARGET" 2>/dev/null) \
+        || agent_state=unreadable
+      case "$agent_state" in
+        alive|dead)
+          fm_secondmate_live_endpoint_matches || {
+            echo "secondmate $id: refused: live endpoint generation or provider identity is unverifiable (state=$agent_state)" >&2
+            status=1
+            continue
+          }
+          ;;
+        missing)
+          # The durable lifecycle record remains the recovery authority when
+          # the provider endpoint is confidently absent. The locked liveness
+          # sweep re-reads this exact record before replacing the worker.
+          ;;
+        *)
+          echo "secondmate $id: refused: live endpoint generation or provider identity is unverifiable (state=$agent_state)" >&2
+          status=1
+          continue
+          ;;
+      esac
     fi
   done
   [ -n "$registry" ] && [ -f "$registry" ] || return "$status"

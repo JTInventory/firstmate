@@ -50,7 +50,7 @@ export CODEX_THREAD_ID
 RUN_TAG=$$
 BG_PIDS=()
 worker_isolation_cleanup() {
-  local pid entry marker
+  local pid entry marker command
   set +e
   for pid in "${BG_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
@@ -60,8 +60,16 @@ worker_isolation_cleanup() {
     pid=${entry#/proc/}
     marker=$( { tr '\0' '\n' < "$entry/environ"; } 2>/dev/null \
       | sed -n 's/^FM_AGENT_TEST_RUN=//p' | head -1)
-    [ "$marker" = "$RUN_TAG" ] || continue
-    kill -9 "$pid" 2>/dev/null
+    if [ "$marker" = "$RUN_TAG" ]; then
+      kill -9 "$pid" 2>/dev/null
+      continue
+    fi
+    command=$( { tr '\0' ' ' < "$entry/cmdline"; } 2>/dev/null)
+    case "$command" in
+      *"$TMP_ROOT/"*"/bin/fm-session-durable-authority.sh "*)
+        kill -9 "$pid" 2>/dev/null
+        ;;
+    esac
   done
   fm_test_cleanup
   return 0
@@ -101,18 +109,27 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "exec $FM_SESSION_AUTHORITY_FD>&-; exec $FM_SESSION_AUTHORITY_DURABLE_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "exec $FM_TEST_AUTHORITY_FD>&-; exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
 
 test_secondmate_declaration_pins_only_its_own_home() {
-  local prefix
+  local prefix same_home_prefix same_home="$TMP_ROOT/same-home-declaration"
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "exec $FM_TEST_AUTHORITY_FD>&-; exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
-  pass "a secondmate declaration pins its own home and clears every inherited override"
+  mkdir -p "$same_home"
+  same_home_prefix=$( FM_HOME="$same_home" \
+    . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+    && FM_HOME="$same_home" \
+      fm_worker_launch_env_prefix secondmate dom-b2 "$same_home" )
+  assert_not_contains "$same_home_prefix" "exec $FM_TEST_DURABLE_AUTHORITY_FD>&-" \
+    "same-home secondmate declaration closed its scoped durable authority"
+  assert_not_contains "$same_home_prefix" "FM_SESSION_AUTHORITY_DURABLE_FD= " \
+    "same-home secondmate declaration cleared its scoped durable authority"
+  pass "a secondmate declaration strips cross-home authority and keeps same-home durable authority"
 }
 
 test_declaration_refuses_rather_than_emitting_a_partial_prefix() {
@@ -215,25 +232,22 @@ SH
 }
 
 make_launch_case() {
-  local name=$1 id=$2 case_dir home proj wt fakebin owner
+  local name=$1 id=$2 case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_launch_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  owner="$$|codex:$CODEX_THREAD_ID|fallback"
-  printf '%s\n' "$owner" > "$home/state/.lock"
-  printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
-  fm_session_authority_write_file "$home/state/.session-authority" "$$" \
-    "$owner" "$home" "$ROOT" || fail "could not create launch authority fixture"
+  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  fm_worker_test_primary_identity_bind "$ROOT" "$home" \
+    || fail "could not create launch authority fixture"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/tmux-window-name"
   : > "$case_dir/launch.log"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+  MAKE_LAUNCH_CASE_RESULT="$case_dir|$home|$proj|$wt|$fakebin"
 }
 
 read_launch_record() {
@@ -246,7 +260,8 @@ test_every_verified_harness_launches_with_its_home_declaration() {
   local harness id rec out status launch expected home_real
   for harness in claude codex opencode pi grok; do
     id="declared-$harness-b1"
-    rec=$(make_launch_case "launch-$harness" "$id")
+    make_launch_case "launch-$harness" "$id"
+    rec=$MAKE_LAUNCH_CASE_RESULT
     read_launch_record "$rec"
     out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
       FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -275,7 +290,7 @@ test_secondmate_child_receives_only_its_own_home() {
   local expected launch_line ticket_line wrapper_line wait_line recheck_line clear_line release_line spawned_line
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
-    "FM_HOME='/homes/dom' "*) : ;;
+    *"FM_HOME='/homes/dom' "*) : ;;
     *) fail "secondmate declaration did not pin its own home first: $expected" ;;
   esac
   assert_not_contains "$expected" "FM_ROOT_OVERRIDE='" \
@@ -283,7 +298,7 @@ test_secondmate_child_receives_only_its_own_home() {
   launch_line=$(grep -n 'fm_backend_launch_trusted_process' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   ticket_line=$(grep -n 'fm_session_enrollment_ticket_write' "$SPAWN" | tail -1 | cut -d: -f1)
-  wrapper_line=$(grep -n 'LAUNCH="PATH=.*GOTMPDIR=.*fm-session-authority-exec.sh' \
+  wrapper_line=$(grep -n 'SPAWN_AUTHORITY_COMMAND="PATH=.*GOTMPDIR=.*fm-session-authority-exec.sh' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   [ -n "$wrapper_line" ] && [ -n "$launch_line" ] && [ -n "$ticket_line" ] \
     && [ "$wrapper_line" -lt "$launch_line" ] \
@@ -331,17 +346,18 @@ test_secondmate_child_receives_only_its_own_home() {
 # --- C. a declared worker is inert and refused -------------------------------
 
 make_primary_home() {
-  local dir=$1 owner
+  local dir=$1 owner broker
   mkdir -p "$dir/bin" "$dir/state" "$dir/data" "$dir/config"
   fm_git_init_commit "$dir"
   git -C "$dir" branch -M main
   printf '# agents\n' > "$dir/AGENTS.md"
-  owner="$$|codex:$CODEX_THREAD_ID|harness"
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  owner=$(fm_session_lock_owner) || fail "could not resolve primary test owner"
+  broker=$FM_TEST_AUTHORITY_BROKER_PID
   printf '%s\n' "$owner" > "$dir/state/.lock"
   printf '%s\n' "$dir" > "$dir/state/.primary-checkout"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
   fm_session_authority_write_file \
-    "$dir/state/.session-authority" "$$" "$owner" "$dir" "$dir" \
+    "$dir/state/.session-authority" "$broker" "$owner" "$dir" "$dir" \
     || fail "could not create primary session-authority fixture"
   printf '%s\n' "$dir"
 }
@@ -390,6 +406,30 @@ test_unbound_identity_has_no_primary_mutation_authority() {
   pass "an undeclared process outside the primary checkout has no mutation authority"
 }
 
+test_fixture_primary_requires_protected_authority() {
+  local home out status=0
+  home="$TMP_ROOT/protected-fixture-primary"
+  mkdir -p "$home/state"
+  out=$(cd "$TMP_ROOT" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a protected fixture primary must bind"
+  [ -z "$out" ] || fail "protected fixture primary emitted unexpected output: $out"
+  status=0
+  out=$(cd "$TMP_ROOT" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    bash -c 'eval "exec ${FM_TEST_AUTHORITY_FD}<&-"; . "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a fixture primary must recover live authority from the durable channel"
+  status=0
+  out=$(cd "$TMP_ROOT" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    bash -c 'eval "exec ${FM_TEST_DURABLE_AUTHORITY_FD}<&-"; . "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "a fixture primary without durable authority must refuse"
+  assert_contains "$out" "primary identity is not bound" \
+    "unprotected fixture primary refusal lost its reason"
+  pass "fixture primary binding recovers live authority but requires durable authority"
+}
+
 test_real_primary_needs_no_ambient_role() {
   local primary_home out status=0
   primary_home=$(make_primary_home "$TMP_ROOT/real-primary")
@@ -408,7 +448,9 @@ test_fresh_primary_requires_durable_session_binding() {
   rm -rf "$primary_home/state"
   out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    bash -c '
+    env -u FM_TEST_AUTHORITY_FD -u FM_TEST_DURABLE_AUTHORITY_FD \
+      -u FM_TEST_AUTHORITY_BROKER_PID -u FM_TEST_AUTHORITY_OWNER_PID bash -c '
+      exec 9<&- 18<&-
       . "$1/bin/fm-worker-isolation-lib.sh"
       ps() {
         case "$*" in *"-o comm="*"-p $$"*) printf "codex\n" ;; *) command ps "$@" ;; esac
@@ -424,11 +466,16 @@ test_fresh_primary_requires_durable_session_binding() {
 
 test_fresh_primary_session_lock_enrolls_atomically() {
   local primary_home out status=0
+  # The bootstrap proof uses whole-second process and filesystem birth times.
+  # Keep the fresh repository strictly newer than this test session.
+  sleep 1
   primary_home=$(make_primary_home "$TMP_ROOT/fresh-enrollment")
+  cp -R "$ROOT/bin/." "$primary_home/bin/"
   rm -rf "$primary_home/state"
   out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+    "$primary_home/bin/fm-session-authority-exec.sh" \
+      "$primary_home/bin/fm-lock.sh" 2>&1) || status=$?
   expect_code 0 "$status" "an empty primary home must enroll under the acquisition lock"
   assert_present "$primary_home/state/.lock" "fresh enrollment omitted the session lock"
   assert_present "$primary_home/state/.primary-checkout" \
@@ -654,10 +701,12 @@ test_stale_session_lock_reaches_verified_recovery() {
   fm_session_authority_write_file "$primary_home/state/.session-authority" \
     "$sleeper" "$owner" "$primary_home" "$primary_home" \
     || fail "could not create stale authority fixture"
+  cp -R "$ROOT/bin/." "$primary_home/bin/"
   kill "$sleeper"
   wait "$sleeper" 2>/dev/null || true
   out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+    "$primary_home/bin/fm-session-authority-exec.sh" \
+      "$primary_home/bin/fm-lock.sh" 2>&1) || status=$?
   expect_code 0 "$status" "a provably stale session lock must reach verified recovery"
   assert_contains "$out" "lock acquired" "stale session-lock recovery did not complete"
   pass "primary authority permits only verified stale session-lock recovery"
@@ -691,6 +740,7 @@ test_binding_failure_never_installs_new_session_owner() {
 test_binding_publication_is_verified_before_commit() {
   local home fakebin real_mv out status=0
   home=$(make_primary_home "$TMP_ROOT/binding-publication-verification")
+  cp -R "$ROOT/bin/." "$home/bin/"
   rm -rf "$home/state"
   fakebin="$TMP_ROOT/binding-publication-fakebin"
   mkdir -p "$fakebin"
@@ -704,7 +754,8 @@ test_binding_publication_is_verified_before_commit() {
   out=$(cd "$home" && PATH="$fakebin:$PATH" FM_REAL_MV="$real_mv" \
     FM_CORRUPT_BINDING="$home/state/.primary-checkout" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+    "$home/bin/fm-session-authority-exec.sh" \
+      "$home/bin/fm-lock.sh" 2>&1) || status=$?
   expect_code 1 "$status" "corrupt published binding must fail before commit"
   assert_contains "$out" "session authority publication is incomplete" \
     "binding publication failure lost its transaction reason"
@@ -788,6 +839,7 @@ session_test_signature() {
 test_session_authority_recovery_retains_unverified_backup() {
   local home fakebin out status=0
   home=$(make_primary_home "$TMP_ROOT/session-authority-recovery")
+  cp -R "$ROOT/bin/." "$home/bin/"
   printf '%s\n' "$home" > "$home/state/.primary-checkout"
   mkdir "$home/state/.session-authority-transaction"
   cp "$home/state/.lock" "$home/state/.session-authority-transaction/old-lock"
@@ -804,7 +856,8 @@ printf 'corrupt\n' > "${@: -1}"
 SH
   chmod +x "$fakebin/cp"
   out=$(cd "$home" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
+    "$home/bin/fm-session-authority-exec.sh" \
+      "$home/bin/fm-lock.sh" 2>&1) || status=$?
   expect_code 1 "$status" "unverified session-authority recovery must fail closed"
   [ -d "$home/state/.session-authority-transaction" ] \
     || fail "unverified session-authority recovery destroyed its backup"
@@ -815,7 +868,9 @@ SH
 
 test_session_authority_recovery_precedes_current_tuple_validation() {
   local home txn out status=0
+  sleep 1
   home=$(make_primary_home "$TMP_ROOT/session-authority-mixed-recovery")
+  cp -R "$ROOT/bin/." "$home/bin/"
   txn="$home/state/.session-authority-transaction"
   mkdir "$txn"
   cp "$home/state/.lock" "$txn/old-lock"
@@ -827,8 +882,11 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
   printf '%s\n' 'invalid-authority' > "$home/state/.session-authority"
   out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    "$AUTHORITY_EXEC" "$LOCK" 2>&1) || status=$?
-  expect_code 1 "$status" "launcher-key loss must not prevent transaction recovery"
+    "$home/bin/fm-session-authority-exec.sh" \
+      "$home/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 0 "$status" "launcher-key loss must not prevent transaction recovery"
+  assert_contains "$out" "lock acquired" \
+    "recovered authority did not complete lock acquisition"
   assert_absent "$txn" "verified authority recovery left its transaction behind"
   [ "$(cat "$home/state/.lock")" != '999999|codex:foreign|fallback' ] \
     || fail "durable-key recovery did not restore the saved lock"
@@ -983,7 +1041,7 @@ test_secondmate_authority_delegation_uses_no_node() {
 }
 
 test_authority_fds_require_sibling_proc_isolation() {
-  local parent=$$ sibling_can_open=0 fd
+  local parent=$$ sibling_can_open=0 fd authority_fds
   . "$ROOT/bin/fm-session-lock-lib.sh"
   case "$(uname -s 2>/dev/null)" in
     Linux)
@@ -992,7 +1050,11 @@ test_authority_fds_require_sibling_proc_isolation() {
         sibling_can_open=1
       fi
       exec 8<&-
-      for fd in 7 8 9 10 17 18 "$FM_SESSION_AUTHORITY_FD"; do
+      authority_fds="7 8 9 10 17"
+      if ! fm_session_test_authority_broker_present; then
+        authority_fds="$authority_fds 18 $FM_SESSION_AUTHORITY_FD"
+      fi
+      for fd in $authority_fds; do
         if [ "$sibling_can_open" -eq 1 ]; then
           ! fm_session_descriptor_channel_isolated "$fd" \
             || fail "authority descriptor $fd remained usable through sibling procfs"
@@ -1679,10 +1741,18 @@ test_fresh_enrollment_requires_external_capability() {
   home=$(make_primary_home "$TMP_ROOT/fresh-capability-required")
   rm -rf "$home/state"
   out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
-    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" "$LOCK" 2>&1) || status=$?
+    -u FM_SESSION_AUTHORITY_DURABLE_FD \
+    -u FM_SESSION_AUTHORITY_BROKER_PID \
+    -u FM_SESSION_AUTHORITY_BROKER_START \
+    -u FM_SESSION_AUTHORITY_BROKER_IDENTITY \
+    -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
+    -u FM_TEST_AUTHORITY_FD -u FM_TEST_DURABLE_AUTHORITY_FD \
+    -u FM_TEST_AUTHORITY_BROKER_PID -u FM_TEST_AUTHORITY_OWNER_PID \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    bash -c 'exec 9<&- 18<&- 19<&-; exec "$1"' _ "$LOCK" 2>&1) || status=$?
   expect_code 1 "$status" "fresh enrollment without an external capability must fail"
   assert_absent "$home/state/.lock" "capability-free enrollment published a lock"
-  assert_contains "$out" "broker is missing or invalid" \
+  assert_contains "$out" "primary identity is not bound" \
     "capability-free enrollment refusal lost its reason"
   pass "fresh enrollment requires independently supplied authority capability"
 }
@@ -2081,7 +2151,8 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   local rec id out status lying pid
   require_procfs || { pass "skip: this host has no readable procfs for spawn settle proof"; return 0; }
   id="settle-proc-d4-$RUN_TAG"
-  rec=$(make_launch_case settle-proc "$id")
+  make_launch_case settle-proc "$id"
+  rec=$MAKE_LAUNCH_CASE_RESULT
   read_launch_record "$rec"
   lying="$CASE_DIR/other-real-checkout"
   fm_git_init_commit "$lying"
@@ -2108,18 +2179,15 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
 # --- E. pooled-slot ownership -----------------------------------------------
 
 make_slot_world() {
-  local name=$1 world proj wt other owner
+  local name=$1 world proj wt other
   world="$TMP_ROOT/$name"
   proj="$world/project"
   wt="$world/wt"
   other="$world/wt-other"
   mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
-  owner="$$|codex:$CODEX_THREAD_ID|fallback"
-  printf '%s\n' "$owner" > "$world/home/state/.lock"
-  printf '%s\n' "$ROOT" > "$world/home/state/.primary-checkout"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
-  fm_session_authority_write_file "$world/home/state/.session-authority" "$$" \
-    "$owner" "$world/home" "$ROOT" || fail "could not create slot authority fixture"
+  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  fm_worker_test_primary_identity_bind "$ROOT" "$world/home" \
+    || fail "could not create slot authority fixture"
   fm_git_worktree "$proj" "$wt" "slot-$name"
   git -C "$proj" worktree add --quiet -b "slot-$name-other" "$other"
   printf '%s\n' "$world|$proj|$wt|$other"
@@ -2132,7 +2200,9 @@ EOF
 }
 
 slot_verdict() {  # <state> <id> <wt> <stamp-home> [role] [worker-home]
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( FM_TEST_AGENT_PIDS="${BG_PIDS[*]:-} $$"
+    export FM_TEST_AGENT_PIDS
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" "${5:-crewmate}" )
 }
 
@@ -2904,7 +2974,9 @@ test_manual_reclaim_has_no_task_identity_exemption() {
   rec=$(make_slot_world manual-reclaim-occupant)
   read_slot_world "$rec"
   pid=$(start_declared_agent "$WT_DIR" __manual-reclaim__ "$WORLD/home")
-  occupants=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  occupants=$( FM_TEST_AGENT_PIDS="$FM_TEST_AGENT_PIDS $pid"
+    export FM_TEST_AGENT_PIDS
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_manual_reclaim_occupants "$WT_DIR" )
   assert_contains "$occupants" "__manual-reclaim__" \
     "manual reclaim excluded a live task that matched its old sentinel identity"
@@ -3013,16 +3085,7 @@ test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation() {
   read_slot_world "$rec"
   fakebin=$(fm_fakebin "$WORLD/fake")
   log="$WORLD/tmux.log"
-  cat > "$fakebin/tmux" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = show-options ]; then
-  printf '%s\n' endpoint-task-e14
-  exit 0
-fi
-printf '%s\n' "\$*" >> "$log"
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  make_generation_tmux "$fakebin" endpoint-task-e14 "$log"
   fm_fake_exit0 "$fakebin" gh-axi gh
   mkdir -p "$WORLD/corrupt-project"
   write_current_meta "$WORLD/home/state/task-e14.meta" task-e14 "$WORLD/home" endpoint-task-e14 \
@@ -3415,7 +3478,8 @@ test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id() {
 test_spawn_claim_abort_clears_only_a_new_exact_claim() {
   local rec id out status home_real stamp
   id="claim-abort-g1-$RUN_TAG"
-  rec=$(make_launch_case claim-abort "$id")
+  make_launch_case claim-abort "$id"
+  rec=$MAKE_LAUNCH_CASE_RESULT
   read_launch_record "$rec"
   cat > "$FAKEBIN_DIR/mktemp" <<'SH'
 #!/usr/bin/env bash
@@ -3463,7 +3527,8 @@ SH
 test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
   local rec id out status stamp exclude
   id="foreign-claim-g2-$RUN_TAG"
-  rec=$(make_launch_case foreign-claim "$id")
+  make_launch_case foreign-claim "$id"
+  rec=$MAKE_LAUNCH_CASE_RESULT
   read_launch_record "$rec"
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" foreign-g2 "$CASE_DIR/foreign-home" ) \
@@ -3598,6 +3663,7 @@ test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
 test_unbound_identity_has_no_primary_mutation_authority
+test_fixture_primary_requires_protected_authority
 test_real_primary_needs_no_ambient_role
 test_fresh_primary_requires_durable_session_binding
 test_fresh_primary_session_lock_enrolls_atomically
@@ -3636,6 +3702,8 @@ test_a_lost_window_name_never_answers_with_firstmates_own_pane
 test_one_proc_walk_answers_every_task_in_a_sweep
 test_unreadable_agent_candidate_is_indexed_as_unproven
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
+FM_TEST_AGENT_PIDS=$$
+export FM_TEST_AGENT_PIDS
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_exact_stamp_clear_accepts_canonical_home_alias
 test_clean_ownership_disposes
@@ -3674,6 +3742,7 @@ test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling
 test_normal_teardown_validates_receipts_before_commit
 test_teardown_finishes_fallible_cleanup_before_provider_boundaries
 test_verification_capture_includes_lifecycle_clears
+unset FM_TEST_AGENT_PIDS
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence

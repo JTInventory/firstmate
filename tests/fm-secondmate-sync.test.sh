@@ -26,12 +26,14 @@ set -u
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
+. "$ROOT/bin/fm-backend.sh"
 
 fm_ff_target_lock_acquire() { return 0; }
 fm_ff_target_lock_release() { return 0; }
 fm_backend_endpoint_generation() {
   printf 'endpoint-%s' "${2##*:fm-}"
 }
+fm_backend_tmux_endpoint_matches() { return 0; }
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
@@ -40,6 +42,7 @@ fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
 SYNC_PIDS=()
+SM_ENDPOINT_SEQ=8
 cleanup_secondmate_sync() {
   local pid
   for pid in "${SYNC_PIDS[@]:-}"; do
@@ -83,15 +86,19 @@ new_world() {
 # the primary at <commit>, plus its seed marker and a LIVE kind=secondmate meta
 # (a window= makes it a running direct report).
 add_sm_worktree() {
-  local w=$1 id=$2 commit=$3
+  local w=$1 id=$2 commit=$3 endpoint
+  SM_ENDPOINT_SEQ=$((SM_ENDPOINT_SEQ + 1))
+  endpoint=$SM_ENDPOINT_SEQ
   git -C "$w/main" worktree add -q --detach "$w/$id" "$commit"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
   {
-    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'window=@%s\n' "$endpoint"
+    printf 'backend=tmux\n'
+    printf 'tmux_pane_id=%%%s\n' "$endpoint"
     printf 'kind=secondmate\n'
     printf 'home=%s/%s\n' "$w" "$id"
     printf 'task=%s\n' "$id"
-    printf 'endpoint_generation=endpoint-%s\n' "$id"
+    printf 'endpoint_generation=endpoint-%s\n' "$endpoint"
     printf 'worktree=%s/%s\n' "$w" "$id"
     printf 'project=%s/main\n' "$w"
     printf 'harness=codex\n'
@@ -294,13 +301,20 @@ make_fake_toolchain() {
   fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
   cat >"$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+target=
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[$i]}" = -t ]; then
+    next=$((i + 1))
+    target=${args[$next]:-}
+    break
+  fi
+done
+endpoint=${target#@}
+endpoint=${endpoint#%}
+[ -n "$endpoint" ] || endpoint=9
 if [ "${1:-}" = show-options ]; then
-  target=
-  while [ $# -gt 0 ]; do
-    if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
-    shift
-  done
-  printf 'endpoint-%s\n' "${target##*:fm-}"
+  printf 'endpoint-%s\n' "$endpoint"
 fi
 if [ "${1:-}" = new-window ]; then
   printf '@9\n'
@@ -308,7 +322,8 @@ fi
 if [ "${1:-}" = display-message ]; then
   case "${*: -1}" in
     '#{window_name}') printf 'fm-sm\n' ;;
-    '#{pane_id}') printf '%%9\n' ;;
+    '#{pane_id}') printf '%%%s\n' "$endpoint" ;;
+    '#{window_id}') printf '@%s\n' "$endpoint" ;;
   esac
 fi
 exit 0
@@ -355,8 +370,9 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   printf 'sm-nonlive\n' > "$w/sm-nonlive/.fm-secondmate-home"
 
   fakebin=$(make_fake_toolchain "$w")
-  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" \
-    FM_ROOT_OVERRIDE="$w/main" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 
   nudge_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged ' || true)
   [ -n "$nudge_line" ] || fail "no successful bootstrap nudge line emitted (got: $out)"
@@ -398,10 +414,12 @@ test_bootstrap_sweep_surfaces_skipped_home() {
 }
 
 test_bootstrap_retry_clears_child_obligation() {
-  local w commit fakebin out count pending
+  local w commit fakebin out count pending window endpoint_generation
   w=$(new_world boot-retry)
   commit=$(head_of "$w/main")
   add_sm_worktree "$w" sm-retry "$commit"
+  window=$(fm_meta_get "$w/home/state/sm-retry.meta" window)
+  endpoint_generation=$(fm_meta_get "$w/home/state/sm-retry.meta" endpoint_generation)
   mkdir -p "$w/sm-retry/state" "$w/home/state/.secondmate-nudge-pending"
   printf 'generation=%s\n' "$commit" > "$w/sm-retry/state/.watch-protocol-reread-required"
   pending="$w/home/state/.secondmate-nudge-pending/sm-retry.pending"
@@ -409,8 +427,8 @@ test_bootstrap_retry_clears_child_obligation() {
     printf 'id=sm-retry\n'
     printf 'selector=fm-sm-retry\n'
     printf 'home=%s/sm-retry\n' "$w"
-    printf 'window=firstmate:fm-sm-retry\n'
-    printf 'endpoint_generation=endpoint-sm-retry\n'
+    printf 'window=%s\n' "$window"
+    printf 'endpoint_generation=%s\n' "$endpoint_generation"
     printf 'commit=%s\n' "$commit"
     printf 'instructions=AGENTS.md\n'
     printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
@@ -430,10 +448,12 @@ test_bootstrap_retry_clears_child_obligation() {
 }
 
 test_bootstrap_retry_respects_secondmate_lifecycle_lock() {
-  local w commit fakebin out pending lock held_locks=()
+  local w commit fakebin out pending lock window endpoint_generation held_locks=()
   w=$(new_world boot-retry-lock)
   commit=$(head_of "$w/main")
   add_sm_worktree "$w" sm-retry-lock "$commit"
+  window=$(fm_meta_get "$w/home/state/sm-retry-lock.meta" window)
+  endpoint_generation=$(fm_meta_get "$w/home/state/sm-retry-lock.meta" endpoint_generation)
   mkdir -p "$w/sm-retry-lock/state" "$w/home/state/.secondmate-nudge-pending"
   printf 'generation=%s\n' "$commit" > "$w/sm-retry-lock/state/.watch-protocol-reread-required"
   pending="$w/home/state/.secondmate-nudge-pending/sm-retry-lock.pending"
@@ -441,8 +461,8 @@ test_bootstrap_retry_respects_secondmate_lifecycle_lock() {
     printf 'id=sm-retry-lock\n'
     printf 'selector=fm-sm-retry-lock\n'
     printf 'home=%s/sm-retry-lock\n' "$w"
-    printf 'window=firstmate:fm-sm-retry-lock\n'
-    printf 'endpoint_generation=endpoint-sm-retry-lock\n'
+    printf 'window=%s\n' "$window"
+    printf 'endpoint_generation=%s\n' "$endpoint_generation"
     printf 'commit=%s\n' "$commit"
     printf 'instructions=AGENTS.md\n'
     printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
@@ -469,12 +489,14 @@ test_bootstrap_retry_respects_secondmate_lifecycle_lock() {
 }
 
 test_bootstrap_retry_retains_delivery_until_acknowledged() {
-  local w commit stale fakebin pending receipt out sends obligation
+  local w commit stale fakebin pending receipt out sends obligation window endpoint_generation
   w=$(new_world boot-retry-ack-failure)
   git -C "$w/main" commit --allow-empty -qm second
   commit=$(head_of "$w/main")
   stale=$(git -C "$w/main" rev-parse "$commit^")
   add_sm_worktree "$w" sm-ack "$commit"
+  window=$(fm_meta_get "$w/home/state/sm-ack.meta" window)
+  endpoint_generation=$(fm_meta_get "$w/home/state/sm-ack.meta" endpoint_generation)
   mkdir -p "$w/sm-ack/state" "$w/home/state/.secondmate-nudge-pending"
   obligation="$w/sm-ack/state/.watch-protocol-reread-required"
   fm_update_obligation_write "$obligation" "$stale"
@@ -483,8 +505,8 @@ test_bootstrap_retry_retains_delivery_until_acknowledged() {
     printf 'id=sm-ack\n'
     printf 'selector=fm-sm-ack\n'
     printf 'home=%s/sm-ack\n' "$w"
-    printf 'window=firstmate:fm-sm-ack\n'
-    printf 'endpoint_generation=endpoint-sm-ack\n'
+    printf 'window=%s\n' "$window"
+    printf 'endpoint_generation=%s\n' "$endpoint_generation"
     printf 'commit=%s\n' "$commit"
     printf 'instructions=AGENTS.md\n'
     printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
@@ -492,10 +514,27 @@ test_bootstrap_retry_retains_delivery_until_acknowledged() {
   fakebin=$(make_fake_toolchain "$w")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = show-options ]; then
-  printf '%s\n' endpoint-sm-ack
-  exit 0
-fi
+target=
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[$i]}" = -t ]; then
+    target=${args[$((i + 1))]:-}
+    break
+  fi
+done
+endpoint=${target#@}
+endpoint=${endpoint#%}
+[ -n "$endpoint" ] || endpoint=9
+case "${1:-}" in
+  show-options) printf 'endpoint-%s\n' "$endpoint"; exit 0 ;;
+  display-message)
+    case "${*: -1}" in
+      '#{pane_id}') printf '%%%s\n' "$endpoint" ;;
+      '#{window_id}') printf '@%s\n' "$endpoint" ;;
+    esac
+    exit 0
+    ;;
+esac
 printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
 exit 0
 SH
@@ -539,14 +578,14 @@ test_bootstrap_refuses_ambiguous_lifecycle_metadata() {
   [ "$rc" -ne 0 ] || fail "bootstrap accepted ambiguous lifecycle metadata"
   [ "$(head_of "$w/sm-ambiguous")" = "$before" ] \
     || fail "bootstrap advanced a home with ambiguous lifecycle metadata"
-  assert_contains "$out" "ambiguous lifecycle metadata" \
+  assert_contains "$out" "legacy tmux endpoint migration failed" \
     "bootstrap did not report ambiguous lifecycle metadata"
   pass "bootstrap refuses ambiguous lifecycle metadata before mutation"
 }
 
 # --- T11: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
-  local w c1 c2 fakebin rc
+  local w c1 c2 fakebin rc out
   w=$(new_world spawn-ff)
   c1=$(head_of "$w/main")
   git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
@@ -560,14 +599,16 @@ test_spawn_fast_forwards_before_launch() {
   fakebin=$(make_fake_toolchain "$w")
 
   rc=0
-  env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
+  out=$(env -u NO_MISTAKES_GATE PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>&1 || rc=$?
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate 2>&1) || rc=$?
 
-  [ "$rc" -eq 0 ] || fail "capability-complete secondmate spawn failed"
+  [ "$rc" -ne 0 ] || fail "stubbed secondmate launch bypassed exact-process verification"
+  assert_contains "$out" "could not verify the exact launch process" \
+    "secondmate sync fixture did not reach exact-process verification"
   [ "$(head_of "$w/sm")" = "$c2" ] \
     || fail "spawn did not fast-forward the secondmate worktree to the primary's HEAD"
   pass "T10 spawn fast-forwards a secondmate worktree to the primary's local HEAD before launch"

@@ -215,15 +215,31 @@ fm_backend_tmux_current_command() {  # <target>
 }
 
 fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+  local target=$1 comm session window windows inventory_status inventory_format
+  local inventory_command=list-windows
+  local -a inventory_args=()
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
+    @*)
+      inventory_format='#{window_id}'
+      inventory_args=(-a)
+      window=$target
+      ;;
+    %*)
+      inventory_command=list-panes
+      inventory_format='#{pane_id}'
+      inventory_args=(-a)
+      window=$target
+      ;;
+    *:*)
+      session=${target%%:*}
+      window=${target#*:}
+      inventory_format='#{window_name}'
+      inventory_args=(-t "$session")
+      ;;
     *) printf 'unreadable'; return 0 ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if windows=$(LC_ALL=C tmux "$inventory_command" "${inventory_args[@]}" -F "$inventory_format" 2>&1); then
     inventory_status=0
   else
     inventory_status=$?

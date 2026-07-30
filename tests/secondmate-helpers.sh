@@ -39,8 +39,29 @@ case "${1:-}" in
     fi
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     if [ "${1:-}" = kill-window ]; then
+      if [ -f "${FM_FAKE_TMUX_LOG}.pane-pid" ]; then
+        kill "$(cat "${FM_FAKE_TMUX_LOG}.pane-pid")" 2>/dev/null || true
+      fi
       printf '%s\n' "${@: -1}" >> "${FM_FAKE_TMUX_LOG}.closed"
     fi
+    exit 0
+    ;;
+  respawn-pane)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    cwd= command=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -c) shift; cwd=${1:-} ;;
+        'exec env '*) command=$1 ;;
+      esac
+      shift
+    done
+    [ -n "$cwd" ] && [ -n "$command" ] || exit 1
+    ( cd "$cwd" && exec bash -c "$command" 8<&- 17<&- ) \
+      >"${FM_FAKE_TMUX_LOG}.launch" 2>&1 &
+    printf '%s\n' "$!" > "${FM_FAKE_TMUX_LOG}.pane-pid"
+    sleep 0.1
+    printf '%s\n' "$!"
     exit 0
     ;;
   new-window)
@@ -108,6 +129,8 @@ case "${1:-}" in
       *"#{pane_id}"*) printf '%s\n' "${FM_FAKE_PANE_ID:-%42}" ;;
       *"#{window_id}"*) printf '%s\n' "${FM_FAKE_WINDOW_ID:-@42}" ;;
       *"#{window_name}"*) cat "${FM_FAKE_TMUX_LOG}.window-name" ;;
+      *"#{pane_pid}"*) cat "${FM_FAKE_TMUX_LOG}.pane-pid" ;;
+      *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-codex}" ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0
@@ -119,6 +142,10 @@ case "${1:-}" in
     ;;
 esac
 exit 1
+SH
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+exec sleep 300
 SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -173,7 +200,11 @@ case "${1:-}" in
       [ "$(cat "$lease_file" 2>/dev/null || true)" = "$expected_holder" ] || exit 18
     fi
     [ -n "$lease_file" ] && rm -f "$lease_file"
-    [ -n "$target" ] && rm -rf -- "$target"
+    if [ -n "$target" ] && [ -f "$target/.git" ]; then
+      git -C "$target" worktree remove --force "$target" || exit 19
+    elif [ -n "$target" ]; then
+      rm -rf -- "$target"
+    fi
     exit 0
     ;;
 esac
@@ -181,6 +212,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   chmod +x "$fakebin/treehouse"
+  chmod +x "$fakebin/codex"
   : > "$dir/tmux.log"
   printf '%s\n' "$fakebin"
 }

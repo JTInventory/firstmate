@@ -673,9 +673,40 @@ SH
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   shift 2
-  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+  perl -e '$^F=18; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+install_teardown_tmux_fixture() {
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+closed="${0%/*}/.endpoint-closed"
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+case "${1:-}" in
+  display-message)
+    [ ! -e "$closed" ] || exit 1
+    case "$*" in
+      *"#{pane_id}"*) printf '%%42\n' ;;
+      *"#{window_id}"*) printf '@42\n' ;;
+    esac
+    ;;
+  show-options)
+    [ ! -e "$closed" ] || exit 1
+    printf 'endpoint-task-a\n'
+    ;;
+  list-panes)
+    [ ! -e "$closed" ] || exit 1
+    printf '%%42\n'
+    ;;
+  kill-pane|kill-window)
+    : > "$closed"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
 }
 
 test_expected_head_guard_and_prior_generation_replacement() {
@@ -1886,7 +1917,12 @@ test_complete_single_link_validation() {
   state="$dir/home/state"
   fakebin="$dir/fakebin"
   fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
+    'window=@42' \
+    'tmux_pane_id=%42' \
+    'task=task-a' \
+    "home=$dir/home" \
+    'backend=tmux' \
+    'endpoint_generation=endpoint-task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -1897,11 +1933,7 @@ test_complete_single_link_validation() {
   chmod 0600 "$state/.pr-check-quarantine/task-a.check.linked"
   alias="$dir/quarantine.alias"
   ln "$state/.pr-check-quarantine/task-a.check.linked" "$alias"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  install_teardown_tmux_fixture "$fakebin"
   touch "$state/.last-watcher-beat"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
@@ -2856,7 +2888,12 @@ test_teardown_removes_poll_artifacts() {
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/task-a.meta" \
-    'window=fm-task-a' \
+    'window=@42' \
+    'tmux_pane_id=%42' \
+    'task=task-a' \
+    "home=$dir/home" \
+    'backend=tmux' \
+    'endpoint_generation=endpoint-task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -2869,11 +2906,7 @@ test_teardown_removes_poll_artifacts() {
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
   printf 'legacy\n' > "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
   chmod 0600 "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  install_teardown_tmux_fixture "$fakebin"
   touch "$dir/home/state/.last-watcher-beat"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
@@ -2889,7 +2922,12 @@ SH
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/task-a.meta" \
-    'window=fm-task-a' \
+    'window=@42' \
+    'tmux_pane_id=%42' \
+    'task=task-a' \
+    "home=$dir/home" \
+    'backend=tmux' \
+    'endpoint_generation=endpoint-task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -2901,11 +2939,7 @@ SH
   fm_pr_poll_retirement_publish "$dir/home/state" task-a "$POLL" merged \
     || fail "could not publish teardown receipt fixture"
   rm -f "$dir/home/state/task-a.check.sh"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  install_teardown_tmux_fixture "$fakebin"
   touch "$dir/home/state/.last-watcher-beat"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
@@ -2916,7 +2950,12 @@ SH
   dir=$(make_case teardown-reserved-quarantine)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/invalid.meta" \
-    'window=fm-invalid' \
+    'window=@42' \
+    'tmux_pane_id=%42' \
+    'task=invalid' \
+    "home=$dir/home" \
+    'backend=tmux' \
+    'endpoint_generation=endpoint-task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
@@ -2927,11 +2966,7 @@ SH
   printf 'noncanonical evidence\n' > "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123"
   chmod 0600 "$dir/home/state/.pr-check-quarantine/invalid.check.abc123" \
     "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  install_teardown_tmux_fixture "$fakebin"
   touch "$dir/home/state/.last-watcher-beat"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
@@ -2946,7 +2981,12 @@ SH
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \
-      'window=fm-task-a' \
+      'window=@42' \
+      'tmux_pane_id=%42' \
+      'task=task-a' \
+      "home=$dir/home" \
+      'backend=tmux' \
+      'endpoint_generation=endpoint-task-a' \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
@@ -2959,12 +2999,7 @@ SH
     mkdir "$dir/home/state/task-a.$artifact"
     printf 'directory sentinel\n' > "$dir/home/state/task-a.$artifact/sentinel"
     printf 'counterpart sentinel\n' > "$dir/home/state/task-a.$counterpart"
-    cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
-exit 0
-SH
-    chmod +x "$fakebin/tmux"
+    install_teardown_tmux_fixture "$fakebin"
     touch "$dir/home/state/.last-watcher-beat"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_TMUX_LOG="$dir/tmux.log" \
@@ -2986,7 +3021,12 @@ SH
     dir=$(make_case "teardown-quarantine-link-$kind")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \
-      'window=fm-task-a' \
+      'window=@42' \
+      'tmux_pane_id=%42' \
+      'task=task-a' \
+      "home=$dir/home" \
+      'backend=tmux' \
+      'endpoint_generation=endpoint-task-a' \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
@@ -2998,11 +3038,7 @@ SH
       printf 'external task artifact\n' > "$LINK_TARGET/task-a.check.protected"
       chmod 0640 "$LINK_TARGET/task-a.check.protected"
     fi
-    cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-    chmod +x "$fakebin/tmux"
+    install_teardown_tmux_fixture "$fakebin"
     touch "$dir/home/state/.last-watcher-beat"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
@@ -3083,7 +3119,7 @@ test_teardown_rollback_preserves_reissued_refs() {
     'task=other-task' \
     "home=$dir/home" 'mode=direct-PR' 'backend=orca' \
     'endpoint_generation=orca-task-a' 'yolo=off'
-  checksum=$(cksum "$meta" | awk '{print $1 " " $2}')
+  checksum="$(shasum -a 256 "$meta" | awk '{print $1}') $(wc -c < "$meta" | tr -d ' ')"
   txn="$state/.teardown-transactions/task-a"
   mkdir -p "$txn/evidence/top" "$txn/evidence/direct-refs"
   printf '%s\n' "$meta" > "$txn/evidence/top/source"
@@ -3120,9 +3156,10 @@ test_teardown_recovers_missing_meta_from_active_transaction() {
     "project=$dir/project" 'harness=codex' 'kind=ship' 'task=task-a' \
     "home=$dir/home" 'mode=local-only' 'backend=tmux' \
     'endpoint_generation=endpoint-task-a' 'yolo=off'
-  checksum=$(cksum "$meta" | awk '{print $1 " " $2}')
+  checksum="$(shasum -a 256 "$meta" | awk '{print $1}') $(wc -c < "$meta" | tr -d ' ')"
   txn="$state/.teardown-transactions/task-a"
-  mkdir -p "$txn/evidence/top"
+  mkdir -p "$txn/evidence/top" "$txn/release-verdicts"
+  : > "$txn/release-verdicts/.complete"
   printf '%s\n' "$meta" > "$txn/evidence/top/source"
   cp -p "$meta" "$txn/evidence/top/task-a.meta"
   printf 'task=task-a\nmeta=%s\nchecksum=%s\ngeneration=endpoint-task-a\nhome=%s\n' \
@@ -3132,6 +3169,8 @@ test_teardown_recovers_missing_meta_from_active_transaction() {
 #!/usr/bin/env bash
 case "${1:-}" in
   show-options) printf 'endpoint-task-a\n' ;;
+  list-panes) printf '%%42\n' ;;
+  display-message) printf '%%42\n' ;;
 esac
 exit 0
 SH

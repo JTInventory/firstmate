@@ -14,8 +14,16 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -f "${FM_FAKE_TMUX_STATE}.killed" ]; then
+  case "${1:-}" in
+    display-message|list-panes|show-options) exit 1 ;;
+    list-windows) exit 0 ;;
+  esac
+fi
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*) printf '%s\n' '%42'; exit 0 ;;
+  *"#{window_id}"*) printf '%s\n' '@42'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message)
@@ -25,8 +33,12 @@ case "${1:-}" in
     esac
     exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|send-keys|kill-window) exit 0 ;;
+  list-panes) printf '%s\n' '%42'; exit 0 ;;
+  has-session|new-session|send-keys) exit 0 ;;
+  kill-window) touch "${FM_FAKE_TMUX_STATE}.killed"; exit 0 ;;
   new-window) printf '%s\n' '@42'; exit 0 ;;
+  set-option) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE.endpoint"; exit 0 ;;
+  show-options) cat "$FM_FAKE_TMUX_STATE.endpoint"; exit 0 ;;
   set-window-option) exit 0 ;;
   rename-window) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE"; exit 0 ;;
 esac
@@ -71,7 +83,7 @@ $rec
 EOF
   out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
   status=$?
-  expect_code 0 "$status" "grok spawn should succeed"
+  expect_code 0 "$status" "grok spawn should succeed: $out"
   assert_contains "$out" "spawned $id harness=grok" "grok spawn did not report success"
 
   hook="$grok_home/hooks/fm-turn-end.sh"
@@ -110,18 +122,20 @@ $rec
 EOF
   out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
   status=$?
-  expect_code 0 "$status" "grok spawn should succeed before teardown"
+  expect_code 0 "$status" "grok spawn should succeed before teardown: $out"
   token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
 
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_FAKE_TMUX_STATE="$home/tmux-window-name" \
     GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 \
-    || fail "grok teardown failed"
+    "$TEARDOWN" "$id" --force 2>&1) \
+    || fail "grok teardown failed: $out"
 
-  assert_absent "$wt/.fm-grok-turnend" "grok pointer survived teardown"
+  assert_present "$wt/.fm-grok-turnend" \
+    "retained worktree lost its inert grok pointer before safe slot return: $out"
   assert_absent "$grok_home/hooks/fm-turn-end.d/$token" "grok auth token survived teardown"
   assert_absent "$home/state/$id.grok-turnend-token" "grok state token survived teardown"
-  pass "grok teardown removes pointer and token state"
+  pass "grok teardown revokes token state while retaining an unsafe slot"
 }
 
 test_fm_lock_recognizes_grok_holder() {

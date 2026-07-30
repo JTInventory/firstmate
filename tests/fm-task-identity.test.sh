@@ -32,8 +32,18 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+case "\${1:-}" in
+  show-options) printf '%s\n' "endpoint-$meta_id"; exit 0 ;;
+  display-message)
+    case "\${*: -1}" in
+      '#{pane_id}') printf '%%42\n' ;;
+      '#{window_id}') printf '@42\n' ;;
+    esac
+    exit 0
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/gh" "$fakebin/treehouse" "$fakebin/tmux"
@@ -54,9 +64,14 @@ SH
 
   touch "$case_dir/state/.last-watcher-beat"
   fm_write_meta "$case_dir/state/$meta_id.meta" \
-    "window=fm-$meta_id" \
+    "window=@42" \
+    "home=$ROOT" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
+    "task=$meta_id" \
+    "backend=tmux" \
+    "tmux_pane_id=%42" \
+    "endpoint_generation=endpoint-$meta_id" \
     "kind=ship" \
     "mode=direct-PR"
 

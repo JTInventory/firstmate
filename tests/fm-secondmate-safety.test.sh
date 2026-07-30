@@ -560,7 +560,10 @@ test_home_seed_refuses_active_home_and_root() {
     || fail "seed did not explain FM_ROOT rejection"
 
   git clone --quiet "$ROOT" "$root_clone"
-  if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_clone" "$ROOT/bin/fm-home-seed.sh" design "$root_descendant" alpha >/dev/null 2>"$err"; then
+  mkdir -p "$TMP_ROOT/root-descendant-state"
+  if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_clone" \
+    FM_STATE_OVERRIDE="$TMP_ROOT/root-descendant-state" \
+    "$ROOT/bin/fm-home-seed.sh" design "$root_descendant" alpha >/dev/null 2>"$err"; then
     fail "seed allowed secondmate home inside FM_ROOT"
   fi
   grep -F 'secondmate home cannot be inside the firstmate repo' "$err" >/dev/null \
@@ -569,7 +572,10 @@ test_home_seed_refuses_active_home_and_root() {
 
   git clone --quiet "$ROOT" "$root_ancestor"
   git clone --quiet "$ROOT" "$root_inside"
-  if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_inside" "$ROOT/bin/fm-home-seed.sh" design "$root_ancestor" alpha >/dev/null 2>"$err"; then
+  mkdir -p "$TMP_ROOT/root-ancestor-state"
+  if FM_HOME="$home" FM_ROOT_OVERRIDE="$root_inside" \
+    FM_STATE_OVERRIDE="$TMP_ROOT/root-ancestor-state" \
+    "$ROOT/bin/fm-home-seed.sh" design "$root_ancestor" alpha >/dev/null 2>"$err"; then
     fail "seed allowed secondmate home to contain FM_ROOT"
   fi
   grep -F 'secondmate home cannot be an ancestor of the firstmate repo' "$err" >/dev/null \
@@ -918,13 +924,15 @@ test_secondmate_spawn_requires_seeded_matching_home() {
   root_descendant="$fakeroot/tmp/spawn-descendant-home"
   root_ancestor="$TMP_ROOT/spawn-root-ancestor"
   root_inside="$root_ancestor/repo"
-  mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data" "$marker_only/data" "$active_descendant/data" "$root_descendant/data" "$fakeroot/bin"
+  mkdir -p "$home/data" "$home/state" "$subhome/data" "$wronghome/data" "$marker_only/data" "$active_descendant/data" "$root_descendant/data" "$fakeroot/bin" \
+    "$TMP_ROOT/spawn-validate-root-state-absent" "$TMP_ROOT/spawn-validate-root-inside-state-absent"
   cat > "$fakeroot/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
   chmod +x "$fakeroot/bin/fm-guard.sh"
   mkdir -p "$ancestor_active_home/data" "$ancestor_active_home/state" "$active_ancestor/data" "$root_ancestor/data" "$root_inside/bin"
+  mkdir -p "$TMP_ROOT/spawn-root-active-home/data" "$TMP_ROOT/spawn-root-active-home/state"
   cat > "$root_inside/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -997,7 +1005,9 @@ SH
 
   printf 'domain\n' > "$root_descendant/.fm-secondmate-home"
   printf 'charter\n' > "$root_descendant/data/charter.md"
-  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$TMP_ROOT/spawn-validate-root-state-absent" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$root_descendant" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a home inside the firstmate repo"
   fi
@@ -1005,7 +1015,9 @@ SH
 
   printf 'domain\n' > "$root_ancestor/.fm-secondmate-home"
   printf 'charter\n' > "$root_ancestor/data/charter.md"
-  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root_inside" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
+  if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root_inside" FM_HOME="$TMP_ROOT/spawn-root-active-home" \
+    FM_STATE_OVERRIDE="$TMP_ROOT/spawn-validate-root-inside-state-absent" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$root_ancestor" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a home containing the firstmate repo"
   fi
@@ -1053,6 +1065,8 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp() {
   mkdir -p "$home/data/admission" "$home/state" "$home/config" "$home/projects"
   printf 'brief\n' > "$home/data/admission/brief.md"
   make_firstmate_git_root "$subhome"
+  git -C "$subhome" fetch -q "$ROOT" HEAD
+  git -C "$subhome" reset --hard -q FETCH_HEAD
   mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects"
   printf 'admission\n' > "$subhome/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-spawn-fake")
@@ -1062,8 +1076,10 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp() {
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/plain-clone-spawn-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" admission "$subhome" codex --secondmate 2>&1)
   rc=$?
-  [ "$rc" -eq 0 ] || fail "plain-clone secondmate spawn failed"$'\n'"$out"
-  [ -f "$home/state/admission.meta" ] || fail "plain-clone secondmate spawn did not publish metadata"
+  [ "$rc" -ne 0 ] || fail "stubbed plain-clone launch bypassed exact-process verification"
+  assert_contains "$out" "trusted launch identity changed for secondmate admission" \
+    "plain-clone fixture did not reach exact-process verification"
+  [ -f "$home/state/admission.meta" ] || fail "failed plain-clone launch lost durable recovery metadata"
   [ ! -e "$home/state/.spawn-admission.lock" ] \
     || fail "successful plain-clone spawn left its task lock held"
   [ ! -e "$home/state/.locks/spawn-admission.lock" ] \
@@ -1072,7 +1088,7 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp() {
     && fm_slot_stamp_field "$subhome" task >/dev/null 2>&1 ); then
     fail "plain-clone secondmate spawn wrote a pooled-slot stamp"
   fi
-  pass "plain-clone secondmate homes launch without pooled-slot ownership stamps"
+  pass "plain-clone secondmate homes reach exact-process verification without pooled-slot ownership stamps"
 }
 
 test_fm_send_refuses_bare_window_without_home_meta() {
@@ -1110,7 +1126,9 @@ test_secondmate_teardown_retires_empty_home() {
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   subhome_abs=$(cd "$subhome" && pwd -P)
   cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
+window=@42
+backend=tmux
+tmux_pane_id=%42
 worktree=$subhome
 project=$subhome
 harness=echo
@@ -1166,7 +1184,8 @@ test_secondmate_teardown_refuses_mismatched_lease_holder() {
   mkdir -p "$home/state" "$home/data" "$subhome/state"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   fm_write_meta "$home/state/domain.meta" \
-    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "window=@42" "backend=tmux" "tmux_pane_id=%42" \
+    "endpoint_generation=endpoint-domain" "worktree=$subhome" "project=$subhome" \
     "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
     "home=$subhome" "projects=alpha"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"

@@ -92,7 +92,8 @@ test_guard_banner() {
 
 run_bootstrap() {
   # No projects/ under the home keeps fleet sync inert; grep isolates the line.
-  FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+  FM_BOOTSTRAP_DETECT_ONLY=1 FM_ROOT_OVERRIDE="$1" FM_HOME="$1" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
 
 test_bootstrap_line() {
@@ -109,7 +110,8 @@ test_bootstrap_line() {
   git -C "$repo" checkout -q -B fm/tangle-bb2
   out=$(run_bootstrap "$repo" | grep '^TANGLE:' || true)
   assert_contains "$out" "fm/tangle-bb2" "bootstrap did not report the tangled branch"
-  assert_contains "$out" "checkout main" "bootstrap TANGLE line lacked the restore remediation"
+  assert_contains "$out" "leave restore work to the session holding the fleet lock" \
+    "read-only bootstrap TANGLE line lacked the lock-owner remediation"
   pass "fm-bootstrap: TANGLE problem line fires only for a feature branch in the primary"
 }
 
@@ -120,7 +122,7 @@ test_bootstrap_line() {
 test_brief_assertion_precedes_branch() {
   local home brief iso br
   home="$TMP_ROOT/brief-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-cc3 alpha >/dev/null 2>&1
   brief="$home/data/tangle-brief-cc3/brief.md"
   assert_present "$brief" "brief was not scaffolded"
@@ -162,6 +164,7 @@ case "$*" in
       exit 0
     fi
     printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*) printf '%s\n' '%42'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message)
@@ -171,9 +174,12 @@ case "${1:-}" in
     esac
     exit 0 ;;
   list-windows) exit 0 ;;
+  list-panes) printf '%s\n' '%42'; exit 0 ;;
   has-session|new-session|send-keys) exit 0 ;;
   kill-window) printf 'kill-window\n' >> "${FM_TMUX_REC:-/dev/null}"; exit 0 ;;
   new-window) printf '%s\n' '@42'; exit 0 ;;
+  set-option) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE.endpoint"; exit 0 ;;
+  show-options) cat "$FM_FAKE_TMUX_STATE.endpoint"; exit 0 ;;
   set-window-option) exit 0 ;;
   rename-window) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE"; exit 0 ;;
 esac
@@ -200,7 +206,7 @@ run_spawn() {
 test_spawn_isolation_abort() {
   local home proj fakebin out status
   home="$TMP_ROOT/spawn-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
   # A genuine isolated linked worktree of the project, detached on the default.
@@ -229,7 +235,7 @@ test_spawn_isolation_abort() {
 test_spawn_wrong_project_worktree_aborts() {
   local home proj unrelated unrelated_wt fakebin rec out status
   home="$TMP_ROOT/spawn-wrong-project-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
   proj=$(make_repo "$TMP_ROOT/spawn-target-project")
   unrelated=$(make_repo "$TMP_ROOT/spawn-unrelated-project")
   unrelated_wt="$TMP_ROOT/spawn-unrelated-worktree"
@@ -256,7 +262,7 @@ test_spawn_wrong_project_worktree_aborts() {
 test_spawn_transient_wrong_project_path_recovers() {
   local home proj unrelated target_wt fakebin rec seq out status
   home="$TMP_ROOT/spawn-transient-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
   proj=$(make_repo "$TMP_ROOT/spawn-transient-target")
   unrelated=$(make_repo "$TMP_ROOT/spawn-transient-unrelated")
   target_wt="$TMP_ROOT/spawn-transient-wt"

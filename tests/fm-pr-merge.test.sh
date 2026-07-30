@@ -15,6 +15,7 @@ make_case() {
   ln -s "$SCRIPT" "$dir/bin/fm-pr-merge.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-procargs-lib.sh" "$dir/bin/fm-procargs-lib.sh"
   cat > "$dir/bin/fm-pr-check.sh" <<'SH'
 #!/usr/bin/env bash
 meta="$FM_STATE_OVERRIDE/$1.meta"

@@ -222,8 +222,8 @@ test_different_threads_remain_excluded() {
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
   expect_code 1 "$status" "different live Codex thread must be excluded"
-  assert_contains "$out" "primary identity is not bound" \
-    "live owner without exact authority did not fail closed"
+  assert_contains "$out" "another live firstmate session holds the lock" \
+    "protected fixture did not preserve live-owner exclusion"
 
   pass "different Codex threads stay excluded from live legacy owners"
 }
@@ -332,12 +332,14 @@ test_wrong_capability_cannot_forge_or_release_authority() {
   exec {wrong_fd}<"$wrong_file"
   rm -f "$wrong_file"
   out=$(FM_SESSION_AUTHORITY_FD="$wrong_fd" \
+    FM_SESSION_AUTHORITY_DURABLE_FD="$wrong_fd" \
     run_lock "$home" thread-forged "$fakebin" 2>&1) || status=$?
   expect_code 1 "$status" "a foreign capability must not replace keyed authority"
   [ "$(cat "$home/state/.lock")" = "$before" ] \
     || fail "foreign capability replaced the keyed lock owner"
   ( cd "$home" && printf '{"hook_event_name":"SessionEnd","session_id":"thread-keyed"}\n' \
-    | FM_SESSION_AUTHORITY_FD="$wrong_fd" FM_ROOT_OVERRIDE="$home" \
+    | FM_SESSION_AUTHORITY_FD="$wrong_fd" \
+      FM_SESSION_AUTHORITY_DURABLE_FD="$wrong_fd" FM_ROOT_OVERRIDE="$home" \
       FM_HOME="$home" CODEX_THREAD_ID=thread-keyed bash "$HOOK" )
   [ "$(cat "$home/state/.lock")" = "$before" ] \
     || fail "foreign capability released keyed authority"

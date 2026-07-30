@@ -43,6 +43,9 @@ case "${1:-}" in
         uses_window_id "$@" || exit 64
         cat "${FM_FAKE_TMUX_STATE:?}"
         exit 0 ;;
+      *"#{pane_id}"*)
+        printf '%s\n' '%42'
+        exit 0 ;;
     esac
     printf 'firstmate\n'
     exit 0 ;;
@@ -66,9 +69,16 @@ case "${1:-}" in
     esac
     exit 64 ;;
   has-session|new-session) exit 0 ;;
+  list-panes) printf '%s\n' '%42'; exit 0 ;;
   new-window)
     [ "${2:-}" = -dP ] && [ "${3:-}" = -F ] && [ "${4:-}" = '#{window_id}' ] || exit 64
     printf '%s\n' "${FM_FAKE_NEW_WINDOW_ID-@42}"
+    exit 0 ;;
+  set-option)
+    printf '%s\n' "${@: -1}" > "${FM_FAKE_TMUX_STATE:?}.endpoint"
+    exit 0 ;;
+  show-options)
+    cat "${FM_FAKE_TMUX_STATE:?}.endpoint"
     exit 0 ;;
   set-window-option)
     uses_window_id "$@" || exit 64

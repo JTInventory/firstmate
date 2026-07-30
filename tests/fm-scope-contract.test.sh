@@ -56,6 +56,7 @@ test_invalid_contracts_fail_before_spawn() {
   [ "$rc" -ne 0 ] || fail "duplicate and unresolved scope identifiers were accepted"
 
   set +e
+  mkdir -p "$dir/empty-home/data" "$dir/empty-home/state"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/empty-home" FM_DATA_OVERRIDE="$dir/empty-home/data" \
     FM_STATE_OVERRIDE="$dir/empty-home/state" "$BRIEF" task-empty project-a --scope-contract= \
     >"$dir/empty.out" 2>"$dir/empty.err"

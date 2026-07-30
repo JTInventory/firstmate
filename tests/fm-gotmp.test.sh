@@ -43,6 +43,16 @@ install_fake_tmux() {
   local fake=$1
   cat > "$fake/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_id}"*) printf '%%42\n' ;;
+      *"#{window_id}"*) printf '@42\n' ;;
+    esac
+    ;;
+  list-panes) printf '%%42\n' ;;
+  show-options) printf 'endpoint-fixture\n' ;;
+esac
 exit 0
 SH
   chmod +x "$fake/bin/tmux"
@@ -63,6 +73,7 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
   : > "$fake/bin/fm-pending-reply-lib.sh"
@@ -71,6 +82,8 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake/bin/fm-agent-cwd-lib.sh"
   ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
   ln -s "$ROOT/bin/fm-worker-isolation-lib.sh" "$fake/bin/fm-worker-isolation-lib.sh"
+  ln -s "$ROOT/bin/fm-procargs-lib.sh" "$fake/bin/fm-procargs-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -93,7 +106,11 @@ fm_assert_task_branch_matches_meta() { return 0; }
 SH
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
   cat > "$fake/state/$id.meta" <<META
-window=fakeses:fm-$id
+task=$id
+window=@42
+tmux_pane_id=%42
+endpoint_generation=endpoint-fixture
+home=$fake
 worktree=$TMP_ROOT/nonexistent-worktree-$id
 project=$TMP_ROOT/nonexistent-project-$id
 harness=claude
@@ -155,9 +172,10 @@ test_teardown_removes_tasktmp_dir() {
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
-    bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
-    || fail "teardown exited non-zero with a valid tasktmp"
+  local out
+  out=$(PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" \
+    FM_STATE_OVERRIDE="$fake/state" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+    || fail "teardown exited non-zero with a valid tasktmp: $out"
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
@@ -174,6 +192,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
   : > "$fake/bin/fm-pending-reply-lib.sh"
@@ -182,6 +201,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake/bin/fm-agent-cwd-lib.sh"
   ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
   ln -s "$ROOT/bin/fm-worker-isolation-lib.sh" "$fake/bin/fm-worker-isolation-lib.sh"
+  ln -s "$ROOT/bin/fm-procargs-lib.sh" "$fake/bin/fm-procargs-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -200,7 +221,11 @@ fm_assert_task_branch_matches_meta() { return 0; }
 SH
   # No tasktmp= line at all.
   cat > "$fake/state/$id.meta" <<META
-window=fakeses:fm-$id
+task=$id
+window=@42
+tmux_pane_id=%42
+endpoint_generation=endpoint-fixture
+home=$fake
 worktree=$TMP_ROOT/nonexistent-wt-$id
 project=$TMP_ROOT/nonexistent-proj-$id
 harness=claude

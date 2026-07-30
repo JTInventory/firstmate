@@ -58,7 +58,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/home" "$case_dir/state" "$case_dir/config" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -69,7 +69,14 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+if [ "${1:-}" = show-options ]; then
+  printf '%s\n' endpoint-task-x1
+elif [ "${1:-}" = display-message ]; then
+  case "${*: -1}" in
+    '#{pane_id}') printf '%%42\n' ;;
+    '#{window_id}') printf '@42\n' ;;
+  esac
+fi
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -130,7 +137,12 @@ SH
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "task=task-x1" \
+    "window=@42" \
+    "backend=tmux" \
+    "tmux_pane_id=%42" \
+    "endpoint_generation=endpoint-task-x1" \
+    "home=$case_dir/home" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
@@ -264,8 +276,10 @@ SH
 run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEST_AGENT_PIDS="$$" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -282,7 +296,8 @@ test_local_only_fork_remote_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
+  expect_code 0 "$rc" \
+    "fork-allow: teardown should succeed when HEAD is on a fork remote: $(cat "$case_dir/stderr")"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
@@ -706,6 +721,9 @@ test_teardown_retries_transient_index_lock() {
   local case_dir rc wt_head attempts
   case_dir=$(make_case transient-index-lock)
   write_meta "$case_dir" local-only ship
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$case_dir/wt" task-x1 "$case_dir/home" ) \
+    || fail "transient-index-lock: could not create slot ownership fixture"
   wt_commit "$case_dir" "landed work before transient lock"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"

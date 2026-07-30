@@ -2506,12 +2506,8 @@ if [ "$PARENT_PENDING_OPEN" -eq 1 ]; then
   fi
 fi
 
-cleanup_direct_pr_refs || {
-  echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
-  exit 1
-}
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 remove_grok_turnend_auth "$STATE" "$ID"
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
@@ -2585,6 +2581,10 @@ if [ "$TOP_SLOT_ACTION" = return ]; then
     exit 1
   }
 fi
+cleanup_direct_pr_refs || {
+  echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
+  exit 1
+}
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit 1

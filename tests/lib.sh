@@ -29,6 +29,7 @@ FM_TEST_LIB_SOURCED=1
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export FM_TEST_PROCESS=1
 unset FM_AGENT_ROLE FM_AGENT_TASK FM_AGENT_OWNER_HOME
 
 # --- ambient Herdr isolation ------------------------------------------------
@@ -88,12 +89,33 @@ fm_test_tmproot() {
 }
 
 fm_test_session_authority_fd() {
-  local dir=$1 key durable_key
+  local dir=$1 key durable_key inherited_fd inherited_durable_fd
   mkdir -p "$dir"
   key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  inherited_fd=${FM_TEST_AUTHORITY_FD:-}
+  inherited_durable_fd=${FM_TEST_DURABLE_AUTHORITY_FD:-}
+  if [ -n "$inherited_fd" ] && [ -n "$inherited_durable_fd" ]; then
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    FM_SESSION_AUTHORITY_FD=$inherited_fd
+    FM_SESSION_AUTHORITY_DURABLE_FD=$inherited_durable_fd
+    if fm_session_authority_capability_present \
+      && fm_session_authority_durable_capability_present; then
+      export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+      return 0
+    fi
+    unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+  fi
   if ( : <&9 ) 2>/dev/null || ( : <&18 ) 2>/dev/null; then
-    echo "test setup: authority descriptors are already in use" >&2
-    return 1
+    FM_SESSION_AUTHORITY_FD=9
+    FM_SESSION_AUTHORITY_DURABLE_FD=18
+    export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    fm_session_authority_capability_present \
+      && fm_session_authority_durable_capability_present || {
+        echo "test setup: authority descriptors are already in use" >&2
+        return 1
+    }
+    return 0
   fi
   durable_key=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
   exec 9< <(while :; do printf '%s\n' "$key"; done)

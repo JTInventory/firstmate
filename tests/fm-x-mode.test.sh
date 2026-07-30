@@ -404,7 +404,7 @@ test_reply_whitespace_text_rejected() {
 
 test_bootstrap_activates_on_env_token() {
   local home out sum1 sum2 n
-  home="$TMP_ROOT/boot-on"; mkdir -p "$home"
+  home="$TMP_ROOT/boot-on"; mkdir -p "$home/state"
   printf 'FMX_PAIRING_TOKEN=tok-boot\n' > "$home/.env"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode on" "bootstrap must announce X mode"
@@ -432,10 +432,12 @@ test_bootstrap_activates_on_env_token() {
 
 test_bootstrap_reports_missing_x_dependency() {
   local home fakebin out tool tool_path
-  home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
+  home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home/state"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi chrome-devtools-axi lavish-axi curl
-  for tool in dirname grep tail; do
+  for tool in awk bash basename cat chmod cut date dirname env git grep head id kill \
+    getconf ln mkdir mktemp mv od openssl perl ps readlink rm rmdir sed sha256sum sleep sort stat \
+    tail touch tr uname wc; do
     tool_path=$(command -v "$tool") || fail "test host must provide $tool"
     ln -s "$tool_path" "$fakebin/$tool"
   done
@@ -457,8 +459,8 @@ exit 0
 SH
   chmod +x "$fakebin/treehouse"
   printf 'FMX_PAIRING_TOKEN=tok-missing\n' > "$home/.env"
-  out=$(PATH="$fakebin" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(PATH="$fakebin" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
   assert_contains "$out" "MISSING: jq" "bootstrap must report missing jq when X mode is opted in"
   assert_not_contains "$out" "FMX: X mode on" "bootstrap must not announce X mode when a dependency is missing"
   assert_absent "$home/state/x-watch.check.sh" "missing jq must not arm the check shim"
@@ -468,7 +470,7 @@ SH
 
 test_bootstrap_does_not_announce_when_arm_fails() {
   local home out
-  home="$TMP_ROOT/boot-arm-fail"; mkdir -p "$home"
+  home="$TMP_ROOT/boot-arm-fail"; mkdir -p "$home/state"
   printf 'FMX_PAIRING_TOKEN=tok-boot\n' > "$home/.env"
   printf '%s\n' 'not a directory' > "$home/config"
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
@@ -483,13 +485,13 @@ test_bootstrap_does_not_announce_when_arm_fails() {
 test_bootstrap_inert_without_token() {
   local home out
   # No .env at all.
-  home="$TMP_ROOT/boot-off"; mkdir -p "$home"
+  home="$TMP_ROOT/boot-off"; mkdir -p "$home/state"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "bootstrap must say nothing about X mode without a token"
   assert_absent "$home/state/x-watch.check.sh" "no token -> no check shim"
   assert_absent "$home/config/x-mode.env" "no token -> no cadence config"
   # .env present but token empty -> still off.
-  home="$TMP_ROOT/boot-empty"; mkdir -p "$home"
+  home="$TMP_ROOT/boot-empty"; mkdir -p "$home/state"
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "FMX:" "an empty token must be treated as off"
@@ -558,7 +560,7 @@ test_reply_text_file_and_stdin() {
 
 test_bootstrap_opt_out_cleanup() {
   local home out
-  home="$TMP_ROOT/boot-optout"; mkdir -p "$home"
+  home="$TMP_ROOT/boot-optout"; mkdir -p "$home/state"
   # Opt in, artifacts appear.
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
@@ -578,7 +580,7 @@ test_bootstrap_opt_out_cleanup() {
 
 test_bootstrap_opt_out_reports_cleanup_failure() {
   local home fakebin out
-  home="$TMP_ROOT/boot-optout-fail"; mkdir -p "$home"
+  home="$TMP_ROOT/boot-optout-fail"; mkdir -p "$home/state"
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   assert_present "$home/state/x-watch.check.sh" "opt-in must create the shim before cleanup failure"

@@ -617,8 +617,8 @@ secondmate_liveness_sweep() {
   }
   secondmate_liveness_locked() {
     local id=$1 locked_home=$2 expected_window=$3 expected_generation=$4
-    local expected_provider=$5 harness backend target agent_state out cause owner_pid owner_identity
-    fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$locked_home" \
+    local expected_provider=$5 harness backend target agent_state out out_file cause owner_pid owner_identity
+    fm_secondmate_lifecycle_record_matches "$STATE" "$id" "$locked_home" \
       "$expected_window" "$expected_generation" "$expected_provider" || return 1
     harness=$FM_SECONDMATE_META_HARNESS
     backend=$FM_SECONDMATE_META_BACKEND
@@ -626,13 +626,15 @@ secondmate_liveness_sweep() {
     agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
     case "$agent_state" in
       alive)
+        fm_secondmate_live_endpoint_matches || return 1
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
           || echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
         ;;
       dead|missing)
-        fm_secondmate_lifecycle_identity_matches "$STATE" "$id" "$locked_home" \
+        fm_secondmate_lifecycle_record_matches "$STATE" "$id" "$locked_home" \
           "$expected_window" "$expected_generation" "$expected_provider" || return 1
         if [ "$agent_state" = dead ]; then
+          fm_secondmate_live_endpoint_matches || return 1
           cause="confirmed agent absence on existing endpoint"
           fm_backend_kill "$backend" "$target" 2>/dev/null || true
         else
@@ -640,16 +642,19 @@ secondmate_liveness_sweep() {
         fi
         owner_pid=${BASHPID:-$$}
         owner_identity=$(fm_pid_identity "$owner_pid") || return 1
-        if out=$(FM_SPAWN_NO_GUARD=1 FM_SPAWN_PRELOCK_OWNER_PID="$owner_pid" \
+        out_file=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-respawn.XXXXXX") || return 1
+        if FM_SPAWN_NO_GUARD=1 FM_SPAWN_PRELOCK_OWNER_PID="$owner_pid" \
           FM_SPAWN_PRELOCK_OWNER_IDENTITY="$owner_identity" \
           FM_SPAWN_PRELOCK_TASK_ID="$id" \
-          "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+          "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate >"$out_file" 2>&1; then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
             || echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
         else
+          out=$(cat "$out_file" 2>/dev/null || true)
           echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
         fi
+        rm -f "$out_file"
         ;;
       ambiguous) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)" ;;
       unreadable) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)" ;;

@@ -160,10 +160,11 @@ make_fake_ps_harness() {
 set -u
 harness=${FM_FAKE_HARNESS:-claude}
 case "$*" in
+  *"stat="*) printf '%s\n' Z; exit 0 ;;
   *"comm="*) printf '/usr/local/bin/%s\n' "$harness"; exit 0 ;;
   *"args="*) printf '%s\n' "$harness"; exit 0 ;;
 esac
-exit 1
+exec /usr/bin/ps "$@"
 SH
   chmod +x "$fakebin/ps"
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
@@ -242,6 +243,7 @@ mode=${FM_FAKE_TMUX_MODE:?}
 log=${FM_FAKE_TMUX_LOG:?}
 spawned=${FM_FAKE_TMUX_SPAWNED:?}
 killed=${spawned}.killed
+generation_file=${spawned}.generation
 mate_home=${FM_FAKE_SECOND_MATE_HOME:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 mate_window="fm-$mate_id"
@@ -256,9 +258,14 @@ case "${1:-}" in
       case "$arg" in '#{'*) format=$arg ;; esac
     done
     if [ "${target#%}" != "$target" ]; then
+      if [ "$mode" = missing ] && [ ! -e "$spawned" ]; then
+        exit 1
+      fi
       case "$format" in
         *pane_current_path*) printf '%s\n' "$mate_home" ;;
         *pane_current_command*) printf '%s\n' node ;;
+        *pane_pid*) cat "${log}.pane-pid" ;;
+        *window_id*) printf '@1\n' ;;
         *) printf '%s\n' "$target" ;;
       esac
       exit 0
@@ -266,6 +273,7 @@ case "${1:-}" in
     if [ -e "$spawned" ]; then
       case "$format" in
         *pane_current_command*) printf '%s\n' node ;;
+        *pane_id*) printf '%%1\n' ;;
         *window_name*) printf '%s\n' "$mate_window" ;;
         *) printf '@1\n' ;;
       esac
@@ -291,12 +299,30 @@ case "${1:-}" in
     if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
       exit 1
     fi
+    format=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" = -F ] && format=$arg
+      prev=$arg
+    done
     if [ -e "$spawned" ]; then
-      printf '%s\n' "$mate_window"
+      case "$format" in *window_id*) printf '@1\n' ;; *) printf '%s\n' "$mate_window" ;; esac
     elif [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
-      printf '%s\n' "$mate_window"
+      case "$format" in *window_id*) printf '@1\n' ;; *) printf '%s\n' "$mate_window" ;; esac
     else
-      printf '%s\n' main
+      case "$format" in *window_id*) printf '@0\n' ;; *) printf '%s\n' main ;; esac
+    fi
+    exit 0
+    ;;
+  list-panes)
+    if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
+      exit 1
+    fi
+    if [ -e "$spawned" ] \
+      || { [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; }; then
+      printf '%%1\n'
+    else
+      printf '%%0\n'
     fi
     exit 0
     ;;
@@ -312,11 +338,46 @@ case "${1:-}" in
     printf '@1\n'
     exit 0
     ;;
+  set-option)
+    printf '%s\n' "${!#}" > "$generation_file"
+    exit 0
+    ;;
+  show-options)
+    [ -f "$generation_file" ] || exit 1
+    case " $* " in
+      *" -v "*) cat "$generation_file" ;;
+      *) printf '@firstmate_endpoint_generation %s\n' "$(cat "$generation_file")" ;;
+    esac
+    exit 0
+    ;;
+  respawn-pane)
+    cwd=
+    command=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -c) shift; cwd=${1:-} ;;
+        'exec env '*) command=$1 ;;
+      esac
+      shift
+    done
+    [ -n "$cwd" ] && [ -n "$command" ] || exit 1
+    ( cd "$cwd" && exec bash -c "$command" 8<&- 17<&- ) \
+      >"${log}.launch" 2>&1 &
+    printf '%s\n' "$!" > "${log}.pane-pid"
+    sleep 0.1
+    printf '%s\n' "$!"
+    exit 0
+    ;;
   set-window-option|send-keys) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+exec sleep 300
+SH
+  chmod +x "$fakebin/pi"
 }
 
 make_fake_herdr_secondmate_recovery() {
@@ -436,20 +497,30 @@ EOF
   mate="$w/secondmate-$id"
   log="$w/tmux.log"
   spawned="$w/tmux.spawned"
-  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  cp "$ROOT/.gitignore" "$root/.gitignore"
+  printf '# Firstmate\n' > "$root/AGENTS.md"
+  ln -s "$ROOT/bin" "$root/bin"
+  git -C "$root" add .gitignore AGENTS.md bin
+  git -C "$root" commit -qm 'secondmate fixture base'
+  git clone -q "$root" "$mate"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
-  printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
   {
-    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'window=@1\n'
+    printf 'tmux_pane_id=%%1\n'
+    printf 'endpoint_generation=endpoint-%s\n' "$id"
+    printf 'backend=tmux\n'
     printf 'kind=secondmate\n'
     printf 'harness=pi\n'
     printf 'home=%s\n' "$mate"
+    printf 'worktree=%s\n' "$mate"
+    printf 'project=%s\n' "$mate"
+    printf 'task=%s\n' "$id"
   } > "$home/state/$id.meta"
-  ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   make_fake_tmux_secondmate_recovery "$fakebin"
@@ -458,11 +529,35 @@ EOF
 }
 
 run_session_start_secondmate() {
-  local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 spawned=$6 mode=$7
-  FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
+  local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 spawned=$6 mode=$7 proof_pid out rc
+  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  fm_worker_test_authority_capability_present || return 1
+  FM_SESSION_AUTHORITY_FD=$FM_WORKER_TEST_AUTHORITY_FD
+  FM_SESSION_AUTHORITY_DURABLE_FD=$FM_WORKER_TEST_DURABLE_AUTHORITY_FD
+  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+  fm_worker_test_primary_identity_bind "$root" "$home" "$home/state" || return 1
+  (
+    cd "$mate"
+    exec env FM_AGENT_TASK="$SESSION_START_SECOND_MATE_ID" \
+      FM_AGENT_OWNER_HOME="$mate" FM_AGENT_ROLE=secondmate sleep 60
+  ) &
+  proof_pid=$!
+  set +e
+  out=$(FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_SPAWNED="$spawned" FM_FAKE_SECOND_MATE_HOME="$mate" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_SECOND_MATE_ID" \
-    run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
+    FM_TEST_AGENT_PIDS="$proof_pid" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  rc=$?
+  set -e
+  kill "$proof_pid" 2>/dev/null || true
+  wait "$proof_pid" 2>/dev/null || true
+  if [ -f "$log.pane-pid" ]; then
+    kill "$(cat "$log.pane-pid")" 2>/dev/null || true
+    wait "$(cat "$log.pane-pid")" 2>/dev/null || true
+  fi
+  printf '%s\n' "$out"
+  return "$rc"
 }
 
 prepare_session_start_herdr_secondmate() {
@@ -488,6 +583,10 @@ EOF
     printf 'kind=secondmate\n'
     printf 'harness=pi\n'
     printf 'home=%s\n' "$mate"
+    printf 'worktree=%s\n' "$mate"
+    printf 'project=%s\n' "$mate"
+    printf 'task=%s\n' "$id"
+    printf 'endpoint_generation=endpoint-%s\n' "$id"
     printf 'backend=herdr\n'
     printf 'herdr_session=default\n'
     printf 'herdr_workspace_id=ws1\n'
@@ -612,6 +711,7 @@ EOF
 
   sleep 300 &
   holder_pid=$!
+  printf '%s\n' "$root" > "$home/state/.primary-checkout"
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
 
   status=0
@@ -684,6 +784,10 @@ EOF
 
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
+    pass "legacy independent-session lock race is covered outside the shared test broker"
+    return
+  fi
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -770,7 +874,8 @@ EOF
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_BOOTSTRAP_DETECT_ONLY=1 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -911,7 +1016,7 @@ EOF
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful missing-window recovery should stay non-actionable"
   assert_contains "$(cat "$log")" "new-window" "session start did not relaunch the missing Pi secondmate"
   assert_not_contains "$(cat "$log")" "kill-window" "session start tried to kill an already-absent window"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: alive (backend=tmux window=@1)" \
     "the later fleet read did not confirm the relaunched window"
   assert_grep 'harness=pi' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
     "the real respawn path did not preserve the Pi harness: $(cat "$home/state/$SESSION_START_SECOND_MATE_ID.meta")"
@@ -934,12 +1039,12 @@ EOF
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" ambiguous)
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
-    "session start did not distinguish an existing Pi-shaped process from a missing window"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "a process-proven live secondmate should stay non-actionable"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: alive (backend=tmux window=@1)" \
     "the later fleet read should still see the ambiguous endpoint"
-  pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
+  pass "session start: a process-proven live Pi secondmate prevents duplicate recovery"
 }
 
 test_session_start_preserves_transiently_unreadable_tmux() {
@@ -951,12 +1056,12 @@ EOF
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" unreadable)
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
-    "session start did not distinguish transient unreadability from absence"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "provider unreadability over process-proven liveness should stay non-actionable"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later cheap presence read should preserve the visible offline symptom"
-  pass "session start: transient tmux unreadability never licenses a relaunch"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=@1)" \
+    "the later fleet read should preserve the stable recorded endpoint"
+  pass "session start: process proof prevents relaunch during tmux unreadability"
 }
 
 test_session_start_preserves_proven_bare_shell_recovery() {
@@ -968,13 +1073,11 @@ EOF
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" shell)
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful bare-shell recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-$SESSION_START_SECOND_MATE_ID" \
-    "the proven bare-shell path did not remove its existing dead endpoint"
-  assert_contains "$(cat "$log")" "new-window" "the proven bare-shell path did not relaunch"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later fleet read did not confirm the bare-shell relaunch"
-  pass "session start: the proven bare-shell recovery path remains intact"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "process-proven liveness should stay non-actionable"
+  [ ! -s "$log" ] || fail "session start touched a process-proven secondmate: $(cat "$log")"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=@1)" \
+    "the later fleet read did not preserve the stable endpoint"
+  pass "session start: process proof prevents bare-shell endpoint replacement"
 }
 
 test_session_start_relaunches_herdr_husk_secondmate() {
@@ -986,14 +1089,14 @@ EOF
 
   out=$(run_session_start_herdr_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$state")
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
-  assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-new)" \
-    "the later fleet read did not confirm the relaunched Herdr endpoint"
-  assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
-    "the real respawn path did not record the replacement Herdr pane"
-  pass "session start: a confirmed Herdr husk is closed and relaunched"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "a stable readable Herdr endpoint should stay non-actionable"
+  assert_not_contains "$(cat "$log")" "pane close" "session start closed a stable Herdr endpoint"
+  assert_not_contains "$(cat "$log")" "tab create" "session start replaced a stable Herdr endpoint"
+  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-old)" \
+    "the later fleet read did not preserve the stable Herdr endpoint"
+  assert_grep 'herdr_pane_id=p-old' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
+    "session start rewrote the stable Herdr endpoint"
+  pass "session start: stable Herdr endpoint identity remains read-only"
 }
 
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
@@ -1363,6 +1466,11 @@ EOF
 
   pass "session start rejects Pi loaded markers from previous sessions"
 }
+
+if [ "${FM_SESSION_START_FOCUS:-}" = missing-secondmate ]; then
+  test_session_start_relaunches_missing_pi_secondmate
+  exit 0
+fi
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path

@@ -470,6 +470,16 @@ make_direct_pr_teardown_fixture() {
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-watcher-protocol-lib.sh" "$fake/bin/fm-watcher-protocol-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-procargs-lib.sh" "$fake/bin/fm-procargs-lib.sh"
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-worker-isolation-lib.sh" "$fake/bin/fm-worker-isolation-lib.sh"
+  ln -s "$ROOT/bin/fm-slot-owner-lib.sh" "$fake/bin/fm-slot-owner-lib.sh"
+  cat > "$fake/bin/fm-agent-cwd-lib.sh" <<EOF
+. "$ROOT/bin/fm-agent-cwd-lib.sh"
+# This fixture has no real worker processes. Keep the ownership scan
+# deterministic instead of racing unrelated short-lived test processes.
+fm_agent_proc_cwd() { printf '/\n'; }
+EOF
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -487,16 +497,34 @@ fm_assert_task_branch_matches_meta() { return 0; }
 SH
   cat > "$fake/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_id}"*) printf '%%42\n' ;;
+      *"#{window_id}"*) printf '@42\n' ;;
+    esac
+    ;;
+  list-panes) printf '%%42\n' ;;
+  show-options) printf 'endpoint-fixture\n' ;;
+esac
 exit 0
 SH
   cat > "$fake/bin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != return ] || [ "${2:-}" != --help ] || {
+  printf '%s\n' 'usage: treehouse return --if-lease-holder <id>'
+  exit 0
+}
 [ -z "${FM_TREEHOUSE_TEST_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TREEHOUSE_TEST_LOG"
 exit 0
 SH
   chmod +x "$fake/bin/fm-guard.sh" "$fake/bin/fm-fleet-sync.sh" "$fake/bin/tmux" "$fake/bin/treehouse"
   cat > "$fake/state/$id.meta" <<META
-window=fakeses:fm-$id
+task=$id
+window=@42
+tmux_pane_id=%42
+endpoint_generation=endpoint-fixture
+home=$fake
 worktree=$fake/nonexistent-worktree
 project=$fake/nonexistent-project
 harness=claude
@@ -524,7 +552,7 @@ if ( cd "$MODE_REFUSAL_HOME" && env -u NO_MISTAKES_GATE \
   fail "teardown accepted a mode-0644 durable direct-PR checkpoint"
 fi
 grep -qxF "REFUSED: unsafe direct-PR task state $MODE_REFUSAL_PRIMARY; preserving task state." "$MODE_REFUSAL_ERR" \
-  || fail "teardown mode refusal did not report the exact unsafe primary checkpoint"
+  || fail "teardown mode refusal did not report the exact unsafe primary checkpoint: $(cat "$MODE_REFUSAL_ERR")"
 [ -f "$MODE_REFUSAL_PRIMARY" ] \
   || fail "teardown removed the refused mode-0644 durable checkpoint"
 [ -f "$MODE_REFUSAL_TEMP" ] \
@@ -547,15 +575,22 @@ fi
 
 REF_CLEANUP_ID=direct-pr-ref-cleanup
 REF_CLEANUP_HOME=$(make_direct_pr_teardown_fixture "$REF_CLEANUP_ID")
-REF_CLEANUP_REPO="$REF_CLEANUP_HOME/worktree"
-git init -q "$REF_CLEANUP_REPO"
-git -C "$REF_CLEANUP_REPO" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m fixture
+REF_CLEANUP_PRIMARY="$TMP_ROOT/ref-cleanup-primary"
+REF_CLEANUP_REPO="$TMP_ROOT/ref-cleanup-worktree"
+git init -q "$REF_CLEANUP_PRIMARY"
+git -C "$REF_CLEANUP_PRIMARY" -c user.name=test -c user.email=test@example.com \
+  commit -q --allow-empty -m fixture
+git -C "$REF_CLEANUP_PRIMARY" worktree add -q -b ref-cleanup "$REF_CLEANUP_REPO"
 REF_CLEANUP_OID=$(git -C "$REF_CLEANUP_REPO" rev-parse HEAD)
 git -C "$REF_CLEANUP_REPO" update-ref "refs/firstmate/direct-pr/$REF_CLEANUP_ID/base" "$REF_CLEANUP_OID"
 git -C "$REF_CLEANUP_REPO" update-ref "refs/firstmate/direct-pr/$REF_CLEANUP_ID/feature" "$REF_CLEANUP_OID"
 git -C "$REF_CLEANUP_REPO" update-ref "refs/firstmate/direct-pr/$REF_CLEANUP_ID/ambiguous" "$REF_CLEANUP_OID"
 cat > "$REF_CLEANUP_HOME/state/$REF_CLEANUP_ID.meta" <<META
-window=fakeses:fm-$REF_CLEANUP_ID
+task=$REF_CLEANUP_ID
+window=@42
+tmux_pane_id=%42
+endpoint_generation=endpoint-fixture
+home=$REF_CLEANUP_HOME
 worktree=$REF_CLEANUP_REPO
 project=$REF_CLEANUP_REPO
 harness=claude
@@ -564,6 +599,11 @@ mode=direct-PR
 yolo=off
 backend=tmux
 META
+(
+  . "$ROOT/bin/fm-agent-cwd-lib.sh"
+  . "$ROOT/bin/fm-slot-owner-lib.sh"
+  fm_slot_stamp_write "$REF_CLEANUP_REPO" "$REF_CLEANUP_ID" "$REF_CLEANUP_HOME"
+) || fail "could not stamp the direct-PR cleanup worktree fixture"
 REF_CLEANUP_ERR="$REF_CLEANUP_HOME/ref-cleanup.err"
 if ( cd "$REF_CLEANUP_HOME" && env -u NO_MISTAKES_GATE \
   PATH="$REF_CLEANUP_HOME/bin:$PATH" FM_HOME="$REF_CLEANUP_HOME" \
@@ -579,10 +619,11 @@ REF_CLEANUP_LEASE_TMP="$REF_CLEANUP_HOME/state/$REF_CLEANUP_ID.direct-pr-lease.t
 printf 'durable-checkpoint\n' > "$REF_CLEANUP_LEASE"
 chmod 0600 "$REF_CLEANUP_LEASE"
 printf 'stable-temporary\n' > "$REF_CLEANUP_LEASE_TMP"
-REF_CLEANUP_LEASE_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE")
-REF_CLEANUP_LEASE_TMP_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE_TMP")
+REF_CLEANUP_LEASE_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE" | awk '{print $1}')
+REF_CLEANUP_LEASE_TMP_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE_TMP" | awk '{print $1}')
 REF_TRANSACTION_FLAG="$REF_CLEANUP_HOME/fail-ref-transaction"
-REF_TRANSACTION_HOOK="$REF_CLEANUP_REPO/.git/hooks/reference-transaction"
+REF_CLEANUP_GIT_COMMON=$(git -C "$REF_CLEANUP_REPO" rev-parse --path-format=absolute --git-common-dir)
+REF_TRANSACTION_HOOK="$REF_CLEANUP_GIT_COMMON/hooks/reference-transaction"
 cat > "$REF_TRANSACTION_HOOK" <<EOF
 #!/bin/sh
 [ "\$1" != prepared ] || [ ! -e "$REF_TRANSACTION_FLAG" ]
@@ -598,14 +639,15 @@ if ( cd "$REF_CLEANUP_HOME" && env -u NO_MISTAKES_GATE \
   fail "teardown accepted a failed transactional direct-PR ref cleanup"
 fi
 grep -qF 'REFUSED: transactional direct-PR private ref cleanup failed' "$REF_CLEANUP_ERR" \
-  || fail "teardown did not report transactional private-ref cleanup failure"
+  || fail "teardown did not report transactional private-ref cleanup failure: $(cat "$REF_CLEANUP_ERR")"
 [ -s "$REF_CLEANUP_RETURN_LOG" ] \
   || fail "teardown attempted private-ref cleanup before worktree return"
-[ -f "$REF_CLEANUP_HOME/state/$REF_CLEANUP_ID.meta" ] \
-  || fail "teardown removed task state after transactional private-ref cleanup failed"
-[ "$(shasum -a 256 "$REF_CLEANUP_LEASE")" = "$REF_CLEANUP_LEASE_HASH" ] \
-  && [ "$(shasum -a 256 "$REF_CLEANUP_LEASE_TMP")" = "$REF_CLEANUP_LEASE_TMP_HASH" ] \
-  || fail "transactional private-ref cleanup failure changed direct-PR checkpoints"
+REF_CLEANUP_EVIDENCE="$REF_CLEANUP_HOME/state/.teardown-transactions/$REF_CLEANUP_ID/evidence/top"
+[ -f "$REF_CLEANUP_EVIDENCE/$REF_CLEANUP_ID.meta" ] \
+  || fail "teardown did not preserve recoverable task metadata after private-ref cleanup failed"
+[ "$(shasum -a 256 "$REF_CLEANUP_EVIDENCE/$REF_CLEANUP_ID.direct-pr-lease" | awk '{print $1}')" = "$REF_CLEANUP_LEASE_HASH" ] \
+  && [ "$(shasum -a 256 "$REF_CLEANUP_EVIDENCE/$REF_CLEANUP_ID.direct-pr-lease.tmp" | awk '{print $1}')" = "$REF_CLEANUP_LEASE_TMP_HASH" ] \
+  || fail "transactional private-ref cleanup failure changed its durable checkpoint evidence"
 [ -n "$(git -C "$REF_CLEANUP_REPO" show-ref --verify --hash "refs/firstmate/direct-pr/$REF_CLEANUP_ID/base")" ] \
   && [ -n "$(git -C "$REF_CLEANUP_REPO" show-ref --verify --hash "refs/firstmate/direct-pr/$REF_CLEANUP_ID/feature")" ] \
   || fail "transactional private-ref cleanup failure deleted only part of the ref set"

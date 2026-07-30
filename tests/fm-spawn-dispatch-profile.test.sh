@@ -20,18 +20,37 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -f "$FM_FAKE_TMUX_STATE.window-count" ]; then
+      index=$(cat "$FM_FAKE_TMUX_STATE.window-count")
+    else
+      index=1
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}" | sed -n "${index}p"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message)
     case "$*" in
       *"#{window_name}"*) cat "$FM_FAKE_TMUX_STATE" ;;
+      *"#{pane_id}"*) printf '%s\n' '%42' ;;
+      *"#{window_id}"*) printf '%s\n' '@42' ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0 ;;
   list-windows) exit 0 ;;
+  list-panes) printf '%s\n' '%42'; exit 0 ;;
   has-session|new-session|kill-window) exit 0 ;;
-  new-window) printf '%s\n' '@42'; exit 0 ;;
+  new-window)
+    index=$(cat "$FM_FAKE_TMUX_STATE.window-count" 2>/dev/null || printf '0')
+    index=$((index + 1))
+    printf '%s\n' "$index" > "$FM_FAKE_TMUX_STATE.window-count"
+    printf '%s\n' '@42'
+    exit 0
+    ;;
+  set-option) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE.endpoint"; exit 0 ;;
+  show-options) cat "$FM_FAKE_TMUX_STATE.endpoint"; exit 0 ;;
   set-window-option) exit 0 ;;
   rename-window) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE"; exit 0 ;;
   send-keys)
@@ -42,6 +61,16 @@ case "${1:-}" in
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
+      done
+    fi
+    exit 0
+    ;;
+  respawn-pane)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      for a in "$@"; do
+        case "$a" in
+          exec\ env\ *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        esac
       done
     fi
     exit 0
@@ -82,8 +111,8 @@ enable_dispatch_profile() {
 
 make_seeded_secondmate_home() {
   local home=$1 id=$2
-  mkdir -p "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
+  git clone --quiet --shared "$ROOT" "$home"
+  mkdir -p "$home/data"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
@@ -356,17 +385,21 @@ test_pi_omits_invalid_max_effort() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status proj2 wt2 wt_paths
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  proj2="$CASE_DIR/project-2"
+  wt2="$CASE_DIR/wt-2"
+  fm_git_worktree "$proj2" "$wt2" "wt-profile-batch-2"
+  wt_paths=$(printf '%s\n%s' "$WT_DIR" "$wt2")
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  out=$(run_spawn "$HOME_DIR" "$wt_paths" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$proj2" --harness codex --model gpt-5 --effort high)
   status=$?
-  expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
+  expect_code 0 "$status" "batch spawn with shared profile flags should succeed: $out"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
@@ -383,12 +416,13 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  out=$(run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
-  expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement"
-  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
-  assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  expect_code 1 "$status" "stubbed secondmate launch must fail exact-process verification: $out"
+  assert_not_contains "$out" "config/crew-dispatch.json is active" \
+    "dispatch profile blocked a secondmate before exact-process verification"
+  assert_contains "$out" "could not verify the exact launch process" \
+    "secondmate did not reach the exact-process verification boundary"
   [ "$(cat "$sm/config/crew-dispatch.json" 2>/dev/null)" = '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5.6-terra","effort":"medium"}}' ] \
     || fail "secondmate launch did not inherit crew-dispatch.json for future crewmate/scout spawns"
   pass "active crew-dispatch profile does not block secondmate launches"
@@ -404,14 +438,20 @@ test_secondmate_profile_threads_codex_model_and_effort() {
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  out=$(run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
-  expect_code 0 "$status" "secondmate spawn should accept a valid secondmate profile"
-  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use codex"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-sol high
+  expect_code 1 "$status" "stubbed secondmate launch must fail exact-process verification"
+  assert_contains "$out" "could not verify the exact launch process" \
+    "profiled secondmate did not reach exact-process verification"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "secondmate profile did not thread codex model and reasoning effort into launch"
+  assert_contains "$launch" "codex --model" \
+    "secondmate profile did not thread the codex model option into launch"
+  assert_contains "$launch" "gpt-5.6-sol" \
+    "secondmate profile did not thread the codex model value into launch"
+  assert_contains "$launch" "model_reasoning_effort=\"high\"" \
+    "secondmate profile did not thread codex reasoning effort into launch"
+  assert_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" \
+    "secondmate profile did not preserve the codex launch mode"
   [ ! -e "$sm/config/secondmate-profile.json" ] || fail "secondmate-profile.json must stay primary-local"
   pass "secondmate-profile.json threads Codex model and effort for secondmate launch"
 }

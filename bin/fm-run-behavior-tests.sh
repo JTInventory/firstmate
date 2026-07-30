@@ -145,7 +145,58 @@ run_one() {
     fi
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
-    bash "$test_path"
+    python3 - "$test_path" <<'PY'
+import os
+import socket
+import sys
+import threading
+
+keys = {
+    19: b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+    18: b"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\n",
+}
+
+writers = []
+for target_fd, key in keys.items():
+    reader, writer = socket.socketpair()
+    os.dup2(reader.fileno(), target_fd)
+    os.set_inheritable(target_fd, True)
+    reader.close()
+    writers.append((writer, key))
+
+def serve(writer, key):
+    while True:
+        try:
+            writer.sendall(key)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+for writer, key in writers:
+    threading.Thread(target=serve, args=(writer, key), daemon=True).start()
+
+env = os.environ.copy()
+env["FM_TEST_AUTHORITY_FD"] = "19"
+env["FM_TEST_DURABLE_AUTHORITY_FD"] = "18"
+env["FM_TEST_AUTHORITY_BROKER_PID"] = str(os.getpid())
+env["FM_TEST_PROCESS"] = "1"
+env["FM_TEST_SESSION_LOCK_STABLE_OWNER"] = "1"
+status = os.spawnve(
+    os.P_WAIT,
+    "/usr/bin/bash",
+    [
+        "bash",
+        "-c",
+        'FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_OWNER_PID; '
+        'exec /usr/bin/bash "$1"',
+        "fm-test-authority",
+        sys.argv[1],
+    ],
+    env,
+)
+for writer, _ in writers:
+    writer.close()
+sys.exit(status)
+PY
   ) >"$log_path" 2>&1
 }
 

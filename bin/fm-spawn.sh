@@ -509,7 +509,7 @@ if fm_spawn_legacy_task_lock_busy_except "$STATE" \
   echo "error: an older spawn or teardown is still changing this firstmate home" >&2
   exit 1
 fi
-LEGACY_EXCLUDE_PIDS=$$
+LEGACY_EXCLUDE_PIDS=${BASHPID:-$$}
 if [ "${FM_SPAWN_BATCH_PARENT_PID:-}" = "$PPID" ] \
   && fm_lifecycle_process_script "$PPID"; then
   BATCH_PARENT_SCRIPT=$(fm_lifecycle_process_script_path \
@@ -1777,7 +1777,8 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
 if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_ENROLLMENT="$PROJ_ABS/state/.session-authority-enrollment"
   SPAWN_AUTHORITY_LAUNCH=$(fm_session_random_hex 32) || exit 1
-  LAUNCH="PATH=$(shell_quote "$PATH") GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") ${WORKER_ENV_PREFIX}$(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
+  SPAWN_AUTHORITY_COMMAND="PATH=$(shell_quote "$PATH") GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") ${WORKER_ENV_PREFIX}exec $(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
+  LAUNCH="sh -c $(shell_quote "$SPAWN_AUTHORITY_COMMAND")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 fi
@@ -1826,17 +1827,29 @@ if [ "$KIND" = secondmate ]; then
   }
   SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS=0
   while [ "$SPAWN_AUTHORITY_ENDPOINT_ATTEMPTS" -lt 250 ]; do
-    if fm_backend_launch_process_is_current \
+    SPAWN_AUTHORITY_PROCESS_CURRENT=0
+    SPAWN_AUTHORITY_PROCESS_SCRIPT=0
+    fm_backend_launch_process_is_current \
       "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$SPAWN_AUTHORITY_ENDPOINT_PID" \
       "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
-      && fm_session_process_runs_script \
-        "$SPAWN_AUTHORITY_ENDPOINT_PID" \
-        "$PROJ_ABS/bin/fm-session-authority-exec.sh" \
-      && [ "$(fm_session_process_argument_value \
-        "$SPAWN_AUTHORITY_ENDPOINT_PID" --enrollment-launch 2>/dev/null)" \
-        = "$SPAWN_AUTHORITY_LAUNCH" ] \
-      && [ "$(fm_backend_endpoint_identity \
-        "$BACKEND" "$SPAWN_ENDPOINT_TARGET" 2>/dev/null)" \
+      && SPAWN_AUTHORITY_PROCESS_CURRENT=1
+    fm_session_process_runs_script \
+      "$SPAWN_AUTHORITY_ENDPOINT_PID" \
+      "$PROJ_ABS/bin/fm-session-authority-exec.sh" \
+      && SPAWN_AUTHORITY_PROCESS_SCRIPT=1
+    SPAWN_AUTHORITY_PROCESS_LAUNCH=$(
+      fm_session_process_argument_value \
+        "$SPAWN_AUTHORITY_ENDPOINT_PID" --enrollment-launch 2>/dev/null \
+        || true
+    )
+    SPAWN_AUTHORITY_CURRENT_ENDPOINT=$(
+      fm_backend_endpoint_identity \
+        "$BACKEND" "$SPAWN_ENDPOINT_TARGET" 2>/dev/null || true
+    )
+    if [ "$SPAWN_AUTHORITY_PROCESS_CURRENT" -eq 1 ] \
+      && [ "$SPAWN_AUTHORITY_PROCESS_SCRIPT" -eq 1 ] \
+      && [ "$SPAWN_AUTHORITY_PROCESS_LAUNCH" = "$SPAWN_AUTHORITY_LAUNCH" ] \
+      && [ "$SPAWN_AUTHORITY_CURRENT_ENDPOINT" \
         = "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" ]; then
       break
     fi

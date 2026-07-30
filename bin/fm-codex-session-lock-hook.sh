@@ -48,6 +48,12 @@ if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$CODEX_THREAD_ID" != "$SESSION_ID" ]; the
   exit 0
 fi
 export CODEX_THREAD_ID="$SESSION_ID"
+if [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
+  . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+  fm_worker_primary_authority_matches "session lock acquisition" || exit 0
+  FM_TEST_SESSION_LOCK_STABLE_OWNER=1
+  export FM_TEST_SESSION_LOCK_STABLE_OWNER
+fi
 
 if [ "$EVENT" = SessionStart ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true

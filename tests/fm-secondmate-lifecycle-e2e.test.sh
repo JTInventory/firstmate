@@ -35,6 +35,7 @@ SUB_ABS=
 FAKEBIN=
 LOG="$TMP_ROOT/tmux.log"
 PANE="$TMP_ROOT/pane.txt"
+LEASE="$TMP_ROOT/design.lease"
 ALPHA_ORIGIN=
 BETA_ORIGIN=
 
@@ -69,10 +70,20 @@ EOF
 
 phase_seed() {
   local out
+  git -C "$ROOT" worktree add --detach "$SUB" HEAD >/dev/null \
+    || fail "could not create the linked secondmate home fixture"
+  printf '%s\n' design > "$LEASE"
   out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
     "$ROOT/bin/fm-home-seed.sh" design "$SUB" alpha beta gamma) \
     || fail "seed failed"
   SUB_ABS=$(cd "$SUB" && pwd -P)
+  # fm-home-seed clones the committed fixture repository. Overlay the current
+  # authority implementation so this test exercises the change under review.
+  for file in fm-session-authority-exec.sh fm-session-lock-lib.sh \
+    fm-worker-isolation-lib.sh; do
+    cp "$ROOT/bin/$file" "$SUB/bin/$file"
+    git -C "$SUB" update-index --assume-unchanged "bin/$file"
+  done
 
   assert_contains "$out" "home=$SUB_ABS" "seed did not report the subhome"
   assert_present "$SUB/.fm-secondmate-home" "seed did not mark the subhome"
@@ -114,7 +125,7 @@ phase_spawn() {
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-spawn.sh" design "$SUB" codex --secondmate >/dev/null \
-    || fail "secondmate spawn failed"
+    || fail "secondmate spawn failed: $(cat "$LOG.launch" 2>/dev/null || true)"
 
   local meta="$HOME_DIR/state/design.meta"
   assert_grep 'kind=secondmate' "$meta" "spawn meta did not record kind=secondmate"
@@ -143,7 +154,7 @@ phase_send() {
   # design is a kind=secondmate target, so the request is prefixed with the
   # from-firstmate marker (bin/fm-marker-lib.sh): the send targets the meta window
   # AND carries the marker label, and the original payload still follows it.
-  assert_grep 'send-keys -t firstmate:fm-design -l [fm-from-firstmate]' "$LOG" "send did not use the window recorded in this home's meta, or did not mark the secondmate request"
+  assert_grep 'send-keys -t %42 -l [fm-from-firstmate]' "$LOG" "send did not use the pane recorded in this home's exact endpoint metadata, or did not mark the secondmate request"
   assert_grep 'route this work' "$LOG" "the original request text did not survive the marker"
   assert_no_grep 'send-keys -t other-session:fm-design' "$LOG" "send targeted a foreign same-named window"
   pass "send: a bare fm-<id> secondmate routes to the meta window with the from-firstmate marker"
@@ -205,12 +216,12 @@ phase_recovery() {
   local meta="$HOME_DIR/state/design.meta"
   assert_grep "home=$SUB_ABS" "$meta" "respawn did not preserve the persistent home from the registry"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "respawn did not preserve the project list from the registry"
-  assert_grep 'window=firstmate:fm-design' "$meta" "respawn did not reconstruct the direct-report window"
+  assert_grep 'window=@42' "$meta" "respawn did not reconstruct the exact direct-report window endpoint"
   pass "recovery: respawns from the durable registry and persistent home"
 }
 
 phase_teardown() {
-  local teardown_out pending_reply corr
+  local teardown_out pending_reply corr agent_pid
   for pending_reply in "$HOME_DIR/state/pending-replies"/*; do
     [ -f "$pending_reply" ] || continue
     corr=${pending_reply##*/}
@@ -223,8 +234,12 @@ phase_teardown() {
   . "$ROOT/bin/fm-pending-reply-lib.sh"
   fm_pending_reply_try_resolve "$HOME_DIR/state" "$corr" \
     || fail "correlated secondmate report was not resolved before teardown"
+  agent_pid=$(cat "$LOG.pane-pid")
   : > "$LOG"
-  teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+  teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$LEASE" \
+    FM_TEST_AGENT_PIDS="$agent_pid" \
+    FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
     || fail "teardown failed for the empty secondmate home"
   printf "%s\n" "$teardown_out" | grep -F "Backlog:" >/dev/null \

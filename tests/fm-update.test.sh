@@ -131,7 +131,7 @@ new_world() {
   printf '%s\n' "$owner" > "$w/home/state/.lock"
   printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
   fm_session_authority_write_file "$w/home/state/.session-authority" \
-    "${owner%%|*}" "$owner" "$w/home" "$ROOT"
+    "${owner%%|*}" "$owner" "$w/home" "$w/main"
 
   printf '%s\n' "$w"
 }
@@ -495,10 +495,11 @@ test_firstmate_wrong_branch_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "primary identity is not bound" "off-default firstmate refused"
+  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" \
+    "off-default firstmate was not skipped"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "skipped firstmate HEAD moved"
-  pass "T9 firstmate off its default branch is refused before mutation"
+  pass "T9 firstmate off its default branch is skipped before mutation"
 }
 
 test_firstmate_detached_head_skipped() {
@@ -510,10 +511,11 @@ test_firstmate_detached_head_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "primary identity is not bound" "detached firstmate refused"
+  assert_contains "$out" "firstmate: skipped: detached HEAD, expected main" \
+    "detached firstmate was not skipped"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "detached firstmate HEAD moved"
-  pass "T10 detached firstmate is refused before mutation"
+  pass "T10 detached firstmate is skipped before mutation"
 }
 
 test_unsafe_secondmate_home_skipped_before_git_update() {
@@ -571,8 +573,13 @@ test_replays_interrupted_reread_and_nudge_obligations() {
 }
 
 test_first_protocol_upgrade_requires_installed_updater_pass() {
-  local w fakebin watcher arm out rc
+  local w fakebin watcher arm out rc owner
   w=$(new_protocol_migration_world t13)
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  owner=$(fm_session_lock_owner)
+  printf '%s\n' "$owner" > "$w/home/state/.lock"
+  fm_session_authority_write_file "$w/home/state/.session-authority" \
+    "${owner%%|*}" "$owner" "$w/home" "$w/main"
   fakebin="$w/fakebin"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/tmux"
@@ -666,6 +673,7 @@ cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   *"pane get w1:p2"*) printf '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"tab-1","tokens":{"firstmate_endpoint_generation":"%s"}}}}\n' "$FM_FAKE_HERDR_GENERATION" ;;
+  *"agent get w1:p2"*) printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' ;;
   *"tab get tab-1"*) printf '%s\n' '{"result":{"tab":{"tab_id":"tab-1","workspace_id":"workspace-1"}}}' ;;
   *) exit 1 ;;
 esac
@@ -1371,15 +1379,25 @@ test_live_endpoint_generation_mismatch_refuses_lifecycle_identity() {
 }
 
 test_live_generation_preflight_preserves_primary() {
-  local w before out rc=0
+  local w before out fakebin rc=0
   w=$(new_world t31-live-preflight)
   add_sm "$w" sm1
   bump_origin "$w" instr
   before=$(git -C "$w/main" rev-parse HEAD)
+  rewrite_with_sed 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
   rewrite_with_sed \
     's/^endpoint_generation=.*/endpoint_generation=stale-endpoint/' \
     "$w/home/state/sm1.meta"
-  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1) || rc=$?
+  printf '%s\n' 'backend=tmux' 'tmux_pane_id=%42' \
+    >> "$w/home/state/sm1.meta"
+  fakebin=$(make_fake_tmux "$w/live-generation-fake")
+  : > "$w/live-generation-fake/tmux.log"
+  : > "$w/live-generation-fake/tmux.log.closed"
+  out=$(PATH="$fakebin:$PATH" \
+    FM_FAKE_TMUX_LOG="$w/live-generation-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$w/live-generation-fake/pane.txt" \
+    FM_FAKE_ENDPOINT_GENERATION=live-endpoint \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "stale live endpoint generation passed update preflight"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "primary advanced before stale endpoint generation was refused"
@@ -1406,9 +1424,13 @@ test_corrupt_kind_preflight_preserves_primary() {
 }
 
 test_secondmate_delivery_is_one_locked_generation_transaction() {
-  local w generation fakebin out lock
+  local w generation fakebin out lock target
   w=$(new_world t32)
   add_sm "$w" sm1
+  target=@42
+  rewrite_with_sed 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
+  printf '%s\n' 'backend=tmux' 'tmux_pane_id=%42' \
+    >> "$w/home/state/sm1.meta"
   generation=$(git -C "$w/sm1" rev-parse HEAD)
   mkdir -p "$w/sm1/state"
   fm_update_obligation_write \
@@ -1421,9 +1443,9 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
     FM_FAKE_TMUX_LOG="$w/send-fake/tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$w/send-fake/pane.txt" \
     FM_FAKE_REQUIRED_LOCK="$lock" FM_SEND_SETTLE=0 \
-    "$UPDATE" --deliver-secondmate-nudge main:fm-sm1 "$generation")
+    "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
 
-  assert_contains "$out" "delivered-secondmate-nudge: main:fm-sm1" \
+  assert_contains "$out" "delivered-secondmate-nudge: $target" \
     "locked secondmate delivery did not report completion"
   fm_update_obligation_pending \
     "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
@@ -1440,7 +1462,13 @@ test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
   local crash_meta crash_fakebin crash_resolved crash_journal_snapshot
   local topology_meta topology_fakebin topology_resolved
   local committed_meta committed_fakebin committed_resolved committed_process
+  local owner
   w=$(new_world t32-exact-pane)
+  owner=$(cat "$w/home/state/.lock")
+  printf '%s\n' "$ROOT" > "$w/home/state/.primary-checkout"
+  fm_session_authority_write_file "$w/home/state/.session-authority" \
+    "${owner%%|*}" "$owner" "$w/home" "$ROOT" \
+    || fail "could not bind the migration fixture to its production checkout"
   add_sm "$w" sm1
   rewrite_with_sed 's/^window=.*/window=@42/' "$w/home/state/sm1.meta"
   printf 'tmux_pane_id=%%42\n' >> "$w/home/state/sm1.meta"
@@ -1524,7 +1552,7 @@ SH
     fm_backend_resolve_selector_with_backend fm-sm1 "$w/home/state"
   )
   [ "$resolved" = $'tmux\t%42' ] \
-    || fail "pre-port tmux metadata did not migrate to its exact live pane"
+    || fail "pre-port tmux metadata did not migrate to its exact live pane (got: $resolved)"
   [ ! -e "$w/home/state/.locks/tmux-endpoint-42.migration.lock" ] \
     && [ ! -L "$w/home/state/.locks/tmux-endpoint-42.migration.lock" ] \
     || fail "legacy tmux migration left its recovered lifecycle lock behind"

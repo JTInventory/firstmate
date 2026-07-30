@@ -98,11 +98,42 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ]; then
-  fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" || {
+if [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] \
+  && [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \
+  && fm_session_test_authority_broker_present; then
+  FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
+  FM_SESSION_AUTHORITY_DURABLE_FD=$FM_TEST_DURABLE_AUTHORITY_FD
+  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+fi
+if fm_session_test_authority_broker_present; then
+  if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ] \
+    && [ "$(fm_session_descriptor_identity "$$" \
+        "$FM_SESSION_AUTHORITY_FD" 2>/dev/null || true)" != \
+      "$(fm_session_descriptor_identity "$$" \
+        "$FM_TEST_AUTHORITY_FD" 2>/dev/null || true)" ]; then
+    [ -n "${FM_SESSION_AUTHORITY_BROKER_SCRIPT:-}" ] \
+      && fm_session_authority_broker_present \
+        "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" || {
+        echo "error: trusted session enrollment capability is missing or invalid" >&2
+        exit 1
+      }
+  fi
+  [ "$(fm_session_descriptor_identity "$$" \
+      "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" 2>/dev/null || true)" = \
+    "$(fm_session_descriptor_identity "$$" \
+      "$FM_TEST_DURABLE_AUTHORITY_FD" 2>/dev/null || true)" ] || {
+      echo "error: trusted session enrollment capability is missing or invalid" >&2
+      exit 1
+    }
+fi
+if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ] \
+  && ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD"; then
+  if fm_session_authority_durable_capability_present; then
+    unset FM_SESSION_AUTHORITY_FD
+  else
     echo "error: session authority descriptor isolation is unavailable" >&2
     exit 1
-  }
+  fi
 fi
 authority="$STATE/.session-authority"
 home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || exit 1
@@ -110,6 +141,19 @@ authorized=0
 if fm_session_authority_read "$authority" \
   && [ "$FM_SESSION_AUTHORITY_HOME" = "$home_real" ] \
   && fm_session_authority_is_current_ancestor "$authority"; then
+  authorized=1
+elif [ "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" = 18 ] \
+  && fm_session_authority_durable_capability_present \
+  && fm_session_durable_custodian_validate \
+    "$STATE/.session-durable-authority" \
+  && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home_real" ] \
+  && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$FM_ROOT" ] \
+  && fm_session_process_runs_script \
+    "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
+    "$FM_ROOT/bin/fm-session-durable-authority.sh" \
+  && fm_session_durable_custodian_challenge \
+    "$STATE" "$FM_SESSION_DURABLE_CUSTODIAN_PID" \
+    "$FM_SESSION_DURABLE_CUSTODIAN_START"; then
   authorized=1
 elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   enrollment="$STATE/.session-authority-enrollment"
@@ -184,7 +228,7 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     fm_session_enrollment_consumer_key_validate \
       "$enrollment_consumer_key" "$enrollment_consumer_digest" || exit 1
     enrollment_attempts=0
-    while [ "$enrollment_attempts" -lt 500 ] \
+    while [ "$enrollment_attempts" -lt 1500 ] \
       && { [ ! -f "$enrollment" ] || [ -L "$enrollment" ]; }; do
       sleep 0.02
       enrollment_attempts=$((enrollment_attempts + 1))
@@ -246,6 +290,10 @@ elif fm_worker_primary_bootstrap_matches; then
 fi
 [ "$authorized" -eq 1 ] || {
   echo "error: trusted session enrollment capability is missing or invalid" >&2
+  exit 1
+}
+mkdir -p "$STATE" && [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
+  echo "error: trusted session state directory is unavailable" >&2
   exit 1
 }
 enrollment_fd=${FM_SESSION_AUTHORITY_FD:-}
