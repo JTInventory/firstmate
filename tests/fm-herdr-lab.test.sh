@@ -21,11 +21,11 @@ set -eu
 state=${FM_FAKE_HERDR_STATE:?}
 log=${FM_FAKE_HERDR_LOG:?}
 printf '%s\n' "$*" >> "$log"
-last=
-previous=
-for arg in "$@"; do previous=$last; last=$arg; done
-[ "$previous" = --session ] || { echo 'fake herdr: missing trailing --session' >&2; exit 90; }
-session=$last
+[ "${1:-}" = --session ] \
+  || { echo 'fake herdr: missing leading --session' >&2; exit 90; }
+session=${2:-}
+[ -n "$session" ] || { echo 'fake herdr: missing session name' >&2; exit 90; }
+shift 2
 lab=absent
 [ ! -f "$state/$session" ] || lab=$(cat "$state/$session")
 case "${1:-} ${2:-}" in
@@ -89,7 +89,7 @@ test_guarded_lifecycle() {
   [ "$status" -eq 1 ] || fail "caller-supplied session was not rejected"
   run_fake fm_herdr_lab_teardown "$name" || fail "guarded teardown failed"
   [ ! -e "$TRIPWIRES/$name.fleet-state.json" ] || fail "successful teardown left its tripwire"
-  pass "Herdr lab lifecycle uses trailing session scoping and guarded teardown"
+  pass "Herdr lab lifecycle uses leading session scoping and guarded teardown"
 }
 
 test_missing_tripwire_blocks_destruction() {

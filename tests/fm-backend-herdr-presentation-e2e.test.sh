@@ -37,31 +37,21 @@ REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
-# Log every production-adapter call, remove its already-validated trailing
+# Log every production-adapter call, remove its already-validated leading
 # session flag, and send the operation through the lab helper so that helper
-# remains the sole process which appends the real trailing session flag.
+# remains the sole process which adds the real leading session flag.
 # The adapter's deliberately session-independent version read cannot pass the
 # helper's leading-option guard, so the wrapper sends only that read straight
-# to the absolute real binary with the same explicit trailing lab session.
+# to the absolute real binary with the same explicit leading lab session.
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-{
-  first=1
-  for arg in "$@"; do
-    [ "$first" -eq 0 ] && printf '\t'
-    printf '%s' "$arg"
-    first=0
-  done
-  printf '\n'
-} >> "$HERDR_CALL_LOG"
 args=("$@")
-last_index=$((${#args[@]} - 1))
-flag_index=$((last_index - 1))
 if [ "${#args[@]}" -ge 2 ] \
-   && [ "${args[$flag_index]}" = --session ] \
-   && [ "${args[$last_index]}" = "${HERDR_LAB_SESSION:?}" ]; then
-  unset "args[$last_index]" "args[$flag_index]"
+   && [ "${args[0]}" = --session ] \
+   && [ "${args[1]}" = "${HERDR_LAB_SESSION:?}" ]; then
+  unset 'args[0]' 'args[1]'
+  args=("${args[@]}")
 fi
 set -- "${args[@]}"
 for arg in "$@"; do
@@ -72,8 +62,18 @@ for arg in "$@"; do
       ;;
   esac
 done
+{
+  first=1
+  for arg in "$@"; do
+    [ "$first" -eq 0 ] && printf '\t'
+    printf '%s' "$arg"
+    first=0
+  done
+  printf '\n'
+} >> "$HERDR_CALL_LOG"
 if [ "${1:-}" = --version ]; then
-  exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" "$@" --session "$HERDR_LAB_SESSION"
+  exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" \
+    --session "$HERDR_LAB_SESSION" "$@"
 fi
 focus_snapshot() {
   local list row workspace tab tabs

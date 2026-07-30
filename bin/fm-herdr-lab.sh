@@ -33,7 +33,7 @@ fm_herdr_lab_tripwire_path() { printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_s
 fm_herdr_lab_raw() {
   local name=$1
   shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  HERDR_SESSION="$name" herdr --session "$name" "$@"
 }
 
 fm_herdr_lab_session_list() { fm_herdr_lab_raw "$1" session list --json; }
