@@ -400,14 +400,19 @@ spawn_task() {  # <id> <home> <project>
 }
 
 spawn_secondmate_task() {
-  local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  local id=$1 home=$2 parent_home=${SECOND_PRIMARY_HOME:-$HOME_DIR}
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$parent_home" \
+    FM_ROOT_OVERRIDE="${SECOND_PRIMARY_ROOT:-$ROOT}" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
 }
 
 teardown_task() {  # <id> <home>
-  local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  local id=$1 home=$2 root=$ROOT
+  if [ -n "${SECOND_PRIMARY_HOME:-}" ] \
+    && [ "$home" = "$SECOND_PRIMARY_HOME" ]; then
+    root=$SECOND_PRIMARY_ROOT
+  fi
+  FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force
@@ -880,19 +885,24 @@ pass "real Herdr lab: three repeated create/order/cleanup waves have zero active
 # ------------------------------------------------------------------
 SECOND_HOME_A="$TMP_ROOT/home-2ndmate-alpha"
 SECOND_HOME_B="$TMP_ROOT/home-2ndmate-bravo"
-git clone -q "$ROOT" "$SECOND_HOME_A" || fail "could not clone secondmate A fixture"
-git clone -q "$ROOT" "$SECOND_HOME_B" || fail "could not clone secondmate B fixture"
-for SECOND_FIXTURE_HOME in "$SECOND_HOME_A" "$SECOND_HOME_B"; do
-  for AUTHORITY_FILE in \
-    fm-session-authority-exec.sh \
-    fm-session-enrollment-signer.sh \
-    fm-session-lock-lib.sh \
-    fm-worker-isolation-lib.sh
-  do
-    cp "$ROOT/bin/$AUTHORITY_FILE" "$SECOND_FIXTURE_HOME/bin/$AUTHORITY_FILE"
-    git -C "$SECOND_FIXTURE_HOME" update-index --assume-unchanged -- "bin/$AUTHORITY_FILE"
-  done
-done
+SECOND_PRIMARY_ROOT="$TMP_ROOT/secondmate-primary"
+SECOND_PRIMARY_HOME="$TMP_ROOT/secondmate-parent-home"
+git clone -q "$ROOT" "$SECOND_PRIMARY_ROOT" \
+  || fail "could not clone the secondmate primary fixture"
+git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_A" \
+  || fail "could not clone secondmate A fixture"
+git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_B" \
+  || fail "could not clone secondmate B fixture"
+mkdir -p "$SECOND_PRIMARY_HOME/state" "$SECOND_PRIMARY_HOME/config" \
+  "$SECOND_PRIMARY_HOME/data"
+touch "$SECOND_PRIMARY_HOME/config/herdr-presentation-spaces"
+( . "$ROOT/bin/fm-session-lock-lib.sh"
+  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  FM_HOME="$SECOND_PRIMARY_HOME" FM_ROOT_OVERRIDE="$SECOND_PRIMARY_ROOT" \
+    FM_STATE_OVERRIDE="$SECOND_PRIMARY_HOME/state" \
+    fm_worker_test_primary_identity_bind \
+      "$SECOND_PRIMARY_ROOT" "$SECOND_PRIMARY_HOME"
+) || fail "could not bind the isolated secondmate primary fixture"
 mkdir -p "$SECOND_HOME_A/state" "$SECOND_HOME_A/config" "$SECOND_HOME_A/data" \
   "$SECOND_HOME_B/state" "$SECOND_HOME_B/config" "$SECOND_HOME_B/data"
 printf 'alpha\n' > "$SECOND_HOME_A/.fm-secondmate-home"
@@ -913,9 +923,9 @@ spawn_secondmate_task alpha "$SECOND_HOME_A" > "$TMP_ROOT/alpha.out" 2> "$TMP_RO
   || fail "secondmate alpha spawn failed: $(cat "$TMP_ROOT/alpha.err")"
 [ -f "$SECOND_HOME_A/config/herdr-presentation-spaces" ] \
   || fail "secondmate spawn did not inherit the presentation flag"
-[ ! -e "$HOME_DIR/state/alpha.herdr-presentation" ] \
+[ ! -e "$SECOND_PRIMARY_HOME/state/alpha.herdr-presentation" ] \
   || fail "secondmate spawn published a presentation journal"
-SECOND_META="$HOME_DIR/state/alpha.meta"
+SECOND_META="$SECOND_PRIMARY_HOME/state/alpha.meta"
 [ "$(grep '^kind=' "$SECOND_META" | cut -d= -f2-)" = secondmate ] \
   || fail "secondmate spawn did not record kind=secondmate"
 SECOND_WSID=$(grep '^herdr_workspace_id=' "$SECOND_META" | cut -d= -f2-)
@@ -1274,7 +1284,7 @@ pass "real Herdr lab: legacy projection labels and flat secondmate tabs are left
 for META_HOME_PAIR in \
   "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
   "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
-  "alpha:$HOME_DIR" \
+  "alpha:$SECOND_PRIMARY_HOME" \
   "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B"
 do
   TASK_ID=${META_HOME_PAIR%%:*}
