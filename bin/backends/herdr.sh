@@ -1821,13 +1821,32 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
-fm_backend_herdr_endpoint_identity() {
-  local target=$1 session pane pane_info tab tab_info workspace generation
+fm_backend_herdr_pane_topology_identity() {
+  local target=$1 session pane pane_info tab tab_info workspace
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
   [ "$(printf '%s' "$pane_info" | jq -r '.result.pane.pane_id // empty')" = "$pane" ] || return 1
+  tab=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id // empty') || return 1
+  [ -n "$tab" ] || return 1
+  tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  [ "$(printf '%s' "$tab_info" | jq -r '.result.tab.tab_id // empty')" = "$tab" ] || return 1
+  workspace=$(printf '%s' "$tab_info" | jq -r '.result.tab.workspace_id // empty') || return 1
+  [ -n "$workspace" ] || return 1
+  printf '%s|%s|%s|%s' "$session" "$workspace" "$tab" "$pane"
+}
+
+fm_backend_herdr_endpoint_identity() {
+  local target=$1 session pane pane_info tab tab_info workspace generation
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  pane_info=$(fm_backend_herdr_cli \
+    "$session" pane get "$pane" 2>/dev/null) \
+    || return 1
+  [ "$(printf '%s' "$pane_info" | jq -r '.result.pane.pane_id // empty')" = "$pane" ] \
+    || return 1
   tab=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id // empty') || return 1
   [ -n "$tab" ] || return 1
   tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
@@ -1873,8 +1892,9 @@ fm_backend_herdr_foreground_process_pid() {
 
 fm_backend_herdr_launch_trusted_process() {
   local target=$1 name=$2 cwd=$3 command=$4 expected=$5
+  local replacement_generation=${6:-}
   local session pane identity live_session workspace tab live_pane generation
-  local out returned response_command pid
+  local out returned returned_target response_command pid topology new_identity
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
@@ -1886,24 +1906,75 @@ EOF
   [ "$live_session" = "$session" ] && [ "$live_pane" = "$pane" ] \
     && [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$generation" ] \
     || return 1
+  case "$replacement_generation" in
+    *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
+  esac
   response_command="exec env $command"
   out=$(fm_backend_herdr_cli "$session" agent start "$name" \
     --tab "$tab" \
     --cwd "$cwd" --no-focus -- sh -c "$response_command" 2>/dev/null) || return 1
   printf '%s' "$out" | jq -e \
-    --arg pane "$pane" --arg command "$response_command" '
+    --arg tab "$tab" --arg workspace "$workspace" \
+    --arg command "$response_command" '
       .result.type == "agent_started"
       and (.result.agent | type) == "object"
-      and .result.agent.pane_id == $pane
+      and ((.result.agent.pane_id | type) == "string")
+      and (.result.agent.pane_id | length) > 0
+      and .result.agent.tab_id == $tab
+      and .result.agent.workspace_id == $workspace
       and .result.argv == ["sh", "-c", $command]
     ' >/dev/null 2>&1 || return 1
   returned=$(printf '%s' "$out" \
     | jq -r '.result.agent.pane_id // empty' 2>/dev/null) || return 1
-  [ "$returned" = "$pane" ] || return 1
-  identity=$(fm_backend_herdr_endpoint_identity "$target") || return 1
-  [ "$identity" = "$expected" ] || return 1
-  pid=$(fm_backend_herdr_foreground_process_pid "$target") || return 1
-  printf '%s' "$pid"
+  case "$returned" in *[!A-Za-z0-9._:-]*|"") return 1 ;; esac
+  returned_target="$session:$returned"
+  topology=$(fm_backend_herdr_pane_topology_identity "$returned_target") || {
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$session" "$returned" >/dev/null 2>&1 || true
+    return 1
+  }
+  [ "$topology" = "$session|$workspace|$tab|$returned" ] || {
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$session" "$returned" >/dev/null 2>&1 || true
+    return 1
+  }
+  fm_backend_herdr_bind_endpoint_generation \
+    "$returned_target" "$replacement_generation" || {
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$session" "$returned" >/dev/null 2>&1 || true
+      return 1
+    }
+  new_identity=$(fm_backend_herdr_endpoint_identity "$returned_target") || {
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$session" "$returned" >/dev/null 2>&1 || true
+    return 1
+  }
+  [ "$new_identity" = \
+    "$session|$workspace|$tab|$returned|$replacement_generation" ] || {
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$session" "$returned" >/dev/null 2>&1 || true
+      return 1
+    }
+  pid=$(fm_backend_herdr_foreground_process_pid "$returned_target") || {
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$session" "$returned" >/dev/null 2>&1 || true
+    return 1
+  }
+  if [ "$returned" != "$pane" ]; then
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$session" "$pane" >/dev/null 2>&1 || {
+        fm_backend_herdr_projection_close_pane_focus_preserving \
+          "$session" "$returned" >/dev/null 2>&1 || true
+        return 1
+      }
+  fi
+  fm_backend_herdr_launch_process_is_current \
+    "$returned_target" "$pid" "$new_identity" || {
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$session" "$returned" >/dev/null 2>&1 || true
+      return 1
+    }
+  printf '%s\t%s\t%s' "$pid" "$returned" "$new_identity"
 }
 
 fm_backend_herdr_launch_process_is_current() {

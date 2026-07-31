@@ -1753,6 +1753,51 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 
+spawn_adopt_herdr_launch_endpoint() {  # <pane-id> <endpoint-identity> <generation>
+  local pane=$1 identity=$2 generation=$3 target meta tmp
+  target="$HERDR_SES:$pane"
+  [ "$identity" = \
+    "$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$pane|$generation" ] \
+    || return 1
+  meta="$STATE/$ID.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  tmp=$(mktemp "$STATE/.$ID.meta.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  awk -v old_window="$T" -v new_window="$target" \
+      -v old_pane="$HERDR_PANE_ID" -v new_pane="$pane" \
+      -v old_generation="$ENDPOINT_GENERATION" \
+      -v new_generation="$generation" '
+    $0 == "window=" old_window {
+      window_count += 1
+      print "window=" new_window
+      next
+    }
+    $0 == "herdr_pane_id=" old_pane {
+      pane_count += 1
+      print "herdr_pane_id=" new_pane
+      next
+    }
+    $0 == "endpoint_generation=" old_generation {
+      generation_count += 1
+      print "endpoint_generation=" new_generation
+      next
+    }
+    { print }
+    END {
+      if (window_count != 1 || pane_count != 1 || generation_count != 1) {
+        exit 1
+      }
+    }
+  ' "$meta" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  HERDR_PANE_ID=$pane
+  T=$target
+  WID=$target
+  SPAWN_ENDPOINT_TARGET=$target
+  ENDPOINT_GENERATION=$generation
+  SPAWN_EXPECTED_ENDPOINT_IDENTITY=$identity
+}
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -1816,11 +1861,39 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 HERDR_FLAT_ABORT_CLEANUP=0
 if [ "$KIND" = secondmate ]; then
-  SPAWN_AUTHORITY_ENDPOINT_PID=$(
+  SPAWN_AUTHORITY_REPLACEMENT_GENERATION=$ENDPOINT_GENERATION
+  if [ "$BACKEND" = herdr ]; then
+    SPAWN_AUTHORITY_REPLACEMENT_GENERATION="herdr-$(date +%s)-$$-$RANDOM"
+  fi
+  SPAWN_AUTHORITY_LAUNCH_RESULT=$(
     fm_backend_launch_trusted_process \
       "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$ID" "$PROJ_ABS" "$LAUNCH" \
-      "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" 2>/dev/null
-  ) || SPAWN_AUTHORITY_ENDPOINT_PID=
+      "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
+      "$SPAWN_AUTHORITY_REPLACEMENT_GENERATION" 2>/dev/null
+  ) || SPAWN_AUTHORITY_LAUNCH_RESULT=
+  SPAWN_AUTHORITY_ENDPOINT_PID=
+  if [ "$BACKEND" = herdr ]; then
+    case "$SPAWN_AUTHORITY_LAUNCH_RESULT" in *$'\n'*) ;; *)
+      IFS=$'\t' read -r SPAWN_AUTHORITY_ENDPOINT_PID \
+        SPAWN_AUTHORITY_REPLACEMENT_PANE \
+        SPAWN_AUTHORITY_REPLACEMENT_IDENTITY <<EOF
+$SPAWN_AUTHORITY_LAUNCH_RESULT
+EOF
+      ;;
+    esac
+    if [ -n "$SPAWN_AUTHORITY_ENDPOINT_PID" ] \
+      && ! spawn_adopt_herdr_launch_endpoint \
+        "$SPAWN_AUTHORITY_REPLACEMENT_PANE" \
+        "$SPAWN_AUTHORITY_REPLACEMENT_IDENTITY" \
+        "$SPAWN_AUTHORITY_REPLACEMENT_GENERATION"; then
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$HERDR_SES" "$SPAWN_AUTHORITY_REPLACEMENT_PANE" \
+        >/dev/null 2>&1 || true
+      SPAWN_AUTHORITY_ENDPOINT_PID=
+    fi
+  else
+    SPAWN_AUTHORITY_ENDPOINT_PID=$SPAWN_AUTHORITY_LAUNCH_RESULT
+  fi
   [ -n "$SPAWN_AUTHORITY_ENDPOINT_PID" ] || {
     echo "error: could not verify the exact launch process for secondmate $ID" >&2
     exit 1

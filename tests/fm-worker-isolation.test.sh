@@ -1459,32 +1459,40 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
   local out
   out=$(bash -c '
     . "$1/bin/backends/herdr.sh"
+    fm_backend_herdr_endpoint_identity() {
+      case "$1" in
+        default:w1:p2) printf "default|w1|w1:t2|w1:p2|g7" ;;
+        default:w1:p3) printf "default|w1|w1:t2|w1:p3|g8" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_topology_identity() {
+      [ "$1" = default:w1:p3 ] && printf "default|w1|w1:t2|w1:p3"
+    }
+    fm_backend_herdr_bind_endpoint_generation() {
+      [ "$1" = default:w1:p3 ] && [ "$2" = g8 ]
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving() {
+      [ "$1" = default ] && [ "$2" = w1:p2 ]
+    }
+    fm_backend_herdr_foreground_process_pid() {
+      [ "$1" = default:w1:p3 ] && printf "4242"
+    }
     fm_backend_herdr_cli() {
       case "$*" in
-        *"pane get"*)
-          printf "%s\n" \
-            "{\"result\":{\"pane\":{\"pane_id\":\"w1:p2\",\"tab_id\":\"w1:t2\",\"tokens\":{\"firstmate_endpoint_generation\":\"g7\"}}}}"
-          ;;
-        *"tab get"*)
-          printf "%s\n" \
-            "{\"result\":{\"tab\":{\"tab_id\":\"w1:t2\",\"workspace_id\":\"w1\"}}}"
-          ;;
         *"agent start"*)
           printf "%s\n" \
-            "{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"w1:p2\"},\"argv\":[\"sh\",\"-c\",\"exec env GOTMPDIR=/g wrapper\"]}}"
-          ;;
-        *"pane process-info"*)
-          printf "%s\n" \
-            "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w1:p2\",\"foreground_process_group_id\":4242,\"foreground_processes\":[{\"pid\":4242}]}}}"
+            "{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"w1:p3\",\"tab_id\":\"w1:t2\",\"workspace_id\":\"w1\"},\"argv\":[\"sh\",\"-c\",\"exec env GOTMPDIR=/g wrapper\"]}}"
           ;;
         *) return 1 ;;
       esac
     }
     fm_backend_herdr_launch_trusted_process \
       default:w1:p2 domain /work "GOTMPDIR=/g wrapper" \
-      "default|w1|w1:t2|w1:p2|g7"
-  ' _ "$ROOT") || fail "Herdr direct launch proof rejected its response pane"
-  [ "$out" = 4242 ] || fail "Herdr direct launch proof returned $out"
+      "default|w1|w1:t2|w1:p2|g7" g8
+  ' _ "$ROOT") || fail "Herdr direct launch proof rejected its backend-owned replacement pane"
+  [ "$out" = $'4242\tw1:p3\tdefault|w1|w1:t2|w1:p3|g8' ] \
+    || fail "Herdr direct launch proof did not return the replacement endpoint: $out"
   out=$(bash -c '
     FM_BACKEND_LIB_DIR="$1/bin"
     . "$1/bin/backends/tmux.sh"
@@ -3678,6 +3686,12 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = enrollment-consumer ]; then
   test_authority_fds_reprove_isolation_after_exec
   echo "# focused enrollment-consumer test passed"
+  exit 0
+fi
+
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = backend-launch ]; then
+  test_backend_owned_launch_proof_covers_tmux_and_herdr
+  echo "# focused backend-launch test passed"
   exit 0
 fi
 

@@ -29,6 +29,7 @@ HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
+ALPHA_LAUNCH_TRACE="$TMP_ROOT/alpha-launch-trace.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 mkdir -p "$FAKEBIN"
@@ -36,8 +37,9 @@ mkdir -p "$FAKEBIN"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
+: > "$ALPHA_LAUNCH_TRACE"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG ALPHA_LAUNCH_TRACE HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated leading
@@ -149,6 +151,37 @@ if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SES
   status=0
 else
   status=$?
+fi
+if [ "$status" -eq 0 ] && [ "${1:-} ${2:-} ${3:-}" = "agent start alpha" ]; then
+  returned=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null || true)
+  (
+    printf '%s\n' '--- agent-start-response ---' "$out"
+    printf '%s\n' "returned-pane=$returned"
+    if [ -n "$returned" ]; then
+      for operation in "pane get $returned" "pane process-info --pane $returned" "agent get $returned"; do
+        set -- $operation
+        printf '%s\n' "--- $operation ---"
+        env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run \
+          "$HERDR_LAB_SESSION" "$@" 2>&1 || true
+      done
+      process_info=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run \
+        "$HERDR_LAB_SESSION" pane process-info --pane "$returned" 2>/dev/null || true)
+      printf '%s' "$process_info" | jq -r \
+        '.result.process_info.foreground_processes[]?.pid // empty' 2>/dev/null \
+        | while IFS= read -r pid; do
+            case "$pid" in ''|*[!0-9]*) continue ;; esac
+            printf '%s\n' "--- proc-$pid ---"
+            sed -n 's/^PPid:/parent:/p' "/proc/$pid/status" 2>/dev/null || true
+            printf 'cmdline:'
+            tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true
+            printf '\n'
+            for fd in "/proc/$pid/fd"/*; do
+              [ -e "$fd" ] || continue
+              printf 'fd:%s=%s\n' "${fd##*/}" "$(readlink "$fd" 2>/dev/null || true)"
+            done
+          done
+    fi
+  ) >> "$ALPHA_LAUNCH_TRACE"
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
   case "$label" in
