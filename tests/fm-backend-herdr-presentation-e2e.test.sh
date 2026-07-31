@@ -9,6 +9,70 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
+overlay_current_suite_bytes() {  # <source-worktree> <destination-clone>
+  local source=$1 destination=$2 manifest path source_path destination_path
+  [ "$(git -C "$source" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] \
+    && [ "$(git -C "$destination" rev-parse \
+      --is-inside-work-tree 2>/dev/null)" = true ] || return 1
+  manifest=$(mktemp "${TMPDIR:-/tmp}/fm-suite-overlay.XXXXXX") || return 1
+  if ! {
+    git -C "$source" diff --name-only -z HEAD \
+      && git -C "$source" ls-files --others --exclude-standard -z
+  } > "$manifest"; then
+    rm -f "$manifest"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    case "$path" in ''|/*|../*|*/../*|*/..) rm -f "$manifest"; return 1 ;; esac
+    source_path="$source/$path"
+    destination_path="$destination/$path"
+    if [ -e "$source_path" ] || [ -L "$source_path" ]; then
+      mkdir -p "$(dirname "$destination_path")" \
+        && rm -rf -- "$destination_path" \
+        && cp -a -- "$source_path" "$destination_path" || {
+          rm -f "$manifest"
+          return 1
+        }
+    else
+      rm -rf -- "$destination_path" || {
+        rm -f "$manifest"
+        return 1
+      }
+    fi
+  done < "$manifest"
+  rm -f "$manifest"
+}
+
+if [ "${FM_HERDR_PRESENTATION_FOCUS:-}" = overlay ]; then
+  OVERLAY_TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-overlay.XXXXXX") \
+    || exit 1
+  trap 'rm -rf "$OVERLAY_TEST_ROOT"' EXIT
+  OVERLAY_REPO="$OVERLAY_TEST_ROOT/repo"
+  OVERLAY_SOURCE="$OVERLAY_TEST_ROOT/source"
+  OVERLAY_DEST="$OVERLAY_TEST_ROOT/dest"
+  mkdir -p "$OVERLAY_REPO"
+  git -C "$OVERLAY_REPO" init -q -b main
+  printf 'committed\n' > "$OVERLAY_REPO/changed"
+  printf 'remove me\n' > "$OVERLAY_REPO/deleted"
+  git -C "$OVERLAY_REPO" add changed deleted
+  git -C "$OVERLAY_REPO" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm initial
+  git -C "$OVERLAY_REPO" worktree add -q -b overlay-source "$OVERLAY_SOURCE"
+  git clone -q "$OVERLAY_SOURCE" "$OVERLAY_DEST"
+  mkdir -p "$OVERLAY_SOURCE/nested"
+  printf 'current bytes\n' > "$OVERLAY_SOURCE/changed"
+  rm -f "$OVERLAY_SOURCE/deleted"
+  printf 'untracked bytes\n' > "$OVERLAY_SOURCE/nested/untracked"
+  overlay_current_suite_bytes "$OVERLAY_SOURCE" "$OVERLAY_DEST" \
+    || { echo 'not ok - current suite overlay failed' >&2; exit 1; }
+  [ "$(cat "$OVERLAY_DEST/changed")" = 'current bytes' ] \
+    && [ ! -e "$OVERLAY_DEST/deleted" ] \
+    && [ "$(cat "$OVERLAY_DEST/nested/untracked")" = 'untracked bytes' ] \
+    || { echo 'not ok - nested clone retained stale committed bytes' >&2; exit 1; }
+  echo 'ok - nested clone receives modified, deleted, and untracked suite bytes'
+  exit 0
+fi
+
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
@@ -929,10 +993,16 @@ SECOND_PRIMARY_ROOT="$TMP_ROOT/secondmate-primary"
 SECOND_PRIMARY_HOME="$TMP_ROOT/secondmate-parent-home"
 git clone -q "$ROOT" "$SECOND_PRIMARY_ROOT" \
   || fail "could not clone the secondmate primary fixture"
+overlay_current_suite_bytes "$ROOT" "$SECOND_PRIMARY_ROOT" \
+  || fail "could not overlay current suite bytes into the secondmate primary fixture"
 git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_A" \
   || fail "could not clone secondmate A fixture"
 git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_B" \
   || fail "could not clone secondmate B fixture"
+overlay_current_suite_bytes "$ROOT" "$SECOND_HOME_A" \
+  || fail "could not overlay current suite bytes into secondmate A"
+overlay_current_suite_bytes "$ROOT" "$SECOND_HOME_B" \
+  || fail "could not overlay current suite bytes into secondmate B"
 mkdir -p "$SECOND_PRIMARY_HOME/state" "$SECOND_PRIMARY_HOME/config" \
   "$SECOND_PRIMARY_HOME/data"
 touch "$SECOND_PRIMARY_HOME/config/herdr-presentation-spaces"
