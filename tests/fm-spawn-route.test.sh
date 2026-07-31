@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-spawn.sh route evidence integration.
 #
-# The fake tmux reports a controlled pane cwd after `treehouse get`, so these
+# The fake tmux reports a controlled pane cwd after durable `treehouse get`, so these
 # tests exercise the real spawn success path without opening windows.
 set -u
 
@@ -169,6 +169,10 @@ EOF
   window_name=$(cat "$home/tmux-window-name")
   assert_contains "$window_name" "fm-$id" "ordinary spawn did not restore the canonical window name after locking renames"
   launch=$(cat "$home/launch.log")
+  assert_contains "$launch" "treehouse get --lease --lease-holder '$id'" \
+    "ordinary spawn did not hold a durable Treehouse lease until teardown"
+  assert_contains "$launch" 'cd -- "$fm_wt"' \
+    "ordinary spawn did not enter the durably leased worktree"
   assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"medium\"' --dangerously-bypass-approvals-and-sandbox" \
     "ordinary route did not thread model and effort into launch"
   assert_grep "# Route" "$brief" "ordinary spawn did not add route block to brief"
