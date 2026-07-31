@@ -21,6 +21,7 @@ REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
+EVIDENCE_DIR=${FM_HERDR_PRESENTATION_EVIDENCE_DIR:-}
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
@@ -282,6 +283,10 @@ EOF
     PATH="$HERDR_ORIGINAL_PATH" \
       "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
     LAB_READY=0
+  fi
+  if [ -n "$EVIDENCE_DIR" ]; then
+    mkdir -p "$EVIDENCE_DIR" 2>/dev/null || true
+    cp -a "$TMP_ROOT/." "$EVIDENCE_DIR/" 2>/dev/null || true
   fi
   rm -rf "$TMP_ROOT"
 }
