@@ -1758,20 +1758,31 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
 }
 
 test_enrollment_validator_trace_is_stage_only() {
-  local trace="$TMP_ROOT/enrollment-validator-stage.trace" out
+  local dir="$TMP_ROOT/enrollment-validator-stage" trace out
+  mkdir -p "$dir"
+  trace="$dir/.session-enrollment-stage.trace"
   : > "$trace"
   out=$(bash -c '
-    FM_SESSION_ENROLLMENT_TRACE_FILE=$1
+    FM_SESSION_ENROLLMENT_STAGE_TRACE=1
     . "$2/bin/fm-session-lock-lib.sh"
+    fm_session_enrollment_trace_bind "$1/.session-authority-enrollment"
     fm_session_enrollment_trace nonce-presence present
     fm_session_enrollment_trace endpoint-generation-presence present
     fm_session_enrollment_trace broker-process fail
+    fm_session_enrollment_trace signer-acceptance-published pass
+    fm_session_enrollment_trace consumer-ack-written pass
+    fm_session_enrollment_trace consumer-final-written pass
+    fm_session_enrollment_trace consumer-authority-descriptor pass
+    fm_session_enrollment_trace authority-descriptor-fd18-isolation fail
+    fm_session_enrollment_trace consumer-durable-custodian pass
+    fm_session_enrollment_trace consumer-launch-ready pass
+    fm_session_enrollment_trace signer-final-validation fail
     ! fm_session_enrollment_trace "nonce=not-loggable" fail
     ! fm_session_enrollment_trace broker-process "secret=not-loggable"
-    cat "$1"
-  ' _ "$trace" "$ROOT") \
+    cat "$1/.session-enrollment-stage.trace"
+  ' _ "$dir" "$ROOT") \
     || fail "stage-only enrollment trace fixture failed"
-  [ "$out" = $'enrollment-validator nonce-presence=present\nenrollment-validator endpoint-generation-presence=present\nenrollment-validator broker-process=fail' ] \
+  [ "$out" = $'enrollment-validator nonce-presence=present\nenrollment-validator endpoint-generation-presence=present\nenrollment-validator broker-process=fail\nenrollment-validator signer-acceptance-published=pass\nenrollment-validator consumer-ack-written=pass\nenrollment-validator consumer-final-written=pass\nenrollment-validator consumer-authority-descriptor=pass\nenrollment-validator authority-descriptor-fd18-isolation=fail\nenrollment-validator consumer-durable-custodian=pass\nenrollment-validator consumer-launch-ready=pass\nenrollment-validator signer-final-validation=fail' ] \
     || fail "enrollment trace exposed non-stage data: $out"
   pass "enrollment validator trace accepts only fixed non-secret stage facts"
 }

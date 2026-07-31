@@ -265,12 +265,25 @@ fm_session_sha256_file() {
 fm_session_enrollment_trace() {  # <fixed-stage> <fixed-result>
   local stage=$1 result=$2 file=${FM_SESSION_ENROLLMENT_TRACE_FILE:-}
   case "$stage" in
-    nonce-presence|endpoint-generation-presence|ticket-file|ticket-lines|ticket-shape|ticket-characters|issuer-path|signature|public-key-digest|signer-public-key|signer-start|signer-identity|signer-script|signer-descriptor|broker-descriptor|authority-digest|authority-shape|authority-descriptor|authority-home|authority-lock|authority-binding|broker-script-binding|broker-start|broker-identity|broker-process|endpoint-start|endpoint-identity|endpoint-self|ticket-validation) ;;
+    nonce-presence|endpoint-generation-presence|ticket-file|ticket-lines|ticket-shape|ticket-characters|issuer-path|signature|public-key-digest|signer-public-key|signer-start|signer-identity|signer-script|signer-descriptor|broker-descriptor|authority-digest|authority-shape|authority-descriptor|authority-home|authority-lock|authority-binding|broker-script-binding|broker-start|broker-identity|broker-process|endpoint-start|endpoint-identity|endpoint-self|ticket-validation|consume-request-written|signer-consume-present|signer-consume-shape|signer-consumer-task|signer-consumer-home|signer-consumer-start|signer-consumer-identity|signer-endpoint-start|signer-endpoint-identity|signer-consumer-endpoint|signer-consumer-script|signer-consumer-role|signer-consumer-key|signer-acceptance-published|consumer-acceptance-validation|consumer-ack-written|consumer-acceptance-digest|consumer-acceptance-revalidation|consumer-pid-binding|consumer-final-written|consumer-authorized|consumer-authority-descriptor|consumer-durable-custodian|consumer-launch-ready|authority-descriptor-slots|authority-descriptor-isolation|authority-descriptor-key-generation|authority-descriptor-fd9-open|authority-descriptor-fd18-open|authority-descriptor-fd9-isolation|authority-descriptor-fd18-isolation|signer-ack-validation|signer-consumer-current-start|signer-consumer-current-identity|signer-final-validation|signer-complete|parent-acceptance-visible|parent-acceptance-validation|parent-signer-exit) ;;
     *) return 1 ;;
   esac
   case "$result" in pass|fail|present|absent) ;; *) return 1 ;; esac
   [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
   printf 'enrollment-validator %s=%s\n' "$stage" "$result" >> "$file"
+}
+
+fm_session_enrollment_trace_bind() {  # <exact-enrollment-file>
+  local enrollment=$1 state trace
+  [ "${FM_SESSION_ENROLLMENT_STAGE_TRACE:-0}" = 1 ] || return 1
+  case "$enrollment" in */.session-authority-enrollment) ;; *) return 1 ;; esac
+  state=${enrollment%/*}
+  state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
+  [ "$enrollment" = "$state/.session-authority-enrollment" ] || return 1
+  trace="$state/.session-enrollment-stage.trace"
+  [ -f "$trace" ] && [ ! -L "$trace" ] || return 1
+  FM_SESSION_ENROLLMENT_TRACE_FILE=$trace
+  export FM_SESSION_ENROLLMENT_TRACE_FILE
 }
 
 fm_session_hmac_pad() {
@@ -514,23 +527,46 @@ fm_session_authority_descriptor_create() {
   local key durable_key
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null \
     || ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
+    fm_session_enrollment_trace authority-descriptor-slots fail 2>/dev/null || true
     return 1
   fi
-  fm_session_exec_descriptor_isolation_durable || return 1
-  key=$(fm_session_random_hex 48) || return 1
-  durable_key=$(fm_session_random_hex 48) || return 1
-  exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
+  fm_session_enrollment_trace authority-descriptor-slots pass 2>/dev/null || true
+  fm_session_exec_descriptor_isolation_durable || {
+    fm_session_enrollment_trace authority-descriptor-isolation fail 2>/dev/null || true
+    return 1
+  }
+  fm_session_enrollment_trace authority-descriptor-isolation pass 2>/dev/null || true
+  key=$(fm_session_random_hex 48) && durable_key=$(fm_session_random_hex 48) || {
+    fm_session_enrollment_trace authority-descriptor-key-generation fail 2>/dev/null || true
+    return 1
+  }
+  fm_session_enrollment_trace authority-descriptor-key-generation pass 2>/dev/null || true
+  exec 9< <(while :; do printf '%s\n' "$key"; done) || {
+    fm_session_enrollment_trace authority-descriptor-fd9-open fail 2>/dev/null || true
+    return 1
+  }
+  fm_session_enrollment_trace authority-descriptor-fd9-open pass 2>/dev/null || true
   exec 18< <(while :; do printf '%s\n' "$durable_key"; done) || {
+    fm_session_enrollment_trace authority-descriptor-fd18-open fail 2>/dev/null || true
     exec 9<&-
     return 1
   }
+  fm_session_enrollment_trace authority-descriptor-fd18-open pass 2>/dev/null || true
   unset key durable_key
-  fm_session_descriptor_channel_isolated 9 \
-    && fm_session_descriptor_channel_isolated 18 || {
-      exec 9<&-
-      exec 18<&-
-      return 1
-    }
+  fm_session_descriptor_channel_isolated 9 || {
+    fm_session_enrollment_trace authority-descriptor-fd9-isolation fail 2>/dev/null || true
+    exec 9<&-
+    exec 18<&-
+    return 1
+  }
+  fm_session_enrollment_trace authority-descriptor-fd9-isolation pass 2>/dev/null || true
+  fm_session_descriptor_channel_isolated 18 || {
+    fm_session_enrollment_trace authority-descriptor-fd18-isolation fail 2>/dev/null || true
+    exec 9<&-
+    exec 18<&-
+    return 1
+  }
+  fm_session_enrollment_trace authority-descriptor-fd18-isolation pass 2>/dev/null || true
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
 }
@@ -1193,7 +1229,10 @@ fm_session_enrollment_signer_run() {
   local acknowledged="${file}.accepted.ack" finalized="${file}.accepted.final"
   local consumer consumer_start consumer_identity consume_task consume_home
   local consumer_public_key consumer_public_digest
-  local expected_script env_role env_task env_home attempts=0
+  local expected_script env_role env_task env_home attempts=0 failed_stage=
+  local ack_traced=0 ack_fail_traced=0 start_fail_traced=0
+  local identity_fail_traced=0 final_fail_traced=0
+  fm_session_enrollment_trace_bind "$file" 2>/dev/null || true
   [ "$private_key_fd" = 10 ] && [ -r /dev/fd/10 ] || return 1
   fm_session_descriptor_channel_isolated "$private_key_fd" || return 1
   private=$(cat <&10) || return 1
@@ -1297,6 +1336,7 @@ fm_session_enrollment_signer_run() {
       && [ "$(wc -l < "$consume" | tr -d ' ')" -eq 9 ] \
       && [ "$(sed -n '1s/^signer-pid=//p' "$consume")" = "$$" ] \
       && [ "$(sed -n '2s/^nonce=//p' "$consume")" = "$nonce" ]; then
+      fm_session_enrollment_trace signer-consume-present pass 2>/dev/null || true
       consumer=$(sed -n '3s/^consumer-pid=//p' "$consume")
       consumer_start=$(sed -n '4s/^consumer-start=//p' "$consume")
       consumer_identity=$(sed -n '5s/^consumer-identity=//p' "$consume")
@@ -1304,7 +1344,12 @@ fm_session_enrollment_signer_run() {
       consume_home=$(sed -n '7s/^home=//p' "$consume")
       consumer_public_key=$(sed -n '8s/^consumer-public-key=//p' "$consume")
       consumer_public_digest=$(sed -n '9s/^consumer-public-key-sha256=//p' "$consume")
-      case "$consumer" in ''|*[!0-9]*) return 1 ;; esac
+      case "$consumer" in
+        ''|*[!0-9]*)
+          fm_session_enrollment_trace signer-consume-shape fail 2>/dev/null || true
+          return 1
+          ;;
+      esac
       expected_script="$home_real/bin/fm-session-authority-exec.sh"
       env_role=$(fm_session_process_environment_value \
         "$consumer" FM_AGENT_ROLE 2>/dev/null || true)
@@ -1312,17 +1357,34 @@ fm_session_enrollment_signer_run() {
         "$consumer" FM_AGENT_TASK 2>/dev/null || true)
       env_home=$(fm_session_process_environment_value \
         "$consumer" FM_AGENT_OWNER_HOME 2>/dev/null || true)
-      [ "$consume_task" = "$task" ] && [ "$consume_home" = "$home_real" ] \
-        && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
-        && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
-        && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
-        && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
-        && [ "$consumer" = "$endpoint" ] \
-        && fm_session_process_runs_script "$consumer" "$expected_script" \
-        && [ "$env_role" = secondmate ] && [ "$env_task" = "$task" ] \
-        && [ "$env_home" = "$home_real" ] \
-        && fm_session_enrollment_public_key_validate \
-          "$consumer_public_key" "$consumer_public_digest" || return 1
+      failed_stage=
+      if [ "$consume_task" != "$task" ]; then
+        failed_stage=signer-consumer-task
+      elif [ "$consume_home" != "$home_real" ]; then
+        failed_stage=signer-consumer-home
+      elif [ "$(fm_session_process_start "$consumer" 2>/dev/null)" != "$consumer_start" ]; then
+        failed_stage=signer-consumer-start
+      elif [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" != "$consumer_identity" ]; then
+        failed_stage=signer-consumer-identity
+      elif [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" != "$endpoint_start" ]; then
+        failed_stage=signer-endpoint-start
+      elif [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" != "$endpoint_identity" ]; then
+        failed_stage=signer-endpoint-identity
+      elif [ "$consumer" != "$endpoint" ]; then
+        failed_stage=signer-consumer-endpoint
+      elif ! fm_session_process_runs_script "$consumer" "$expected_script"; then
+        failed_stage=signer-consumer-script
+      elif [ "$env_role" != secondmate ] || [ "$env_task" != "$task" ] \
+        || [ "$env_home" != "$home_real" ]; then
+        failed_stage=signer-consumer-role
+      elif ! fm_session_enrollment_public_key_validate \
+          "$consumer_public_key" "$consumer_public_digest"; then
+        failed_stage=signer-consumer-key
+      fi
+      if [ -n "$failed_stage" ]; then
+        fm_session_enrollment_trace "$failed_stage" fail 2>/dev/null || true
+        return 1
+      fi
       body=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-accepted.XXXXXX") \
         || return 1
       signature=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-accepted-signature.XXXXXX") \
@@ -1346,18 +1408,45 @@ fm_session_enrollment_signer_run() {
           return 1
         }
       accepted_digest=$(fm_session_sha256_file "$accepted") || return 1
+      fm_session_enrollment_trace signer-acceptance-published pass 2>/dev/null || true
       rm -f "$body" "$signature" "$consume" "$ready"
       attempts=0
       while [ "$attempts" -lt 1500 ]; do
-        if fm_session_enrollment_ack_validate \
-          "$acknowledged" "$accepted_digest" "$$" "$nonce" "$consumer" \
-          "$consumer_start" "$consumer_public_key" "$consumer_public_digest" \
-          && [ "$(fm_session_process_start "$consumer" 2>/dev/null)" = "$consumer_start" ] \
-          && [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" = "$consumer_identity" ] \
-          && fm_session_enrollment_final_validate \
-            "$finalized" "$accepted_digest" "$$" "$nonce" "$consumer" \
-            "$consumer_start" "$consumer_public_key" "$consumer_public_digest"; then
-          return 0
+        if [ -f "$acknowledged" ] && [ ! -L "$acknowledged" ]; then
+          if fm_session_enrollment_ack_validate \
+              "$acknowledged" "$accepted_digest" "$$" "$nonce" "$consumer" \
+              "$consumer_start" "$consumer_public_key" "$consumer_public_digest"; then
+            if [ "$ack_traced" -eq 0 ]; then
+              fm_session_enrollment_trace signer-ack-validation pass 2>/dev/null || true
+              ack_traced=1
+            fi
+            if [ "$(fm_session_process_start "$consumer" 2>/dev/null)" != "$consumer_start" ]; then
+              if [ "$start_fail_traced" -eq 0 ]; then
+                fm_session_enrollment_trace signer-consumer-current-start fail 2>/dev/null || true
+                start_fail_traced=1
+              fi
+            elif [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" != "$consumer_identity" ]; then
+              if [ "$identity_fail_traced" -eq 0 ]; then
+                fm_session_enrollment_trace signer-consumer-current-identity fail 2>/dev/null || true
+                identity_fail_traced=1
+              fi
+            elif [ -f "$finalized" ] && [ ! -L "$finalized" ]; then
+              if fm_session_enrollment_final_validate \
+                  "$finalized" "$accepted_digest" "$$" "$nonce" "$consumer" \
+                  "$consumer_start" "$consumer_public_key" "$consumer_public_digest"; then
+                fm_session_enrollment_trace signer-final-validation pass 2>/dev/null || true
+                fm_session_enrollment_trace signer-complete pass 2>/dev/null || true
+                return 0
+              fi
+              if [ "$final_fail_traced" -eq 0 ]; then
+                fm_session_enrollment_trace signer-final-validation fail 2>/dev/null || true
+                final_fail_traced=1
+              fi
+            fi
+          elif [ "$ack_fail_traced" -eq 0 ]; then
+            fm_session_enrollment_trace signer-ack-validation fail 2>/dev/null || true
+            ack_fail_traced=1
+          fi
         fi
         kill -0 "$consumer" 2>/dev/null || return 1
         sleep 0.02
@@ -1592,18 +1681,35 @@ fm_session_enrollment_ticket_wait_accepted() {
   local file=$1 signer=$2 nonce=$3 public_key=$4 public_digest=$5
   local attempts=${6:-1500} accepted="${file}.accepted" ack="${file}.accepted.ack"
   local final="${file}.accepted.final"
-  local seen=0
+  local seen=0 visible=0
   case "$signer:$attempts" in *[!0-9:]*) return 1 ;; esac
   [ "${#nonce}" -eq 64 ] || return 1
   case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
   while [ "$seen" -lt "$attempts" ]; do
-    if [ -f "$ack" ] && [ ! -L "$ack" ] \
-      && fm_session_enrollment_acceptance_validate \
-        "$accepted" "$signer" "$nonce" "$public_key" "$public_digest"; then
-      wait "$signer" 2>/dev/null || return 1
-      rm -f "$accepted" "$ack" "$final" "${file}.ready" "${file}.consume"
-      return 0
+    if [ -f "$ack" ] && [ ! -L "$ack" ]; then
+      if [ "$visible" -eq 0 ]; then
+        fm_session_enrollment_trace parent-acceptance-visible pass 2>/dev/null || true
+        visible=1
+      fi
+      if fm_session_enrollment_acceptance_validate \
+          "$accepted" "$signer" "$nonce" "$public_key" "$public_digest"; then
+        fm_session_enrollment_trace parent-acceptance-validation pass 2>/dev/null || true
+        if wait "$signer" 2>/dev/null; then
+          fm_session_enrollment_trace parent-signer-exit pass 2>/dev/null || true
+          rm -f "$accepted" "$ack" "$final" "${file}.ready" "${file}.consume"
+          return 0
+        fi
+        fm_session_enrollment_trace parent-signer-exit fail 2>/dev/null || true
+        return 1
+      fi
+      fm_session_enrollment_trace parent-acceptance-validation fail 2>/dev/null || true
+      if ! kill -0 "$signer" 2>/dev/null; then
+        fm_session_enrollment_trace parent-signer-exit fail 2>/dev/null || true
+        wait "$signer" 2>/dev/null || true
+        return 1
+      fi
     elif ! kill -0 "$signer" 2>/dev/null; then
+      fm_session_enrollment_trace parent-signer-exit fail 2>/dev/null || true
       wait "$signer" 2>/dev/null || true
       return 1
     fi

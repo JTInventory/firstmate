@@ -1944,6 +1944,9 @@ EOF
   SPAWN_AUTHORITY_ENDPOINT_IDENTITY=$(
     fm_session_process_identity "$SPAWN_AUTHORITY_ENDPOINT_PID"
   ) || exit 1
+  if [ "${FM_SESSION_ENROLLMENT_STAGE_TRACE:-0}" = 1 ]; then
+    fm_session_enrollment_trace_bind "$SPAWN_AUTHORITY_ENROLLMENT" || exit 1
+  fi
   fm_session_enrollment_ticket_write \
     "$SPAWN_AUTHORITY_ENROLLMENT" "$ID" "$PROJ_ABS" "$FM_HOME" \
     "$SPAWN_AUTHORITY_ENDPOINT_PID" "$SPAWN_AUTHORITY_ENDPOINT_START" \

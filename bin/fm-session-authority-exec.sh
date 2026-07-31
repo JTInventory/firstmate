@@ -294,11 +294,12 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
       && [ ! -e "$enrollment_ticket" ] && [ ! -L "$enrollment_ticket" ] \
       && mv "$enrollment" "$enrollment_ticket"; then
       if fm_session_enrollment_ticket_validate \
-        "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real" \
-        && fm_session_enrollment_consumption_request \
-          "$enrollment" "$FM_AGENT_TASK" "$home_real"; then
-        enrollment_attempts=0
-        while [ "$enrollment_attempts" -lt 250 ]; do
+          "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real"; then
+        if fm_session_enrollment_consumption_request \
+            "$enrollment" "$FM_AGENT_TASK" "$home_real"; then
+          fm_session_enrollment_trace consume-request-written pass 2>/dev/null || true
+          enrollment_attempts=0
+          while [ "$enrollment_attempts" -lt 250 ]; do
           if fm_session_enrollment_acceptance_validate \
             "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
             "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
@@ -310,9 +311,13 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
               "${enrollment}.accepted.ack" "${enrollment}.accepted" \
               "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
               "$FM_SESSION_ENROLLMENT_NONCE" "$enrollment_consumer_digest"; then
+            fm_session_enrollment_trace consumer-acceptance-validation pass 2>/dev/null || true
+            fm_session_enrollment_trace consumer-pid-binding pass 2>/dev/null || true
+            fm_session_enrollment_trace consumer-ack-written pass 2>/dev/null || true
             enrollment_authorized=$(
               fm_session_sha256_file "${enrollment}.accepted"
             ) || exit 1
+            fm_session_enrollment_trace consumer-acceptance-digest pass 2>/dev/null || true
             if fm_session_enrollment_ticket_validate \
                 "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real" \
               && [ "$(fm_session_sha256_file \
@@ -332,19 +337,26 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
                 "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
                 "$FM_SESSION_ENROLLMENT_NONCE" \
                 "$enrollment_consumer_digest"; then
+              fm_session_enrollment_trace consumer-acceptance-revalidation pass 2>/dev/null || true
+              fm_session_enrollment_trace consumer-final-written pass 2>/dev/null || true
               rm -f -- "$enrollment_ticket" || exit 1
               enrollment_ticket=
               authorized=1
+              fm_session_enrollment_trace consumer-authorized pass 2>/dev/null || true
               break
             fi
           fi
           kill -0 "$FM_SESSION_ENROLLMENT_SIGNER_PID" 2>/dev/null || break
           sleep 0.02
           enrollment_attempts=$((enrollment_attempts + 1))
-        done
-        if [ "$authorized" -ne 1 ]; then
-          rm -f "$enrollment_ticket" "${enrollment}.consume" \
-            "${enrollment}.accepted" "${enrollment}.accepted.ack"
+          done
+          if [ "$authorized" -ne 1 ]; then
+            rm -f "$enrollment_ticket" "${enrollment}.consume" \
+              "${enrollment}.accepted" "${enrollment}.accepted.ack"
+          fi
+        else
+          fm_session_enrollment_trace consume-request-written fail 2>/dev/null || true
+          rm -f "$enrollment_ticket" "${enrollment}.consume"
         fi
       else
         rm -f "$enrollment_ticket" "${enrollment}.consume"
@@ -394,6 +406,7 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   if [ "$durable_fd" = 18 ] \
     && fm_session_authority_durable_capability_present; then
     fm_session_authority_live_descriptor_rotate || {
+      fm_session_enrollment_trace consumer-authority-descriptor fail 2>/dev/null || true
       echo "error: protected session authority rotation failed" >&2
       exit 1
     }
@@ -406,13 +419,15 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     unset FM_SESSION_AUTHORITY_DURABLE_FD
     if [ -e "$STATE/.session-durable-authority" ] \
       || [ -L "$STATE/.session-durable-authority" ]; then
-      [ -f "$STATE/.session-durable-authority" ] \
-        && [ ! -L "$STATE/.session-durable-authority" ] || {
+        [ -f "$STATE/.session-durable-authority" ] \
+          && [ ! -L "$STATE/.session-durable-authority" ] || {
+          fm_session_enrollment_trace consumer-authority-descriptor fail 2>/dev/null || true
           echo "error: durable session authority custodian is invalid" >&2
           exit 1
         }
       if [ -z "$durable_recovery" ]; then
         fm_session_durable_consumer_prepare || {
+          fm_session_enrollment_trace consumer-authority-descriptor fail 2>/dev/null || true
           echo "error: durable session authority recovery key is unavailable" >&2
           exit 1
         }
@@ -426,16 +441,19 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
         "$STATE" "$home_real" "$FM_ROOT" "$durable_recovery" \
         "$durable_consumer_key" "$durable_consumer_digest" \
         && fm_session_authority_live_descriptor_rotate || {
+          fm_session_enrollment_trace consumer-authority-descriptor fail 2>/dev/null || true
           echo "error: durable session authority recovery failed" >&2
           exit 1
         }
     else
       fm_session_authority_descriptor_create || {
+        fm_session_enrollment_trace consumer-authority-descriptor fail 2>/dev/null || true
         echo "error: protected session authority descriptor is unavailable" >&2
         exit 1
       }
     fi
   fi
+  fm_session_enrollment_trace consumer-authority-descriptor pass 2>/dev/null || true
 elif [ "$enrollment_fd" = 9 ] \
   && fm_session_authority_capability_present; then
   if ! fm_session_authority_durable_capability_present; then
@@ -538,13 +556,16 @@ FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
 fm_session_durable_custodian_ensure "$STATE" "$home_real" "$FM_ROOT" || {
+  fm_session_enrollment_trace consumer-durable-custodian fail 2>/dev/null || true
   echo "error: durable session authority custodian is unavailable" >&2
   exit 1
 }
+fm_session_enrollment_trace consumer-durable-custodian pass 2>/dev/null || true
 export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
 export FM_SESSION_AUTHORITY_BROKER_PID
 export FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY
 export FM_SESSION_AUTHORITY_BROKER_SCRIPT
+fm_session_enrollment_trace consumer-launch-ready pass 2>/dev/null || true
 child_pid=
 forward_signal() {
   [ -z "$child_pid" ] || kill -TERM "$child_pid" 2>/dev/null || true
