@@ -633,8 +633,8 @@ From there the task is an ordinary ship task through its mode-specific validatio
 
 The watcher is the backbone.
 Whenever at least one task is in flight, keep `bin/fm-watch.sh` running through a harness-tracked `bin/fm-watch-arm.sh` background task.
-In a harness lane where tracked background tasks are not durable enough, run `bin/fm-watch-session.sh start` instead; it keeps a home-scoped tmux runner alive and re-arms through the same verified `fm-watch-arm.sh` path, immediately after wake output and with the retry delay only after failed or quiet healthy no-op arms.
-For Grok's background-notify path, read [docs/supervision-protocols/grok.md](docs/supervision-protocols/grok.md): the arm now detaches the watcher so a harness reap ends only the follower, and `fm-watch-session.sh start` remains the fallback when native background notification is unreliable.
+In a non-Grok harness lane where tracked background tasks are not durable enough, run `bin/fm-watch-session.sh start` instead; it keeps a home-scoped tmux runner alive and re-arms through the same verified `fm-watch-arm.sh` path, immediately after wake output and with the retry delay only after failed or quiet healthy no-op arms.
+For Grok's background-notify path, read [docs/supervision-protocols/grok.md](docs/supervision-protocols/grok.md): it owns the per-home follower, status-to-badge mapping, and `fm-watch-session.sh` refusal/override rules; the arm now detaches the watcher so a harness reap ends only the follower.
 It costs zero tokens while running.
 **Always-on wake triage (absorb only when provably working).**
 The watcher classifies every wake it detects in bash and absorbs the benign majority without ever waking you, but it never absorbs a crewmate that has stopped.
@@ -676,7 +676,7 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 ```sh
 bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; attaches to a healthy cycle
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
-bin/fm-watch-session.sh start   # durable home-scoped tmux runner; immediate re-arm after wake output
+bin/fm-watch-session.sh start   # non-Grok fallback runner; immediate re-arm after wake output
 bin/fm-watch-session.sh --status  # report whether this home's runner window is live
 bin/fm-watch.sh            # the detached watcher itself; exits with: signal|stale|check|heartbeat
 bin/fm-supervise.sh        # read-only checklist/JSON view of current work; never mutates state, tmux/Herdr, git, treehouse, or GitHub; normalizes HOME-local Axi tool paths for non-interactive shells
@@ -720,7 +720,7 @@ The no-watcher case leads with a prominent, bordered ●-marked banner (in-fligh
 So the next time you touch the fleet with queued wakes or no watcher alive, the tool output itself tells you what to do - a pull-based guard that works on any harness, since it rides the script output you already read rather than a harness-specific hook.
 The grace window keeps normal handling silent only when the lock still proves a live watcher.
 If a guard warning says queued wakes are pending, drain them before doing anything else.
-If a guard warning says watcher liveness is stale or unconfirmed, arm `bin/fm-watch-arm.sh` after draining any queued wakes, or start `bin/fm-watch-session.sh start` in this environment.
+If a guard warning says watcher liveness is stale or unconfirmed, arm `bin/fm-watch-arm.sh` after draining any queued wakes, or start `bin/fm-watch-session.sh start` in a non-Grok fallback lane; Grok follows its protocol above.
 
 `fm-guard.sh` carries a second, independent alarm in the same bordered ●-marked style: the **worktree-tangle** guard.
 Firstmate is a treehouse-pooled git repo of itself - the primary checkout (the repo root, `FM_ROOT`) and every crewmate worktree and secondmate home are linked worktrees of one repo - and the primary must stay on its default branch.
