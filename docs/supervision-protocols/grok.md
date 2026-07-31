@@ -33,6 +33,9 @@ One home has one follower slot. The sole owner of the blocking wait for a Grok p
 
 The `watcher:` rows map to a Grok UI badge only when the line comes from Grok's tracked background call. The tmux fallback captures and echoes the inner arm's `watcher:` output, but that output is status only and never proves a Grok badge.
 
+Do not re-arm after `follower already waiting` while the existing follower owns the wait; re-arm only after a real wake or failure.
+A fail-closed ownership error is reported as `watcher: FAILED - follower ownership is unverified`; it establishes no badge and must be repaired before another arm is started.
+
 When `GROK_AGENT=1` is present, `bin/fm-watch-session.sh start` and `restart` refuse this unsafe overlap. `FM_ALLOW_WATCH_SESSION_WITH_GROK=1` is an explicit emergency override for operators who have chosen the fallback and accept that the Grok badge is unavailable.
 
 Grok injects a synthetic user message with `synthetic_reason: task_completed` when the background arm completes.

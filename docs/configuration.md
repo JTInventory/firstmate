@@ -359,6 +359,7 @@ FM_WATCH_SESSION_RETRY_DELAY=    # legacy alias for FM_WATCH_SESSION_REARM_DELAY
 FM_WATCH_SESSION_AFK_DELAY=15    # seconds watch-session sleeps while the AFK daemon owns supervision
 FM_WATCH_SESSION_TMUX_SESSION=firstmate-watch   # tmux session name for durable watch-session runner windows
 FM_WATCH_SESSION_TMUX_WINDOW=   # optional tmux window name; default is fm-watch-<home/state hash>
+FM_ALLOW_WATCH_SESSION_WITH_GROK=    # set exactly 1 only for the emergency tmux fallback; Grok otherwise reserves the follower wait for its tracked background arm
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE=             # optional extra captain-relevant status regex; built-in terminal and legacy matches remain active, while nonterminal progress verbs stay excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked

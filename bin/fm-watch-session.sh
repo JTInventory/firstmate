@@ -6,6 +6,9 @@
 # loop there. The watcher itself remains the same singleton: it is still scoped by
 # this home's state/.watch.lock, and no broad process matching is used. Wake output
 # re-arms immediately; failed and quiet healthy no-op arms keep the retry delay.
+# A Grok primary keeps the follower wait on Grok's tracked background arm: start
+# and restart refuse unless FM_ALLOW_WATCH_SESSION_WITH_GROK=1 selects the emergency
+# tmux fallback explicitly.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
