@@ -14,6 +14,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-detach-lib.sh
 . "$SCRIPT_DIR/fm-detach-lib.sh"
 
+refuse_grok_primary() {
+  [ "${GROK_AGENT:-}" = "1" ] || return 0
+  [ "${FM_ALLOW_WATCH_SESSION_WITH_GROK:-}" = "1" ] && return 0
+  echo "watch-session: refusing Grok primary; Grok's tracked background arm must own the watcher wait (set FM_ALLOW_WATCH_SESSION_WITH_GROK=1 only for emergency fallback)" >&2
+  return 1
+}
+
 SESSION_NAME=${FM_WATCH_SESSION_TMUX_SESSION:-firstmate-watch}
 HASH=$(printf '%s\n%s\n' "$FM_HOME" "$STATE" | cksum | awk '{print $1}')
 WINDOW_NAME=${FM_WATCH_SESSION_TMUX_WINDOW:-fm-watch-$HASH}
@@ -168,10 +175,17 @@ stop_runner() {
 
 mode=${1:-start}
 case "$mode" in
-  start|--start) start_runner ;;
+  start|--start)
+    refuse_grok_primary || exit 1
+    start_runner
+    ;;
   status|--status) status_runner ;;
   stop|--stop) stop_runner ;;
-  restart|--restart) stop_runner >/dev/null || exit 1; start_runner ;;
+  restart|--restart)
+    refuse_grok_primary || exit 1
+    stop_runner >/dev/null || exit 1
+    start_runner
+    ;;
   -h|--help|help) usage; exit 0 ;;
   *) usage; exit 2 ;;
 esac

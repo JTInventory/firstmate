@@ -257,8 +257,41 @@ test_watch_session_status_reports_runner_not_inner_arm_health() {
   pass "watch-session status reports runner-window liveness, not inner arm health"
 }
 
+test_watch_session_refuses_grok_primary_without_override() {
+  local dir fakebin out status
+  dir=$(make_case grok-primary-refusal)
+  fakebin=$(install_fake_tmux "$dir")
+  out="$dir/start.out"
+
+  status=0
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" GROK_AGENT=1 "$WATCH_SESSION" start >"$out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "Grok primary watch-session start was not refused"
+  grep -F 'refusing Grok primary' "$out" >/dev/null \
+    || fail "Grok refusal did not explain the native background owner: $(cat "$out")"
+  [ ! -e "$dir/tmux-state/firstmate-watch" ] \
+    || fail "Grok refusal created a tmux fallback before failing"
+  pass "watch-session refuses to steal the Grok primary follower slot"
+}
+
+test_watch_session_grok_emergency_override_allows_fallback() {
+  local dir fakebin out
+  dir=$(make_case grok-primary-override)
+  fakebin=$(install_fake_tmux "$dir")
+  out="$dir/start.out"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" GROK_AGENT=1 FM_ALLOW_WATCH_SESSION_WITH_GROK=1 "$WATCH_SESSION" start >"$out" \
+    || fail "explicit Grok watch-session emergency override did not allow fallback: $(cat "$out")"
+  grep -F 'watch-session: started target=' "$out" >/dev/null \
+    || fail "Grok emergency override did not start the fallback runner"
+  pass "watch-session emergency override remains available for Grok fallback"
+}
+
 test_watch_session_start_status_stop_are_home_scoped
 test_watch_session_stop_waits_for_starting_watcher
 test_watch_session_stop_fails_for_unpinned_legacy_watcher
 test_watch_session_delays_only_after_failed_rearm
 test_watch_session_status_reports_runner_not_inner_arm_health
+test_watch_session_refuses_grok_primary_without_override
+test_watch_session_grok_emergency_override_allows_fallback
