@@ -337,6 +337,9 @@ test_secondmate_child_receives_only_its_own_home() {
   assert_not_contains "$(sed -n "${wrapper_line}p" "$SPAWN")" \
     "FM_SESSION_ENROLLMENT_CLAIM" \
     "secondmate launch exposed a bearer claim in terminal command text"
+  assert_contains "$(sed -n "${wrapper_line}p" "$SPAWN")" \
+    '${WORKER_ENV_PREFIX}${SPAWN_AUTHORITY_TRACE_PREFIX}exec ' \
+    "secondmate trace opt-in was scoped to the descriptor-isolation prelude instead of the endpoint exec"
   assert_not_contains "$(sed -n "${launch_line}p" "$SPAWN")" \
     "fm_agent_backend_shell_pid" \
     "secondmate enrollment retained the tmux-only shell-pid proof"
@@ -1752,6 +1755,25 @@ test_secondmate_spawn_waits_for_enrollment_acceptance() {
   assert_absent "${ticket}.accepted.ack" \
     "consumer-acknowledged enrollment receipt was not retired"
   pass "secondmate spawn requires a consumer-signed enrollment acknowledgment"
+}
+
+test_enrollment_validator_trace_is_stage_only() {
+  local trace="$TMP_ROOT/enrollment-validator-stage.trace" out
+  : > "$trace"
+  out=$(bash -c '
+    FM_SESSION_ENROLLMENT_TRACE_FILE=$1
+    . "$2/bin/fm-session-lock-lib.sh"
+    fm_session_enrollment_trace nonce-presence present
+    fm_session_enrollment_trace endpoint-generation-presence present
+    fm_session_enrollment_trace broker-process fail
+    ! fm_session_enrollment_trace "nonce=not-loggable" fail
+    ! fm_session_enrollment_trace broker-process "secret=not-loggable"
+    cat "$1"
+  ' _ "$trace" "$ROOT") \
+    || fail "stage-only enrollment trace fixture failed"
+  [ "$out" = $'enrollment-validator nonce-presence=present\nenrollment-validator endpoint-generation-presence=present\nenrollment-validator broker-process=fail' ] \
+    || fail "enrollment trace exposed non-stage data: $out"
+  pass "enrollment validator trace accepts only fixed non-secret stage facts"
 }
 
 test_forged_key_cannot_issue_secondmate_enrollment() {
@@ -3689,6 +3711,18 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = enrollment-consumer ]; then
   exit 0
 fi
 
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = enrollment-trace ]; then
+  test_enrollment_validator_trace_is_stage_only
+  echo "# focused enrollment-trace test passed"
+  exit 0
+fi
+
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = enrollment-trace-launch ]; then
+  test_secondmate_child_receives_only_its_own_home
+  echo "# focused enrollment-trace-launch test passed"
+  exit 0
+fi
+
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = backend-launch ]; then
   test_backend_owned_launch_proof_covers_tmux_and_herdr
   echo "# focused backend-launch test passed"
@@ -3744,6 +3778,7 @@ test_unrelated_process_cannot_consume_endpoint_enrollment
 test_backend_owned_launch_proof_covers_tmux_and_herdr
 test_darwin_session_identity_uses_supported_fields
 test_secondmate_spawn_waits_for_enrollment_acceptance
+test_enrollment_validator_trace_is_stage_only
 test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker

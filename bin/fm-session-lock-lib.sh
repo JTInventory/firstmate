@@ -262,6 +262,17 @@ fm_session_sha256_file() {
   printf '%s\n' "$digest"
 }
 
+fm_session_enrollment_trace() {  # <fixed-stage> <fixed-result>
+  local stage=$1 result=$2 file=${FM_SESSION_ENROLLMENT_TRACE_FILE:-}
+  case "$stage" in
+    nonce-presence|endpoint-generation-presence|ticket-file|ticket-lines|ticket-shape|ticket-characters|issuer-path|signature|public-key-digest|signer-public-key|signer-start|signer-identity|signer-script|signer-descriptor|broker-descriptor|authority-digest|authority-shape|authority-descriptor|authority-home|authority-lock|authority-binding|broker-script-binding|broker-start|broker-identity|broker-process|endpoint-start|endpoint-identity|endpoint-self|ticket-validation) ;;
+    *) return 1 ;;
+  esac
+  case "$result" in pass|fail|present|absent) ;; *) return 1 ;; esac
+  [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  printf 'enrollment-validator %s=%s\n' "$stage" "$result" >> "$file"
+}
+
 fm_session_hmac_pad() {
   local key=$1 pad=$2 index=0 byte value octal
   while [ "$index" -lt 64 ]; do
@@ -1609,9 +1620,15 @@ fm_session_enrollment_ticket_validate() {
   local issuer_real authority lock binding current_digest status=1
   local broker broker_start broker_identity broker_script authority_fd descriptor
   local signer signer_start signer_identity signer_script current
-  local endpoint endpoint_start endpoint_identity
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  [ "$(wc -l < "$file" | tr -d ' ')" -eq 22 ] || return 1
+  local endpoint endpoint_start endpoint_identity failed_stage=
+  [ -f "$file" ] && [ ! -L "$file" ] || {
+    fm_session_enrollment_trace ticket-file fail 2>/dev/null || true
+    return 1
+  }
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq 22 ] || {
+    fm_session_enrollment_trace ticket-lines fail 2>/dev/null || true
+    return 1
+  }
   version=$(sed -n '1s/^version=//p' "$file")
   role=$(sed -n '2s/^role=//p' "$file")
   ticket_task=$(sed -n '3s/^task=//p' "$file")
@@ -1634,7 +1651,15 @@ fm_session_enrollment_ticket_validate() {
   endpoint_start=$(sed -n '20s/^endpoint-start=//p' "$file")
   endpoint_identity=$(sed -n '21s/^endpoint-identity=//p' "$file")
   signature=$(sed -n '22s/^signature=//p' "$file")
-  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  if [ -n "$nonce" ]; then
+    fm_session_enrollment_trace nonce-presence present 2>/dev/null || true
+  else
+    fm_session_enrollment_trace nonce-presence absent 2>/dev/null || true
+  fi
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || {
+    fm_session_enrollment_trace ticket-shape fail 2>/dev/null || true
+    return 1
+  }
   [ "$version" = 5 ] && [ "$role" = secondmate ] \
     && [ "$ticket_task" = "$task" ] && [ "$ticket_home" = "$home_real" ] \
     && [ "${#authority_digest}" -eq 64 ] && [ "${#nonce}" -eq 64 ] \
@@ -1643,13 +1668,30 @@ fm_session_enrollment_ticket_validate() {
     && [ -n "$signer_start" ] && [ -n "$signer_identity" ] \
     && [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] \
     && [ -n "$endpoint_start" ] && [ -n "$endpoint_identity" ] \
-    && [ -n "$signature" ] || return 1
-  case "$broker:$signer:$authority_fd:$endpoint" in *[!0-9:]*) return 1 ;; esac
-  case "$authority_digest:$nonce:$public_digest" in
-    *[!0-9a-f:]*) return 1 ;;
+    && [ -n "$signature" ] || {
+      fm_session_enrollment_trace ticket-shape fail 2>/dev/null || true
+      return 1
+    }
+  case "$broker:$signer:$authority_fd:$endpoint" in
+    *[!0-9:]*)
+      fm_session_enrollment_trace ticket-characters fail 2>/dev/null || true
+      return 1
+      ;;
   esac
-  issuer_real=$(cd "$issuer" 2>/dev/null && pwd -P) || return 1
-  [ "$issuer_real" != "$home_real" ] || return 1
+  case "$authority_digest:$nonce:$public_digest" in
+    *[!0-9a-f:]*)
+      fm_session_enrollment_trace ticket-characters fail 2>/dev/null || true
+      return 1
+      ;;
+  esac
+  issuer_real=$(cd "$issuer" 2>/dev/null && pwd -P) || {
+    fm_session_enrollment_trace issuer-path fail 2>/dev/null || true
+    return 1
+  }
+  [ "$issuer_real" != "$home_real" ] || {
+    fm_session_enrollment_trace issuer-path fail 2>/dev/null || true
+    return 1
+  }
   public_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-public.XXXXXX") || return 1
   signature_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-signature.XXXXXX") || {
     rm -f "$public_file"
@@ -1674,33 +1716,59 @@ fm_session_enrollment_ticket_validate() {
   current=$(fm_session_process_start "$signer" 2>/dev/null || true)
   signer_public_digest=$(fm_session_process_argument_value \
     "$signer" --public-sha256 2>/dev/null || true)
-  if openssl dgst -sha256 -verify "$public_file" -signature "$signature_file" \
-      "$body_file" >/dev/null 2>&1 \
-    && [ "$(fm_session_sha256_file "$public_file" 2>/dev/null)" = "$public_digest" ] \
-    && [ "$signer_public_digest" = "$public_digest" ] \
-    && [ "$current" = "$signer_start" ] \
-    && [ "$(fm_session_process_identity "$signer" 2>/dev/null)" = "$signer_identity" ] \
-    && fm_session_process_runs_script "$signer" "$signer_script" \
-    && [ "$(fm_session_descriptor_identity "$signer" "$authority_fd" 2>/dev/null)" = "$descriptor" ] \
-    && [ "$(fm_session_descriptor_identity "$broker" "$authority_fd" 2>/dev/null)" = "$descriptor" ] \
-    && [ "$current_digest" = "$authority_digest" ] \
-    && fm_session_authority_read_shape "$authority" \
-    && [ "$(fm_session_descriptor_identity \
+  if ! openssl dgst -sha256 -verify "$public_file" -signature "$signature_file" \
+      "$body_file" >/dev/null 2>&1; then
+    failed_stage=signature
+  elif [ "$(fm_session_sha256_file "$public_file" 2>/dev/null)" != "$public_digest" ]; then
+    failed_stage=public-key-digest
+  elif [ "$signer_public_digest" != "$public_digest" ]; then
+    failed_stage=signer-public-key
+  elif [ "$current" != "$signer_start" ]; then
+    failed_stage=signer-start
+  elif [ "$(fm_session_process_identity "$signer" 2>/dev/null)" != "$signer_identity" ]; then
+    failed_stage=signer-identity
+  elif ! fm_session_process_runs_script "$signer" "$signer_script"; then
+    failed_stage=signer-script
+  elif [ "$(fm_session_descriptor_identity "$signer" "$authority_fd" 2>/dev/null)" != "$descriptor" ]; then
+    failed_stage=signer-descriptor
+  elif [ "$(fm_session_descriptor_identity "$broker" "$authority_fd" 2>/dev/null)" != "$descriptor" ]; then
+    failed_stage=broker-descriptor
+  elif [ "$current_digest" != "$authority_digest" ]; then
+    failed_stage=authority-digest
+  elif ! fm_session_authority_read_shape "$authority"; then
+    failed_stage=authority-shape
+  elif [ "$(fm_session_descriptor_identity \
           "$FM_SESSION_AUTHORITY_PID" "$authority_fd" 2>/dev/null)" \
-      = "$descriptor" ] \
-    && [ "$FM_SESSION_AUTHORITY_HOME" = "$issuer_real" ] \
-    && [ -f "$lock" ] && [ ! -L "$lock" ] \
-    && [ "$(cat "$lock" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_OWNER" ] \
-    && [ -f "$binding" ] && [ ! -L "$binding" ] \
-    && [ "$(cat "$binding" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_CHECKOUT" ] \
-    && [ "$broker_script" = \
-      "$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh" ] \
-    && [ "$(fm_session_process_start "$broker" 2>/dev/null)" = "$broker_start" ] \
-    && [ "$(fm_session_process_identity "$broker" 2>/dev/null)" = "$broker_identity" ] \
-    && fm_session_process_runs_authority_broker "$broker" "$broker_script" \
-    && [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" = "$endpoint_start" ] \
-    && [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" = "$endpoint_identity" ] \
-    && [ "$endpoint" = "$$" ]; then
+      != "$descriptor" ]; then
+    failed_stage=authority-descriptor
+  elif [ "$FM_SESSION_AUTHORITY_HOME" != "$issuer_real" ]; then
+    failed_stage=authority-home
+  elif [ ! -f "$lock" ] || [ -L "$lock" ] \
+    || [ "$(cat "$lock" 2>/dev/null)" != "$FM_SESSION_AUTHORITY_OWNER" ]; then
+    failed_stage=authority-lock
+  elif [ ! -f "$binding" ] || [ -L "$binding" ] \
+    || [ "$(cat "$binding" 2>/dev/null)" != "$FM_SESSION_AUTHORITY_CHECKOUT" ]; then
+    failed_stage=authority-binding
+  elif [ "$broker_script" != \
+      "$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh" ]; then
+    failed_stage=broker-script-binding
+  elif [ "$(fm_session_process_start "$broker" 2>/dev/null)" != "$broker_start" ]; then
+    failed_stage=broker-start
+  elif [ "$(fm_session_process_identity "$broker" 2>/dev/null)" != "$broker_identity" ]; then
+    failed_stage=broker-identity
+  elif ! fm_session_process_runs_authority_broker "$broker" "$broker_script"; then
+    failed_stage=broker-process
+  elif [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" != "$endpoint_start" ]; then
+    failed_stage=endpoint-start
+  elif [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" != "$endpoint_identity" ]; then
+    failed_stage=endpoint-identity
+  elif [ "$endpoint" != "$$" ]; then
+    failed_stage=endpoint-self
+  fi
+  if [ -n "$failed_stage" ]; then
+    fm_session_enrollment_trace "$failed_stage" fail 2>/dev/null || true
+  else
+    fm_session_enrollment_trace ticket-validation pass 2>/dev/null || true
     status=0
     FM_SESSION_ENROLLMENT_SIGNER_PID=$signer
     FM_SESSION_ENROLLMENT_NONCE=$nonce

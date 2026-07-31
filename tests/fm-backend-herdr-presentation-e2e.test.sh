@@ -526,7 +526,8 @@ spawn_task() {  # <id> <home> <project>
 
 spawn_secondmate_task() {
   local id=$1 home=$2 parent_home=${SECOND_PRIMARY_HOME:-$HOME_DIR}
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$parent_home" \
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
+    FM_SESSION_ENROLLMENT_STAGE_TRACE=1 FM_HOME="$parent_home" \
     FM_ROOT_OVERRIDE="${SECOND_PRIMARY_ROOT:-$ROOT}" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
 }

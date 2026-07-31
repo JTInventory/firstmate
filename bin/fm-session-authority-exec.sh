@@ -131,6 +131,30 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+unset FM_SESSION_ENROLLMENT_TRACE_FILE
+if [ "${FM_SESSION_ENROLLMENT_STAGE_TRACE:-0}" = 1 ] \
+  && [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
+  mkdir -p "$STATE" && [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 1
+  FM_SESSION_ENROLLMENT_TRACE_FILE="$STATE/.session-enrollment-stage.trace"
+  if [ ! -e "$FM_SESSION_ENROLLMENT_TRACE_FILE" ] \
+    && [ ! -L "$FM_SESSION_ENROLLMENT_TRACE_FILE" ]; then
+    enrollment_trace_tmp=$(mktemp "$STATE/.session-enrollment-stage.trace.XXXXXX") \
+      || exit 1
+    chmod 600 "$enrollment_trace_tmp" \
+      && mv "$enrollment_trace_tmp" "$FM_SESSION_ENROLLMENT_TRACE_FILE" || {
+        rm -f "$enrollment_trace_tmp"
+        exit 1
+      }
+  fi
+  [ -f "$FM_SESSION_ENROLLMENT_TRACE_FILE" ] \
+    && [ ! -L "$FM_SESSION_ENROLLMENT_TRACE_FILE" ] || exit 1
+  export FM_SESSION_ENROLLMENT_TRACE_FILE
+  if [ "${FM_SESSION_ENROLLMENT_ENDPOINT_GENERATION_PRESENT:-0}" = 1 ]; then
+    fm_session_enrollment_trace endpoint-generation-presence present || exit 1
+  else
+    fm_session_enrollment_trace endpoint-generation-presence absent || exit 1
+  fi
+fi
 if [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] \
   && [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \
   && fm_session_test_authority_broker_present; then
