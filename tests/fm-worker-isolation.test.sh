@@ -318,6 +318,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
 
 test_secondmate_child_receives_only_its_own_home() {
   local expected launch_line ticket_line wrapper_line wait_line recheck_line clear_line release_line spawned_line
+  local descriptor_line final_line ready_line
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
     *"FM_HOME='/homes/dom' "*) : ;;
@@ -373,6 +374,15 @@ test_secondmate_child_receives_only_its_own_home() {
     && [ "$clear_line" -lt "$release_line" ] \
     && [ "$release_line" -lt "$spawned_line" ] \
     || fail "secondmate launch reports success before trusted enrollment is accepted"
+  descriptor_line=$(grep -n 'fm_session_authority_descriptor_create' \
+    "$AUTHORITY_EXEC" | tail -1 | cut -d: -f1)
+  final_line=$(grep -n 'fm_session_enrollment_final_write' \
+    "$AUTHORITY_EXEC" | tail -1 | cut -d: -f1)
+  ready_line=$(grep -n 'consumer-launch-ready pass' \
+    "$AUTHORITY_EXEC" | tail -1 | cut -d: -f1)
+  [ "$descriptor_line" -lt "$final_line" ] \
+    && [ "$final_line" -lt "$ready_line" ] \
+    || fail "secondmate final enrollment receipt was published before authority setup completed"
   pass "a secondmate child receives its own home and no inherited override"
 }
 

@@ -43,6 +43,7 @@ enrollment_consumer_key=
 enrollment_consumer_digest=
 enrollment_authorized=
 enrollment_confirmed=
+enrollment_final_pending=0
 enrollment_ticket_data=
 enrollment_acceptance_data=
 enrollment_ticket=
@@ -330,18 +331,12 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
                 "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
                 "$enrollment_consumer_digest" \
               && [ "$(sed -n '4s/^consumer-pid=//p' \
-                  "${enrollment}.accepted")" = "$$" ] \
-              && fm_session_enrollment_final_write \
-                "${enrollment}.accepted.final" \
-                "${enrollment}.accepted" \
-                "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
-                "$FM_SESSION_ENROLLMENT_NONCE" \
-                "$enrollment_consumer_digest"; then
+                  "${enrollment}.accepted")" = "$$" ]; then
               fm_session_enrollment_trace consumer-acceptance-revalidation pass 2>/dev/null || true
-              fm_session_enrollment_trace consumer-final-written pass 2>/dev/null || true
               rm -f -- "$enrollment_ticket" || exit 1
               enrollment_ticket=
               authorized=1
+              enrollment_final_pending=1
               fm_session_enrollment_trace consumer-authorized pass 2>/dev/null || true
               break
             fi
@@ -571,6 +566,24 @@ else
     exit 1
   }
   fm_session_enrollment_trace consumer-durable-custodian pass 2>/dev/null || true
+fi
+if [ "$enrollment_final_pending" -eq 1 ]; then
+  fm_session_enrollment_acceptance_validate \
+      "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+      "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+      "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
+      "$enrollment_consumer_digest" \
+    && [ "$(sed -n '4s/^consumer-pid=//p' \
+        "${enrollment}.accepted")" = "$$" ] \
+    && fm_session_enrollment_final_write \
+      "${enrollment}.accepted.final" "${enrollment}.accepted" \
+      "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+      "$FM_SESSION_ENROLLMENT_NONCE" "$enrollment_consumer_digest" || {
+        fm_session_enrollment_trace consumer-final-written fail 2>/dev/null || true
+        echo "error: protected session authority launch finalization failed" >&2
+        exit 1
+      }
+  fm_session_enrollment_trace consumer-final-written pass 2>/dev/null || true
 fi
 [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] || export FM_SESSION_AUTHORITY_FD
 [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \

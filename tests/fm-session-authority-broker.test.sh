@@ -86,4 +86,33 @@ library_live=$(cd "$HOME_DIR" && printf 'library-public-test-body' | env \
   || fail "session-lock library returned a malformed broker digest"
 pass "session-lock library adopts the peer-credential authority channel"
 
+kill "$BROKER_PID" 2>/dev/null || true
+wait "$BROKER_PID" 2>/dev/null || true
+BROKER_PID=
+LONG_COMPONENT=home-$(printf '%080d' 0)
+HOME_DIR="$TMP_ROOT/$LONG_COMPONENT"
+STATE="$HOME_DIR/state"
+RECORD="$STATE/.session-authority-broker"
+LONG_SOCKET="$STATE/.session-authority-broker.sock"
+mkdir -p "$STATE"
+[ "${#LONG_SOCKET}" -ge 108 ] \
+  || fail "long-home broker fixture did not exceed the Linux filesystem socket limit"
+python3 "$BROKER" serve --state "$STATE" --home "$HOME_DIR" \
+  --checkout "$ROOT" --task alpha >/dev/null 2>&1 &
+BROKER_PID=$!
+attempts=0
+while [ "$attempts" -lt 100 ] && [ ! -f "$RECORD" ]; do
+  kill -0 "$BROKER_PID" 2>/dev/null \
+    || fail "long-home authority broker exited before publishing its record"
+  sleep 0.02
+  attempts=$((attempts + 1))
+done
+[ -f "$RECORD" ] && [ ! -L "$RECORD" ] \
+  || fail "long-home authority broker did not publish a private regular record"
+long_home_live=$(broker_hmac "$HOME_DIR" secondmate live) \
+  || fail "same-home secondmate could not use authority from a long home"
+[ "${#long_home_live}" -eq 64 ] \
+  || fail "long-home authority broker returned a malformed digest"
+pass "peer-credential broker supports homes beyond the filesystem socket path limit"
+
 echo "# all fm-session-authority-broker tests passed"

@@ -116,7 +116,7 @@ def peer_is_authorized(
 
 
 def write_record(
-    record: Path, *, pid: int, socket_path: Path, home: str, checkout: str,
+    record: Path, *, pid: int, socket_address: str, home: str, checkout: str,
     task: str, script: str
 ) -> None:
     body = (
@@ -124,7 +124,7 @@ def write_record(
         f"pid={pid}\n"
         f"start={process_start(pid)}\n"
         f"identity={process_identity(pid)}\n"
-        f"socket={socket_path}\n"
+        f"socket={socket_address}\n"
         f"home={home}\n"
         f"checkout={checkout}\n"
         f"task={task}\n"
@@ -161,11 +161,12 @@ def serve(args: argparse.Namespace) -> int:
         return 1
     if not state.is_dir() or state.is_symlink() or not Path(home).is_dir():
         return 1
-    socket_path = state / ".session-authority-broker.sock"
     record = state / ".session-authority-broker"
-    for path in (socket_path, record):
-        if path.exists() or path.is_symlink():
-            return 1
+    if record.exists() or record.is_symlink():
+        return 1
+    socket_name = f"firstmate-{os.getpid()}-{secrets.token_hex(16)}"
+    socket_address = f"abstract:{socket_name}"
+    bind_address = f"\0{socket_name}"
     live_key = secrets.token_bytes(48)
     durable_key = secrets.token_bytes(48)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -178,16 +179,11 @@ def serve(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    old_umask = os.umask(0o177)
-    try:
-        server.bind(str(socket_path))
-    finally:
-        os.umask(old_umask)
-    os.chmod(socket_path, 0o600)
+    server.bind(bind_address)
     server.listen(16)
     server.settimeout(1.0)
     write_record(
-        record, pid=os.getpid(), socket_path=socket_path, home=home,
+        record, pid=os.getpid(), socket_address=socket_address, home=home,
         checkout=checkout, task=args.task, script=script
     )
     try:
@@ -195,7 +191,7 @@ def serve(args: argparse.Namespace) -> int:
             try:
                 connection, _ = server.accept()
             except socket.timeout:
-                if not record.is_file() or not socket_path.exists() or not Path(home).is_dir():
+                if not record.is_file() or not Path(home).is_dir():
                     break
                 continue
             except OSError:
@@ -231,11 +227,10 @@ def serve(args: argparse.Namespace) -> int:
             server.close()
         except OSError:
             pass
-        for path in (record, socket_path):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        try:
+            record.unlink()
+        except OSError:
+            pass
     return 0
 
 
@@ -260,12 +255,22 @@ def read_record(path: Path) -> dict[str, str]:
     command = process_command(pid)
     if len(command) < 3 or canonical(command[1]) != canonical(metadata["script"]) or command[2] != "serve":
         raise ValueError("wrong broker process")
-    socket_path = Path(metadata["socket"])
-    socket_stat = socket_path.lstat()
-    if not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_mode & 0o077:
-        raise ValueError("unsafe broker socket")
-    if socket_path.parent != path.parent:
-        raise ValueError("foreign broker socket")
+    socket_value = metadata["socket"]
+    if socket_value.startswith("abstract:"):
+        socket_name = socket_value.removeprefix("abstract:")
+        if (
+            not socket_name
+            or len(socket_name.encode()) > 107
+            or any(value not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._" for value in socket_name)
+        ):
+            raise ValueError("unsafe abstract broker socket")
+    else:
+        socket_path = Path(socket_value)
+        socket_stat = socket_path.lstat()
+        if not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_mode & 0o077:
+            raise ValueError("unsafe broker socket")
+        if socket_path.parent != path.parent:
+            raise ValueError("foreign broker socket")
     return metadata
 
 
@@ -277,7 +282,12 @@ def client(args: argparse.Namespace) -> int:
             return 1
         kind = b"L" if args.kind == "live" else b"D"
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.connect(metadata["socket"])
+        socket_value = metadata["socket"]
+        connection.connect(
+            f"\0{socket_value.removeprefix('abstract:')}"
+            if socket_value.startswith("abstract:")
+            else socket_value
+        )
         with connection:
             connection.sendall(struct.pack("!cI", kind, len(body)) + body)
             response = recv_exact(connection, 65)
