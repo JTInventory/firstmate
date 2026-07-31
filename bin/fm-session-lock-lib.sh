@@ -1653,7 +1653,7 @@ fm_session_enrollment_ticket_validate() {
     && [ "$(fm_session_descriptor_identity "$signer" "$authority_fd" 2>/dev/null)" = "$descriptor" ] \
     && [ "$(fm_session_descriptor_identity "$broker" "$authority_fd" 2>/dev/null)" = "$descriptor" ] \
     && [ "$current_digest" = "$authority_digest" ] \
-    && fm_session_authority_read "$authority" \
+    && fm_session_authority_read_shape "$authority" \
     && [ "$(fm_session_descriptor_identity \
           "$FM_SESSION_AUTHORITY_PID" "$authority_fd" 2>/dev/null)" \
       = "$descriptor" ] \
