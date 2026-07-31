@@ -13,6 +13,9 @@ make_fixture_root() {
   mkdir -p "$fixture/bin" "$fixture/tests"
   cp "$HELPER" "$fixture/bin/fm-run-behavior-tests.sh" \
     || fail "fixture could not copy the behavior-test runner"
+  cp "$ROOT/bin/fm-session-authority-exec.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$fixture/bin/" \
+    || fail "fixture could not copy the behavior authority broker"
   cat > "$fixture/bin/fm-no-mistakes-pr-target-guard.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -31,6 +34,33 @@ SH
 #!/usr/bin/env bash
 set -eu
 name=$(basename "$0" .test.sh)
+fixture_root=$(cd "$(dirname "$0")/.." && pwd -P)
+broker_script="$fixture_root/bin/fm-session-authority-exec.sh"
+expected_broker_script="$TMPDIR/issuer-checkout/bin/fm-session-authority-exec.sh"
+mkdir -p "${expected_broker_script%/*}"
+cp "$broker_script" "$expected_broker_script"
+case "${FM_TEST_AUTHORITY_BROKER_PID:-}" in
+  ''|*[!0-9]*) exit 30 ;;
+esac
+env -u FM_TEST_PROCESS -u FM_TEST_AUTHORITY_FD \
+  -u FM_TEST_DURABLE_AUTHORITY_FD -u FM_TEST_AUTHORITY_BROKER_PID \
+  -u FM_TEST_AUTHORITY_OWNER_PID -u FM_TEST_SESSION_LOCK_STABLE_OWNER \
+  bash -c '
+    . "$1"
+    fm_session_process_runs_authority_broker "$2" "$3"
+  ' _ "$fixture_root/bin/fm-session-lock-lib.sh" \
+  "$FM_TEST_AUTHORITY_BROKER_PID" "$expected_broker_script" || exit 31
+printf '\n# byte-mismatch fixture\n' >> "$expected_broker_script"
+if env -u FM_TEST_PROCESS -u FM_TEST_AUTHORITY_FD \
+  -u FM_TEST_DURABLE_AUTHORITY_FD -u FM_TEST_AUTHORITY_BROKER_PID \
+  -u FM_TEST_AUTHORITY_OWNER_PID -u FM_TEST_SESSION_LOCK_STABLE_OWNER \
+  bash -c '
+    . "$1"
+    fm_session_process_runs_authority_broker "$2" "$3"
+  ' _ "$fixture_root/bin/fm-session-lock-lib.sh" \
+  "$FM_TEST_AUTHORITY_BROKER_PID" "$expected_broker_script"; then
+  exit 32
+fi
 printf '%s\n' "$TMPDIR" > "$FM_FIXTURE_OUTPUT_DIR/$name.tmpdir"
 printf '%s\n' "$GOTMPDIR" > "$FM_FIXTURE_OUTPUT_DIR/$name.gotmpdir"
 [ -d "$TMPDIR" ] || exit 20

@@ -145,7 +145,8 @@ run_one() {
     fi
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
-    python3 - "$test_path" <<'PY'
+    python3 - "$test_path" \
+      "$test_root/bin/fm-session-authority-exec.sh" <<'PY'
 import os
 import socket
 import sys
@@ -177,7 +178,6 @@ for writer, key in writers:
 env = os.environ.copy()
 env["FM_TEST_AUTHORITY_FD"] = "19"
 env["FM_TEST_DURABLE_AUTHORITY_FD"] = "18"
-env["FM_TEST_AUTHORITY_BROKER_PID"] = str(os.getpid())
 env["FM_TEST_PROCESS"] = "1"
 env["FM_TEST_SESSION_LOCK_STABLE_OWNER"] = "1"
 status = os.spawnve(
@@ -185,10 +185,8 @@ status = os.spawnve(
     "/usr/bin/bash",
     [
         "bash",
-        "-c",
-        'FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_OWNER_PID; '
-        'exec /usr/bin/bash "$1"',
-        "fm-test-authority",
+        sys.argv[2],
+        "--behavior-test-authority-broker",
         sys.argv[1],
     ],
     env,

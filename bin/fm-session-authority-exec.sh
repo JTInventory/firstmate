@@ -1,6 +1,39 @@
 #!/usr/bin/env bash
 set -eu
 
+if [ "${1:-}" = --behavior-test-authority-broker ]; then
+  [ "$#" -eq 2 ] && [ "${FM_TEST_PROCESS:-0}" = 1 ] \
+    && [ "${FM_TEST_AUTHORITY_FD:-}" = 19 ] \
+    && [ "${FM_TEST_DURABLE_AUTHORITY_FD:-}" = 18 ] \
+    && [ -f "$2" ] && [ ! -L "$2" ] || exit 2
+  if [ -d /proc/$$/fd ]; then
+    [ -e /proc/$$/fd/19 ] && [ -e /proc/$$/fd/18 ] || exit 1
+  elif [ -d /dev/fd ]; then
+    [ -e /dev/fd/19 ] && [ -e /dev/fd/18 ] || exit 1
+  else
+    exit 1
+  fi
+  FM_TEST_AUTHORITY_BROKER_PID=$$
+  export FM_TEST_AUTHORITY_BROKER_PID
+  behavior_test_child=
+  cleanup_behavior_test_child() {
+    [ -z "$behavior_test_child" ] \
+      || kill "$behavior_test_child" 2>/dev/null || true
+  }
+  trap cleanup_behavior_test_child EXIT HUP INT TERM
+  /usr/bin/bash -c '
+    FM_TEST_AUTHORITY_OWNER_PID=$$
+    export FM_TEST_AUTHORITY_OWNER_PID
+    exec /usr/bin/bash "$1"
+  ' fm-test-authority "$2" &
+  behavior_test_child=$!
+  behavior_test_status=0
+  wait "$behavior_test_child" || behavior_test_status=$?
+  behavior_test_child=
+  trap - EXIT HUP INT TERM
+  exit "$behavior_test_status"
+fi
+
 [ "$#" -gt 0 ] || {
   echo "usage: fm-session-authority-exec.sh command [args...]" >&2
   exit 2

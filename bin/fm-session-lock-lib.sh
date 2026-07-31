@@ -166,6 +166,36 @@ fm_session_process_runs_script() {
   case "$args" in *" $script"|*" $script "*) return 0 ;; *) return 1 ;; esac
 }
 
+fm_session_process_runs_behavior_test_broker() {
+  local pid=$1 expected=$2 actual= mode= item index=0 actual_digest expected_digest
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/cmdline" ]; then
+    while IFS= read -r -d '' item; do
+      case "$index" in
+        1) actual=$item ;;
+        2) mode=$item; break ;;
+      esac
+      index=$((index + 1))
+    done < "/proc/$pid/cmdline"
+  elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    fm_procargs2_read "$pid" || return 1
+    [ "${#FM_PROCARGS_ARGV[@]}" -ge 3 ] || return 1
+    actual=${FM_PROCARGS_ARGV[1]}
+    mode=${FM_PROCARGS_ARGV[2]}
+  else
+    return 1
+  fi
+  [ "$mode" = --behavior-test-authority-broker ] \
+    && [ -f "$actual" ] && [ ! -L "$actual" ] && [ -x "$actual" ] \
+    && [ -f "$expected" ] && [ ! -L "$expected" ] && [ -x "$expected" ] \
+    && [ "$(fm_session_process_environment_value \
+      "$pid" FM_TEST_PROCESS 2>/dev/null || true)" = 1 ] \
+    || return 1
+  actual_digest=$(fm_session_sha256_file "$actual") || return 1
+  expected_digest=$(fm_session_sha256_file "$expected") || return 1
+  [ "$actual_digest" = "$expected_digest" ]
+}
+
 fm_session_process_environment() {
   local pid=$1 value
   if [ -r "/proc/$pid/environ" ]; then
@@ -328,6 +358,7 @@ fm_session_test_authority_broker_present() {
 fm_session_process_runs_authority_broker() {
   local pid=$1 script=$2
   fm_session_process_runs_script "$pid" "$script" && return 0
+  fm_session_process_runs_behavior_test_broker "$pid" "$script" && return 0
   fm_session_test_authority_broker_present \
     && [ "$pid" = "$FM_TEST_AUTHORITY_BROKER_PID" ]
 }
