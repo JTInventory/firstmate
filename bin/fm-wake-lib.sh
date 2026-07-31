@@ -376,20 +376,44 @@ fm_lifecycle_process_environment() {
 fm_spawn_legacy_process_matches_scope() {
   local pid=$1 script=$2 target_home=$3 target_state=$4
   local line lifecycle_home= lifecycle_state= home= root= state=
+  local lifecycle_home_count=0 lifecycle_state_count=0
   local process_home= process_state= environment raw canonical linked=0
   fm_lifecycle_process_environment "$pid" || return 2
   environment=$FM_LIFECYCLE_ENVIRONMENT
   if [ "$FM_LIFECYCLE_ENVIRONMENT_SOURCE" = proc ]; then
     while IFS= read -r line; do
       case "$line" in
-        FM_LIFECYCLE_HOME=*) lifecycle_home=${line#FM_LIFECYCLE_HOME=} ;;
-        FM_LIFECYCLE_STATE=*) lifecycle_state=${line#FM_LIFECYCLE_STATE=} ;;
+        FM_LIFECYCLE_HOME=*)
+          lifecycle_home_count=$((lifecycle_home_count + 1))
+          lifecycle_home=${line#FM_LIFECYCLE_HOME=}
+          ;;
+        FM_LIFECYCLE_STATE=*)
+          lifecycle_state_count=$((lifecycle_state_count + 1))
+          lifecycle_state=${line#FM_LIFECYCLE_STATE=}
+          ;;
         FM_HOME=*) home=${line#FM_HOME=} ;;
         FM_ROOT_OVERRIDE=*) root=${line#FM_ROOT_OVERRIDE=} ;;
         FM_STATE_OVERRIDE=*) state=${line#FM_STATE_OVERRIDE=} ;;
       esac
     done <<< "$environment"
   else
+    return 2
+  fi
+  # Modern lifecycle scripts publish this pair before their process census.
+  # It is authoritative: FM_ROOT_OVERRIDE may name one checkout shared by
+  # several homes. A partial, duplicate, or split-home pair stays unproven.
+  if [ "$lifecycle_home_count" -gt 0 ] || [ "$lifecycle_state_count" -gt 0 ]; then
+    [ "$lifecycle_home_count" -eq 1 ] && [ -n "$lifecycle_home" ] \
+      && [ "$lifecycle_state_count" -eq 1 ] && [ -n "$lifecycle_state" ] \
+      || return 2
+    process_home=$(fm_lifecycle_canonical_path "$lifecycle_home") || return 2
+    process_state=$(fm_lifecycle_canonical_path "$lifecycle_state") || return 2
+    if [ "$process_home" = "$target_home" ] && [ "$process_state" = "$target_state" ]; then
+      return 0
+    fi
+    if [ "$process_home" != "$target_home" ] && [ "$process_state" != "$target_state" ]; then
+      return 1
+    fi
     return 2
   fi
   for raw in "$lifecycle_home" "$home" "$root"; do

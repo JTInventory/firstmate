@@ -1033,6 +1033,7 @@ FM_STATE_OVERRIDE=$w/other-home/state"
     fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
   ) || fail "conflicting lifecycle home and state evidence did not fail closed"
 
+  rc=0
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_process_environment() {
@@ -1043,7 +1044,9 @@ FM_LIFECYCLE_STATE=$w/other-home/state
 FM_STATE_OVERRIDE=$w/home/state"
     }
     fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
-  ) || fail "conflicting same-axis lifecycle markers were allowed to override target evidence"
+  ) || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "complete authoritative foreign lifecycle markers did not override legacy target evidence"
 
   (
     . "$ROOT/bin/fm-wake-lib.sh"
