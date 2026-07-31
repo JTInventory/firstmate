@@ -403,7 +403,14 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     eval "exec ${enrollment_fd}<&-"
   fi
   unset FM_SESSION_AUTHORITY_FD
-  if [ "$durable_fd" = 18 ] \
+  if fm_session_authority_socket_broker_present; then
+    if [ "$durable_fd" = 18 ]; then
+      exec 18<&-
+    elif [ -n "$durable_fd" ]; then
+      eval "exec ${durable_fd}<&-"
+    fi
+    unset FM_SESSION_AUTHORITY_DURABLE_FD
+  elif [ "$durable_fd" = 18 ] \
     && fm_session_authority_durable_capability_present; then
     fm_session_authority_live_descriptor_rotate || {
       fm_session_enrollment_trace consumer-authority-descriptor fail 2>/dev/null || true
@@ -555,13 +562,19 @@ FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
-fm_session_durable_custodian_ensure "$STATE" "$home_real" "$FM_ROOT" || {
-  fm_session_enrollment_trace consumer-durable-custodian fail 2>/dev/null || true
-  echo "error: durable session authority custodian is unavailable" >&2
-  exit 1
-}
-fm_session_enrollment_trace consumer-durable-custodian pass 2>/dev/null || true
-export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+if fm_session_authority_socket_broker_present; then
+  fm_session_enrollment_trace consumer-authority-broker pass 2>/dev/null || true
+else
+  fm_session_durable_custodian_ensure "$STATE" "$home_real" "$FM_ROOT" || {
+    fm_session_enrollment_trace consumer-durable-custodian fail 2>/dev/null || true
+    echo "error: durable session authority custodian is unavailable" >&2
+    exit 1
+  }
+  fm_session_enrollment_trace consumer-durable-custodian pass 2>/dev/null || true
+fi
+[ -z "${FM_SESSION_AUTHORITY_FD:-}" ] || export FM_SESSION_AUTHORITY_FD
+[ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \
+  || export FM_SESSION_AUTHORITY_DURABLE_FD
 export FM_SESSION_AUTHORITY_BROKER_PID
 export FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY
 export FM_SESSION_AUTHORITY_BROKER_SCRIPT

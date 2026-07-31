@@ -74,6 +74,7 @@ Each file also starts with a short header comment.
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home session lock with Codex thread ownership and legacy PID support             |
 | `fm-session-authority-exec.sh` | Broker first enrollment, recovery, and delegated primary or secondmate authority |
+| `fm-session-authority-broker.py` | Linux per-home secondmate HMAC authority over a peer-credential-verified private Unix socket |
 | `fm-codex-session-lock-hook.sh` | Bounded Codex SessionStart claim and exact-thread SessionEnd release adapter   |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash newly offered mentions and emit their once-only wake |

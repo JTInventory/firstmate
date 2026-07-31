@@ -345,8 +345,69 @@ fm_session_authority_key_path() {
   return 1
 }
 
+fm_session_authority_socket_broker_record() {
+  local home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}
+  local state=${FM_STATE_OVERRIDE:-$home/state}
+  [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+    && [ -n "${FM_AGENT_TASK:-}" ] \
+    && [ -n "${FM_AGENT_OWNER_HOME:-}" ] || return 1
+  printf '%s\n' "$state/.session-authority-broker"
+}
+
+fm_session_authority_socket_broker_client() {
+  local kind=$1 record script
+  record=$(fm_session_authority_socket_broker_record) || return 1
+  script="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-broker.py"
+  command -v python3 >/dev/null 2>&1 \
+    && [ -f "$record" ] && [ ! -L "$record" ] \
+    && [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  python3 "$script" client --record "$record" --kind "$kind"
+}
+
+fm_session_authority_socket_broker_present() {
+  fm_session_authority_socket_broker_client live </dev/null >/dev/null 2>&1 \
+    && fm_session_authority_socket_broker_client durable \
+      </dev/null >/dev/null 2>&1
+}
+
+fm_session_authority_socket_broker_start() {
+  local state=$1 home=$2 checkout=$3 task=$4 script record pid attempts=0
+  script="$checkout/bin/fm-session-authority-broker.py"
+  record="$state/.session-authority-broker"
+  [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+    && [ "${FM_AGENT_TASK:-}" = "$task" ] \
+    && [ "${FM_AGENT_OWNER_HOME:-}" = "$home" ] \
+    && command -v python3 >/dev/null 2>&1 \
+    && [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    fm_session_authority_socket_broker_present
+    return
+  fi
+  if command -v setsid >/dev/null 2>&1; then
+    setsid python3 "$script" serve --state "$state" --home "$home" \
+      --checkout "$checkout" --task "$task" </dev/null >/dev/null 2>&1 &
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
+      python3 "$script" serve --state "$state" --home "$home" \
+      --checkout "$checkout" --task "$task" </dev/null >/dev/null 2>&1 &
+  else
+    return 1
+  fi
+  pid=$!
+  while [ "$attempts" -lt 100 ]; do
+    fm_session_authority_socket_broker_present && return 0
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return 1
+}
+
 fm_session_authority_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_FD:-}
+  fm_session_authority_socket_broker_present && return 0
   if ! fm_session_descriptor_channel_isolated "$fd"; then
     fm_session_test_authority_broker_present || return 1
     FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
@@ -392,6 +453,7 @@ fm_session_authority_broker_present() {
   local start=${FM_SESSION_AUTHORITY_BROKER_START:-}
   local identity=${FM_SESSION_AUTHORITY_BROKER_IDENTITY:-}
   local current caller_target broker_target
+  fm_session_authority_socket_broker_present && return 0
   if fm_session_test_authority_broker_present \
     && { [ -z "${FM_SESSION_AUTHORITY_BROKER_PID:-}" ] \
       || [ "$FM_SESSION_AUTHORITY_BROKER_PID" = "$FM_TEST_AUTHORITY_BROKER_PID" ]; }; then
@@ -525,6 +587,20 @@ fm_session_exec_descriptor_isolation_durable() {
 
 fm_session_authority_descriptor_create() {
   local key durable_key
+  if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
+    local home state checkout
+    home=$(cd "${FM_HOME:-}" 2>/dev/null && pwd -P) || return 1
+    state=${FM_STATE_OVERRIDE:-$home/state}
+    checkout=${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}
+    checkout=$(cd "$checkout" 2>/dev/null && pwd -P) || return 1
+    if fm_session_authority_socket_broker_start \
+        "$state" "$home" "$checkout" "$FM_AGENT_TASK"; then
+      fm_session_enrollment_trace authority-broker-peercred pass 2>/dev/null || true
+      return 0
+    fi
+    fm_session_enrollment_trace authority-broker-peercred fail 2>/dev/null || true
+    return 1
+  fi
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null \
     || ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
     fm_session_enrollment_trace authority-descriptor-slots fail 2>/dev/null || true
@@ -1895,6 +1971,10 @@ fm_session_hmac_from_descriptor() {
 }
 
 fm_session_authority_hmac() {
+  if fm_session_authority_socket_broker_present; then
+    fm_session_authority_socket_broker_client live
+    return
+  fi
   fm_session_authority_capability_present || return 1
   fm_session_descriptor_channel_isolated \
     "${FM_SESSION_AUTHORITY_FD:-}" \
@@ -1904,6 +1984,7 @@ fm_session_authority_hmac() {
 
 fm_session_authority_durable_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  fm_session_authority_socket_broker_present && return 0
   if [ -z "$fd" ] && fm_session_test_authority_broker_present; then
     fd=$FM_TEST_DURABLE_AUTHORITY_FD
     FM_SESSION_AUTHORITY_DURABLE_FD=$fd
@@ -1918,6 +1999,10 @@ fm_session_authority_durable_capability_present() {
 
 fm_session_authority_durable_hmac() {
   local fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if fm_session_authority_socket_broker_present; then
+    fm_session_authority_socket_broker_client durable
+    return
+  fi
   if [ -z "$fd" ]; then
     fm_session_authority_durable_capability_present || return 1
     fd=$FM_SESSION_AUTHORITY_DURABLE_FD
