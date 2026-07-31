@@ -521,7 +521,7 @@ make_project() {  # <dir>
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 900'" --backend herdr
 }
 
 spawn_secondmate_task() {
@@ -529,7 +529,7 @@ spawn_secondmate_task() {
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
     FM_SESSION_ENROLLMENT_STAGE_TRACE=1 FM_HOME="$parent_home" \
     FM_ROOT_OVERRIDE="${SECOND_PRIMARY_ROOT:-$ROOT}" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 900'" --secondmate --backend herdr
 }
 
 teardown_task() {  # <id> <home>

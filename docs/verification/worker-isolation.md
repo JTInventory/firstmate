@@ -178,7 +178,7 @@ after cd+sleep:
   foreground_pid=641185  fg /proc cwd=/usr
 ```
 
-The descent to the foreground process is what makes a tmux reading follow a `treehouse get` subshell during the spawn worktree-settle poll, rather than reporting the pane shell's own directory.
+The descent to the foreground process is what makes a tmux reading follow the shell after the durable `treehouse get --lease` command enters its returned worktree during the spawn settle poll, rather than trusting a stale pane hint.
 
 ## Reading another process's environment
 

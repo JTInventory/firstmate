@@ -122,6 +122,7 @@ Each call site therefore states which of the two it is, so a new caller cannot s
 The live-occupant check stays a blocking condition and is never weakened to compensate.
 If authoritative cwd or process-identity capability is unavailable, the slot is retained.
 Once a process is proven inside the slot, unreadable, partial, undeclared, or mixed-version identity is contested ownership rather than absence of an occupant.
+Ordinary spawn holds a task-bound durable Treehouse lease from acquisition through teardown. A worker exit therefore cannot return and reissue the stamped slot behind Firstmate's back; an unprovable teardown retains that lease instead of exposing the slot to reuse.
 
 The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode and refuses every later mutation until the sweep is clean.
 

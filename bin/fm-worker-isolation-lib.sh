@@ -53,6 +53,19 @@ fm_worker_shell_quote() {  # <text>
   printf "'"
 }
 
+# fm_worker_treehouse_lease_command <task-id>
+# Print the pane command that durably leases a pooled slot and enters it. The
+# lease remains held even if the worker process exits, so only Firstmate's
+# ownership-gated teardown can return and recycle the slot.
+fm_worker_treehouse_lease_command() {
+  local id=$1 quoted
+  [ -n "$id" ] || return 1
+  case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  quoted=$(fm_worker_shell_quote "$id") || return 1
+  printf 'fm_wt=$(treehouse get --lease --lease-holder %s) && cd -- "$fm_wt" && unset fm_wt' \
+    "$quoted"
+}
+
 # fm_worker_launch_env_prefix <role> <task-id> <owner-home>
 # Print the exact env-assignment prefix a launch command must carry, with one
 # trailing space, so a caller composes `<prefix><launch command>`. Refuses an
