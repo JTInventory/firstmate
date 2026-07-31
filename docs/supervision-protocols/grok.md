@@ -23,12 +23,15 @@ When this session owns supervision and away mode is not active:
 
 One home has one follower slot. The sole owner of the blocking wait for a Grok primary is the Grok tracked background arm. `bin/fm-watch-session.sh` is a fallback for harnesses whose native background task is unreliable; it must never run at the same time as the Grok background arm.
 
-| Status line | Grok UI badge outcome | Meaning and next action |
+| Output source and status line | Grok UI badge outcome | Meaning and next action |
 | --- | --- | --- |
-| `watcher: started ...` or `watcher: attached ...` | The tracked Grok background task remains visible as the watcher badge. | The Grok arm owns the wait. End the turn and do not start `fm-watch-session`. |
-| `watcher: follower already waiting ...` | This arm exits without a new badge. | An existing follower owns the slot. If it is a `watch-session` runner, stop that fallback before starting one Grok background arm; two waiters are never simultaneous. |
-| `watcher: FAILED ...` | No live Grok watcher badge is proven. | Repair the failure, then start exactly one Grok tracked background arm. |
+| `watcher: started ...` or `watcher: attached ...` from the tracked Grok background call | The tracked Grok background task remains visible as the watcher badge. | The Grok arm owns the wait. End the turn and do not start `fm-watch-session`. |
+| `watcher: follower already waiting ...` from the tracked Grok background call | This arm exits without a new badge. | An existing follower owns the slot. If it is a `watch-session` runner, stop that fallback before starting one Grok background arm; two waiters are never simultaneous. |
+| `watcher: FAILED ...` from the tracked Grok background call | No live Grok watcher badge is proven. | Repair the failure, then start exactly one Grok tracked background arm. |
+| `watcher: ...` echoed by the tmux fallback's inner `fm-watch-arm.sh` | No badge; this is fallback arm output only. | The tmux fallback owns the wait. Do not interpret this line as proof of a tracked Grok task. |
 | `watch-session: started ...` or `watch-session: running ...` | No Grok background badge is expected. | The tmux fallback owns the wait because native background-notify is unreliable. Do not start a Grok background arm until this fallback is stopped. |
+
+The `watcher:` rows map to a Grok UI badge only when the line comes from Grok's tracked background call. The tmux fallback captures and echoes the inner arm's `watcher:` output, but that output is status only and never proves a Grok badge.
 
 When `GROK_AGENT=1` is present, `bin/fm-watch-session.sh start` and `restart` refuse this unsafe overlap. `FM_ALLOW_WATCH_SESSION_WITH_GROK=1` is an explicit emergency override for operators who have chosen the fallback and accept that the Grok badge is unavailable.
 

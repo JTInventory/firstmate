@@ -274,6 +274,40 @@ test_watch_session_refuses_grok_primary_without_override() {
   pass "watch-session refuses to steal the Grok primary follower slot"
 }
 
+test_watch_session_refuses_grok_restart_without_stopping_fallback() {
+  local dir fakebin state out status after_status log
+  dir=$(make_case grok-primary-restart-refusal)
+  fakebin=$(install_fake_tmux "$dir")
+  state="$dir/home/state"
+  out="$dir/restart.out"
+  after_status="$dir/status.out"
+  log="$dir/tmux.log"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" GROK_AGENT=1 FM_ALLOW_WATCH_SESSION_WITH_GROK=1 "$WATCH_SESSION" start >/dev/null \
+    || fail "could not establish the fallback runner before Grok restart refusal"
+
+  status=0
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" GROK_AGENT=1 "$WATCH_SESSION" restart >"$out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "Grok primary watch-session restart was not refused"
+  grep -F 'refusing Grok primary' "$out" >/dev/null \
+    || fail "Grok restart refusal did not explain the native background owner: $(cat "$out")"
+  [ -e "$dir/tmux-state/firstmate-watch" ] \
+    || fail "Grok restart refusal removed the existing fallback session"
+  [ ! -e "$state/.watch-session/stop" ] \
+    || fail "Grok restart refusal touched the fallback stop marker"
+  ! grep -F 'tmux kill-window' "$log" >/dev/null \
+    || fail "Grok restart refusal stopped the fallback before refusing"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" "$WATCH_SESSION" --status >"$after_status" \
+    || fail "fallback status failed after Grok restart refusal"
+  grep -F 'watch-session: running target=' "$after_status" >/dev/null \
+    || fail "existing fallback was not intact after Grok restart refusal"
+  pass "watch-session restart refuses Grok overlap before stopping the fallback"
+}
+
 test_watch_session_grok_emergency_override_allows_fallback() {
   local dir fakebin out
   dir=$(make_case grok-primary-override)
@@ -294,4 +328,5 @@ test_watch_session_stop_fails_for_unpinned_legacy_watcher
 test_watch_session_delays_only_after_failed_rearm
 test_watch_session_status_reports_runner_not_inner_arm_health
 test_watch_session_refuses_grok_primary_without_override
+test_watch_session_refuses_grok_restart_without_stopping_fallback
 test_watch_session_grok_emergency_override_allows_fallback
