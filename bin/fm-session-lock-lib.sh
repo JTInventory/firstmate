@@ -1086,9 +1086,6 @@ fm_session_enrollment_signer_prepare() {
 
 fm_session_enrollment_consumer_prepare() {
   local private public output public_digest public_key
-  if ( : <&8 ) 2>/dev/null || ( : >&8 ) 2>/dev/null; then
-    return 1
-  fi
   fm_session_exec_descriptor_isolation_durable || return 1
   private=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) \
     || return 1
@@ -1100,16 +1097,10 @@ fm_session_enrollment_consumer_prepare() {
   [ "${#public_digest}" -eq 64 ] || return 1
   case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
   public_key=$(printf '%s\n' "$public" | openssl base64 -A) || return 1
-  exec 8< <(printf '%s\n' "$private") || return 1
+  FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY=$private
   unset private public
-  fm_session_descriptor_channel_isolated 8 || {
-    exec 8<&-
-    return 1
-  }
-  FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD=8
   FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY=$public_key
   FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256=$public_digest
-  export FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD
   export FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY
   export FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256
 }
@@ -1131,8 +1122,13 @@ fm_session_enrollment_public_key_validate() {
 }
 
 fm_session_enrollment_consumer_key_validate() {
-  [ "${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD:-}" = 8 ] \
-    && [ -r /dev/fd/8 ] \
+  local derived derived_key
+  [ -n "${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY:-}" ] || return 1
+  derived=$(printf '%s\n' "$FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY" \
+    | openssl ec -pubout 2>/dev/null) || return 1
+  derived_key=$(printf '%s\n' "$derived" | openssl base64 -A) || return 1
+  unset derived
+  [ "$derived_key" = "$1" ] \
     && fm_session_enrollment_public_key_validate "$1" "$2"
 }
 
@@ -1485,15 +1481,13 @@ fm_session_enrollment_final_validate() {
 fm_session_enrollment_receipt_write() {
   local acknowledged=$1 accepted=$2 signer=$3 nonce=$4 public_digest=$5
   local stage=$6
-  local private_fd=${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD:-}
   local private consumer_start accepted_digest body signature tmp
-  [ "$private_fd" = 8 ] && [ -r /dev/fd/8 ] || return 1
-  fm_session_descriptor_channel_isolated "$private_fd" || return 1
+  fm_session_exec_descriptor_isolation_durable || return 1
+  [ -n "${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY:-}" ] || return 1
   [ ! -e "$acknowledged" ] && [ ! -L "$acknowledged" ] || return 1
   consumer_start=$(fm_session_process_start "$$") || return 1
   accepted_digest=$(fm_session_sha256_file "$accepted") || return 1
-  private=$(cat <&8) || return 1
-  exec 8< <(printf '%s\n' "$private") || return 1
+  private=$FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY
   body=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-ack.XXXXXX") \
     || return 1
   signature=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-ack-signature.XXXXXX") \
@@ -1526,7 +1520,7 @@ fm_session_enrollment_ack_write() {
 
 fm_session_enrollment_final_write() {
   fm_session_enrollment_receipt_write "$@" final || return 1
-  exec 8<&-
+  unset FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY
 }
 
 fm_session_enrollment_consumption_request() {

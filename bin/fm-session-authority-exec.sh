@@ -256,9 +256,30 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
             enrollment_authorized=$(
               fm_session_sha256_file "${enrollment}.accepted"
             ) || exit 1
-            exec "$SCRIPT_DIR/fm-session-authority-exec.sh" \
-              --enrollment-authorized "$enrollment_authorized" \
-              --enrollment-launch "$enrollment_launch" "$@"
+            if fm_session_enrollment_ticket_validate \
+                "$enrollment_ticket" "$FM_AGENT_TASK" "$home_real" \
+              && [ "$(fm_session_sha256_file \
+                  "${enrollment}.accepted" 2>/dev/null)" \
+                = "$enrollment_authorized" ] \
+              && fm_session_enrollment_acceptance_validate \
+                "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+                "$FM_SESSION_ENROLLMENT_NONCE" \
+                "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+                "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
+                "$enrollment_consumer_digest" \
+              && [ "$(sed -n '4s/^consumer-pid=//p' \
+                  "${enrollment}.accepted")" = "$$" ] \
+              && fm_session_enrollment_final_write \
+                "${enrollment}.accepted.final" \
+                "${enrollment}.accepted" \
+                "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+                "$FM_SESSION_ENROLLMENT_NONCE" \
+                "$enrollment_consumer_digest"; then
+              rm -f -- "$enrollment_ticket" || exit 1
+              enrollment_ticket=
+              authorized=1
+              break
+            fi
           fi
           kill -0 "$FM_SESSION_ENROLLMENT_SIGNER_PID" 2>/dev/null || break
           sleep 0.02

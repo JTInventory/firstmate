@@ -1378,17 +1378,19 @@ test_authority_fds_reprove_isolation_after_exec() {
   consume="$TMP_ROOT/in-process-consumer-key"
   (
     exec 8<&-
-    fm_session_descriptor_channel_isolated() { return 0; }
+    fm_session_descriptor_channel_isolated() { return 1; }
     fm_session_exec_descriptor_isolation_durable() { return 0; }
     fm_session_enrollment_consumer_prepare
+    ! ( : <&8 ) 2>/dev/null
+    [ -n "${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY:-}" ]
+    ! export -p | grep -q 'FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY='
     FM_SESSION_ENROLLMENT_SIGNER_PID=123
     FM_SESSION_ENROLLMENT_NONCE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     fm_session_enrollment_consumption_request "$consume" task "$TMP_ROOT"
     grep -q '^consumer-public-key=.' "$consume.consume"
     grep -qx "consumer-public-key-sha256=$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256" \
       "$consume.consume"
-    exec 8<&-
-  ) || fail "in-process consumer public key did not reach the signer request"
+  ) || fail "in-memory consumer key did not reach the signer request"
   rm -f "$consume.consume"
   (
     exec 10< <(printf 'private\n')
@@ -1398,12 +1400,15 @@ test_authority_fds_reprove_isolation_after_exec() {
     [ "$(cat <&10)" = private ]
   ) || fail "post-exec signer consumed its key before isolation proof"
   (
-    exec 8< <(printf 'private\n')
-    FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY_FD=8
+    accepted="$TMP_ROOT/in-process-consumer-accepted"
+    printf 'accepted\n' > "$accepted"
     fm_session_descriptor_channel_isolated() { return 1; }
-    ! fm_session_enrollment_ack_write x y 2 z q
-    [ "$(cat <&8)" = private ]
-  ) || fail "post-exec consumer consumed its key before isolation proof"
+    fm_session_exec_descriptor_isolation_durable() { return 0; }
+    fm_session_enrollment_consumer_prepare
+    fm_session_enrollment_ack_write "$TMP_ROOT/in-process-consumer-ack" \
+      "$accepted" 2 z "$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256"
+    [ -s "$TMP_ROOT/in-process-consumer-ack" ]
+  ) || fail "in-memory consumer could not sign its stage receipt"
   exec 17<&-
   FM_SESSION_AUTHORITY_FD=$original_fd
   pass "authority secrets never cross unproven exec isolation"
@@ -3669,6 +3674,12 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
     "the collapsed conflicting identity lost its wrong role"
   pass "the sweep reports collapsed conflicts even beside a correct worker"
 }
+
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = enrollment-consumer ]; then
+  test_authority_fds_reprove_isolation_after_exec
+  echo "# focused enrollment-consumer test passed"
+  exit 0
+fi
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_secondmate_child_receives_only_its_own_home
