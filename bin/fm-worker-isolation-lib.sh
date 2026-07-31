@@ -269,6 +269,45 @@ fm_worker_test_authority_capability_present() {
   FM_WORKER_TEST_DURABLE_AUTHORITY_FD=$durable_fd
 }
 
+# A behavior-test broker exposes one key stream to all descendants. Keep the
+# full primary identity proof atomic so concurrent fixtures cannot split its
+# reads. Production workers use per-home authority and never enter this path.
+fm_worker_test_primary_identity_lock_acquire() {
+  local broker=${FM_TEST_AUTHORITY_BROKER_PID:-} tmp lock owner attempts=0
+  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  tmp=$(fm_worker_canonical_path "${TMPDIR:-/tmp}") || return 1
+  [ -d "$tmp" ] && [ ! -L "$tmp" ] || return 1
+  lock="$tmp/.fm-test-primary-identity-$broker.lock"
+  owner=${BASHPID:-$$}
+  while [ "$attempts" -lt 500 ]; do
+    if mkdir "$lock" 2>/dev/null; then
+      chmod 700 "$lock" \
+        && printf '%s\n' "$owner" > "$lock/owner" || {
+          rm -f "$lock/owner"
+          rmdir "$lock" 2>/dev/null || true
+          return 1
+        }
+      FM_WORKER_TEST_PRIMARY_IDENTITY_LOCK=$lock
+      return 0
+    fi
+    if [ -e "$lock" ] || [ -L "$lock" ]; then
+      [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+    fi
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+fm_worker_test_primary_identity_lock_release() {
+  local lock=${FM_WORKER_TEST_PRIMARY_IDENTITY_LOCK:-} owner=${BASHPID:-$$}
+  [ -n "$lock" ] && [ -d "$lock" ] && [ ! -L "$lock" ] \
+    && [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] \
+    && [ "$(cat "$lock/owner" 2>/dev/null)" = "$owner" ] || return 1
+  rm -f "$lock/owner" && rmdir "$lock" || return 1
+  FM_WORKER_TEST_PRIMARY_IDENTITY_LOCK=
+}
+
 fm_worker_test_primary_identity_bind() {
   local root=$1 home=$2 state=${3:-$2/state} binding lock authority owner broker
   local binding_tmp lock_tmp authority_tmp
@@ -365,7 +404,7 @@ fm_worker_primary_bootstrap_matches() {
   return 1
 }
 
-fm_worker_primary_authority_matches() {
+fm_worker_primary_authority_matches_unlocked() {
   local operation=${1:-} root home root_real home_real cwd branch default ref
   local pid ppid env binding lock authority old marker authority_state binding_bound=0
   local test_tmp test_state test_bind_state= legacy_test_state root_top
@@ -528,6 +567,24 @@ fm_worker_primary_authority_matches() {
   done
   [ "$pid" -eq 1 ] || return 1
   [ "$cwd" = "$root_real" ]
+}
+
+fm_worker_primary_authority_matches() {
+  local operation=${1:-} status=0
+  if [ "${FM_TEST_PROCESS:-0}" != 1 ]; then
+    fm_worker_primary_authority_matches_unlocked "$operation"
+    return
+  fi
+  case "${FM_TEST_AUTHORITY_BROKER_PID:-}" in
+    ''|*[!0-9]*)
+      fm_worker_primary_authority_matches_unlocked "$operation"
+      return
+      ;;
+  esac
+  fm_worker_test_primary_identity_lock_acquire || return 1
+  fm_worker_primary_authority_matches_unlocked "$operation" || status=$?
+  fm_worker_test_primary_identity_lock_release || return 1
+  return "$status"
 }
 
 # fm_worker_refuse_primary_operation <operation>
