@@ -43,6 +43,18 @@ overlay_current_suite_bytes() {  # <source-worktree> <destination-clone>
   rm -f "$manifest"
 }
 
+commit_disposable_suite_overlay() {  # <destination-clone>
+  local destination=$1
+  [ "$(git -C "$destination" rev-parse \
+    --is-inside-work-tree 2>/dev/null)" = true ] || return 1
+  [ -n "$(git -C "$destination" status --porcelain)" ] || return 0
+  git -C "$destination" add -A \
+    && git -C "$destination" -c core.hooksPath=/dev/null \
+      -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm 'test fixture overlay' \
+    && [ -z "$(git -C "$destination" status --porcelain)" ]
+}
+
 if [ "${FM_HERDR_PRESENTATION_FOCUS:-}" = overlay ]; then
   OVERLAY_TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-overlay.XXXXXX") \
     || exit 1
@@ -50,6 +62,7 @@ if [ "${FM_HERDR_PRESENTATION_FOCUS:-}" = overlay ]; then
   OVERLAY_REPO="$OVERLAY_TEST_ROOT/repo"
   OVERLAY_SOURCE="$OVERLAY_TEST_ROOT/source"
   OVERLAY_DEST="$OVERLAY_TEST_ROOT/dest"
+  OVERLAY_CHILD="$OVERLAY_TEST_ROOT/child"
   mkdir -p "$OVERLAY_REPO"
   git -C "$OVERLAY_REPO" init -q -b main
   printf 'committed\n' > "$OVERLAY_REPO/changed"
@@ -65,11 +78,19 @@ if [ "${FM_HERDR_PRESENTATION_FOCUS:-}" = overlay ]; then
   printf 'untracked bytes\n' > "$OVERLAY_SOURCE/nested/untracked"
   overlay_current_suite_bytes "$OVERLAY_SOURCE" "$OVERLAY_DEST" \
     || { echo 'not ok - current suite overlay failed' >&2; exit 1; }
+  commit_disposable_suite_overlay "$OVERLAY_DEST" \
+    || { echo 'not ok - disposable suite overlay commit failed' >&2; exit 1; }
+  git clone -q "$OVERLAY_DEST" "$OVERLAY_CHILD"
   [ "$(cat "$OVERLAY_DEST/changed")" = 'current bytes' ] \
     && [ ! -e "$OVERLAY_DEST/deleted" ] \
     && [ "$(cat "$OVERLAY_DEST/nested/untracked")" = 'untracked bytes' ] \
-    || { echo 'not ok - nested clone retained stale committed bytes' >&2; exit 1; }
-  echo 'ok - nested clone receives modified, deleted, and untracked suite bytes'
+    && [ "$(cat "$OVERLAY_CHILD/changed")" = 'current bytes' ] \
+    && [ ! -e "$OVERLAY_CHILD/deleted" ] \
+    && [ "$(cat "$OVERLAY_CHILD/nested/untracked")" = 'untracked bytes' ] \
+    && [ -z "$(git -C "$OVERLAY_DEST" status --porcelain)" ] \
+    && [ -z "$(git -C "$OVERLAY_CHILD" status --porcelain)" ] \
+    || { echo 'not ok - clean child clone retained stale suite bytes' >&2; exit 1; }
+  echo 'ok - disposable overlay commits current bytes before clean child clone'
   exit 0
 fi
 
@@ -995,14 +1016,12 @@ git clone -q "$ROOT" "$SECOND_PRIMARY_ROOT" \
   || fail "could not clone the secondmate primary fixture"
 overlay_current_suite_bytes "$ROOT" "$SECOND_PRIMARY_ROOT" \
   || fail "could not overlay current suite bytes into the secondmate primary fixture"
+commit_disposable_suite_overlay "$SECOND_PRIMARY_ROOT" \
+  || fail "could not commit current suite bytes in the secondmate primary fixture"
 git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_A" \
   || fail "could not clone secondmate A fixture"
 git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_B" \
   || fail "could not clone secondmate B fixture"
-overlay_current_suite_bytes "$ROOT" "$SECOND_HOME_A" \
-  || fail "could not overlay current suite bytes into secondmate A"
-overlay_current_suite_bytes "$ROOT" "$SECOND_HOME_B" \
-  || fail "could not overlay current suite bytes into secondmate B"
 mkdir -p "$SECOND_PRIMARY_HOME/state" "$SECOND_PRIMARY_HOME/config" \
   "$SECOND_PRIMARY_HOME/data"
 touch "$SECOND_PRIMARY_HOME/config/herdr-presentation-spaces"
