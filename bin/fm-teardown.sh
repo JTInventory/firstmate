@@ -1757,8 +1757,9 @@ EOF
 
 TEARDOWN_SLOT_RETAINED=0
 TEARDOWN_SLOT_RETAIN_VERDICT=
-slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <label> <retire|refuse>
-  local state=$1 id=$2 wt=$3 stamp_home=$4 worker_home=$5 role=$6 label=$7 disposition=$8 verdict key i
+slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <label> <retire|refuse> <endpoint-state> <backend> <target>
+  local state=$1 id=$2 wt=$3 stamp_home=$4 worker_home=$5 role=$6 label=$7 disposition=$8
+  local endpoint_state=$9 backend=${10} target=${11} verdict key i
   TEARDOWN_SLOT_RETAIN_VERDICT=
   case "$disposition" in
     retire|refuse) ;;
@@ -1779,7 +1780,8 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <worke
     done
     [ -n "${verdict:-}" ] || return 1
   else
-    verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$stamp_home" "$worker_home" "$role")
+    verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$stamp_home" \
+      "$worker_home" "$role" "$endpoint_state" "$backend" "$target")
     TEARDOWN_RELEASE_KEYS+=("$key")
     if [ "$verdict" = dispose ]; then
       TEARDOWN_RELEASE_RESULTS+=(dispose)
@@ -1885,7 +1887,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       require_secondmate_slot_claim "$abs_home_path" "${expected_id:-$ID}" \
         "$home_scope" "$label" || return 1
       slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
-        "$home_scope" "$abs_home_path" secondmate "$label" refuse || return 1
+        "$home_scope" "$abs_home_path" secondmate "$label" refuse closed "" "" || return 1
       teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" \
         "$state_scope" "${expected_id:-$ID}" "$home_scope" "${expected_id:-$ID}" || {
         echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
@@ -2109,7 +2111,8 @@ validate_firstmate_home_children_removal() {
           require_secondmate_slot_claim "$child_home" "$child_id" "$home" \
             "child firstmate home" || return 1
           slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" "$child_home" \
-            secondmate "child firstmate home" refuse || return 1
+            secondmate "child firstmate home" refuse "$child_endpoint_state" \
+            "$child_backend" "$TEARDOWN_CHILD_WINDOW" || return 1
           ;;
         unregistered)
           if ! plain_legacy_firstmate_clone "$child_home"; then
@@ -2125,7 +2128,8 @@ validate_firstmate_home_children_removal() {
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "$home" \
-        crewmate "child worktree" retire; then
+        crewmate "child worktree" retire "$child_endpoint_state" \
+        "$child_backend" "$TEARDOWN_CHILD_WINDOW"; then
         require_treehouse_return_capability \
           "child worktree" "$child_wt" "$child_id" || return 1
       fi
@@ -2240,7 +2244,8 @@ stage_firstmate_home_children() {
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "$home" \
-        crewmate "child worktree" retire; then
+        crewmate "child worktree" retire "$child_endpoint_state" \
+        "$child_backend" "$child_t"; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         command -v treehouse >/dev/null 2>&1 || {
           echo "REFUSED: treehouse command not found; preserving child worktree $child_wt and its metadata" >&2
@@ -2338,7 +2343,7 @@ if [ "$KIND" = secondmate ]; then
         require_secondmate_slot_claim "$HOME_PATH" "$ID" "$FM_HOME" \
           "secondmate home" || exit 1
         slot_release_allowed "$STATE" "$ID" "$HOME_PATH" "$FM_HOME" "$HOME_PATH" \
-          secondmate "secondmate home" refuse || exit 1
+          secondmate "secondmate home" refuse "$TOP_ENDPOINT_STATE" "$BACKEND" "$T" || exit 1
         ;;
       unregistered)
         if ! plain_legacy_firstmate_clone "$HOME_PATH"; then
@@ -2443,7 +2448,7 @@ validate_direct_pr_ref_cleanup || exit 1
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ]; then
   validate_child_worktree_for_removal "$WT" "$PROJ" "worktree" >/dev/null || exit 1
   if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
-    crewmate "worktree" retire; then
+    crewmate "worktree" retire "$TOP_ENDPOINT_STATE" "$BACKEND" "$T"; then
     require_treehouse_return_capability "worktree" "$WT" "$ID" || exit 1
   fi
 fi
@@ -2548,7 +2553,7 @@ TOP_SLOT_ACTION=none
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   TOP_SLOT_RETAIN_VERDICT=
   if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
-    crewmate "worktree" retire; then
+    crewmate "worktree" retire "$endpoint_state" "$BACKEND" "$T"; then
     TOP_SLOT_ACTION=return
   else
     TOP_SLOT_ACTION=retain

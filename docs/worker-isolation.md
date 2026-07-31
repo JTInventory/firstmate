@@ -100,7 +100,7 @@ Getting this wrong turns unrelated host processes into stderr noise on a read-on
 ### Pooled-slot ownership
 
 `bin/fm-slot-owner-lib.sh` owns the release-or-retain verdict.
-Disposal is gated on positive evidence of a conflict in three independent forms, any one of which retains the lease: another task recorded in the same home naming the same physical slot, an ownership stamp naming a different task or home, or a live agent declared for a different task running inside the slot.
+Disposal is gated on positive evidence of a conflict in three independent forms, any one of which retains the lease: another task recorded in the same home naming the same physical slot, an ownership stamp naming a different task or home, or the process bound to the already-validated backend endpoint being a different or unidentified task running inside the slot.
 
 The stamp is written by `bin/fm-spawn.sh` into the worktree's private git directory, never into the working tree, so it can never dirty a status check or reach a commit.
 Writing is refused for anything that is not a linked worktree, so a primary checkout can never be marked as a disposable slot.
@@ -119,9 +119,9 @@ That clear is deliberately narrow in two directions.
 A stamp naming a *different* task is always preserved, because it is the evidence that stops a stale task from disposing of a slot whose real occupant is merely paused or between processes, and destroying preserved work would be strictly worse than leaking a slot.
 A caller that refuses outright preserves the stamp too, because a refused operation mutates nothing: its records all stay, ownership did not change, and stripping the evidence there would set up exactly that same destructive sequence once those records are reconciled away.
 Each call site therefore states which of the two it is, so a new caller cannot silently inherit the wrong behaviour.
-The live-occupant check stays a blocking condition and is never weakened to compensate.
-If authoritative cwd or process-identity capability is unavailable, the slot is retained.
-Once a process is proven inside the slot, unreadable, partial, undeclared, or mixed-version identity is contested ownership rather than absence of an occupant.
+The endpoint-occupant check stays a blocking condition and is never weakened to compensate.
+For a live endpoint, teardown asks the backend for that exact endpoint's foreground PID, reads its authoritative cwd and declaration, then confirms the endpoint still names the same PID. If any part of that proof is unavailable, the slot is retained. A backend endpoint already proven closed needs no live-process census.
+Once the endpoint-bound process is proven inside the slot, unreadable, partial, undeclared, or mixed-version identity is contested ownership rather than absence of an occupant. Teardown deliberately does not scan every host process: an unrelated unreadable `/proc` entry says nothing about this task's slot and cannot block all homes. Manual reclaim remains stricter and keeps the whole-host census because it has no endpoint or durable task lease to bind its proof.
 Ordinary spawn holds a task-bound durable Treehouse lease from acquisition through teardown. A worker exit therefore cannot return and reissue the stamped slot behind Firstmate's back; an unprovable teardown retains that lease instead of exposing the slot to reuse.
 
 The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode and refuses every later mutation until the sweep is clean.

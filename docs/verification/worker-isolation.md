@@ -192,4 +192,9 @@ bin/fm-agent-cwd-lib.sh: line 114: /proc/462/environ: Permission denied
 Redirections are applied left to right, so a trailing `2>/dev/null` on the same command is established only after the input redirect has already failed and written to stderr.
 The group form is what suppresses it, and `fm_agent_environ` is the single reader that applies it.
 
+That whole-host index remains appropriate for the restore sweep and deliberate manual reclaim.
+Normal pooled-slot teardown has stronger scope: metadata has already bound one exact backend endpoint and ordinary spawn holds a durable task lease.
+Teardown therefore reads only that endpoint's foreground PID, cwd, and worker declaration, then verifies the endpoint still returns the same PID.
+An unreadable unrelated host process cannot veto the slot decision; unavailable endpoint-bound proof still retains the durable lease.
+
 Regression: `tests/fm-worker-isolation.test.sh` captures the sweep with stderr folded into stdout. An unreadable live candidate whose command matches `FM_HARNESS_RE` is emitted as unproven and fails closed; unrelated unreadable kernel or non-harness processes are ignored.

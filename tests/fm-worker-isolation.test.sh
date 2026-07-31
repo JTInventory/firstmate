@@ -2276,10 +2276,18 @@ EOF
 }
 
 slot_verdict() {  # <state> <id> <wt> <stamp-home> [role] [worker-home]
-  ( FM_TEST_AGENT_PIDS="${BG_PIDS[*]:-} $$"
-    export FM_TEST_AGENT_PIDS
-    . "$ROOT/bin/fm-slot-owner-lib.sh" \
-    && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" "${5:-crewmate}" )
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" \
+      "${5:-crewmate}" closed "" "" )
+}
+
+slot_live_verdict() {  # <pid> <state> <id> <wt> <stamp-home> [role] [worker-home]
+  local pid=$1
+  shift
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_backend_foreground_process_pid() { printf '%s' "$pid"; }
+    fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" \
+      "${5:-crewmate}" live test test:pane )
 }
 
 write_current_meta() {
@@ -2426,11 +2434,12 @@ test_unavailable_occupant_evidence_retains() {
     && fm_slot_stamp_write "$WT_DIR" task-unknown "$WORLD/home" )
   verdict=$(
     . "$ROOT/bin/fm-slot-owner-lib.sh"
-    fm_slot_live_occupant_tasks() { return 2; }
-    fm_slot_disposal_verdict "$WORLD/home/state" task-unknown "$WT_DIR" "$WORLD/home" "$WORLD/home" crewmate
+    fm_slot_endpoint_occupant_tasks() { return 2; }
+    fm_slot_disposal_verdict "$WORLD/home/state" task-unknown "$WT_DIR" \
+      "$WORLD/home" "$WORLD/home" crewmate live test test:pane
   )
   case "$verdict" in
-    "retain: authoritative live-occupant evidence is unavailable"*) ;;
+    "retain: authoritative endpoint-occupant evidence is unavailable"*) ;;
     *) fail "unavailable occupant evidence did not retain: $verdict" ;;
   esac
   pass "unavailable authoritative occupant evidence retains the slot"
@@ -2448,11 +2457,11 @@ test_unclassified_live_process_retains() {
     && fm_slot_stamp_write "$WT_DIR" task-unclassified "$WORLD/home" )
   verdict=$(
     . "$ROOT/bin/fm-slot-owner-lib.sh"
-    fm_agent_proc_cwd() { return 1; }
+    fm_slot_endpoint_occupant_tasks() { return 2; }
     fm_slot_disposal_verdict "$WORLD/home/state" task-unclassified "$WT_DIR" \
-      "$WORLD/home" "$WORLD/home" crewmate
+      "$WORLD/home" "$WORLD/home" crewmate live test test:pane
   )
-  [ "$verdict" = "retain: authoritative live-occupant evidence is unavailable" ] \
+  [ "$verdict" = "retain: authoritative endpoint-occupant evidence is unavailable" ] \
     || fail "an unclassified live process did not retain the slot: $verdict"
   pass "authoritative cwd failures retain the slot"
 }
@@ -2476,9 +2485,9 @@ test_undeclared_in_slot_process_retains() {
     [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || true)" = "$WT_DIR" ] && break
     sleep 0.02
   done
-  verdict=$(slot_verdict "$WORLD/home/state" task-undeclared "$WT_DIR" "$WORLD/home")
+  verdict=$(slot_live_verdict "$pid" "$WORLD/home/state" task-undeclared "$WT_DIR" "$WORLD/home")
   case "$verdict" in
-    "retain: a live agent for task(s) unidentified-process-$pid is running in the slot"*) ;;
+    "retain: the endpoint-bound process for task(s) unidentified-process-$pid is running in the slot"*) ;;
     *) fail "undeclared in-slot process did not retain: $verdict" ;;
   esac
   pass "an undeclared mixed-version process proven inside a slot retains it"
@@ -2548,7 +2557,7 @@ test_a_stamp_naming_another_task_retains_the_slot() {
 }
 
 test_a_live_agent_of_another_task_retains_the_slot() {
-  local rec verdict occupant
+  local rec verdict occupant pid
   require_procfs || { pass "skip: this host has no readable procfs for occupancy proof"; return 0; }
   rec=$(make_slot_world slot-occupied)
   read_slot_world "$rec"
@@ -2559,16 +2568,17 @@ test_a_live_agent_of_another_task_retains_the_slot() {
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e5 "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$occupant" "$WORLD/home" >/dev/null
-  verdict=$(slot_verdict "$WORLD/home/state" task-e5 "$WT_DIR" "$WORLD/home")
+  pid=${BG_PIDS[${#BG_PIDS[@]}-1]}
+  verdict=$(slot_live_verdict "$pid" "$WORLD/home/state" task-e5 "$WT_DIR" "$WORLD/home")
   case "$verdict" in
-    "retain: a live agent for task(s) $occupant"*) : ;;
+    "retain: the endpoint-bound process for task(s) $occupant"*) : ;;
     *) fail "a slot occupied by another task's live agent did not retain: $verdict" ;;
   esac
   pass "a slot occupied by another task's live agent retains its lease"
 }
 
 test_same_task_in_another_home_or_role_retains_the_slot() {
-  local rec verdict id
+  local rec verdict id pid
   require_procfs || { pass "skip: this host has no readable procfs for identity occupancy proof"; return 0; }
   rec=$(make_slot_world slot-same-task-foreign-identity)
   read_slot_world "$rec"
@@ -2576,9 +2586,10 @@ test_same_task_in_another_home_or_role_retains_the_slot() {
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" "$id" "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$id" "$WORLD/other-home" crewmate >/dev/null
-  verdict=$(slot_verdict "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home")
+  pid=${BG_PIDS[${#BG_PIDS[@]}-1]}
+  verdict=$(slot_live_verdict "$pid" "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home")
   case "$verdict" in
-    "retain: a live agent for task(s) $id"*) ;;
+    "retain: the endpoint-bound process for task(s) $id"*) ;;
     *) fail "same task in another home did not retain the slot: $verdict" ;;
   esac
   rec=$(make_slot_world slot-same-task-foreign-role)
@@ -2587,9 +2598,10 @@ test_same_task_in_another_home_or_role_retains_the_slot() {
   ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" "$id" "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$id" "$WORLD/home" secondmate >/dev/null
-  verdict=$(slot_verdict "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home" crewmate)
+  pid=${BG_PIDS[${#BG_PIDS[@]}-1]}
+  verdict=$(slot_live_verdict "$pid" "$WORLD/home/state" "$id" "$WT_DIR" "$WORLD/home" crewmate)
   case "$verdict" in
-    "retain: a live agent for task(s) $id"*) ;;
+    "retain: the endpoint-bound process for task(s) $id"*) ;;
     *) fail "same task and home with another role did not retain the slot: $verdict" ;;
   esac
   pass "live slot occupancy excludes only the exact task, home, and role identity"
