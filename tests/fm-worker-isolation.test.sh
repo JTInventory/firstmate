@@ -106,19 +106,23 @@ require_procfs() {
 # --- A. the home declaration itself -----------------------------------------
 
 test_crewmate_declaration_clears_every_inherited_home() {
-  local prefix
+  local prefix close_live close_durable
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "exec $FM_TEST_AUTHORITY_FD>&-; exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  close_live="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
+  close_durable="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_DURABLE_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
+  [ "$prefix" = ":; ${close_live}${close_durable}FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
 
 test_secondmate_declaration_pins_only_its_own_home() {
-  local prefix same_home_prefix same_home="$TMP_ROOT/same-home-declaration"
+  local prefix close_live close_durable same_home_prefix same_home="$TMP_ROOT/same-home-declaration"
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "exec $FM_TEST_AUTHORITY_FD>&-; exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  close_live="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
+  close_durable="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_DURABLE_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
+  [ "$prefix" = ":; ${close_live}${close_durable}FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   mkdir -p "$same_home"
   same_home_prefix=$( FM_HOME="$same_home" \
@@ -130,6 +134,32 @@ test_secondmate_declaration_pins_only_its_own_home() {
   assert_not_contains "$same_home_prefix" "FM_SESSION_AUTHORITY_DURABLE_FD= " \
     "same-home secondmate declaration cleared its scoped durable authority"
   pass "a secondmate declaration strips cross-home authority and keeps same-home durable authority"
+}
+
+test_worker_declaration_tolerates_authority_fds_already_closed() {
+  local prefix out status
+  prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+    && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
+  status=0
+  out=$(sh -c "PATH=/bin GOTMPDIR=/tmp ${prefix}printf '%s|%s' \"\$PATH\" \"\$GOTMPDIR\"" \
+    19<&- 18<&-) || status=$?
+  expect_code 0 "$status" \
+    "a worker launch must survive authority descriptors already closed by its backend"
+  [ "$out" = "/bin|/tmp" ] \
+    || fail "the descriptor-safe worker launch lost its leading environment: '$out'"
+  status=0
+  out=$(bash -c "${prefix}sh -c 'if [ -e /proc/\$\$/fd/$FM_TEST_AUTHORITY_FD ] || [ -e /dev/fd/$FM_TEST_AUTHORITY_FD ] || [ -e /proc/\$\$/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || [ -e /dev/fd/$FM_TEST_DURABLE_AUTHORITY_FD ]; then exit 9; fi; printf reached'" \
+    19</dev/null 18</dev/null) || status=$?
+  expect_code 0 "$status" \
+    "a worker launch must close authority descriptors that its backend inherited"
+  [ "$out" = reached ] \
+    || fail "the descriptor-closing worker launch returned '$out' instead of reaching its command"
+  status=0
+  sh -c "${prefix}printf reached" 19</dev/null 18</dev/null \
+    >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a shell unable to close high authority descriptors continued the worker launch"
+  pass "a worker declaration portably tolerates absent authority descriptors and closes present ones"
 }
 
 test_declaration_refuses_rather_than_emitting_a_partial_prefix() {
@@ -3642,6 +3672,7 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_secondmate_child_receives_only_its_own_home
+  test_worker_declaration_tolerates_authority_fds_already_closed
   test_authority_fds_require_sibling_proc_isolation
   test_authority_fds_reprove_isolation_after_exec
   test_secondmate_authority_delegation_uses_no_node
@@ -3658,6 +3689,7 @@ fi
 
 test_crewmate_declaration_clears_every_inherited_home
 test_secondmate_declaration_pins_only_its_own_home
+test_worker_declaration_tolerates_authority_fds_already_closed
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home

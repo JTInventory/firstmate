@@ -79,6 +79,7 @@ fm_worker_launch_env_prefix() {
       || strip_authority=1
   fi
   if [ "$strip_authority" -eq 1 ]; then
+    printf ':; '
     for var in FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD \
       FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD; do
       eval "authority_fd=\${$var:-}"
@@ -94,7 +95,7 @@ fm_worker_launch_env_prefix() {
               [ "$authority_fd" != "${FM_TEST_AUTHORITY_FD:-}" ] || continue
               ;;
           esac
-          printf 'exec %s>&-; ' "$authority_fd"
+          printf '%s' "if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$authority_fd ] || exec $authority_fd>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$authority_fd ] || exec $authority_fd>&-; else echo 'error: cannot prove authority descriptor $authority_fd absent before worker launch' >&2; exit 1; fi; "
           closed_fds="$closed_fds $authority_fd"
           ;;
       esac
