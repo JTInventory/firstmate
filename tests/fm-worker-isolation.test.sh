@@ -395,13 +395,45 @@ test_secondmate_child_receives_only_its_own_home() {
     "authority descriptor closure still interpolated an environment value"
   abort_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' \
     "$SPAWN" | sed '$d')
-  assert_not_contains "$abort_source" 'fm_slot_stamp_clear_exact' \
-    "unpublished spawn cleanup still cleared a lease without returning it"
+  assert_contains "$abort_source" 'SPAWN_TREEHOUSE_LEASE_ACQUIRED' \
+    "unpublished spawn cleanup did not distinguish leases from stamp creation"
   assert_contains "$(cat "$SPAWN")" 'fm_slot_disposal_verdict' \
     "unpublished spawn cleanup did not use the slot ownership gate"
   assert_contains "$(cat "$SPAWN")" '--if-lease-holder "$ID"' \
     "unpublished spawn cleanup did not bind Treehouse return to its lease holder"
+  assert_contains "$(cat "$SPAWN")" 'SPAWN_TREEHOUSE_LEASE_ACQUIRED=1' \
+    "spawn did not record Treehouse lease acquisition independently"
   pass "a secondmate child receives its own home and no inherited override"
+}
+
+test_unpublished_retry_returns_matching_lease() {
+  local function_source marker out
+  marker="$TMP_ROOT/unpublished-retry-returned"
+  function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+    "$SPAWN" | sed '$d')
+  out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
+    bash -c '
+      eval "$FUNCTION_SOURCE"
+      SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+      SPAWN_SLOT_CLAIMED=1
+      SPAWN_SLOT_CLAIM_CREATED=0
+      SPAWN_SLOT_CLAIM_PUBLISHED=0
+      SPAWN_SLOT_CLAIM_WT=/tmp/retry-worktree
+      SPAWN_SLOT_CLAIM_HOME=/tmp/retry-home
+      SPAWN_ENDPOINT_TARGET=
+      ID=retry-task
+      KIND=ship
+      FM_HOME=/tmp/retry-home
+      FM_ROOT=/tmp
+      STATE=/tmp/retry-home/state
+      BACKEND=tmux
+      fm_slot_disposal_verdict() { printf "%s" dispose; }
+      fm_slot_stamp_stage_return() { FM_SLOT_RETURN_STAGED=0; }
+      treehouse() { [ "$1" = return ] && : > "$RETURN_MARKER"; }
+      spawn_return_unpublished_slot
+    ' 2>&1) || fail "an unpublished retry could not return its matching lease: $out"
+  [ -f "$marker" ] || fail "an acquired lease with a preexisting stamp was not returned"
+  pass "unpublished retries return leases even when the stamp preexists"
 }
 
 # --- C. a declared worker is inert and refused -------------------------------
@@ -3819,6 +3851,7 @@ fi
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-hardening ]; then
   test_secondmate_child_receives_only_its_own_home
+  test_unpublished_retry_returns_matching_lease
   echo "# focused isolation-hardening test passed"
   exit 0
 fi

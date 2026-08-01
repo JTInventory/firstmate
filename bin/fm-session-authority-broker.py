@@ -126,17 +126,16 @@ def peer_is_authorized(
         for _ in range(MAX_ANCESTRY_DEPTH):
             ancestor_environment = process_environment(current)
             ancestor_role = ancestor_environment.get("FM_AGENT_ROLE")
-            if ancestor_role == "crewmate":
+            if ancestor_role != "secondmate":
                 return False
-            if ancestor_role == "secondmate":
-                ancestor_home = ancestor_environment.get("FM_AGENT_OWNER_HOME", "")
-                if (
-                    ancestor_environment.get("FM_AGENT_TASK") != task
-                    or not ancestor_home
-                    or not os.path.isabs(ancestor_home)
-                    or canonical(ancestor_home) != home
-                ):
-                    return False
+            ancestor_home = ancestor_environment.get("FM_AGENT_OWNER_HOME", "")
+            if (
+                ancestor_environment.get("FM_AGENT_TASK") != task
+                or not ancestor_home
+                or not os.path.isabs(ancestor_home)
+                or canonical(ancestor_home) != home
+            ):
+                return False
             if current == launch_pid:
                 return (
                     process_generation(current) == (launch_start, launch_identity)

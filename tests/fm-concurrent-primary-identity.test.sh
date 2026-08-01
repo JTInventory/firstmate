@@ -25,7 +25,19 @@ esac
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$ROOT/bin/fm-worker-isolation-lib.sh"
 
-if ! timeout 5 bash -c '
+run_bounded() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  else
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", $pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  fi
+}
+
+if ! run_bounded 5 bash -c '
   . "$1/bin/fm-wake-lib.sh"
   fm_lock_try_acquire() { return 1; }
   pids=()

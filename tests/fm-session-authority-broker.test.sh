@@ -90,7 +90,8 @@ SH
   chmod 700 "$launch_script"
   (
     cd "$home" || exit 1
-    exec "$launch_script"
+    exec env FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
+      FM_AGENT_OWNER_HOME="$home" "$launch_script"
   ) >/dev/null 2>&1 &
   LAUNCH_PID=$!
   launch_start=$(test_process_start "$LAUNCH_PID") \
@@ -330,6 +331,50 @@ then
   fail "the broker did not validate every secondmate ancestor scope"
 fi
 pass "peer-credential broker rejects mismatched secondmate ancestors"
+
+if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+home = "/test/home"
+script = str(broker_path)
+for role in ("", "primary", "unknown"):
+    broker.canonical = lambda value: value
+    broker.os.readlink = lambda path: home if path.endswith("/cwd") else "/usr/bin/python3"
+    broker.process_command = lambda pid: ["python3", script, "client"]
+    broker.process_generation = lambda pid: ("proc:x", "exe:x")
+    broker.process_environment = lambda pid, role=role: {
+        42: {
+            "FM_AGENT_ROLE": "secondmate",
+            "FM_AGENT_TASK": "alpha",
+            "FM_AGENT_OWNER_HOME": home,
+        },
+        43: {"FM_AGENT_ROLE": role},
+        44: {
+            "FM_AGENT_ROLE": "secondmate",
+            "FM_AGENT_TASK": "alpha",
+            "FM_AGENT_OWNER_HOME": home,
+        },
+    }[pid]
+    broker.parent_pid = lambda pid: {42: 43, 43: 44}[pid]
+    if broker.peer_is_authorized(
+        42, uid=1000, gid=1000, home=home, task="alpha", script=script,
+        launch_pid=44, launch_start="proc:x", launch_identity="exe:x",
+        broker_uid=1000, broker_gid=1000
+    ):
+        raise SystemExit(f"an undeclared {role or 'empty'} ancestor was accepted")
+PY
+then
+  fail "the broker accepted an undeclared ancestry gap"
+fi
+pass "peer-credential broker rejects empty, primary, and unknown ancestors"
 
 if ! python3 - "$BROKER" <<'PY'
 import importlib.util

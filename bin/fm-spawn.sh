@@ -242,6 +242,7 @@ SPAWN_ADMISSION_LOCKS=()
 SPAWN_SLOT_CLAIM_CREATED=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
+SPAWN_TREEHOUSE_LEASE_ACQUIRED=0
 SPAWN_SLOT_CLAIM_WT=
 SPAWN_SLOT_CLAIM_HOME=
 SPAWN_AUTHORITY_ENROLLMENT=
@@ -267,7 +268,8 @@ claim_spawn_slot() {
 spawn_return_unpublished_slot() {
   local endpoint_state=closed worker_role=crewmate worker_home=$FM_HOME verdict
   local claim legacy stamp_path staged
-  [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] || return 0
+  [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ] || return 0
+  [ "$SPAWN_SLOT_CLAIMED" = 1 ] || return 0
   [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] || return 0
   if [ -n "${SPAWN_ENDPOINT_TARGET:-}" ]; then
     endpoint_state=live
@@ -352,8 +354,13 @@ spawn_abort_cleanup() {
       "${SPAWN_AUTHORITY_ENROLLMENT}.accepted.final"
   [ -z "$SPAWN_AUTHORITY_LAUNCH_RECEIPT" ] \
     || rm -f -- "$SPAWN_AUTHORITY_LAUNCH_RECEIPT"
-  if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
-    spawn_return_unpublished_slot || true
+  if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
+    if [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ]; then
+      spawn_return_unpublished_slot || true
+    elif [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ]; then
+      fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" \
+        "$SPAWN_SLOT_CLAIM_HOME" || true
+    fi
   fi
   if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] \
      && [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
@@ -1596,6 +1603,7 @@ if [ "$KIND" != secondmate ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
   claim_spawn_slot || exit 1
 fi
 
