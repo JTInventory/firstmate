@@ -1041,6 +1041,11 @@ git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_A" \
   || fail "could not clone secondmate A fixture"
 git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_B" \
   || fail "could not clone secondmate B fixture"
+SECOND_PRIMARY_ORIGIN=$(git -C "$SECOND_PRIMARY_ROOT" remote get-url origin) \
+  || fail "could not resolve the secondmate primary fixture origin"
+git -C "$SECOND_HOME_A" remote set-url origin "$SECOND_PRIMARY_ORIGIN" \
+  && git -C "$SECOND_HOME_B" remote set-url origin "$SECOND_PRIMARY_ORIGIN" \
+  || fail "could not align disposable secondmate clone origins"
 mkdir -p "$SECOND_PRIMARY_HOME/state" "$SECOND_PRIMARY_HOME/config" \
   "$SECOND_PRIMARY_HOME/data"
 touch "$SECOND_PRIMARY_HOME/config/herdr-presentation-spaces"
@@ -1242,6 +1247,36 @@ teardown_task aflat "$SECOND_HOME_A" > "$TMP_ROOT/aflat-teardown.out" 2> "$TMP_R
   || fail "flat cross-home contention fixture teardown failed"
 pass "real Herdr lab: session lock contention from a secondmate home falls back flat with no journal"
 
+# Retire every still-live endpoint before the restart fixtures deliberately
+# stop Herdr. A reprovision preserves pane structure but not these agents, so
+# carrying their old generations across that boundary would correctly make
+# fail-closed teardown refuse them later.
+for META_HOME_PAIR in \
+  "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" \
+  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
+  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B" \
+  "alpha:$SECOND_PRIMARY_HOME"
+do
+  TASK_ID=${META_HOME_PAIR%%:*}
+  TASK_HOME=${META_HOME_PAIR#*:}
+  teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-$TASK_ID.out" 2> "$TMP_ROOT/td-$TASK_ID.err" \
+    || fail "pre-restart multi-home teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-$TASK_ID.err")"
+done
+assert_focus_is "$CAPTAIN_FOCUS" "pre-restart multi-home teardown"
+pass "real Herdr lab: live multi-home endpoints retire before session reprovision"
+
+# Alpha teardown removes its disposable plain-clone home. Recreate only the
+# marked, inherited home fixture needed by the later cross-home recovery cases;
+# it has no stale endpoint metadata to rebind or trust.
+git clone -q "$SECOND_PRIMARY_ROOT" "$SECOND_HOME_A" \
+  || fail "could not recreate secondmate A after pre-restart retirement"
+git -C "$SECOND_HOME_A" remote set-url origin "$SECOND_PRIMARY_ORIGIN" \
+  || fail "could not align the recreated secondmate A origin"
+mkdir -p "$SECOND_HOME_A/state" "$SECOND_HOME_A/config" "$SECOND_HOME_A/data"
+printf 'alpha\n' > "$SECOND_HOME_A/.fm-secondmate-home"
+touch "$SECOND_HOME_A/state/.last-watcher-beat" \
+  "$SECOND_HOME_A/config/herdr-presentation-spaces"
+
 # Same-identity recovery replaces only one exact agent-free husk in its
 # original projected workspace.
 # Exercise both the leading fm- identity style seen in Hi Bit work and the
@@ -1429,20 +1464,12 @@ lab tab get "$FLAT_TAB_ID" >/dev/null 2>&1 \
   || fail "correction removed the seeded flat secondmate child tab"
 pass "real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated"
 
-# Teardown multi-home projected tasks by exact pane only.
-for META_HOME_PAIR in \
-  "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
-  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
-  "alpha:$SECOND_PRIMARY_HOME" \
-  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B"
-do
-  TASK_ID=${META_HOME_PAIR%%:*}
-  TASK_HOME=${META_HOME_PAIR#*:}
-  teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-$TASK_ID.out" 2> "$TMP_ROOT/td-$TASK_ID.err" \
-    || fail "multi-home teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-$TASK_ID.err")"
-done
-assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
-pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
+# This endpoint was created after the restart fixtures and retains its exact
+# live generation, so teardown can still prove and close it normally.
+teardown_task post-legacy "$HOME_DIR" > "$TMP_ROOT/td-post-legacy.out" 2> "$TMP_ROOT/td-post-legacy.err" \
+  || fail "post-restart teardown of post-legacy failed: $(cat "$TMP_ROOT/td-post-legacy.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "post-restart teardown"
+pass "real Herdr lab: exact-pane teardowns restore captain focus without workspace close authority"
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is
