@@ -89,7 +89,10 @@ release_claim_lock() {
 }
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
-fm_lock_acquire_wait "$CLAIM_LOCK"
+if ! fm_lock_acquire_wait "$CLAIM_LOCK"; then
+  echo "error: could not acquire the session-lock claim lock" >&2
+  exit 1
+fi
 CLAIM_LOCK_HELD=1
 AUTH_TXN="$STATE/.session-authority-transaction"
 AUTHORITY="$STATE/.session-authority"

@@ -132,6 +132,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+  && ! fm_worker_secondmate_effective_scope_matches; then
+  echo "error: secondmate scope does not match its declared owner home" >&2
+  exit 1
+fi
 unset FM_SESSION_ENROLLMENT_TRACE_FILE
 if [ "${FM_SESSION_ENROLLMENT_STAGE_TRACE:-0}" = 1 ] \
   && [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
@@ -156,6 +161,24 @@ if [ "${FM_SESSION_ENROLLMENT_STAGE_TRACE:-0}" = 1 ] \
     fm_session_enrollment_trace endpoint-generation-presence absent || exit 1
   fi
 fi
+
+fm_session_close_descriptor() {
+  local fd=$1 fd_path
+  case "$fd" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$fd" -ge 3 ] 2>/dev/null || return 1
+  if [ -d "/proc/$$/fd" ]; then
+    fd_path="/proc/$$/fd/$fd"
+  elif [ -d /dev/fd ]; then
+    fd_path="/dev/fd/$fd"
+  else
+    return 1
+  fi
+  [ -e "$fd_path" ] || return 1
+  exec {fd}<&-
+}
+
 if [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] \
   && [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \
   && fm_session_test_authority_broker_present; then
@@ -395,14 +418,14 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   if [ "$enrollment_fd" = 9 ]; then
     exec 9<&-
   elif [ -n "$enrollment_fd" ]; then
-    eval "exec ${enrollment_fd}<&-"
+    fm_session_close_descriptor "$enrollment_fd" || exit 1
   fi
   unset FM_SESSION_AUTHORITY_FD
   if fm_session_authority_socket_broker_present; then
     if [ "$durable_fd" = 18 ]; then
       exec 18<&-
     elif [ -n "$durable_fd" ]; then
-      eval "exec ${durable_fd}<&-"
+      fm_session_close_descriptor "$durable_fd" || exit 1
     fi
     unset FM_SESSION_AUTHORITY_DURABLE_FD
   elif [ "$durable_fd" = 18 ] \
@@ -416,7 +439,7 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     if [ "$durable_fd" = 18 ]; then
       exec 18<&-
     elif [ -n "$durable_fd" ]; then
-      eval "exec ${durable_fd}<&-"
+      fm_session_close_descriptor "$durable_fd" || exit 1
     fi
     unset FM_SESSION_AUTHORITY_DURABLE_FD
     if [ -e "$STATE/.session-durable-authority" ] \
@@ -502,7 +525,7 @@ elif [ "$durable_fd" = 18 ] \
   if [ "$enrollment_fd" = 9 ]; then
     exec 9<&-
   elif [ -n "$enrollment_fd" ]; then
-    eval "exec ${enrollment_fd}<&-"
+    fm_session_close_descriptor "$enrollment_fd" || exit 1
   fi
   unset FM_SESSION_AUTHORITY_FD
   fm_session_authority_live_descriptor_rotate || {
@@ -513,12 +536,12 @@ else
   if [ "$enrollment_fd" = 9 ]; then
     exec 9<&-
   elif [ -n "$enrollment_fd" ]; then
-    eval "exec ${enrollment_fd}<&-"
+    fm_session_close_descriptor "$enrollment_fd" || exit 1
   fi
   if [ "$durable_fd" = 18 ]; then
     exec 18<&-
   elif [ -n "$durable_fd" ]; then
-    eval "exec ${durable_fd}<&-"
+    fm_session_close_descriptor "$durable_fd" || exit 1
   fi
   unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
   if [ -f "$STATE/.session-durable-authority" ] \

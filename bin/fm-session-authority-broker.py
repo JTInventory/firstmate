@@ -17,11 +17,13 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 
 
 MAX_BODY = 1024 * 1024
 PROTOCOL_VERSION = 1
 MAX_ANCESTRY_DEPTH = 128
+BROKER_REQUEST_TIMEOUT_SECONDS = 2.0
 
 
 def canonical(value: str) -> str:
@@ -76,10 +78,17 @@ def process_command(pid: int) -> list[str]:
     ]
 
 
-def recv_exact(connection: socket.socket, length: int) -> bytes:
+def recv_exact(
+    connection: socket.socket, length: int, deadline: float | None = None
+) -> bytes:
     chunks: list[bytes] = []
     remaining = length
     while remaining:
+        if deadline is not None:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise TimeoutError("broker request deadline exceeded")
+            connection.settimeout(timeout)
         chunk = connection.recv(remaining)
         if not chunk:
             raise ValueError("short broker request")
@@ -115,8 +124,19 @@ def peer_is_authorized(
         current = pid
         visited: set[int] = set()
         for _ in range(MAX_ANCESTRY_DEPTH):
-            if process_environment(current).get("FM_AGENT_ROLE") == "crewmate":
+            ancestor_environment = process_environment(current)
+            ancestor_role = ancestor_environment.get("FM_AGENT_ROLE")
+            if ancestor_role == "crewmate":
                 return False
+            if ancestor_role == "secondmate":
+                ancestor_home = ancestor_environment.get("FM_AGENT_OWNER_HOME", "")
+                if (
+                    ancestor_environment.get("FM_AGENT_TASK") != task
+                    or not ancestor_home
+                    or not os.path.isabs(ancestor_home)
+                    or canonical(ancestor_home) != home
+                ):
+                    return False
             if current == launch_pid:
                 return (
                     process_generation(current) == (launch_start, launch_identity)
@@ -132,6 +152,21 @@ def peer_is_authorized(
         return False
     except (OSError, UnicodeError, ValueError):
         return False
+
+
+def connected_peer_matches_record(
+    connection: socket.socket, metadata: dict[str, str]
+) -> bool:
+    credentials = connection.getsockopt(
+        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+    )
+    pid, uid, gid = struct.unpack("3i", credentials)
+    return (
+        pid == int(metadata["pid"])
+        and uid == int(metadata["uid"])
+        and gid == int(metadata["gid"])
+        and process_generation(pid) == (metadata["start"], metadata["identity"])
+    )
 
 
 def read_launch_evidence(
@@ -269,7 +304,7 @@ def serve(args: argparse.Namespace) -> int:
             args.launch_evidence_fd, home=home, task=args.task,
             launch_script=launch_script
         )
-    except (OSError, UnicodeError, ValueError):
+    except (OSError, UnicodeError, ValueError, struct.error):
         return 1
     record = state / ".session-authority-broker"
     if record.exists() or record.is_symlink():
@@ -318,15 +353,16 @@ def serve(args: argparse.Namespace) -> int:
                 raise
             with connection:
                 try:
+                    request_deadline = time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
                     credentials = connection.getsockopt(
                         socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
                     )
                     pid, uid, gid = struct.unpack("3i", credentials)
-                    header = recv_exact(connection, 5)
+                    header = recv_exact(connection, 5, request_deadline)
                     kind, length = struct.unpack("!cI", header)
                     if length > MAX_BODY or kind not in (b"L", b"D"):
                         raise ValueError("invalid broker request")
-                    body = recv_exact(connection, length)
+                    body = recv_exact(connection, length, request_deadline)
                     if not peer_is_authorized(
                         pid, uid=uid, gid=gid, home=home, task=args.task, script=script,
                         launch_pid=launch_pid, launch_start=launch_start,
@@ -419,8 +455,12 @@ def client(args: argparse.Namespace) -> int:
             else socket_value
         )
         with connection:
+            if not connected_peer_matches_record(connection, metadata):
+                return 1
             connection.sendall(struct.pack("!cI", kind, len(body)) + body)
-            response = recv_exact(connection, 65)
+            response = recv_exact(
+                connection, 65, time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
+            )
         if response[:1] != b"O" or any(value not in b"0123456789abcdef" for value in response[1:]):
             return 1
         sys.stdout.buffer.write(response[1:] + b"\n")

@@ -43,7 +43,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+if ! fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+  echo "error: could not acquire the wake-queue lock" >&2
+  exit 1
+fi
 DRAIN_LOCK_HELD=true
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then

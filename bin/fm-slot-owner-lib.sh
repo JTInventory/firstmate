@@ -446,6 +446,32 @@ fm_slot_meta_referencing_tasks() {
   return "$found"
 }
 
+fm_slot_process_identity() {
+  local env=$1 key count any=0
+  local task_count=0 home_count=0 role_count=0
+  FM_SLOT_PROCESS_TASK=
+  FM_SLOT_PROCESS_HOME=
+  FM_SLOT_PROCESS_ROLE=
+  for key in FM_AGENT_TASK FM_AGENT_OWNER_HOME FM_AGENT_ROLE; do
+    count=$(printf '%s\n' "$env" | grep -c "^${key}=" 2>/dev/null) || count=0
+    [ "$count" -eq 0 ] || any=1
+    case "$key" in
+      FM_AGENT_TASK) task_count=$count ;;
+      FM_AGENT_OWNER_HOME) home_count=$count ;;
+      FM_AGENT_ROLE) role_count=$count ;;
+    esac
+  done
+  [ "$any" -eq 1 ] || return 1
+  [ "$task_count" -eq 1 ] && [ "$home_count" -eq 1 ] \
+    && [ "$role_count" -eq 1 ] || return 2
+  FM_SLOT_PROCESS_TASK=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p')
+  FM_SLOT_PROCESS_HOME=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p')
+  FM_SLOT_PROCESS_ROLE=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p')
+  [ -n "$FM_SLOT_PROCESS_TASK" ] \
+    && [ -n "$FM_SLOT_PROCESS_HOME" ] \
+    && [ -n "$FM_SLOT_PROCESS_ROLE" ] || return 2
+}
+
 # fm_slot_live_occupant_tasks <worktree> <task-id> <home> <role>: other
 # complete identities whose declared
 # live agent process is running inside the slot right now, newline separated
@@ -493,9 +519,17 @@ fm_slot_live_occupant_tasks() {
     fi
     fm_agent_path_within "$wt_real" "$cwd" || continue
     if env=$(fm_agent_environ "$pid"); then
-      task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
-      home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
-      role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+      if fm_slot_process_identity "$env"; then
+        task=$FM_SLOT_PROCESS_TASK
+        home=$FM_SLOT_PROCESS_HOME
+        role=$FM_SLOT_PROCESS_ROLE
+      elif [ "$?" -eq 2 ]; then
+        return 2
+      else
+        task=
+        home=
+        role=
+      fi
     else
       task=
       home=
@@ -543,9 +577,17 @@ fm_slot_endpoint_occupant_tasks() {
     && [ "$(fm_session_process_identity "$current" 2>/dev/null || true)" = "$identity" ] \
     || return 2
   fm_agent_path_within "$wt_real" "$cwd" || return 1
-  task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
-  home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
-  role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+  if fm_slot_process_identity "$env"; then
+    task=$FM_SLOT_PROCESS_TASK
+    home=$FM_SLOT_PROCESS_HOME
+    role=$FM_SLOT_PROCESS_ROLE
+  elif [ "$?" -eq 2 ]; then
+    return 2
+  else
+    task=
+    home=
+    role=
+  fi
   if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
      && fm_slot_same_path "$home" "$self_home"; then
     return 1

@@ -1097,10 +1097,37 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+fm_lock_monotonic_millis() {
+  if [ -r /proc/uptime ]; then
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime
+    return $?
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import time; print(int(time.monotonic() * 1000))'
+}
+
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
-    sleep 0.1
+  local lockdir=$1 timeout_ms=${2:-${FM_LOCK_ACQUIRE_WAIT_TIMEOUT_MS:-5000}}
+  local started now rc deadline
+  case "$timeout_ms" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$timeout_ms" -gt 0 ] || return 1
+  started=$(fm_lock_monotonic_millis) || return 1
+  deadline=$((started + timeout_ms))
+  while :; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 1 ] || return "$rc"
+    now=$(fm_lock_monotonic_millis) || return 1
+    if [ "$now" -ge "$deadline" ]; then
+      printf 'error: timed out waiting for lock %s\n' "$lockdir" >&2
+      return 1
+    fi
+    sleep 0.01
   done
 }
 
@@ -1142,7 +1169,9 @@ fm_wake_append() {
   seq_file="$STATE/.wake-queue.seq"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if ! fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+    return 1
+  fi
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;

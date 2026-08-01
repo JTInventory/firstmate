@@ -264,6 +264,45 @@ claim_spawn_slot() {
   SPAWN_SLOT_CLAIM_HOME=$home
 }
 
+spawn_return_unpublished_slot() {
+  local endpoint_state=closed worker_role=crewmate worker_home=$FM_HOME verdict
+  local claim legacy stamp_path staged
+  [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] || return 0
+  [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] || return 0
+  if [ -n "${SPAWN_ENDPOINT_TARGET:-}" ]; then
+    endpoint_state=live
+  fi
+  if [ "$KIND" = secondmate ]; then
+    worker_role=secondmate
+    worker_home=${PROJ_ABS:-$FM_HOME}
+  fi
+  verdict=$(fm_slot_disposal_verdict "$STATE" "$ID" \
+    "$SPAWN_SLOT_CLAIM_WT" "$SPAWN_SLOT_CLAIM_HOME" "$worker_home" \
+    "$worker_role" "$endpoint_state" "$BACKEND" \
+    "${SPAWN_ENDPOINT_TARGET:-}") || return 1
+  [ "$verdict" = dispose ] || {
+    echo "warning: retaining unpublished slot $SPAWN_SLOT_CLAIM_WT: ${verdict#retain: }" >&2
+    return 1
+  }
+  fm_slot_stamp_stage_return "$SPAWN_SLOT_CLAIM_WT" "$ID" \
+    "$SPAWN_SLOT_CLAIM_HOME" "$STATE" "$ID" || return 1
+  staged=${FM_SLOT_RETURN_STAGED:-0}
+  claim=${FM_SLOT_RETURN_CLAIM:-}
+  legacy=${FM_SLOT_RETURN_LEGACY:-}
+  stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
+  if ! ( cd "$FM_ROOT" && treehouse return --force "$SPAWN_SLOT_CLAIM_WT" \
+    --if-lease-holder "$ID" ); then
+    if [ "$staged" = 1 ]; then
+      fm_slot_stamp_restore_return "$SPAWN_SLOT_CLAIM_WT" "$ID" \
+        "$SPAWN_SLOT_CLAIM_HOME" "$claim" "$ID" "$stamp_path" "$legacy" || true
+    fi
+    return 1
+  fi
+  if [ "$staged" = 1 ]; then
+    fm_slot_stamp_finalize_return "$claim" "$legacy" || return 1
+  fi
+}
+
 parse_orca_worktree_result() {
   local raw=$1 rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
@@ -314,7 +353,7 @@ spawn_abort_cleanup() {
   [ -z "$SPAWN_AUTHORITY_LAUNCH_RECEIPT" ] \
     || rm -f -- "$SPAWN_AUTHORITY_LAUNCH_RECEIPT"
   if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ] && [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
-    fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" "$SPAWN_SLOT_CLAIM_HOME" || true
+    spawn_return_unpublished_slot || true
   fi
   if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] \
      && [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then

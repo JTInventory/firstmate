@@ -320,7 +320,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
 
 test_secondmate_child_receives_only_its_own_home() {
   local expected launch_line ticket_line wrapper_line wait_line recheck_line clear_line release_line spawned_line
-  local descriptor_line final_line ready_line
+  local descriptor_line final_line ready_line scope_line trace_line abort_source
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
     *"FM_HOME='/homes/dom' "*) : ;;
@@ -385,6 +385,22 @@ test_secondmate_child_receives_only_its_own_home() {
   [ "$descriptor_line" -lt "$final_line" ] \
     && [ "$final_line" -lt "$ready_line" ] \
     || fail "secondmate final enrollment receipt was published before authority setup completed"
+  scope_line=$(grep -n 'fm_worker_secondmate_effective_scope_matches' \
+    "$AUTHORITY_EXEC" | head -1 | cut -d: -f1)
+  trace_line=$(grep -n 'mkdir -p "$STATE"' "$AUTHORITY_EXEC" \
+    | head -1 | cut -d: -f1)
+  [ -n "$scope_line" ] && [ -n "$trace_line" ] && [ "$scope_line" -lt "$trace_line" ] \
+    || fail "secondmate scope validation did not precede state creation"
+  assert_not_contains "$(cat "$AUTHORITY_EXEC")" 'eval "exec' \
+    "authority descriptor closure still interpolated an environment value"
+  abort_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' \
+    "$SPAWN" | sed '$d')
+  assert_not_contains "$abort_source" 'fm_slot_stamp_clear_exact' \
+    "unpublished spawn cleanup still cleared a lease without returning it"
+  assert_contains "$(cat "$SPAWN")" 'fm_slot_disposal_verdict' \
+    "unpublished spawn cleanup did not use the slot ownership gate"
+  assert_contains "$(cat "$SPAWN")" '--if-lease-holder "$ID"' \
+    "unpublished spawn cleanup did not bind Treehouse return to its lease holder"
   pass "a secondmate child receives its own home and no inherited override"
 }
 
@@ -3798,6 +3814,12 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_durable_custodian_is_root_bound_and_scoped
   test_authority_hmac_needs_only_openssl
   echo "# focused session-authority tests passed"
+  exit 0
+fi
+
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-hardening ]; then
+  test_secondmate_child_receives_only_its_own_home
+  echo "# focused isolation-hardening test passed"
   exit 0
 fi
 

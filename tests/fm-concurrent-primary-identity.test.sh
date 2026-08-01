@@ -25,6 +25,29 @@ esac
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$ROOT/bin/fm-worker-isolation-lib.sh"
 
+if ! timeout 5 bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire() { return 1; }
+  pids=()
+  for worker in $(seq 1 40); do
+    (
+      if FM_LOCK_ACQUIRE_WAIT_TIMEOUT_MS=100 fm_lock_acquire_wait "$2"; then
+        exit 1
+      fi
+      exit 0
+    ) &
+    pids+=("$!")
+  done
+  status=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+  done
+  exit "$status"
+' _ "$ROOT" "$TMP_ROOT/.lock.acquire" >/dev/null 2>&1; then
+  fail "the 40-way session-lock race did not fail closed within its deadline"
+fi
+pass "the 40-way session-lock race is hard bounded and fail closed"
+
 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$PRIMARY_HOME/state" \
   fm_worker_test_primary_identity_bind \

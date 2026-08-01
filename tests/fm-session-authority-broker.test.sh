@@ -242,6 +242,97 @@ pass "peer-credential broker fails closed when ancestry depth is exhausted"
 
 if ! python3 - "$BROKER" <<'PY'
 import importlib.util
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+left, right = socket.socketpair()
+try:
+    started = time.monotonic()
+    try:
+        broker.recv_exact(left, 1, started + 0.05)
+    except TimeoutError:
+        pass
+    else:
+        raise SystemExit("a partial broker request was not deadline bounded")
+    if time.monotonic() - started > 1:
+        raise SystemExit("broker request deadline was not hard bounded")
+    start, identity = broker.process_generation(os.getpid())
+    metadata = {
+        "pid": str(os.getpid()),
+        "uid": str(os.geteuid()),
+        "gid": str(os.getegid()),
+        "start": start,
+        "identity": identity,
+    }
+    if not broker.connected_peer_matches_record(left, metadata):
+        raise SystemExit("the connected peer generation did not match its record")
+    metadata["start"] = "proc:stale"
+    if broker.connected_peer_matches_record(left, metadata):
+        raise SystemExit("a stale connected peer generation was accepted")
+finally:
+    left.close()
+    right.close()
+PY
+then
+  fail "the broker did not bound partial reads or authenticate the connected peer"
+fi
+pass "peer-credential broker bounds partial reads and revalidates connected generation"
+
+if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+home = "/test/home"
+script = str(broker_path)
+broker.canonical = lambda value: value
+broker.os.readlink = lambda path: home if path.endswith("/cwd") else "/usr/bin/python3"
+broker.process_command = lambda pid: ["python3", script, "client"]
+broker.process_generation = lambda pid: ("proc:x", "exe:x")
+broker.process_environment = lambda pid: {
+    42: {
+        "FM_AGENT_ROLE": "secondmate",
+        "FM_AGENT_TASK": "alpha",
+        "FM_AGENT_OWNER_HOME": home,
+    },
+    43: {
+        "FM_AGENT_ROLE": "secondmate",
+        "FM_AGENT_TASK": "foreign",
+        "FM_AGENT_OWNER_HOME": home,
+    },
+    44: {},
+}[pid]
+broker.parent_pid = lambda pid: {42: 43, 43: 44}[pid]
+
+if broker.peer_is_authorized(
+    42, uid=1000, gid=1000, home=home, task="alpha", script=script,
+    launch_pid=44, launch_start="proc:x", launch_identity="exe:x",
+    broker_uid=1000, broker_gid=1000
+):
+    raise SystemExit("a mismatched secondmate ancestor was accepted")
+PY
+then
+  fail "the broker did not validate every secondmate ancestor scope"
+fi
+pass "peer-credential broker rejects mismatched secondmate ancestors"
+
+if ! python3 - "$BROKER" <<'PY'
+import importlib.util
 import sys
 from pathlib import Path
 
