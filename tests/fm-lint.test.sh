@@ -23,6 +23,7 @@ fi
 count_file=${FAKE_SHELLCHECK_COUNT:?}
 paths_file=${FAKE_SHELLCHECK_PATHS:?}
 args_file=${FAKE_SHELLCHECK_ARGS:?}
+batch_sizes_file=${FAKE_SHELLCHECK_BATCHES:-}
 count=0
 if [ -s "$count_file" ]; then
   count=$(sed -n '1p' "$count_file")
@@ -34,15 +35,20 @@ printf '%s|%s|%s|%s|%s|%s|%s\n' \
   "$1" "$2" "$3" "$4" "$5" "$6" "$7" >>"$args_file"
 
 record_paths=0
+batch_size=0
 for arg in "$@"; do
   if [ "$arg" = '--' ]; then
     record_paths=1
     continue
   fi
   if [ "$record_paths" -eq 1 ]; then
+    batch_size=$((batch_size + 1))
     printf '%s\0' "$arg" >>"$paths_file"
   fi
 done
+if [ -n "$batch_sizes_file" ]; then
+  printf '%s\n' "$batch_size" >>"$batch_sizes_file"
+fi
 SH
   chmod +x "$fake_shellcheck"
 }
@@ -82,16 +88,18 @@ SH
 }
 
 test_batched_complete_coverage_and_flags() {
-  local tmp fakebin count_file paths_file args_file output rc expected_count actual_count expected_batches count line
+  local tmp fakebin count_file paths_file args_file batch_sizes_file output rc expected_count actual_count expected_batches count line batch_size
   local -a expected_paths observed_paths
   tmp=$(fm_test_tmproot fm-lint-batches)
   fakebin=$(fm_fakebin "$tmp")
   count_file="$tmp/count"
   paths_file="$tmp/paths"
   args_file="$tmp/args"
+  batch_sizes_file="$tmp/batch-sizes"
   : >"$count_file"
   : >"$paths_file"
   : >"$args_file"
+  : >"$batch_sizes_file"
   write_logging_shellcheck "$fakebin/shellcheck"
 
   rc=0
@@ -99,6 +107,7 @@ test_batched_complete_coverage_and_flags() {
     FAKE_SHELLCHECK_COUNT="$count_file" \
       FAKE_SHELLCHECK_PATHS="$paths_file" \
       FAKE_SHELLCHECK_ARGS="$args_file" \
+      FAKE_SHELLCHECK_BATCHES="$batch_sizes_file" \
       PATH="$fakebin:$PATH" "$LINT" 2>&1
   ) || rc=$?
   [ "$rc" -eq 0 ] || fail "batched lint unexpectedly failed: $output"
@@ -116,9 +125,15 @@ test_batched_complete_coverage_and_flags() {
 
   count=$(sed -n '1p' "$count_file")
   [ "$count" -gt 1 ] || fail "lint did not use multiple ShellCheck batches"
-  expected_batches=$(( (expected_count + 19) / 20 ))
+  batch_size=5
+  expected_batches=$(( (expected_count + batch_size - 1) / batch_size ))
   [ "$count" -eq "$expected_batches" ] \
     || fail "lint used $count batches for $expected_count files"
+  while IFS= read -r line; do
+    [ "$line" -gt 0 ] || fail "lint emitted an empty ShellCheck batch"
+    [ "$line" -le "$batch_size" ] \
+      || fail "lint exceeded the batch size bound: $line > $batch_size"
+  done <"$batch_sizes_file"
   while IFS= read -r line; do
     [ "$line" = '--norc|-x|-P|SCRIPTDIR|-S|warning|--' ] \
       || fail "lint changed ShellCheck flags: $line"

@@ -11,7 +11,7 @@
 set -eu
 
 REQUIRED_SHELLCHECK=0.11.0
-BATCH_SIZE=20
+BATCH_SIZE=5
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "${1:-}" = '--required-version' ]; then
