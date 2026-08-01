@@ -3,8 +3,9 @@
 # running?".
 #
 # METHOD OF RECORD (owner ruling 2026-07-25): the AGENT PROCESS's own cwd, read
-# from /proc/<pid>/cwd, is the isolation check of record. A session provider's
-# pane/surface cwd field is a cheap HINT and never evidence.
+# through /proc/<pid>/cwd on Linux or lsof -d cwd on macOS, is the isolation
+# check of record. A session provider's pane/surface cwd field is a cheap HINT
+# and never evidence.
 #
 # Why: a backend's pane cwd can name a completely different process. Observed
 # live - a herdr pane listing reported a worker's cwd as the PRIMARY checkout
@@ -20,8 +21,9 @@
 #      independent, and the only source that survives a restore that re-parents
 #      or relabels panes.
 #   2. the backend's pane/shell pid, then the deepest descendant of it (the
-#      foreground process), read through /proc. Only tmux exposes a verified
-#      per-pane pid; herdr, zellij, cmux, and orca do not, so they fall through.
+#      foreground process), through an authoritative process interface. Only
+#      tmux exposes a verified per-pane pid; herdr, zellij, cmux, and orca do
+#      not, so they fall through.
 #   3. nothing - the caller may use its own pane-cwd hint, LABELLED as a hint.
 #
 # Every reader prints one tab-separated verdict record so no call site invents
@@ -31,9 +33,10 @@
 #   proc       - authoritative, read from the named process
 #   unknown    - no authoritative reading is available here (pid and cwd empty)
 #
-# On a host without procfs (macOS) step 1 is unavailable and step 2 falls back
-# to `lsof -d cwd`; when neither works the verdict is `unknown` rather than a
-# pane value silently promoted to evidence.
+# On macOS, declared-process discovery remains available through kern.procargs2,
+# while process cwd uses lsof -d cwd. When neither supported process interface
+# works, the verdict is `unknown` rather than a pane value silently promoted to
+# evidence.
 #
 # docs/worker-isolation.md owns how this mechanism fits with the other three,
 # and docs/verification/worker-isolation.md owns the per-provider evidence.
@@ -113,7 +116,8 @@ fm_agent_environ() {
 }
 
 # fm_agent_proc_env <pid> <var>: one environment value of a live process, or 1
-# when procfs is unavailable, the process is gone, or the variable is unset.
+# when no supported process interface can answer, the process is gone, or the
+# variable is unset.
 fm_agent_proc_env() {
   local pid=$1 var=$2 value
   [ -n "$var" ] || return 1
@@ -124,14 +128,16 @@ fm_agent_proc_env() {
 
 # fm_agent_task_pid_index: one
 # `<task-id>\t<owner-home>\t<role>\t<pid>` line per live declared process,
-# built from a SINGLE walk of /proc.
+# built from a SINGLE process-list walk (/proc/[0-9]* on Linux or ps on macOS),
+# with environment data read from procfs or kern.procargs2.
 #
 # Reading one process's environment costs several processes of its own, so a
 # caller that asks about MANY tasks builds this index once and hands it back to
 # the lookups below. Asking per task instead is O(tasks x processes), which the
 # resume sweep pays on the session-start critical path - and the incident it
 # exists for had 17 concurrent tasks.
-# Returns 1 when procfs is unavailable or no live process declares a task.
+# Returns 1 when no supported process list/identity can be read or no live
+# process declares a task.
 fm_agent_task_pid_index() {
   local entry pid task home role env found=1 pids comm args
   if [ -n "${FM_TEST_AGENT_PIDS:-}" ]; then
@@ -173,7 +179,7 @@ fm_agent_task_pid_index() {
 # fm_agent_pids_for_identity <task-id> <owner-home> <role> [pid-index]: every
 # live process carrying this complete declaration, newline separated.
 # A supplied <pid-index> (fm_agent_task_pid_index) is consulted instead of
-# walking /proc again; an empty one is a real answer - no process declares a
+# walking the process list again; an empty one is a real answer - no process declares a
 # task - not a missing argument.
 fm_agent_pids_for_identity() {
   local id=$1 home=$2 role=$3 index pids
@@ -317,7 +323,7 @@ fm_agent_harness_pid_below() {
 # Never falls back to a pane value: a caller that wants a hint must ask its
 # backend for one and label it as a hint.
 # A caller looping over many tasks passes one fm_agent_task_pid_index so the
-# declared-agent lookup costs a single /proc walk for the whole loop.
+# declared-agent lookup costs a single process-list walk for the whole loop.
 fm_agent_cwd_verdict() {
   local id=${1:-} home=${2:-} role=${3:-} backend=${4:-} target=${5:-} pid='' cwd shell_pid
   if [ -n "$id" ] && [ -n "$home" ] && [ -n "$role" ]; then

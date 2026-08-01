@@ -17,10 +17,10 @@
 # digest exactly like TANGLE.
 #
 # Evidence discipline (bin/fm-agent-cwd-lib.sh owns the method of record): a
-# collapse is reported only from an AUTHORITATIVE /proc reading of the agent
-# process. A provider's pane cwd is never promoted to evidence here, because a
-# pane field naming the wrong process is precisely what produced a false
-# isolation violation on 2026-07-25.
+# collapse is reported only from an AUTHORITATIVE process-interface reading of
+# the agent process. A provider's pane cwd is never promoted to evidence here,
+# because a pane field naming the wrong process is precisely what produced a
+# false isolation violation on 2026-07-25.
 #
 # docs/worker-isolation.md owns how this mechanism fits with the other three.
 #
@@ -50,11 +50,12 @@ esac
 HOME_REAL=$(fm_agent_canonical_dir "$FM_HOME") || HOME_REAL=$FM_HOME
 ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 
-# One /proc walk for the whole sweep, reused for every task below. Asking per
-# task instead costs a full walk each time - O(tasks x processes) of forked
-# environment reads on the session-start critical path, and the incident this
-# sweep exists for had 17 concurrent tasks. An empty index is a real answer (no
-# live process declares a task), not a missing one.
+# One process-list walk for the whole sweep (procfs on Linux, ps on macOS),
+# reused for every task below. Asking per task instead costs a full walk each
+# time - O(tasks x processes) of forked environment reads on the session-start
+# critical path, and the incident this sweep exists for had 17 concurrent
+# tasks. An empty index is a real answer (no live process declares a task), not
+# a missing one.
 PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
 UNREADABLE_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
   '$1 == "__FM_UNPROVEN__" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')

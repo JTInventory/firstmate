@@ -42,9 +42,11 @@
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
 # child work, kills child windows, and removes the retired home. Removing a
-# leased home releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# leased home returns its durable treehouse lease only after the ownership gate
+# proves the slot is uncontested; a contested or unproven slot is retained, and
+# a contested secondmate home is refused. If the treehouse return fails,
+# teardown leaves the leased home and state in place instead of hiding a
+# still-held lease.
 # Worktree disposal never trusts a recorded worktree= as current ownership.
 # Before returning a pooled slot, bin/fm-slot-owner-lib.sh checks other metadata,
 # the private owner stamp, and live declared agents. A conflict retains the
