@@ -75,9 +75,17 @@ case "$cmd $sub" in
   "pane run"|"pane send-text"|"pane send-keys")
     ;;
 esac
-exit 0
+  exit 0
 SH
   chmod +x "$fakebin/herdr"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_WORKTREE:-}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 

@@ -256,10 +256,19 @@ case "${1:-}" in
     exit 0
     ;;
 esac
-exit 0
+  exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get)
+    printf '%s\n' "${FM_FAKE_TREEHOUSE_RESULT:-${FM_FAKE_PANE_PATH:-}}"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -300,6 +309,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
       FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+      FM_FAKE_TREEHOUSE_RESULT="$WT_DIR" \
       FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
       FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
       PATH="$FAKEBIN_DIR:$PATH" \
@@ -320,7 +330,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
 
 test_secondmate_child_receives_only_its_own_home() {
   local expected launch_line ticket_line wrapper_line wait_line recheck_line clear_line release_line spawned_line
-  local descriptor_line final_line ready_line scope_line trace_line abort_source
+  local descriptor_line final_line ready_line scope_line trace_line abort_source lease_source settle_source
   expected=$(fm_worker_env_prefix secondmate dom-b5 /homes/dom)
   case "$expected" in
     *"FM_HOME='/homes/dom' "*) : ;;
@@ -403,6 +413,18 @@ test_secondmate_child_receives_only_its_own_home() {
     "unpublished spawn cleanup did not bind Treehouse return to its lease holder"
   assert_contains "$(cat "$SPAWN")" 'SPAWN_TREEHOUSE_LEASE_ACQUIRED=1' \
     "spawn did not record Treehouse lease acquisition independently"
+  lease_source=$(sed -n '/^spawn_acquire_treehouse_lease()/,/^spawn_settle_path/p' \
+    "$SPAWN" | sed '$d')
+  assert_contains "$lease_source" 'cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID"' \
+    "spawn did not capture the lease result from the target project"
+  assert_contains "$lease_source" 'SPAWN_TREEHOUSE_LEASE_WT=$result' \
+    "spawn did not retain the exact Treehouse result"
+  settle_source=$(sed -n '/^spawn_settle_path()/,/^if \[ "\$KIND" != secondmate \]; then/p' \
+    "$SPAWN" | sed '$d')
+  assert_not_contains "$settle_source" 'SPAWN_TREEHOUSE_LEASE_WT=' \
+    "pane/process cwd evidence can still authorize lease rollback"
+  assert_not_contains "$(cat "$SPAWN")" 'SPAWN_TREEHOUSE_LEASE_WT=$p' \
+    "a provider path hint can still become the rollback target"
   lease_arm_line=$(grep -n 'SPAWN_TREEHOUSE_LEASE_ACQUIRED=1' "$SPAWN" \
     | head -1 | cut -d: -f1)
   validate_line=$(grep -n 'validate_spawn_worktree "treehouse get"' "$SPAWN" \
@@ -412,9 +434,26 @@ test_secondmate_child_receives_only_its_own_home() {
   pass "a secondmate child receives its own home and no inherited override"
 }
 
-test_unpublished_retry_returns_matching_lease() {
+test_treehouse_result_is_exact_acquisition_receipt() {
+  local function_source out
+  function_source=$(sed -n '/^spawn_acquire_treehouse_lease()/,/^spawn_settle_path/p' \
+    "$SPAWN" | sed '$d')
+  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    PROJ_ABS=/tmp
+    ID=receipt-task
+    treehouse() { printf "%s\\n" /tmp/exact-get-result; }
+    spawn_acquire_treehouse_lease
+    [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ]
+    [ "$SPAWN_TREEHOUSE_LEASE_WT" = /tmp/exact-get-result ]
+    [ "$WT" = /tmp/exact-get-result ]
+  ' 2>&1) || fail "exact Treehouse acquisition receipt was not retained: $out"
+  pass "the exact Treehouse result is distinct from cwd evidence"
+}
+
+test_preexisting_stamp_never_returns_a_lease() {
   local function_source marker out
-  marker="$TMP_ROOT/unpublished-retry-returned"
+  marker="$TMP_ROOT/preexisting-stamp-not-returned"
   function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
@@ -423,6 +462,7 @@ test_unpublished_retry_returns_matching_lease() {
       SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
       SPAWN_SLOT_CLAIMED=1
       SPAWN_SLOT_CLAIM_CREATED=0
+      SPAWN_SLOT_CLAIM_PREEXISTING=1
       SPAWN_SLOT_CLAIM_PUBLISHED=0
       SPAWN_SLOT_CLAIM_WT=/tmp/retry-worktree
       SPAWN_SLOT_CLAIM_HOME=/tmp/retry-home
@@ -436,42 +476,76 @@ test_unpublished_retry_returns_matching_lease() {
       fm_slot_disposal_verdict() { printf "%s" dispose; }
       fm_slot_stamp_stage_return() { FM_SLOT_RETURN_STAGED=0; }
       treehouse() { [ "$1" = return ] && : > "$RETURN_MARKER"; }
-      spawn_return_unpublished_slot
-    ' 2>&1) || fail "an unpublished retry could not return its matching lease: $out"
-  [ -f "$marker" ] || fail "an acquired lease with a preexisting stamp was not returned"
-  pass "unpublished retries return leases even when the stamp preexists"
+      spawn_return_unpublished_treehouse_lease && exit 31
+      [ ! -f "$RETURN_MARKER" ] || exit 32
+    ' 2>&1) || fail "a preexisting matching stamp was not retained: $out"
+  [ ! -f "$marker" ] || fail "a preexisting matching stamp authorized lease return"
+  pass "preexisting matching stamps retain their lease"
 }
 
-test_invalid_leased_path_returns_only_this_lease() {
+test_exact_new_lease_returns_through_slot_gates() {
   local function_source marker out
-  marker="$TMP_ROOT/invalid-lease-returned"
+  marker="$TMP_ROOT/exact-lease-returned"
   function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
     bash -c '
       eval "$FUNCTION_SOURCE"
       SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
-      SPAWN_TREEHOUSE_LEASE_WT=/tmp/invalid-leased-path
-      SPAWN_SLOT_CLAIM_ATTEMPTED=0
+      SPAWN_TREEHOUSE_LEASE_WT=/tmp/exact-leased-path
+      SPAWN_SLOT_CLAIM_PREEXISTING=0
+      SPAWN_SLOT_CLAIM_WT=/tmp/exact-leased-path
+      SPAWN_SLOT_CLAIM_HOME=/tmp/exact-home
       SPAWN_SLOT_CLAIMED=0
       SPAWN_SLOT_CLAIM_PUBLISHED=0
-      ID=invalid-lease-task
+      ID=exact-lease-task
       FM_ROOT="$ROOT"
       treehouse() {
         [ "$1" = return ] && [ "$2" = --force ] \
-          && [ "$3" = /tmp/invalid-leased-path ] \
+          && [ "$3" = /tmp/exact-leased-path ] \
           && [ "$4" = --if-lease-holder ] \
-          && [ "$5" = invalid-lease-task ] \
+          && [ "$5" = exact-lease-task ] \
           && : > "$RETURN_MARKER"
       }
-      SPAWN_SLOT_CLAIM_ATTEMPTED=1
+      SPAWN_SLOT_CLAIMED=1
+      fm_slot_disposal_verdict() { printf "%s" dispose; }
+      fm_slot_stamp_stage_return() { FM_SLOT_RETURN_STAGED=0; }
+      spawn_return_unpublished_treehouse_lease
+    ' 2>&1) || fail "an exact new lease did not pass the ownership gates: $out"
+  [ -f "$marker" ] || fail "exact new lease rollback did not use the lease holder gate"
+  pass "exact new leases return through the ownership gates"
+}
+
+test_invalid_acquired_path_is_retained_without_private_stamp() {
+  local acquire_source rollback_source function_source marker out
+  marker="$TMP_ROOT/invalid-acquired-not-returned"
+  acquire_source=$(sed -n '/^spawn_acquire_treehouse_lease()/,/^spawn_settle_path/p' \
+    "$SPAWN" | sed '$d')
+  rollback_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+    "$SPAWN" | sed '$d')
+  function_source="$acquire_source
+$rollback_source"
+  out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
+    bash -c '
+      eval "$FUNCTION_SOURCE"
+      PROJ_ABS=/tmp
+      ID=invalid-acquired-task
+      treehouse() {
+        if [ "${1:-}" = get ]; then
+          printf "%s\\n" /tmp/invalid-acquired-path
+        elif [ "${1:-}" = return ]; then
+          : > "$RETURN_MARKER"
+        fi
+      }
+      spawn_acquire_treehouse_lease
+      SPAWN_SLOT_CLAIM_PREEXISTING=0
+      SPAWN_SLOT_CLAIMED=0
+      SPAWN_SLOT_CLAIM_PUBLISHED=0
       spawn_return_unpublished_treehouse_lease && exit 31
       [ ! -f "$RETURN_MARKER" ] || exit 32
-      SPAWN_SLOT_CLAIM_ATTEMPTED=0
-      spawn_return_unpublished_treehouse_lease
-    ' 2>&1) || fail "an invalid leased path did not return its exact lease: $out"
-  [ -f "$marker" ] || fail "invalid leased path rollback did not use the exact lease holder gate"
-  pass "invalid leased paths return only the exact newly acquired lease"
+    ' 2>&1) || fail "an invalid acquired path was not retained: $out"
+  [ ! -f "$marker" ] || fail "an invalid acquired path bypassed the private-stamp gate"
+  pass "invalid acquired paths retain leases without private ownership proof"
 }
 
 # --- C. a declared worker is inert and refused -------------------------------
@@ -2337,6 +2411,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$lying" FM_FAKE_PANE_PID="$pid" \
+    FM_FAKE_TREEHOUSE_RESULT="$WT_DIR" \
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -3691,6 +3766,7 @@ SH
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_TREEHOUSE_RESULT="$WT_DIR" \
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" FM_FAKE_KILL_LOG="$CASE_DIR/kill.log" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
@@ -3711,6 +3787,7 @@ SH
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_TREEHOUSE_RESULT="$WT_DIR" \
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" FM_FAKE_KILL_LOG="$CASE_DIR/kill.log" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
@@ -3737,6 +3814,7 @@ test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_TREEHOUSE_RESULT="$WT_DIR" \
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" FM_FAKE_KILL_LOG="$CASE_DIR/kill.log" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
@@ -3889,8 +3967,10 @@ fi
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-hardening ]; then
   test_secondmate_child_receives_only_its_own_home
-  test_unpublished_retry_returns_matching_lease
-  test_invalid_leased_path_returns_only_this_lease
+  test_treehouse_result_is_exact_acquisition_receipt
+  test_preexisting_stamp_never_returns_a_lease
+  test_exact_new_lease_returns_through_slot_gates
+  test_invalid_acquired_path_is_retained_without_private_stamp
   echo "# focused isolation-hardening test passed"
   exit 0
 fi

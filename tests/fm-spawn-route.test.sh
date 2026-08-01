@@ -118,7 +118,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -179,9 +187,9 @@ EOF
   window_name=$(cat "$home/tmux-window-name")
   assert_contains "$window_name" "fm-$id" "ordinary spawn did not restore the canonical window name after locking renames"
   launch=$(cat "$home/launch.log")
-  assert_contains "$launch" "treehouse get --lease --lease-holder '$id'" \
+  assert_contains "$(cat "$home/tmux.log")" "treehouse get --lease --lease-holder $id" \
     "ordinary spawn did not hold a durable Treehouse lease until teardown"
-  assert_contains "$launch" 'cd -- "$fm_wt"' \
+  assert_contains "$(cat "$home/tmux.log")" "cd -- '$wt'" \
     "ordinary spawn did not enter the durably leased worktree"
   assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"medium\"' --dangerously-bypass-approvals-and-sandbox" \
     "ordinary route did not thread model and effort into launch"

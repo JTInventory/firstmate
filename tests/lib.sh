@@ -215,6 +215,14 @@ if [ "${1:-}" = show-options ]; then
 fi
 exit 0
 SH
+    elif [ "$tool" = treehouse ]; then
+      cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_RESULT:-${FM_FAKE_PANE_PATH:-${FM_FAKE_WORKTREE:-}}}"
+fi
+exit 0
+SH
     else
       cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash

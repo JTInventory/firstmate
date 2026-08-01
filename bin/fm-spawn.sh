@@ -241,7 +241,7 @@ SPAWN_TASK_LOCK_HELD=0
 SPAWN_ADMISSION_LOCKS=()
 SPAWN_SLOT_CLAIM_CREATED=0
 SPAWN_SLOT_CLAIMED=0
-SPAWN_SLOT_CLAIM_ATTEMPTED=0
+SPAWN_SLOT_CLAIM_PREEXISTING=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
 SPAWN_TREEHOUSE_LEASE_ACQUIRED=0
 SPAWN_TREEHOUSE_LEASE_WT=
@@ -257,12 +257,16 @@ claim_spawn_slot() {
   if [ "$KIND" = secondmate ] && fm_slot_is_plain_checkout "$WT"; then
     return 0
   fi
-  SPAWN_SLOT_CLAIM_ATTEMPTED=1
   if ! fm_slot_stamp_write "$WT" "$ID" "$home"; then
     echo "error: could not claim pooled-slot ownership for $WT; refusing to publish task $ID" >&2
     return 1
   fi
   SPAWN_SLOT_CLAIM_CREATED=${FM_SLOT_STAMP_CREATED:-0}
+  if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ]; then
+    SPAWN_SLOT_CLAIM_PREEXISTING=0
+  else
+    SPAWN_SLOT_CLAIM_PREEXISTING=1
+  fi
   SPAWN_SLOT_CLAIMED=1
   SPAWN_SLOT_CLAIM_WT=$WT
   SPAWN_SLOT_CLAIM_HOME=$home
@@ -312,17 +316,15 @@ spawn_return_unpublished_treehouse_lease() {
   local target=${SPAWN_TREEHOUSE_LEASE_WT:-}
   [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ] || return 0
   [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] || return 0
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ]; then
-    spawn_return_unpublished_slot
-    return
+  if [ "$SPAWN_SLOT_CLAIMED" != 1 ]; then
+    echo "warning: retaining unpublished lease ${target:-<unknown>} because private slot ownership was not proven" >&2
+    return 1
   fi
-  [ "$SPAWN_SLOT_CLAIM_ATTEMPTED" = 0 ] || {
-    echo "warning: retaining unpublished lease $target because slot ownership could not be proven" >&2
+  [ "$SPAWN_SLOT_CLAIM_PREEXISTING" != 1 ] || {
+    echo "warning: retaining unpublished lease $target because its ownership stamp preexisted this spawn" >&2
     return 1
   }
-  [ -n "$target" ] || return 1
-  ( cd "$FM_ROOT" && treehouse return --force "$target" \
-    --if-lease-holder "$ID" )
+  spawn_return_unpublished_slot
 }
 
 parse_orca_worktree_result() {
@@ -1586,6 +1588,27 @@ if [ "$KIND" = secondmate ]; then
 fi
 SPAWN_SETTLE_SOURCE=
 SPAWN_SETTLE_PATH=
+spawn_acquire_treehouse_lease() {
+  local result
+  result=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || return 1
+  SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+  SPAWN_TREEHOUSE_LEASE_WT=$result
+  case "$result" in
+    /*) ;;
+    *)
+      echo "error: treehouse get returned a non-absolute lease path; retaining the lease" >&2
+      return 1
+      ;;
+  esac
+  case "$result" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      echo "error: treehouse get returned an ambiguous lease path; retaining the lease" >&2
+      return 1
+      ;;
+  esac
+  WT=$result
+}
+
 spawn_settle_path() {  # <target>
   local record path
   SPAWN_SETTLE_SOURCE=
@@ -1604,44 +1627,37 @@ spawn_settle_path() {  # <target>
 }
 
 if [ "$KIND" != secondmate ]; then
-  TREEHOUSE_LEASE_COMMAND=$(fm_worker_treehouse_lease_command "$ID") || exit 1
-  fm_backend_send_text_line "$BACKEND" "$WID" "$TREEHOUSE_LEASE_COMMAND"
+  spawn_acquire_treehouse_lease || {
+    echo "error: treehouse get did not return an exact lease path for $ID" >&2
+    exit 1
+  }
+  claim_spawn_slot || exit 1
+  sq_treehouse_wt=$(shell_quote "$WT") || exit 1
+  fm_backend_send_text_line "$BACKEND" "$WID" "cd -- $sq_treehouse_wt" || exit 1
 
   # Prefer the live process cwd through /proc. Provider pane cwd remains a hint
   # where no process id is available.
-  # Accept a pane cwd only once it passes the complete target-repo check. A
-  # transient foreign cwd is retained only for the eventual diagnostic.
+  lease_real=$(real_path_or_raw "$WT")
+  lease_settled=0
   WT_CANDIDATE=
   for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
     spawn_settle_path "$WID"
     p=$SPAWN_SETTLE_PATH
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      if [ "$SPAWN_SETTLE_SOURCE" = proc ]; then
-        SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
-        SPAWN_TREEHOUSE_LEASE_WT=$p
-      fi
+    if [ -n "$p" ]; then
       WT_CANDIDATE="$p"
-      if worktree_of_target_repo "$p"; then
-        WT="$p"
-        if [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" != 1 ]; then
-          SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
-          SPAWN_TREEHOUSE_LEASE_WT=$p
-        fi
+      if [ "$(real_path_or_raw "$p")" = "$lease_real" ]; then
+        lease_settled=1
         break
       fi
     fi
     sleep 1
   done
-  if [ -z "$WT" ] && [ -n "$WT_CANDIDATE" ]; then
-    WT="$WT_CANDIDATE"
-  fi
-  if [ -z "$WT" ]; then
+  if [ "$lease_settled" != 1 ]; then
     echo "error: treehouse get did not enter a worktree within ${FM_SPAWN_WT_WAIT_SECS:-60}s; inspect window $T" >&2
     exit 1
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
-  claim_spawn_slot || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
