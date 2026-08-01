@@ -139,7 +139,7 @@ FM_BACKEND_TMUX_META_LEGACY=0
 fm_backend_tmux_meta_read() {  # <meta-file>
   local meta=$1 line key value
   local backend_count=0 window_count=0 pane_count=0 generation_count=0
-  local herdr_count=0 backend= window= pane= generation=
+  local herdr_count=0 backend='' window='' pane='' generation=''
   FM_BACKEND_TMUX_META_WINDOW=
   FM_BACKEND_TMUX_META_PANE=
   FM_BACKEND_TMUX_META_GENERATION=
@@ -185,6 +185,7 @@ fm_backend_tmux_meta_read() {  # <meta-file>
     FM_BACKEND_TMUX_META_PROVIDER_IDENTITY="tmux:$window:$pane"
   else
     FM_BACKEND_TMUX_META_TARGET=$window
+    # shellcheck disable=SC2034 # Read by fm-ff-lib.sh after this parser returns.
     FM_BACKEND_TMUX_META_PROVIDER_IDENTITY="tmux:$window"
   fi
   FM_BACKEND_TMUX_META_WINDOW=$window

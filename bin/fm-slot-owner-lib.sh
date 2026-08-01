@@ -119,6 +119,7 @@ fm_slot_stamp_write() {
     return
   fi
   if ( set -C; printf 'task=%s\nhome=%s\n' "$id" "$home" > "$path" ) 2>/dev/null; then
+    # shellcheck disable=SC2034 # Read by fm-spawn.sh after this function returns.
     FM_SLOT_STAMP_CREATED=1
     return 0
   fi
@@ -296,9 +297,13 @@ fm_slot_stamp_stage_return() {
     [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
     return 0
   fi
+  # shellcheck disable=SC2034 # Read by teardown and presentation callers.
   FM_SLOT_RETURN_STAGED=1
+  # shellcheck disable=SC2034 # Read by teardown and presentation callers.
   FM_SLOT_RETURN_CLAIM=$claim
+  # shellcheck disable=SC2034 # Read by teardown and presentation callers.
   FM_SLOT_RETURN_STAMP_PATH=$path
+  # shellcheck disable=SC2034 # Read by teardown and presentation callers.
   FM_SLOT_RETURN_LEGACY=$legacy
 }
 

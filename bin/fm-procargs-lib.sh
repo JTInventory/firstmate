@@ -6,7 +6,7 @@ fm_procargs2_dump() {
 
 fm_procargs2_read() {
   local pid=$1 argc token saw_exec=0 argv_started=0 argv_count=0 snapshot
-  local read_fd= write_fd= candidate
+  local read_fd='' write_fd='' candidate
   local -a tokens=()
   FM_PROCARGS_ARGV=()
   FM_PROCARGS_ENV=()

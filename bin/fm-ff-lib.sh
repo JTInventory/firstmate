@@ -363,8 +363,8 @@ fm_secondmate_lifecycle_meta_read() {
   local kind_count=0 home_count=0 task_count=0 window_count=0 generation_count=0
   local harness_count=0 backend_count=0 session_count=0 workspace_count=0
   local tab_count=0 pane_count=0 tmux_pane_count=0
-  local kind= home= task= window= generation= harness= backend=
-  local session= workspace= tab= pane= tmux_pane= target= provider_identity=
+  local kind='' home='' task='' window='' generation='' harness='' backend=''
+  local session='' workspace='' tab='' pane='' tmux_pane='' target='' provider_identity=''
   FM_SECONDMATE_META_HOME=
   FM_SECONDMATE_META_WINDOW=
   FM_SECONDMATE_META_ENDPOINT_GENERATION=
@@ -499,6 +499,7 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_HOME=$home
   FM_SECONDMATE_META_WINDOW=$window
   FM_SECONDMATE_META_ENDPOINT_GENERATION=$generation
+  # shellcheck disable=SC2034 # Read by fm-bootstrap.sh after this parser returns.
   FM_SECONDMATE_META_HARNESS=$harness
   FM_SECONDMATE_META_BACKEND=$backend
   FM_SECONDMATE_META_TARGET=$target

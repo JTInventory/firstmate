@@ -65,12 +65,12 @@ fm_session_darwin_getsid() {
 }
 
 fm_session_process_session_id() {
-  local pid=$1 stat state ppid pgrp sid current parent
+  local pid=$1 stat state ppid sid current parent
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -r "/proc/$pid/stat" ]; then
     stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
     stat=${stat##*) }
-    read -r state ppid pgrp sid _ <<< "$stat"
+    read -r state ppid _ sid _ <<< "$stat"
   elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     sid=$(fm_session_darwin_getsid "$pid") || return 1
     case "$sid" in ''|*[!0-9]*) return 1 ;; esac
@@ -167,7 +167,7 @@ fm_session_process_runs_script() {
 }
 
 fm_session_process_runs_behavior_test_broker() {
-  local pid=$1 expected=$2 actual= mode= item index=0 actual_digest expected_digest
+  local pid=$1 expected=$2 actual='' mode='' item index=0 actual_digest expected_digest
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -r "/proc/$pid/cmdline" ]; then
     while IFS= read -r -d '' item; do
@@ -1435,27 +1435,27 @@ fm_session_enrollment_signer_run() {
         "$consumer" FM_AGENT_OWNER_HOME 2>/dev/null || true)
       failed_stage=
       if [ "$consume_task" != "$task" ]; then
-        failed_stage=signer-consumer-task
+        failed_stage='signer-consumer-task'
       elif [ "$consume_home" != "$home_real" ]; then
-        failed_stage=signer-consumer-home
+        failed_stage='signer-consumer-home'
       elif [ "$(fm_session_process_start "$consumer" 2>/dev/null)" != "$consumer_start" ]; then
-        failed_stage=signer-consumer-start
+        failed_stage='signer-consumer-start'
       elif [ "$(fm_session_process_identity "$consumer" 2>/dev/null)" != "$consumer_identity" ]; then
-        failed_stage=signer-consumer-identity
+        failed_stage='signer-consumer-identity'
       elif [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" != "$endpoint_start" ]; then
-        failed_stage=signer-endpoint-start
+        failed_stage='signer-endpoint-start'
       elif [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" != "$endpoint_identity" ]; then
-        failed_stage=signer-endpoint-identity
+        failed_stage='signer-endpoint-identity'
       elif [ "$consumer" != "$endpoint" ]; then
-        failed_stage=signer-consumer-endpoint
+        failed_stage='signer-consumer-endpoint'
       elif ! fm_session_process_runs_script "$consumer" "$expected_script"; then
-        failed_stage=signer-consumer-script
+        failed_stage='signer-consumer-script'
       elif [ "$env_role" != secondmate ] || [ "$env_task" != "$task" ] \
         || [ "$env_home" != "$home_real" ]; then
-        failed_stage=signer-consumer-role
+        failed_stage='signer-consumer-role'
       elif ! fm_session_enrollment_public_key_validate \
           "$consumer_public_key" "$consumer_public_digest"; then
-        failed_stage=signer-consumer-key
+        failed_stage='signer-consumer-key'
       fi
       if [ -n "$failed_stage" ]; then
         fm_session_enrollment_trace "$failed_stage" fail 2>/dev/null || true
@@ -1902,50 +1902,50 @@ fm_session_enrollment_ticket_validate() {
       "$body_file" >/dev/null 2>&1; then
     failed_stage=signature
   elif [ "$(fm_session_sha256_file "$public_file" 2>/dev/null)" != "$public_digest" ]; then
-    failed_stage=public-key-digest
+    failed_stage='public-key-digest'
   elif [ "$signer_public_digest" != "$public_digest" ]; then
-    failed_stage=signer-public-key
+    failed_stage='signer-public-key'
   elif [ "$current" != "$signer_start" ]; then
-    failed_stage=signer-start
+    failed_stage='signer-start'
   elif [ "$(fm_session_process_identity "$signer" 2>/dev/null)" != "$signer_identity" ]; then
-    failed_stage=signer-identity
+    failed_stage='signer-identity'
   elif ! fm_session_process_runs_script "$signer" "$signer_script"; then
-    failed_stage=signer-script
+    failed_stage='signer-script'
   elif [ "$(fm_session_descriptor_identity "$signer" "$authority_fd" 2>/dev/null)" != "$descriptor" ]; then
-    failed_stage=signer-descriptor
+    failed_stage='signer-descriptor'
   elif [ "$(fm_session_descriptor_identity "$broker" "$authority_fd" 2>/dev/null)" != "$descriptor" ]; then
-    failed_stage=broker-descriptor
+    failed_stage='broker-descriptor'
   elif [ "$current_digest" != "$authority_digest" ]; then
-    failed_stage=authority-digest
+    failed_stage='authority-digest'
   elif ! fm_session_authority_read_shape "$authority"; then
-    failed_stage=authority-shape
+    failed_stage='authority-shape'
   elif [ "$(fm_session_descriptor_identity \
           "$FM_SESSION_AUTHORITY_PID" "$authority_fd" 2>/dev/null)" \
       != "$descriptor" ]; then
-    failed_stage=authority-descriptor
+    failed_stage='authority-descriptor'
   elif [ "$FM_SESSION_AUTHORITY_HOME" != "$issuer_real" ]; then
-    failed_stage=authority-home
+    failed_stage='authority-home'
   elif [ ! -f "$lock" ] || [ -L "$lock" ] \
     || [ "$(cat "$lock" 2>/dev/null)" != "$FM_SESSION_AUTHORITY_OWNER" ]; then
-    failed_stage=authority-lock
+    failed_stage='authority-lock'
   elif [ ! -f "$binding" ] || [ -L "$binding" ] \
     || [ "$(cat "$binding" 2>/dev/null)" != "$FM_SESSION_AUTHORITY_CHECKOUT" ]; then
-    failed_stage=authority-binding
+    failed_stage='authority-binding'
   elif [ "$broker_script" != \
       "$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-authority-exec.sh" ]; then
-    failed_stage=broker-script-binding
+    failed_stage='broker-script-binding'
   elif [ "$(fm_session_process_start "$broker" 2>/dev/null)" != "$broker_start" ]; then
-    failed_stage=broker-start
+    failed_stage='broker-start'
   elif [ "$(fm_session_process_identity "$broker" 2>/dev/null)" != "$broker_identity" ]; then
-    failed_stage=broker-identity
+    failed_stage='broker-identity'
   elif ! fm_session_process_runs_authority_broker "$broker" "$broker_script"; then
-    failed_stage=broker-process
+    failed_stage='broker-process'
   elif [ "$(fm_session_process_start "$endpoint" 2>/dev/null)" != "$endpoint_start" ]; then
-    failed_stage=endpoint-start
+    failed_stage='endpoint-start'
   elif [ "$(fm_session_process_identity "$endpoint" 2>/dev/null)" != "$endpoint_identity" ]; then
-    failed_stage=endpoint-identity
+    failed_stage='endpoint-identity'
   elif [ "$endpoint" != "$$" ]; then
-    failed_stage=endpoint-self
+    failed_stage='endpoint-self'
   fi
   if [ -n "$failed_stage" ]; then
     fm_session_enrollment_trace "$failed_stage" fail 2>/dev/null || true

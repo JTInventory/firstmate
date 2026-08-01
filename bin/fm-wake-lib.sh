@@ -110,9 +110,9 @@ fm_lifecycle_admission_acquire() {
 
 fm_lifecycle_admission_release() {
   local list_name=$1 i count lock
-  eval "count=\${#$list_name[@]}"
+  eval "count=\${#${list_name}[@]}"
   for ((i=count - 1; i >= 0; i--)); do
-    eval "lock=\${$list_name[$i]}"
+    eval "lock=\${${list_name}[$i]}"
     fm_lock_release "$lock" || true
   done
   eval "$list_name=()"
@@ -292,7 +292,7 @@ fm_lifecycle_process_kernel_thread() {
 }
 
 fm_lifecycle_process_script() {
-  local pid=$1 provider_rc fallback_rc executable= executable_base base parsed_rc
+  local pid=$1 provider_rc fallback_rc executable='' executable_base base parsed_rc
   local -a argv=()
   if fm_lifecycle_read_proc_argv "$pid"; then
     provider_rc=0
@@ -370,14 +370,14 @@ fm_lifecycle_process_environment() {
   FM_LIFECYCLE_ENVIRONMENT=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) \
     || return 2
   [ -n "$FM_LIFECYCLE_ENVIRONMENT" ] || return 2
-  FM_LIFECYCLE_ENVIRONMENT_SOURCE=ps
+  FM_LIFECYCLE_ENVIRONMENT_SOURCE='ps'
 }
 
 fm_spawn_legacy_process_matches_scope() {
   local pid=$1 script=$2 target_home=$3 target_state=$4
-  local line lifecycle_home= lifecycle_state= home= root= state=
+  local line lifecycle_home='' lifecycle_state='' home='' root='' state=''
   local lifecycle_home_count=0 lifecycle_state_count=0
-  local process_home= process_state= environment raw canonical linked=0
+  local process_home='' process_state='' environment raw canonical linked=0
   fm_lifecycle_process_environment "$pid" || return 2
   environment=$FM_LIFECYCLE_ENVIRONMENT
   if [ "$FM_LIFECYCLE_ENVIRONMENT_SOURCE" = proc ]; then
