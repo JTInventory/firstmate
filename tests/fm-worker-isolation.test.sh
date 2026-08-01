@@ -537,7 +537,7 @@ $rollback_source"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = get ]; then
-  printf '%s\n' /tmp/invalid-acquired-path
+  printf '%s\n' invalid-acquired-path
 elif [ "${1:-}" = return ]; then
   : > "$RETURN_MARKER"
 fi
@@ -549,39 +549,61 @@ SH
       PROJ_ABS=/tmp
       ID=invalid-acquired-task
       spawn_acquire_treehouse_lease
+      [ "$SPAWN_TREEHOUSE_LEASE_UNKNOWN" = 1 ] || exit 31
       SPAWN_SLOT_CLAIMED=0
       SPAWN_SLOT_CLAIM_PUBLISHED=0
-      spawn_return_unpublished_treehouse_lease && exit 31
-      [ ! -f "$RETURN_MARKER" ] || exit 32
+      spawn_return_unpublished_treehouse_lease || exit 32
+      [ ! -f "$RETURN_MARKER" ] || exit 33
     ' 2>&1) || fail "an invalid acquired path was not retained: $out"
   [ ! -f "$marker" ] || fail "an invalid acquired path bypassed the private-stamp gate"
+  assert_contains "$out" "manual recovery" \
+    "an invalid acquired path did not surface unknown-lease recovery"
   pass "invalid acquired paths retain leases without private ownership proof"
 }
 
 test_treehouse_acquisition_timeout_is_bounded() {
-  local acquire_source fakebin out status started finished
+  local acquire_source rollback_source function_source fakebin out marker acquired_marker started finished
   acquire_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
     "$SPAWN" | sed '$d')
+  rollback_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+    "$SPAWN" | sed '$d')
+  function_source="$acquire_source
+$rollback_source"
+  marker="$TMP_ROOT/timeout-lease-not-returned"
+  acquired_marker="$TMP_ROOT/timeout-lease-acquired"
   fakebin=$(fm_fakebin "$TMP_ROOT/treehouse-timeout")
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-sleep 5
+if [ "${1:-}" = get ]; then
+  : > "$ACQUIRED_MARKER"
+  sleep 5
+elif [ "${1:-}" = return ]; then
+  : > "$RETURN_MARKER"
+fi
 SH
   chmod +x "$fakebin/treehouse"
   started=$(date +%s)
-  status=0
-  out=$(PATH="$fakebin:$PATH" FUNCTION_SOURCE="$acquire_source" \
+  out=$(PATH="$fakebin:$PATH" FUNCTION_SOURCE="$function_source" \
+    ACQUIRED_MARKER="$acquired_marker" RETURN_MARKER="$marker" \
     bash -c '
       eval "$FUNCTION_SOURCE"
       PROJ_ABS=/tmp
       ID=timeout-task
       FM_SPAWN_TREEHOUSE_GET_TIMEOUT_SECS=1
-      spawn_acquire_treehouse_lease
-    ' 2>&1) || status=$?
+      spawn_acquire_treehouse_lease && exit 31
+      [ "$SPAWN_TREEHOUSE_LEASE_UNKNOWN" = 1 ] || exit 32
+      [ -f "$ACQUIRED_MARKER" ] || exit 33
+      SPAWN_SLOT_CLAIMED=1
+      spawn_return_unpublished_treehouse_lease
+      [ ! -f "$RETURN_MARKER" ] || exit 34
+    ' 2>&1) || fail "a timed-out Treehouse acquisition did not fail closed: $out"
   finished=$(date +%s)
-  [ "$status" -ne 0 ] || fail "a blocked Treehouse acquisition unexpectedly succeeded"
   [ $((finished - started)) -lt 4 ] \
     || fail "a blocked Treehouse acquisition exceeded its hard deadline: $out"
+  [ -f "$acquired_marker" ] || fail "the timeout fixture did not simulate a possible lease acquisition"
+  [ ! -f "$marker" ] || fail "a possible timed-out lease received guessed cleanup"
+  assert_contains "$out" "manual recovery" \
+    "a timed-out lease acquisition did not surface manual recovery"
   pass "Treehouse acquisition fails closed within its hard deadline"
 }
 

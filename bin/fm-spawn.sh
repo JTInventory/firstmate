@@ -243,6 +243,7 @@ SPAWN_SLOT_CLAIM_CREATED=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
 SPAWN_TREEHOUSE_LEASE_ACQUIRED=0
+SPAWN_TREEHOUSE_LEASE_UNKNOWN=0
 SPAWN_TREEHOUSE_LEASE_WT=
 SPAWN_SLOT_CLAIM_WT=
 SPAWN_SLOT_CLAIM_HOME=
@@ -1603,23 +1604,33 @@ spawn_treehouse_get_bounded() {
 }
 
 spawn_acquire_treehouse_lease() {
-  local result
-  result=$(spawn_treehouse_get_bounded) || return 1
-  SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
-  SPAWN_TREEHOUSE_LEASE_WT=$result
+  local result status
+  SPAWN_TREEHOUSE_LEASE_UNKNOWN=0
+  if result=$(spawn_treehouse_get_bounded); then
+    :
+  else
+    status=$?
+    SPAWN_TREEHOUSE_LEASE_UNKNOWN=1
+    echo "error: Treehouse lease acquisition attempt for task $ID returned no trustworthy path; possible lease requires manual recovery; no lease return will be attempted" >&2
+    return "$status"
+  fi
   case "$result" in
     /*) ;;
     *)
-      echo "error: treehouse get returned a non-absolute lease path; retaining the lease" >&2
+      SPAWN_TREEHOUSE_LEASE_UNKNOWN=1
+      echo "error: Treehouse lease acquisition attempt for task $ID returned no trustworthy path; possible lease requires manual recovery; no lease return will be attempted" >&2
       return 1
       ;;
   esac
   case "$result" in
     *$'\n'*|*$'\r'*|*$'\t'*)
-      echo "error: treehouse get returned an ambiguous lease path; retaining the lease" >&2
+      SPAWN_TREEHOUSE_LEASE_UNKNOWN=1
+      echo "error: Treehouse lease acquisition attempt for task $ID returned no trustworthy path; possible lease requires manual recovery; no lease return will be attempted" >&2
       return 1
       ;;
   esac
+  SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+  SPAWN_TREEHOUSE_LEASE_WT=$result
   WT=$result
 }
 
