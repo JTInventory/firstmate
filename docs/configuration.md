@@ -100,7 +100,7 @@ Each line records the secondmate id, charter summary, absolute home path, natura
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
 `fm-backlog-audit.sh` also uses these ids as registered persistent inventory, so a live `kind=secondmate` meta record does not have to appear under the main `## In flight` section.
 Use `fm-home-seed.sh <id> - <project>...` to lease a fresh firstmate worktree for the secondmate home.
-The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
+The lease is held under the secondmate id until explicit retirement or seed rollback asks the ownership-gated teardown to return it, so normal restarts do not free or recycle the home. Conflicting or unproven ownership retains or refuses the slot; see [`docs/worker-isolation.md`](worker-isolation.md).
 Teardown retries a `treehouse return` error only when Git reports an existing `index.lock`, then fails closed if the lease still cannot be released; plain-clone homes with no treehouse pool slot are removed directly.
 Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
@@ -321,8 +321,8 @@ and process environment bind the ticket's public-key digest. Spawn submits a
 randomly tagged wrapper through a backend-owned launch. A serialized tmux
 respawn returns the exact pane PID; Herdr's direct agent-start response and
 exact pane process-info identify that wrapper PID. Before the ticket is issued,
-the live Herdr session, workspace, tab, pane, and generation must all equal the
-recorded endpoint identity. The ticket
+the recorded endpoint identity: Herdr requires the live session, workspace, tab,
+pane, and generation; tmux requires the live window, pane, and generation. The ticket
 binds that exact live PID, start value, and executable identity, and only that
 process can consume it. The signing key exists only
 in shell memory and anonymous pipes, never at a filesystem pathname, in the
@@ -424,7 +424,7 @@ FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3          # additional waits before stale-lock proof; invalid values use 3
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1  # seconds between signature-matched retries; invalid values use 1
 FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30        # minimum lock age before removal can be considered
-FM_ISOLATION_VERBOSE=0   # also emit BOOTSTRAP_INFO for non-actionable worker-isolation sweep results
+FM_ISOLATION_VERBOSE=0   # with 1, also emit BOOTSTRAP_INFO for successful worker-isolation proof facts
 FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher and tmux helper
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok

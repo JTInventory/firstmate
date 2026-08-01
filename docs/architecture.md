@@ -149,7 +149,7 @@ Firstmate does not install CBM or change host MCP configuration. The captain may
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
 `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the selected session-provider and shared status-file path as any direct report.
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
-Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
+Retirement or seed rollback asks ownership-gated teardown to return the leased home; conflicting or unproven ownership retains or refuses it as described in [`docs/worker-isolation.md`](worker-isolation.md). Normal restart/recovery keeps it leased.
 Teardown retries only a transient Git `index.lock`/`File exists` failure from `treehouse return` before leaving the route and home intact for any remaining return failure, rather than hiding a still-held lease.
 Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.

@@ -44,8 +44,7 @@ bin/fm-home-seed.sh <id> <home|-> <project>...
 
 `-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
 The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
-The slot stays reserved across restarts until the lease is released.
-Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
+The slot stays reserved across restarts until explicit retirement or seed rollback asks the ownership-gated teardown to release it; never release it on routine restart or recovery. Conflicting or unproven ownership retains or refuses the slot (see `docs/worker-isolation.md`).
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
@@ -142,11 +141,11 @@ Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or mai
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
 When safe, teardown kills the direct tmux window, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
-Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
+When ownership checks pass, removing a leased home releases its durable treehouse lease via `treehouse return`; contested or unproven ownership retains or refuses the slot (see `docs/worker-isolation.md`).
 A plain-clone home with no pool slot is simply removed.
 Teardown retries only a transient Git `index.lock`/`File exists` failure from `treehouse return`; if it still fails, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
 Teardown also stops with state intact when another task still holds that pooled slot. `--force` does not waive the ownership gate; reconcile the other holder and retry (see `docs/worker-isolation.md`).
 
 With `--force`, teardown is the explicit discard path.
-It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
+After the ownership gate passes, it kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
 Never use `--force` unless the captain explicitly said to discard the work.

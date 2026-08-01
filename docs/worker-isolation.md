@@ -142,11 +142,11 @@ It is the captain's authority to discard *this* task's work, never authority to 
 ### Restore-time re-assertion
 
 `bin/fm-isolation-sweep.sh` re-establishes at session start what spawn could only assert at launch.
-It is read-only, exits nonzero when it prints a finding, and prints one `ISOLATION:` line per task whose live agent is provably misplaced or whose authoritative process isolation cannot be established.
+It is read-only, exits nonzero when it prints a finding, and prints `ISOLATION:` lines for each task finding whose live agent is provably misplaced or whose authoritative process isolation cannot be established.
 `bin/fm-bootstrap.sh` runs it in the same place as the worktree-tangle check and surfaces those lines in the session-start digest; the `bootstrap-diagnostics` skill owns what the agent does about each shape.
 
 It reports only from an authoritative process reading.
-A task with no authoritative reading produces an actionable `ISOLATION:` finding in every mode because missing process capability is ownership ambiguity, while `FM_ISOLATION_VERBOSE=1` may add detail.
+A task with no authoritative reading produces an actionable `ISOLATION:` finding in every mode because missing process capability is ownership ambiguity. `FM_ISOLATION_VERBOSE=1` adds successful `BOOTSTRAP_INFO` proof facts; it never suppresses a finding.
 Pane paths remain hints and never satisfy or suppress that finding.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.
