@@ -610,7 +610,11 @@ fm_slot_disposal_missing_worktree_verdict() {
   local endpoint_state=${7:-unknown} backend=${8:-} target=${9:-}
   local claim_status=1 stamp_path legacy_path
   fm_slot_meta_referencing_tasks "$state" "$self" "$wt" >/dev/null 2>&1 || true
-  fm_slot_return_claim_record "$wt" >/dev/null 2>&1 || claim_status=$?
+  if fm_slot_return_claim_record "$wt" >/dev/null 2>&1; then
+    claim_status=0
+  else
+    claim_status=$?
+  fi
   stamp_path=$(fm_slot_stamp_path "$wt" 2>/dev/null || true)
   legacy_path=$(fm_slot_return_legacy_path "$wt" 2>/dev/null || true)
   if [ "$claim_status" -eq 0 ] && [ -n "$stamp_path" ] && [ -L "$stamp_path" ] \

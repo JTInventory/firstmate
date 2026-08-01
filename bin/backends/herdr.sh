@@ -1890,30 +1890,46 @@ fm_backend_herdr_foreground_process_pid() {
   printf '%s' "$foreground"
 }
 
-fm_backend_herdr_launch_cleanup_uncertainty_record() {
-  local task=$1 target=$2 reason=$3
-  local file=${FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE:-}
+fm_backend_herdr_launch_cleanup_uncertainty_write() {
+  local file=$1 task=$2 target=$3 reason=$4
   local dir tmp
-  if [ -z "$file" ]; then
-    file="${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}/$task.herdr-cleanup-uncertain"
-  fi
   dir=${file%/*}
   [ "$dir" != "$file" ] || dir=.
   mkdir -p "$dir" 2>/dev/null || return 1
   tmp=$(mktemp "${file}.XXXXXX") || return 1
-  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  {
-    printf 'version=1\n'
-    printf 'task_id=%s\n' "$task"
-    printf 'reason=%s\n' "$reason"
-    printf 'target=%s\n' "$target"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$file"
+  if chmod 600 "$tmp" \
+    && {
+      printf 'version=1\n'
+      printf 'task_id=%s\n' "$task"
+      printf 'reason=%s\n' "$reason"
+      printf 'target=%s\n' "$target"
+    } > "$tmp" \
+    && mv "$tmp" "$file"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+fm_backend_herdr_launch_cleanup_uncertainty_record() {
+  local task=$1 target=$2 reason=$3
+  local file=${FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE:-}
+  local fallback
+  if [ -z "$file" ]; then
+    file="${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}/$task.herdr-cleanup-uncertain"
+  fi
+  fallback=${FM_BACKEND_HERDR_CLEANUP_FALLBACK_FILE:-"$file.fallback"}
+  fm_backend_herdr_launch_cleanup_uncertainty_write \
+    "$file" "$task" "$target" "$reason" && return 0
+  [ "$fallback" != "$file" ] || return 1
+  fm_backend_herdr_launch_cleanup_uncertainty_write \
+    "$fallback" "$task" "$target" "$reason" && return 2
+  return 1
 }
 
 fm_backend_herdr_launch_cleanup_after_start() {
   local session=$1 pane=$2 task=$3 reason=$4 close_status=0
-  fm_backend_herdr_projection_close_pane_focus_preserving \
+  fm_backend_herdr_projection_teardown_close \
     "$session" "$pane" >/dev/null 2>&1 || close_status=$?
   [ "$close_status" -eq 0 ] && return 0
   fm_backend_herdr_launch_cleanup_uncertainty_record \

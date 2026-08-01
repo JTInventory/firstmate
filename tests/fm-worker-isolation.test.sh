@@ -445,11 +445,16 @@ test_secondmate_child_receives_only_its_own_home() {
     "treehouse acquisition lacks the portable timeout fallback"
   publication_line=$(grep -n '^SPAWN_SLOT_CLAIM_PUBLISHED=1' "$SPAWN" \
     | tail -1 | cut -d: -f1)
-  final_submit_line=$(grep -n 'fm_backend_send_key "\$BACKEND" "\$WID" Enter' \
+  final_submit_line=$(grep -n '^  spawn_submit_final_enter ||' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   [ -n "$publication_line" ] && [ -n "$final_submit_line" ] \
     && [ "$final_submit_line" -lt "$publication_line" ] \
     || fail "spawn published pooled ownership before final command submission"
+  flat_cleanup_clear_line=$(grep -n '^HERDR_FLAT_ABORT_CLEANUP=0$' "$SPAWN" \
+    | tail -1 | cut -d: -f1)
+  [ -n "$flat_cleanup_clear_line" ] \
+    && [ "$publication_line" -lt "$flat_cleanup_clear_line" ] \
+    || fail "Herdr flat cleanup was disarmed before durable publication"
   pass "a secondmate child receives its own home and no inherited override"
 }
 
@@ -631,6 +636,88 @@ SH
   assert_contains "$out" "manual recovery" \
     "a timed-out lease acquisition did not surface manual recovery"
   pass "Treehouse acquisition fails closed within its hard deadline"
+}
+
+test_treehouse_return_records_unknown_and_committed_outcomes() {
+  local return_source dir out
+  return_source=$(sed -n '/^spawn_treehouse_return_bounded()/,/^parse_orca_worktree_result/p' \
+    "$SPAWN" | sed '$d')
+  dir="$TMP_ROOT/treehouse-return-outcomes"
+  mkdir -p "$dir/state"
+  out=$(FUNCTION_SOURCE="$return_source" STATE="$dir/state" bash -c '
+    eval "$FUNCTION_SOURCE"
+    SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+    SPAWN_SLOT_CLAIMED=1
+    SPAWN_SLOT_CLAIM_PUBLISHED=0
+    SPAWN_ABORT_ENDPOINT_RETIRED=1
+    SPAWN_SLOT_CLAIM_WT=/tmp/return-outcome
+    SPAWN_SLOT_CLAIM_HOME=/tmp/return-home
+    ID=return-unknown
+    KIND=ship
+    FM_HOME=/tmp/return-home
+    BACKEND=tmux
+    fm_slot_disposal_verdict() { printf dispose; }
+    fm_slot_stamp_stage_return() { FM_SLOT_RETURN_STAGED=0; }
+    spawn_treehouse_return_bounded() { return 17; }
+    spawn_return_unpublished_slot && exit 31
+    grep -Fq "reason=provider return outcome is unknown" \
+      "$STATE/$ID.treehouse-lease-unknown"
+    ID=return-committed
+    fm_slot_stamp_stage_return() {
+      FM_SLOT_RETURN_STAGED=1
+      FM_SLOT_RETURN_CLAIM="$STATE/return.claim"
+      FM_SLOT_RETURN_LEGACY="$STATE/return.owner"
+    }
+    fm_slot_stamp_mark_return_committed() {
+      : > "$STATE/return.claim.committed"
+    }
+    fm_slot_stamp_finalize_return() { return 1; }
+    spawn_treehouse_return_bounded() { return 0; }
+    spawn_return_unpublished_slot && exit 32
+    [ -f "$STATE/return.claim.committed" ]
+  ' 2>&1) || fail "Treehouse return outcomes were not durable: $out"
+  assert_contains "$out" "manual recovery" \
+    "an ambiguous Treehouse return did not require manual recovery"
+  pass "Treehouse return timeouts record unknown leases and commit before finalization"
+}
+
+test_abort_retires_endpoint_before_returning_lease() {
+  local function_source dir log out
+  dir="$TMP_ROOT/abort-order"
+  log="$dir/order.log"
+  mkdir -p "$dir"
+  function_source=$(sed -n '/^spawn_abort_retire_unpublished_endpoint()/,/^trap spawn_abort_cleanup EXIT/p' \
+    "$SPAWN" | sed '$d')
+  out=$(FUNCTION_SOURCE="$function_source" LOG="$log" STATE="$dir/state" ID=abort-order \
+    bash -c '
+      eval "$FUNCTION_SOURCE"
+      BACKEND=tmux
+      WID=firstmate:fm-abort-order
+      SPAWN_SLOT_CLAIM_PUBLISHED=0
+      SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+      SPAWN_TREEHOUSE_LEASE_WT=/tmp/abort-order
+      SPAWN_SLOT_CLAIMED=1
+      SPAWN_SLOT_CLAIM_CREATED=0
+      SPAWN_SLOT_CLAIM_WT=/tmp/abort-order
+      SPAWN_SLOT_CLAIM_HOME=/tmp/abort-home
+      SPAWN_AUTHORITY_ENROLLMENT=
+      SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
+      SPAWN_AUTHORITY_LAUNCH_RECEIPT=
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+      HERDR_FLAT_ABORT_CLEANUP=0
+      HERDR_FLAT_ABORT_UNCERTAIN=0
+      HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+      SPAWN_TASK_LOCK_HELD=0
+      SPAWN_ADMISSION_LOCKS=()
+      ORCA_ABORT_CLEANUP=0
+      fm_backend_kill() { printf "kill\n" >> "$LOG"; }
+      fm_backend_agent_alive() { printf "alive\n" >> "$LOG"; printf dead; }
+      spawn_return_unpublished_treehouse_lease() { printf "return\n" >> "$LOG"; }
+      spawn_abort_cleanup
+    ' 2>&1) || fail "abort cleanup did not complete its ordered fixture: $out"
+  [ "$(cat "$log")" = $'kill\nalive\nreturn' ] \
+    || fail "abort cleanup returned a lease before endpoint retirement: $(cat "$log")"
+  pass "abort cleanup proves endpoint retirement before returning a Treehouse lease"
 }
 
 # --- C. a declared worker is inert and refused -------------------------------
@@ -2044,21 +2131,49 @@ test_enrollment_validator_trace_is_stage_only() {
   pass "enrollment validator trace accepts only fixed non-secret stage facts"
 }
 
-test_post_start_validation_failures_arm_durable_cleanup() {
-  local herdr_source signer_source cleanup_calls
-  herdr_source=$(sed -n '/^fm_backend_herdr_launch_trusted_process()/,/^fm_backend_herdr_launch_process_is_current/p' \
-    "$ROOT/bin/backends/herdr.sh")
-  assert_contains "$herdr_source" 'fm_backend_herdr_launch_cleanup_uncertainty_record' \
-    "Herdr launch validation does not persist cleanup uncertainty"
-  assert_not_contains "$herdr_source" '|| true' \
-    "Herdr launch validation still discards a close failure"
-  signer_source=$(sed -n '/^fm_session_enrollment_ticket_write()/,/^fm_session_enrollment_acceptance_validate/p' \
-    "$ROOT/bin/fm-session-lock-lib.sh")
-  cleanup_calls=$(printf '%s\n' "$signer_source" \
-    | grep -c 'fm_session_enrollment_signer_cleanup')
-  [ "$cleanup_calls" -ge 6 ] \
-    || fail "signer validation has too few armed cleanup paths: $cleanup_calls"
-  pass "post-start Herdr and enrollment validation failures retain durable cleanup guards"
+test_signer_cleanup_failure_is_durable() {
+  local dir ticket fakebin out
+  dir="$TMP_ROOT/signer-cleanup-failure"
+  ticket="$dir/state/.session-authority-enrollment"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/state" "$fakebin"
+  printf stale > "${ticket}.ready"
+  cat > "$fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" = "${ticket}.ready" ] && exit 1
+done
+exec /bin/rm "\$@"
+SH
+  chmod +x "$fakebin/rm"
+  out=$(ROOT="$ROOT" PATH="$fakebin:$PATH" TICKET="$ticket" bash -c '
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    FM_SESSION_ENROLLMENT_SIGNER_PID=999999
+    export FM_SESSION_ENROLLMENT_SIGNER_PID
+    if fm_session_enrollment_signer_cleanup "$TICKET" 999999; then
+      exit 31
+    fi
+    [ "${FM_SESSION_ENROLLMENT_SIGNER_CLEANUP_UNCERTAIN:-0}" = 1 ] || exit 32
+  ' 2>&1) || fail "signer cleanup failure was not surfaced: $out"
+  [ -f "${ticket}.ready" ] || fail "failed signer artifact was silently discarded"
+  [ -f "${ticket}.cleanup-uncertain" ] \
+    || fail "failed signer cleanup did not persist a durable uncertainty marker"
+  pass "signer artifact cleanup failures remain durable and fail closed"
+}
+
+test_final_submission_failure_does_not_publish() {
+  local function_source out
+  function_source=$(sed -n '/^spawn_submit_final_enter()/,/^}/p' "$SPAWN")
+  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    BACKEND=tmux
+    WID=firstmate:fm-final-submit
+    SPAWN_SLOT_CLAIM_PUBLISHED=0
+    fm_backend_send_key() { return 1; }
+    spawn_submit_final_enter && exit 31
+    [ "$SPAWN_SLOT_CLAIM_PUBLISHED" = 0 ] || exit 32
+  ' 2>&1) || fail "final submission failure did not stay before publication: $out"
+  pass "final command submission failures leave pooled publication unarmed"
 }
 
 test_forged_key_cannot_issue_secondmate_enrollment() {
@@ -2836,6 +2951,35 @@ test_missing_worktree_runs_all_ownership_gates_before_retaining() {
   [ "$(cat "$log")" = metaclaimstamp-pathlegacy-pathstampendpoint ] \
     || fail "missing worktree skipped an ownership gate: $(cat "$log")"
   pass "missing worktrees run sibling, claim, stamp, and endpoint gates before retaining"
+}
+
+test_missing_worktree_accepts_valid_return_claim_before_stamp() {
+  local rec log verdict legacy stamp
+  rec=$(make_slot_world slot-missing-claim-success)
+  read_slot_world "$rec"
+  log="$WORLD/missing-claim-success.log"
+  legacy="$WORLD/home/state/return.owner"
+  stamp="$WORLD/home/state/return.stamp"
+  printf 'task=claim-success\nhome=%s\nlease_holder=claim-success\n' "$WORLD/home" \
+    > "$legacy"
+  ln -s "$legacy" "$stamp"
+  verdict=$(ROOT="$ROOT" STATE_DIR="$WORLD/home/state" WT="$WORLD/missing" \
+    LOG="$log" STAMP="$stamp" LEGACY="$legacy" bash -c '
+      . "$ROOT/bin/fm-slot-owner-lib.sh"
+      fm_slot_meta_referencing_tasks() { return 1; }
+      fm_slot_return_claim_record() { printf claim >> "$LOG"; return 0; }
+      fm_slot_stamp_path() { printf "%s" "$STAMP"; }
+      fm_slot_return_legacy_path() { printf "%s" "$LEGACY"; }
+      fm_slot_owner_record_file() { printf owner >> "$LOG"; return 0; }
+      fm_slot_stamp_record() { printf stamp >> "$LOG"; return 1; }
+      fm_slot_disposal_missing_worktree_verdict "$STATE_DIR" claim-success "$WT" \
+        "$STATE_DIR" "$STATE_DIR" crewmate closed tmux test:pane
+    ')
+  [ "$verdict" = 'retain: recorded worktree is missing; pooled slot ownership evidence is incomplete' ] \
+    || fail "valid return-claim evidence changed the conservative missing-worktree verdict"
+  [ "$(cat "$log")" = claimowner ] \
+    || fail "a successful return-claim read did not authorize its owner-record gate: $(cat "$log")"
+  pass "missing worktrees honor a successful return claim before stamp fallback"
 }
 
 test_a_stamp_naming_another_task_retains_the_slot() {
@@ -4124,7 +4268,7 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_authority_fds_require_sibling_proc_isolation
   test_authority_fds_reprove_isolation_after_exec
   test_secondmate_authority_delegation_uses_no_node
-  test_post_start_validation_failures_arm_durable_cleanup
+  test_signer_cleanup_failure_is_durable
   test_unrelated_process_cannot_consume_endpoint_enrollment
   test_backend_owned_launch_proof_covers_tmux_and_herdr
   test_darwin_session_identity_uses_supported_fields
@@ -4149,9 +4293,13 @@ fi
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = review-fixes ]; then
   test_secondmate_child_receives_only_its_own_home
+  test_final_submission_failure_does_not_publish
   test_treehouse_acquisition_timeout_is_bounded
+  test_treehouse_return_records_unknown_and_committed_outcomes
+  test_abort_retires_endpoint_before_returning_lease
   test_missing_worktree_runs_all_ownership_gates_before_retaining
-  test_post_start_validation_failures_arm_durable_cleanup
+  test_missing_worktree_accepts_valid_return_claim_before_stamp
+  test_signer_cleanup_failure_is_durable
   test_sweep_preserves_fail_closed_exit_status
   test_sweep_canonicalizes_declared_owner_home_aliases
   echo "# focused review-fixes tests passed"
@@ -4191,7 +4339,7 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr
 test_darwin_session_identity_uses_supported_fields
 test_secondmate_spawn_waits_for_enrollment_acceptance
 test_enrollment_validator_trace_is_stage_only
-test_post_start_validation_failures_arm_durable_cleanup
+test_signer_cleanup_failure_is_durable
 test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker

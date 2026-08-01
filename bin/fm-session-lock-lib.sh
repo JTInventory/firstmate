@@ -1565,16 +1565,50 @@ fm_session_enrollment_signer_run() {
 }
 
 fm_session_enrollment_signer_cleanup() {
-  local file=$1 signer=${2:-}
+  local file=$1 signer=${2:-} path status=0 marker fallback marker_tmp destination
   if [ -n "$signer" ]; then
     kill "$signer" 2>/dev/null || true
     wait "$signer" 2>/dev/null || true
   fi
-  rm -f "$file" "${file}.ready" "${file}.consume" "${file}.accepted" \
-    "${file}.accepted.ack" "${file}.accepted.final"
+  for path in "$file" "${file}.ready" "${file}.consume" "${file}.accepted" \
+    "${file}.accepted.ack" "${file}.accepted.final"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      rm -f "$path" || status=1
+      [ ! -e "$path" ] && [ ! -L "$path" ] || status=1
+    fi
+  done
+  marker="${file}.cleanup-uncertain"
+  fallback="${marker}.fallback"
+  if [ "$status" -ne 0 ]; then
+    for destination in "$marker" "$fallback"; do
+      marker_tmp=$(mktemp "${destination}.XXXXXX" 2>/dev/null || true)
+      [ -n "$marker_tmp" ] || continue
+      if printf 'version=1\nreason=signer-artifact-cleanup-failed\n' \
+          > "$marker_tmp" \
+        && chmod 600 "$marker_tmp" \
+        && mv "$marker_tmp" "$destination"; then
+        break
+      fi
+      rm -f "$marker_tmp"
+    done
+    FM_SESSION_ENROLLMENT_SIGNER_CLEANUP_UNCERTAIN=1
+    export FM_SESSION_ENROLLMENT_SIGNER_CLEANUP_UNCERTAIN
+    return 1
+  fi
+  if [ -e "$marker" ] || [ -L "$marker" ] \
+    || [ -e "$fallback" ] || [ -L "$fallback" ]; then
+    rm -f "$marker" "$fallback" \
+      && [ ! -e "$marker" ] && [ ! -L "$marker" ] \
+      && [ ! -e "$fallback" ] && [ ! -L "$fallback" ] || {
+      FM_SESSION_ENROLLMENT_SIGNER_CLEANUP_UNCERTAIN=1
+      export FM_SESSION_ENROLLMENT_SIGNER_CLEANUP_UNCERTAIN
+      return 1
+    }
+  fi
   if [ "${FM_SESSION_ENROLLMENT_SIGNER_PID:-}" = "$signer" ]; then
     unset FM_SESSION_ENROLLMENT_SIGNER_PID
   fi
+  unset FM_SESSION_ENROLLMENT_SIGNER_CLEANUP_UNCERTAIN
   unset FM_SESSION_ENROLLMENT_NONCE FM_SESSION_ENROLLMENT_PUBLIC_KEY \
     FM_SESSION_ENROLLMENT_PUBLIC_SHA256
 }
@@ -1582,7 +1616,7 @@ fm_session_enrollment_signer_cleanup() {
 fm_session_enrollment_ticket_write() {
   local file=$1 task=$2 home=$3 issuer=$4 endpoint=$5 endpoint_start=$6
   local endpoint_identity=$7 signer ready nonce public_key public_digest
-  local attempts=0
+  local attempts=0 cleanup_marker cleanup_fallback
   local signer_script issuer_real authority broker_script
   case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
   [ "$endpoint" -gt 1 ] \
@@ -1599,7 +1633,12 @@ fm_session_enrollment_ticket_write() {
   signer_script="$FM_SESSION_AUTHORITY_CHECKOUT/bin/fm-session-enrollment-signer.sh"
   [ -x "$signer_script" ] && [ ! -L "$signer_script" ] || return 1
   ready="${file}.ready"
+  cleanup_marker="${file}.cleanup-uncertain"
+  cleanup_fallback="${cleanup_marker}.fallback"
+  [ ! -e "$cleanup_marker" ] && [ ! -L "$cleanup_marker" ] \
+    && [ ! -e "$cleanup_fallback" ] && [ ! -L "$cleanup_fallback" ] || return 1
   [ ! -e "$ready" ] && [ ! -L "$ready" ] || return 1
+  unset FM_SESSION_ENROLLMENT_SIGNER_CLEANUP_UNCERTAIN
   "$signer_script" "$file" "$task" "$home" "$issuer" "$endpoint" \
     "$endpoint_start" "$endpoint_identity" >/dev/null 2>&1 &
   signer=$!

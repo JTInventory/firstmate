@@ -2045,6 +2045,61 @@ EOF
   pass "projected teardown: already-dead is idempotent; close, focus, and absence failures stay closed"
 }
 
+test_launch_cleanup_after_start_is_behaviorally_fail_closed() {
+  local dir out
+  dir="$TMP_ROOT/launch-cleanup-after-start"
+  mkdir -p "$dir"
+  out=$(ROOT="$ROOT" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() {
+      [ "$CLOSE_OK" = 1 ]
+    }
+    fm_backend_herdr_pane_agent_state() {
+      if [ -e "$PANE_STATE" ]; then
+        printf "%s" "$AFTER"
+      else
+        : > "$PANE_STATE"
+        printf "%s" "$BEFORE"
+      fi
+    }
+    run_case() {
+      local marker=$1 before=$2 after=$3 close_ok=$4 result=0
+      rm -f "$marker" "$marker.fallback" "$PANE_STATE"
+      BEFORE=$before AFTER=$after CLOSE_OK=$close_ok \
+        FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE="$marker" \
+        FM_BACKEND_HERDR_CLEANUP_FALLBACK_FILE="$marker.fallback" \
+        export BEFORE AFTER CLOSE_OK FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE \
+          FM_BACKEND_HERDR_CLEANUP_FALLBACK_FILE
+      fm_backend_herdr_launch_cleanup_after_start fmtest w1:p2 cleanup-task validation \
+        || result=$?
+      printf "%s:%s:%s\n" "$result" \
+        "$([ -e "$marker" ] && printf primary || printf absent)" \
+        "$([ -e "$marker.fallback" ] && printf fallback || printf none)"
+    }
+    PANE_STATE="$1/pane-state"
+    export PANE_STATE
+    run_case "$1/live" no-agent live 1
+    run_case "$1/dead" no-agent dead 1
+    blocked="$1/blocked"
+    printf blocker > "$blocked"
+    rm -f "$1/fallback" "$1/fallback.fallback" "$PANE_STATE"
+    BEFORE=no-agent AFTER=live CLOSE_OK=0 \
+      FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE="$blocked/primary" \
+      FM_BACKEND_HERDR_CLEANUP_FALLBACK_FILE="$1/fallback" \
+      export BEFORE AFTER CLOSE_OK FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE \
+        FM_BACKEND_HERDR_CLEANUP_FALLBACK_FILE
+    result=0
+    fm_backend_herdr_launch_cleanup_after_start fmtest w1:p2 cleanup-task close-failed \
+      || result=$?
+    printf "%s:%s:%s\n" "$result" \
+      "$([ -e "$blocked/primary" ] && printf primary || printf absent)" \
+      "$([ -e "$1/fallback" ] && printf fallback || printf none)"
+  ' _ "$dir") || fail "Herdr cleanup behavior fixture failed: $out"
+  [ "$out" = $'0:primary:none\n0:absent:none\n1:absent:fallback' ] \
+    || fail "Herdr cleanup did not prove absence or retain fallback uncertainty: $out"
+  pass "Herdr post-start cleanup verifies pane death and durable fallback uncertainty"
+}
+
 test_current_path_reads_cwd() {
   local dir log resp fb out
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3587,6 +3642,13 @@ test_wait_transition_clean_timeout_returns_1() {
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
+
+if [ "${FM_BACKEND_HERDR_FOCUS:-}" = review-fixes ]; then
+  test_projection_teardown_requires_confirmed_absence
+  test_launch_cleanup_after_start_is_behaviorally_fail_closed
+  echo "# focused Herdr review-fix tests passed"
+  exit 0
+fi
 
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol

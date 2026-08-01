@@ -234,6 +234,7 @@ HERDR_FLAT_ABORT_UNCERTAIN=0
 HERDR_FLAT_ABORT_SCOPE=
 HERDR_FLAT_ABORT_LABEL=
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE=
+HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -250,6 +251,7 @@ SPAWN_SLOT_CLAIM_HOME=
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 SPAWN_AUTHORITY_LAUNCH_RECEIPT=
+SPAWN_ABORT_ENDPOINT_RETIRED=0
 
 claim_spawn_slot() {
   local home
@@ -293,11 +295,13 @@ spawn_treehouse_return_bounded() {
 
 spawn_return_unpublished_slot() {
   local endpoint_state=closed worker_role=crewmate worker_home=$FM_HOME verdict
-  local claim legacy stamp_path staged
+  local claim legacy stamp_path staged return_status
   [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ] || return 0
   [ "$SPAWN_SLOT_CLAIMED" = 1 ] || return 0
   [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] || return 0
-  if [ -n "${SPAWN_ENDPOINT_TARGET:-}" ]; then
+  if [ "$SPAWN_ABORT_ENDPOINT_RETIRED" = 1 ]; then
+    endpoint_state=closed
+  elif [ -n "${SPAWN_ENDPOINT_TARGET:-}" ]; then
     endpoint_state=live
   fi
   if [ "$KIND" = secondmate ]; then
@@ -318,15 +322,32 @@ spawn_return_unpublished_slot() {
   claim=${FM_SLOT_RETURN_CLAIM:-}
   legacy=${FM_SLOT_RETURN_LEGACY:-}
   stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
-  if ! spawn_treehouse_return_bounded "$SPAWN_SLOT_CLAIM_WT" "$ID"; then
+  if spawn_treehouse_return_bounded "$SPAWN_SLOT_CLAIM_WT" "$ID"; then
+    return_status=0
+  else
+    return_status=$?
+    spawn_treehouse_return_unknown_record \
+      "provider return outcome is unknown" "$SPAWN_SLOT_CLAIM_WT" \
+      "$return_status" || true
     if [ "$staged" = 1 ]; then
       fm_slot_stamp_restore_return "$SPAWN_SLOT_CLAIM_WT" "$ID" \
         "$SPAWN_SLOT_CLAIM_HOME" "$claim" "$ID" "$stamp_path" "$legacy" || true
     fi
+    echo "error: Treehouse lease return for task $ID is unknown; manual recovery is required; no lease reuse will be attempted" >&2
     return 1
   fi
   if [ "$staged" = 1 ]; then
-    fm_slot_stamp_finalize_return "$claim" "$legacy" || return 1
+    fm_slot_stamp_mark_return_committed "$claim" "$legacy" || {
+      spawn_treehouse_return_unknown_record \
+        "provider return succeeded but committed transition evidence could not be recorded" \
+        "$SPAWN_SLOT_CLAIM_WT" "$return_status" || true
+      echo "error: Treehouse returned $SPAWN_SLOT_CLAIM_WT but committed transition evidence is missing; manual recovery is required" >&2
+      return 1
+    }
+    fm_slot_stamp_finalize_return "$claim" "$legacy" || {
+      echo "error: Treehouse returned $SPAWN_SLOT_CLAIM_WT but local transition finalization remains recoverable" >&2
+      return 1
+    }
   fi
 }
 
@@ -359,24 +380,118 @@ parse_orca_worktree_result() {
 }
 
 spawn_herdr_flat_uncertainty_record() {
-  local reason=$1 target=${2:-} scope=${3:-} label=${4:-} file tmp
+  local reason=$1 target=${2:-} scope=${3:-} label=${4:-} file fallback tmp dir
   file=${HERDR_FLAT_ABORT_UNCERTAINTY_FILE:-"$STATE/$ID.herdr-cleanup-uncertain"}
+  fallback=${HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE:-"$file.fallback"}
+  for destination in "$file" "$fallback"; do
+    dir=${destination%/*}
+    [ "$dir" != "$destination" ] || dir=.
+    mkdir -p "$dir" 2>/dev/null || continue
+    tmp=$(mktemp "${destination}.XXXXXX" 2>/dev/null || true)
+    [ -n "$tmp" ] || continue
+    if chmod 600 "$tmp" \
+      && {
+        printf 'version=1\n'
+        printf 'task_id=%s\n' "$ID"
+        printf 'reason=%s\n' "$reason"
+        printf 'target=%s\n' "$target"
+        printf 'scope=%s\n' "$scope"
+        printf 'label=%s\n' "$label"
+      } > "$tmp" \
+      && mv "$tmp" "$destination"; then
+      [ "$destination" = "$file" ] && return 0
+      return 2
+    fi
+    rm -f "$tmp"
+  done
+  return 1
+}
+
+spawn_treehouse_return_unknown_record() {
+  local reason=$1 target=$2 status=$3 file tmp
+  file=${SPAWN_TREEHOUSE_LEASE_UNKNOWN_FILE:-"$STATE/$ID.treehouse-lease-unknown"}
   mkdir -p "$STATE" 2>/dev/null || return 1
-  tmp=$(mktemp "$STATE/.$ID.herdr-cleanup-uncertain.XXXXXX") || return 1
-  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  {
-    printf 'version=1\n'
-    printf 'task_id=%s\n' "$ID"
-    printf 'reason=%s\n' "$reason"
-    printf 'target=%s\n' "$target"
-    printf 'scope=%s\n' "$scope"
-    printf 'label=%s\n' "$label"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$file"
+  tmp=$(mktemp "$file.XXXXXX" 2>/dev/null || return 1)
+  if chmod 600 "$tmp" \
+    && {
+      printf 'version=1\n'
+      printf 'task_id=%s\n' "$ID"
+      printf 'worktree=%s\n' "$target"
+      printf 'lease_holder=%s\n' "$ID"
+      printf 'return_status=%s\n' "$status"
+      printf 'reason=%s\n' "$reason"
+    } > "$tmp" \
+    && mv "$tmp" "$file"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+spawn_abort_retire_unpublished_endpoint() {
+  local status=0 cleanup_session uncertainty_file uncertainty_fallback
+  SPAWN_ABORT_ENDPOINT_RETIRED=0
+  if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" = 1 ]; then
+    SPAWN_ABORT_ENDPOINT_RETIRED=1
+    return 0
+  fi
+  if [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
+    if ! fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 \
+      || [ "$(fm_backend_agent_alive "$BACKEND" "$WID" 2>/dev/null || true)" != dead ]; then
+      status=1
+    fi
+  fi
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ] \
+      && ! spawn_herdr_presentation_order_lock_acquire \
+        "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
+      status=1
+    elif fm_backend_herdr_projection_cleanup_exact \
+      "$HERDR_PROJECTION_ABORT_SESSION" \
+      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+    else
+      status=1
+    fi
+  fi
+  if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
+    uncertainty_file=${HERDR_FLAT_ABORT_UNCERTAINTY_FILE:-"$STATE/$ID.herdr-cleanup-uncertain"}
+    uncertainty_fallback=${HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE:-"$uncertainty_file.fallback"}
+    cleanup_session=${HERDR_FLAT_ABORT_TARGET%%:*}
+    if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ] \
+      && ! spawn_herdr_presentation_order_lock_acquire "$cleanup_session"; then
+      status=1
+    elif fm_backend_herdr_parse_target "$HERDR_FLAT_ABORT_TARGET" \
+      && fm_backend_herdr_projection_teardown_close \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+      if rm -f "$uncertainty_file" "$uncertainty_fallback" \
+        && [ ! -e "$uncertainty_file" ] \
+        && [ ! -e "$uncertainty_fallback" ]; then
+        HERDR_FLAT_ABORT_CLEANUP=0
+      else
+        status=1
+      fi
+    else
+      spawn_herdr_flat_uncertainty_record \
+        "exact focus-safe abort cleanup unconfirmed" \
+        "$HERDR_FLAT_ABORT_TARGET" "" "" || true
+      status=1
+    fi
+  fi
+  [ "$HERDR_FLAT_ABORT_UNCERTAIN" = 0 ] || status=1
+  if [ "$status" -eq 0 ]; then
+    SPAWN_ABORT_ENDPOINT_RETIRED=1
+  fi
+  return "$status"
+}
+
+spawn_submit_final_enter() {
+  fm_backend_send_key "$BACKEND" "$WID" Enter
 }
 
 spawn_abort_cleanup() {
-  local status=$? cleanup_session i
+  local status=$? i
   if [ -n "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" ]; then
     kill "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" 2>/dev/null || true
     wait "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" 2>/dev/null || true
@@ -391,48 +506,17 @@ spawn_abort_cleanup() {
   [ -z "$SPAWN_AUTHORITY_LAUNCH_RECEIPT" ] \
     || rm -f -- "$SPAWN_AUTHORITY_LAUNCH_RECEIPT"
   if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
-    if [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ]; then
-      spawn_return_unpublished_treehouse_lease || true
-    elif [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ]; then
-      fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" \
-        "$SPAWN_SLOT_CLAIM_HOME" || true
+    spawn_abort_retire_unpublished_endpoint || {
+      echo "warning: endpoint cleanup was not proven; retaining pooled ownership evidence" >&2
+    }
+    if [ "$SPAWN_ABORT_ENDPOINT_RETIRED" = 1 ]; then
+      if [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ]; then
+        spawn_return_unpublished_treehouse_lease || true
+      elif [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ]; then
+        fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" \
+          "$SPAWN_SLOT_CLAIM_HOME" || true
+      fi
     fi
-  fi
-  if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] \
-     && [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
-    fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 || true
-  fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
-     && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
-    if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
-      HERDR_PROJECTION_ABORT_CLEANUP=0
-    fi
-  fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
-      "$HERDR_PROJECTION_ABORT_SESSION" \
-      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
-  fi
-  if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
-    cleanup_session=${HERDR_FLAT_ABORT_TARGET%%:*}
-    if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ] \
-       && ! spawn_herdr_presentation_order_lock_acquire "$cleanup_session"; then
-      spawn_herdr_flat_uncertainty_record \
-        "presentation lock unavailable during abort cleanup" "$HERDR_FLAT_ABORT_TARGET" "" "" \
-        || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
-    elif fm_backend_herdr_parse_target "$HERDR_FLAT_ABORT_TARGET" \
-         && fm_backend_herdr_projection_teardown_close \
-           "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
-      rm -f "${HERDR_FLAT_ABORT_UNCERTAINTY_FILE:-"$STATE/$ID.herdr-cleanup-uncertain"}"
-    else
-      spawn_herdr_flat_uncertainty_record \
-        "exact focus-safe abort cleanup unconfirmed" "$HERDR_FLAT_ABORT_TARGET" "" "" \
-        || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
-    fi
-    HERDR_FLAT_ABORT_CLEANUP=0
   fi
   if [ "$HERDR_FLAT_ABORT_UNCERTAIN" = 1 ]; then
     spawn_herdr_flat_uncertainty_record \
@@ -616,8 +700,17 @@ if [ "$SPAWN_TASK_LOCK_COVERED" != 1 ] && ! fm_lock_try_acquire "$SPAWN_TASK_LOC
 fi
 [ "$SPAWN_TASK_LOCK_COVERED" = 1 ] || SPAWN_TASK_LOCK_HELD=1
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/$ID.herdr-cleanup-uncertain"
-if [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; then
+HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE="$STATE/$ID.herdr-cleanup-uncertain.fallback"
+if { [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; } \
+  || { [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE" ] \
+    || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE" ]; }; then
   echo "error: unresolved Herdr cleanup uncertainty for $ID at $HERDR_FLAT_ABORT_UNCERTAINTY_FILE; refusing another spawn" >&2
+  exit 1
+fi
+SPAWN_TREEHOUSE_LEASE_UNKNOWN_FILE="$STATE/$ID.treehouse-lease-unknown"
+if [ -e "$SPAWN_TREEHOUSE_LEASE_UNKNOWN_FILE" ] \
+  || [ -L "$SPAWN_TREEHOUSE_LEASE_UNKNOWN_FILE" ]; then
+  echo "error: unresolved Treehouse lease return for $ID at $SPAWN_TREEHOUSE_LEASE_UNKNOWN_FILE; refusing another spawn" >&2
   exit 1
 fi
 PROJ=
@@ -1944,6 +2037,7 @@ spawn_adopt_herdr_launch_endpoint() {  # <pane-id> <endpoint-identity> <generati
   SPAWN_ENDPOINT_TARGET=$target
   ENDPOINT_GENERATION=$generation
   SPAWN_EXPECTED_ENDPOINT_IDENTITY=$identity
+  HERDR_FLAT_ABORT_TARGET=$target
 }
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -2012,7 +2106,6 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-HERDR_FLAT_ABORT_CLEANUP=0
 if [ "$KIND" = secondmate ]; then
   SPAWN_AUTHORITY_REPLACEMENT_GENERATION=$ENDPOINT_GENERATION
   if [ "$BACKEND" = herdr ]; then
@@ -2020,6 +2113,7 @@ if [ "$KIND" = secondmate ]; then
   fi
   SPAWN_AUTHORITY_LAUNCH_RESULT=$(
     FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE="$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" \
+    FM_BACKEND_HERDR_CLEANUP_FALLBACK_FILE="$HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE" \
     fm_backend_launch_trusted_process \
       "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$ID" "$PROJ_ABS" "$LAUNCH" \
       "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
@@ -2137,9 +2231,13 @@ EOF
         exit 1
       }
 else
-  fm_backend_send_key "$BACKEND" "$WID" Enter
+  spawn_submit_final_enter || {
+    echo "error: final launch submission failed for $ID" >&2
+    exit 1
+  }
 fi
 SPAWN_SLOT_CLAIM_PUBLISHED=1
+HERDR_FLAT_ABORT_CLEANUP=0
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 SPAWN_AUTHORITY_LAUNCH_RECEIPT=

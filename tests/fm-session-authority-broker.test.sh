@@ -55,6 +55,73 @@ test_broker_client_deadline_covers_connect_and_send() {
 
 test_broker_client_deadline_covers_connect_and_send
 
+test_broker_client_deadline_is_behavioral() {
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import io
+import sys
+from types import SimpleNamespace
+
+broker_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("session_authority_broker_deadline", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+broker.read_record = lambda _path: {"socket": "abstract:test"}
+broker.connected_peer_matches_record = lambda _connection, _metadata: True
+
+class FakeConnection:
+    def __init__(self, mode):
+        self.mode = mode
+        self.timeouts = []
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+    def connect(self, _address):
+        if self.mode == "connect":
+            raise TimeoutError("connect stalled")
+
+    def sendall(self, _payload):
+        raise TimeoutError("send stalled")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+def run(mode, clock):
+    connection = FakeConnection(mode)
+    broker.socket.socket = lambda *_args: connection
+    broker.time.monotonic = lambda: clock.pop(0)
+    broker.sys.stdin = io.TextIOWrapper(io.BytesIO(b"body"))
+    status = broker.client(SimpleNamespace(record="unused", kind="live"))
+    if status != 1:
+        raise SystemExit(f"{mode} stall returned {status}")
+    return connection.timeouts
+
+connect_timeouts = run("connect", [100.0])
+if connect_timeouts != [broker.BROKER_REQUEST_TIMEOUT_SECONDS]:
+    raise SystemExit(f"connect deadline missing: {connect_timeouts}")
+
+send_timeouts = run("send", [100.0, 100.1])
+if len(send_timeouts) != 2 or send_timeouts[1] <= 0:
+    raise SystemExit(f"send deadline missing: {send_timeouts}")
+PY
+  then
+    fail "broker connect/send deadline behavior regressed"
+  fi
+  pass "broker connect and send stalls honor the request deadline"
+}
+
+if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
+  test_broker_client_deadline_is_behavioral
+  echo "# focused broker review-fix tests passed"
+  exit 0
+fi
+
 prepare_launch() {
   local home=$1 launch_script
   local launch_start launch_identity receipt_body receipt_hmac
