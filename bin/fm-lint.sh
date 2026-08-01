@@ -11,6 +11,7 @@
 set -eu
 
 REQUIRED_SHELLCHECK=0.11.0
+BATCH_SIZE=20
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "${1:-}" = '--required-version' ]; then
@@ -33,7 +34,17 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
 fi
 
 cd "$ROOT" || exit 1
+
+lint_files=()
 if [ "$#" -gt 0 ]; then
-  exec shellcheck --norc -x -P SCRIPTDIR -S warning "$@"
+  lint_files=("$@")
+else
+  # Keep this glob set identical to the historical single-process invocation.
+  # shellcheck disable=SC2206
+  lint_files=(bin/*.sh tests/*.sh)
 fi
-exec shellcheck --norc -x -P SCRIPTDIR -S warning bin/*.sh tests/*.sh
+
+for ((offset = 0; offset < ${#lint_files[@]}; offset += BATCH_SIZE)); do
+  batch=("${lint_files[@]:offset:BATCH_SIZE}")
+  shellcheck --norc -x -P SCRIPTDIR -S warning -- "${batch[@]}"
+done
