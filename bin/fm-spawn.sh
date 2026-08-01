@@ -241,7 +241,6 @@ SPAWN_TASK_LOCK_HELD=0
 SPAWN_ADMISSION_LOCKS=()
 SPAWN_SLOT_CLAIM_CREATED=0
 SPAWN_SLOT_CLAIMED=0
-SPAWN_SLOT_CLAIM_PREEXISTING=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
 SPAWN_TREEHOUSE_LEASE_ACQUIRED=0
 SPAWN_TREEHOUSE_LEASE_WT=
@@ -262,11 +261,6 @@ claim_spawn_slot() {
     return 1
   fi
   SPAWN_SLOT_CLAIM_CREATED=${FM_SLOT_STAMP_CREATED:-0}
-  if [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ]; then
-    SPAWN_SLOT_CLAIM_PREEXISTING=0
-  else
-    SPAWN_SLOT_CLAIM_PREEXISTING=1
-  fi
   SPAWN_SLOT_CLAIMED=1
   SPAWN_SLOT_CLAIM_WT=$WT
   SPAWN_SLOT_CLAIM_HOME=$home
@@ -320,10 +314,6 @@ spawn_return_unpublished_treehouse_lease() {
     echo "warning: retaining unpublished lease ${target:-<unknown>} because private slot ownership was not proven" >&2
     return 1
   fi
-  [ "$SPAWN_SLOT_CLAIM_PREEXISTING" != 1 ] || {
-    echo "warning: retaining unpublished lease $target because its ownership stamp preexisted this spawn" >&2
-    return 1
-  }
   spawn_return_unpublished_slot
 }
 
@@ -1588,9 +1578,33 @@ if [ "$KIND" = secondmate ]; then
 fi
 SPAWN_SETTLE_SOURCE=
 SPAWN_SETTLE_PATH=
+spawn_treehouse_get_bounded() {
+  local seconds=${FM_SPAWN_TREEHOUSE_GET_TIMEOUT_SECS:-60}
+  case "$seconds" in
+    ''|*[!0-9]*) seconds=60 ;;
+  esac
+  [ "$seconds" -gt 0 ] 2>/dev/null || seconds=60
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 1 "$seconds" bash -c \
+      'cd -- "$1" && exec treehouse get --lease --lease-holder "$2"' \
+      _ "$PROJ_ABS" "$ID"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 1 "$seconds" bash -c \
+      'cd -- "$1" && exec treehouse get --lease --lease-holder "$2"' \
+      _ "$PROJ_ABS" "$ID"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$seconds" bash -c \
+      'cd -- "$1" && exec treehouse get --lease --lease-holder "$2"' \
+      _ "$PROJ_ABS" "$ID"
+  else
+    echo "error: no bounded timeout runner is available for treehouse get" >&2
+    return 1
+  fi
+}
+
 spawn_acquire_treehouse_lease() {
   local result
-  result=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || return 1
+  result=$(spawn_treehouse_get_bounded) || return 1
   SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
   SPAWN_TREEHOUSE_LEASE_WT=$result
   case "$result" in
@@ -1631,7 +1645,6 @@ if [ "$KIND" != secondmate ]; then
     echo "error: treehouse get did not return an exact lease path for $ID" >&2
     exit 1
   }
-  claim_spawn_slot || exit 1
   sq_treehouse_wt=$(shell_quote "$WT") || exit 1
   fm_backend_send_text_line "$BACKEND" "$WID" "cd -- $sq_treehouse_wt" || exit 1
 
@@ -1658,6 +1671,7 @@ if [ "$KIND" != secondmate ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  claim_spawn_slot || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

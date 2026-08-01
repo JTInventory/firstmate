@@ -413,9 +413,9 @@ test_secondmate_child_receives_only_its_own_home() {
     "unpublished spawn cleanup did not bind Treehouse return to its lease holder"
   assert_contains "$(cat "$SPAWN")" 'SPAWN_TREEHOUSE_LEASE_ACQUIRED=1' \
     "spawn did not record Treehouse lease acquisition independently"
-  lease_source=$(sed -n '/^spawn_acquire_treehouse_lease()/,/^spawn_settle_path/p' \
+  lease_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
     "$SPAWN" | sed '$d')
-  assert_contains "$lease_source" 'cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID"' \
+  assert_contains "$lease_source" 'exec treehouse get --lease --lease-holder "$2"' \
     "spawn did not capture the lease result from the target project"
   assert_contains "$lease_source" 'SPAWN_TREEHOUSE_LEASE_WT=$result' \
     "spawn did not retain the exact Treehouse result"
@@ -431,18 +431,33 @@ test_secondmate_child_receives_only_its_own_home() {
     | head -1 | cut -d: -f1)
   [ "$lease_arm_line" -lt "$validate_line" ] \
     || fail "spawn armed the Treehouse rollback only after worktree validation"
+  claim_line=$(grep -n '^  claim_spawn_slot || exit 1' "$SPAWN" \
+    | tail -1 | cut -d: -f1)
+  [ "$validate_line" -lt "$claim_line" ] \
+    || fail "spawn stamped pooled ownership before worktree validation"
+  assert_contains "$lease_source" 'timeout -k 1' \
+    "treehouse acquisition did not use a hard timeout"
+  assert_contains "$lease_source" 'gtimeout -k 1' \
+    "treehouse acquisition lacks the macOS timeout fallback"
+  assert_contains "$lease_source" "perl -e 'alarm shift; exec @ARGV'" \
+    "treehouse acquisition lacks the portable timeout fallback"
   pass "a secondmate child receives its own home and no inherited override"
 }
 
 test_treehouse_result_is_exact_acquisition_receipt() {
-  local function_source out
-  function_source=$(sed -n '/^spawn_acquire_treehouse_lease()/,/^spawn_settle_path/p' \
+  local function_source fakebin out
+  function_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
     "$SPAWN" | sed '$d')
-  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+  fakebin=$(fm_fakebin "$TMP_ROOT/exact-treehouse")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' /tmp/exact-get-result
+SH
+  chmod +x "$fakebin/treehouse"
+  out=$(PATH="$fakebin:$PATH" FUNCTION_SOURCE="$function_source" bash -c '
     eval "$FUNCTION_SOURCE"
     PROJ_ABS=/tmp
     ID=receipt-task
-    treehouse() { printf "%s\\n" /tmp/exact-get-result; }
     spawn_acquire_treehouse_lease
     [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ]
     [ "$SPAWN_TREEHOUSE_LEASE_WT" = /tmp/exact-get-result ]
@@ -451,9 +466,9 @@ test_treehouse_result_is_exact_acquisition_receipt() {
   pass "the exact Treehouse result is distinct from cwd evidence"
 }
 
-test_preexisting_stamp_never_returns_a_lease() {
+test_matching_preexisting_stamp_returns_exact_new_lease() {
   local function_source marker out
-  marker="$TMP_ROOT/preexisting-stamp-not-returned"
+  marker="$TMP_ROOT/preexisting-stamp-new-lease-returned"
   function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
@@ -462,7 +477,6 @@ test_preexisting_stamp_never_returns_a_lease() {
       SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
       SPAWN_SLOT_CLAIMED=1
       SPAWN_SLOT_CLAIM_CREATED=0
-      SPAWN_SLOT_CLAIM_PREEXISTING=1
       SPAWN_SLOT_CLAIM_PUBLISHED=0
       SPAWN_SLOT_CLAIM_WT=/tmp/retry-worktree
       SPAWN_SLOT_CLAIM_HOME=/tmp/retry-home
@@ -475,17 +489,19 @@ test_preexisting_stamp_never_returns_a_lease() {
       BACKEND=tmux
       fm_slot_disposal_verdict() { printf "%s" dispose; }
       fm_slot_stamp_stage_return() { FM_SLOT_RETURN_STAGED=0; }
-      treehouse() { [ "$1" = return ] && : > "$RETURN_MARKER"; }
-      spawn_return_unpublished_treehouse_lease && exit 31
-      [ ! -f "$RETURN_MARKER" ] || exit 32
-    ' 2>&1) || fail "a preexisting matching stamp was not retained: $out"
-  [ ! -f "$marker" ] || fail "a preexisting matching stamp authorized lease return"
-  pass "preexisting matching stamps retain their lease"
+      treehouse() {
+        [ "$1" = return ] && [ "$4" = --if-lease-holder ] \
+          && [ "$5" = retry-task ] && : > "$RETURN_MARKER"
+      }
+      spawn_return_unpublished_treehouse_lease
+    ' 2>&1) || fail "a matching preexisting stamp blocked exact lease rollback: $out"
+  [ -f "$marker" ] || fail "a matching preexisting stamp stranded the new lease"
+  pass "matching preexisting stamps do not block exact lease rollback"
 }
 
-test_exact_new_lease_returns_through_slot_gates() {
+test_contested_exact_new_lease_is_retained() {
   local function_source marker out
-  marker="$TMP_ROOT/exact-lease-returned"
+  marker="$TMP_ROOT/contested-exact-lease-not-returned"
   function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
@@ -493,52 +509,46 @@ test_exact_new_lease_returns_through_slot_gates() {
       eval "$FUNCTION_SOURCE"
       SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
       SPAWN_TREEHOUSE_LEASE_WT=/tmp/exact-leased-path
-      SPAWN_SLOT_CLAIM_PREEXISTING=0
       SPAWN_SLOT_CLAIM_WT=/tmp/exact-leased-path
       SPAWN_SLOT_CLAIM_HOME=/tmp/exact-home
-      SPAWN_SLOT_CLAIMED=0
+      SPAWN_SLOT_CLAIMED=1
       SPAWN_SLOT_CLAIM_PUBLISHED=0
       ID=exact-lease-task
       FM_ROOT="$ROOT"
-      treehouse() {
-        [ "$1" = return ] && [ "$2" = --force ] \
-          && [ "$3" = /tmp/exact-leased-path ] \
-          && [ "$4" = --if-lease-holder ] \
-          && [ "$5" = exact-lease-task ] \
-          && : > "$RETURN_MARKER"
-      }
-      SPAWN_SLOT_CLAIMED=1
-      fm_slot_disposal_verdict() { printf "%s" dispose; }
-      fm_slot_stamp_stage_return() { FM_SLOT_RETURN_STAGED=0; }
-      spawn_return_unpublished_treehouse_lease
+      fm_slot_disposal_verdict() { printf "%s" "retain: contested"; }
+      treehouse() { [ "$1" = return ] && : > "$RETURN_MARKER"; }
+      spawn_return_unpublished_treehouse_lease && exit 31
+      [ ! -f "$RETURN_MARKER" ] || exit 32
     ' 2>&1) || fail "an exact new lease did not pass the ownership gates: $out"
-  [ -f "$marker" ] || fail "exact new lease rollback did not use the lease holder gate"
-  pass "exact new leases return through the ownership gates"
+  [ ! -f "$marker" ] || fail "a contested exact lease was returned"
+  pass "contested exact leases remain retained"
 }
 
 test_invalid_acquired_path_is_retained_without_private_stamp() {
-  local acquire_source rollback_source function_source marker out
+  local acquire_source rollback_source function_source marker fakebin out
   marker="$TMP_ROOT/invalid-acquired-not-returned"
-  acquire_source=$(sed -n '/^spawn_acquire_treehouse_lease()/,/^spawn_settle_path/p' \
+  acquire_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
     "$SPAWN" | sed '$d')
   rollback_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   function_source="$acquire_source
 $rollback_source"
-  out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
+  fakebin=$(fm_fakebin "$TMP_ROOT/invalid-treehouse")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  printf '%s\n' /tmp/invalid-acquired-path
+elif [ "${1:-}" = return ]; then
+  : > "$RETURN_MARKER"
+fi
+SH
+  chmod +x "$fakebin/treehouse"
+  out=$(ROOT="$ROOT" PATH="$fakebin:$PATH" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
     bash -c '
       eval "$FUNCTION_SOURCE"
       PROJ_ABS=/tmp
       ID=invalid-acquired-task
-      treehouse() {
-        if [ "${1:-}" = get ]; then
-          printf "%s\\n" /tmp/invalid-acquired-path
-        elif [ "${1:-}" = return ]; then
-          : > "$RETURN_MARKER"
-        fi
-      }
       spawn_acquire_treehouse_lease
-      SPAWN_SLOT_CLAIM_PREEXISTING=0
       SPAWN_SLOT_CLAIMED=0
       SPAWN_SLOT_CLAIM_PUBLISHED=0
       spawn_return_unpublished_treehouse_lease && exit 31
@@ -546,6 +556,33 @@ $rollback_source"
     ' 2>&1) || fail "an invalid acquired path was not retained: $out"
   [ ! -f "$marker" ] || fail "an invalid acquired path bypassed the private-stamp gate"
   pass "invalid acquired paths retain leases without private ownership proof"
+}
+
+test_treehouse_acquisition_timeout_is_bounded() {
+  local acquire_source fakebin out status started finished
+  acquire_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
+    "$SPAWN" | sed '$d')
+  fakebin=$(fm_fakebin "$TMP_ROOT/treehouse-timeout")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+SH
+  chmod +x "$fakebin/treehouse"
+  started=$(date +%s)
+  status=0
+  out=$(PATH="$fakebin:$PATH" FUNCTION_SOURCE="$acquire_source" \
+    bash -c '
+      eval "$FUNCTION_SOURCE"
+      PROJ_ABS=/tmp
+      ID=timeout-task
+      FM_SPAWN_TREEHOUSE_GET_TIMEOUT_SECS=1
+      spawn_acquire_treehouse_lease
+    ' 2>&1) || status=$?
+  finished=$(date +%s)
+  [ "$status" -ne 0 ] || fail "a blocked Treehouse acquisition unexpectedly succeeded"
+  [ $((finished - started)) -lt 4 ] \
+    || fail "a blocked Treehouse acquisition exceeded its hard deadline: $out"
+  pass "Treehouse acquisition fails closed within its hard deadline"
 }
 
 # --- C. a declared worker is inert and refused -------------------------------
@@ -3968,9 +4005,10 @@ fi
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-hardening ]; then
   test_secondmate_child_receives_only_its_own_home
   test_treehouse_result_is_exact_acquisition_receipt
-  test_preexisting_stamp_never_returns_a_lease
-  test_exact_new_lease_returns_through_slot_gates
+  test_matching_preexisting_stamp_returns_exact_new_lease
+  test_contested_exact_new_lease_is_retained
   test_invalid_acquired_path_is_retained_without_private_stamp
+  test_treehouse_acquisition_timeout_is_bounded
   echo "# focused isolation-hardening test passed"
   exit 0
 fi
