@@ -23,7 +23,8 @@ exec <AUTHORITY_FD>&-; exec <DURABLE_AUTHORITY_FD>&-; FM_HOME= FM_ROOT_OVERRIDE=
 FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-x' FM_AGENT_OWNER_HOME='/home/cap/homes/dom'<SPACE>
 ```
 
-A crewmate carries no home at all; a secondmate carries only its own.
+A crewmate carries no operational home; it carries only its declared owner-home
+path. A secondmate carries only its own operational home.
 For a secondmate spawn, this declaration precedes
 `bin/fm-session-authority-exec.sh`; the authorized parent has already placed a
 one-use signed enrollment ticket in that home without exposing the issuer key.
