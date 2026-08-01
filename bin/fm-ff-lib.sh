@@ -359,7 +359,7 @@ FM_SECONDMATE_META_TMUX_PANE=
 FM_SECONDMATE_META_ERROR=
 
 fm_secondmate_lifecycle_meta_read() {
-  local meta=$1 expected_id=$2 line key value
+  local meta=$1 expected_id=$2 read_only=${3:-0} line key value
   local kind_count=0 home_count=0 task_count=0 window_count=0 generation_count=0
   local harness_count=0 backend_count=0 session_count=0 workspace_count=0
   local tab_count=0 pane_count=0 tmux_pane_count=0
@@ -378,12 +378,14 @@ fm_secondmate_lifecycle_meta_read() {
   FM_SECONDMATE_META_HERDR_TAB=
   FM_SECONDMATE_META_HERDR_PANE=
   FM_SECONDMATE_META_ERROR=
-  fm_backend_tmux_meta_migrate_legacy "$meta" || {
-    [ "$(fm_backend_of_meta "$meta")" != tmux ] || {
-      FM_SECONDMATE_META_ERROR="legacy tmux endpoint migration failed"
-      return 1
+  if [ "$read_only" != 1 ]; then
+    fm_backend_tmux_meta_migrate_legacy "$meta" || {
+      [ "$(fm_backend_of_meta "$meta")" != tmux ] || {
+        FM_SECONDMATE_META_ERROR="legacy tmux endpoint migration failed"
+        return 1
+      }
     }
-  }
+  fi
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     FM_SECONDMATE_META_ERROR="metadata is missing, unreadable, or not a regular file"
     return 1
@@ -567,7 +569,8 @@ live_secondmate_meta_records() {
 }
 
 fm_secondmate_lifecycle_preflight() {
-  local state=$1 registry=${2:-} meta id line home seen="" status=0 kind_count kind
+  local state=$1 registry=${2:-} read_only=${3:-0}
+  local meta id line home seen="" status=0 kind_count kind
   local registry_home agent_state
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
@@ -591,7 +594,7 @@ fm_secondmate_lifecycle_preflight() {
     if [ "$kind" = secondmate ] \
       || { [ -n "$registry" ] && grep -qE "^- ${id}([[:space:]]|$)" "$registry" 2>/dev/null; } \
       || grep -q '^projects=' "$meta" 2>/dev/null; then
-      if ! fm_secondmate_lifecycle_meta_read "$meta" "$id"; then
+      if ! fm_secondmate_lifecycle_meta_read "$meta" "$id" "$read_only"; then
         echo "secondmate $id: refused: ${FM_SECONDMATE_META_ERROR:-ambiguous lifecycle metadata}" >&2
         status=1
         continue
@@ -641,7 +644,7 @@ fm_secondmate_lifecycle_preflight() {
       status=1
       continue
     fi
-    if fm_secondmate_lifecycle_meta_read "$state/$id.meta" "$id"; then
+    if fm_secondmate_lifecycle_meta_read "$state/$id.meta" "$id" "$read_only"; then
       registry_home=$(resolve_path "$home")
       if [ "$registry_home" != "$(resolve_path "$FM_SECONDMATE_META_HOME")" ]; then
         echo "secondmate $id: refused: registry and live metadata homes differ" >&2

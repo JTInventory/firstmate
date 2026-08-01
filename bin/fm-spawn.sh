@@ -267,6 +267,30 @@ claim_spawn_slot() {
   SPAWN_SLOT_CLAIM_HOME=$home
 }
 
+spawn_treehouse_return_bounded() {
+  local target=$1 holder=$2 seconds=${FM_SPAWN_TREEHOUSE_RETURN_TIMEOUT_SECS:-60}
+  case "$seconds" in
+    ''|*[!0-9]*) seconds=60 ;;
+  esac
+  [ "$seconds" -gt 0 ] 2>/dev/null || seconds=60
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 1 "$seconds" bash -c \
+      'cd -- "$1" && exec treehouse return --force "$2" --if-lease-holder "$3"' \
+      _ "$FM_ROOT" "$target" "$holder"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 1 "$seconds" bash -c \
+      'cd -- "$1" && exec treehouse return --force "$2" --if-lease-holder "$3"' \
+      _ "$FM_ROOT" "$target" "$holder"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$seconds" bash -c \
+      'cd -- "$1" && exec treehouse return --force "$2" --if-lease-holder "$3"' \
+      _ "$FM_ROOT" "$target" "$holder"
+  else
+    echo "error: no bounded timeout runner is available for treehouse return" >&2
+    return 1
+  fi
+}
+
 spawn_return_unpublished_slot() {
   local endpoint_state=closed worker_role=crewmate worker_home=$FM_HOME verdict
   local claim legacy stamp_path staged
@@ -294,8 +318,7 @@ spawn_return_unpublished_slot() {
   claim=${FM_SLOT_RETURN_CLAIM:-}
   legacy=${FM_SLOT_RETURN_LEGACY:-}
   stamp_path=${FM_SLOT_RETURN_STAMP_PATH:-}
-  if ! ( cd "$FM_ROOT" && treehouse return --force "$SPAWN_SLOT_CLAIM_WT" \
-    --if-lease-holder "$ID" ); then
+  if ! spawn_treehouse_return_bounded "$SPAWN_SLOT_CLAIM_WT" "$ID"; then
     if [ "$staged" = 1 ]; then
       fm_slot_stamp_restore_return "$SPAWN_SLOT_CLAIM_WT" "$ID" \
         "$SPAWN_SLOT_CLAIM_HOME" "$claim" "$ID" "$stamp_path" "$legacy" || true
@@ -1870,7 +1893,6 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   fi
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
-SPAWN_SLOT_CLAIM_PUBLISHED=1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
   if [ "$HERDR_LABEL_LOCK_HELD" = 1 ]; then
@@ -1997,6 +2019,7 @@ if [ "$KIND" = secondmate ]; then
     SPAWN_AUTHORITY_REPLACEMENT_GENERATION="herdr-$(date +%s)-$$-$RANDOM"
   fi
   SPAWN_AUTHORITY_LAUNCH_RESULT=$(
+    FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE="$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" \
     fm_backend_launch_trusted_process \
       "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$ID" "$PROJ_ABS" "$LAUNCH" \
       "$SPAWN_EXPECTED_ENDPOINT_IDENTITY" \
@@ -2017,9 +2040,14 @@ EOF
         "$SPAWN_AUTHORITY_REPLACEMENT_PANE" \
         "$SPAWN_AUTHORITY_REPLACEMENT_IDENTITY" \
         "$SPAWN_AUTHORITY_REPLACEMENT_GENERATION"; then
-      fm_backend_herdr_projection_close_pane_focus_preserving \
+      if ! fm_backend_herdr_projection_close_pane_focus_preserving \
         "$HERDR_SES" "$SPAWN_AUTHORITY_REPLACEMENT_PANE" \
-        >/dev/null 2>&1 || true
+        >/dev/null 2>&1; then
+        spawn_herdr_flat_uncertainty_record \
+          "replacement endpoint close failed after launch adoption" \
+          "$HERDR_SES:$SPAWN_AUTHORITY_REPLACEMENT_PANE" "" "$ID" \
+          || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
+      fi
       SPAWN_AUTHORITY_ENDPOINT_PID=
     fi
   else
@@ -2111,6 +2139,7 @@ EOF
 else
   fm_backend_send_key "$BACKEND" "$WID" Enter
 fi
+SPAWN_SLOT_CLAIM_PUBLISHED=1
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 SPAWN_AUTHORITY_LAUNCH_RECEIPT=

@@ -170,6 +170,7 @@ fm_agent_task_pid_index() {
     role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
     [ -n "$task" ] && [ -n "$home" ] || continue
     case "$role" in crewmate|secondmate) ;; *) continue ;; esac
+    home=$(fm_agent_canonical_dir "$home" 2>/dev/null || printf '%s' "$home")
     printf '%s\t%s\t%s\t%s\n' "$task" "$home" "$role" "$pid"
     found=0
   done
@@ -184,6 +185,7 @@ fm_agent_task_pid_index() {
 fm_agent_pids_for_identity() {
   local id=$1 home=$2 role=$3 index pids
   [ -n "$id" ] && [ -n "$home" ] && [ -n "$role" ] || return 1
+  home=$(fm_agent_canonical_dir "$home" 2>/dev/null || printf '%s' "$home")
   if [ "$#" -ge 4 ]; then
     index=$4
     pids=$(printf '%s\n' "$index" | awk -F'\t' -v t="$id" -v h="$home" -v r="$role" \

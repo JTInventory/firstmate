@@ -604,6 +604,29 @@ fm_slot_join_ids() {
   printf '%s' "$1" | LC_ALL=C sort -u | tr '\n' ',' | sed 's/,$//'
 }
 
+# fm_slot_disposal_missing_worktree_verdict <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <endpoint-state> <backend> <target>
+fm_slot_disposal_missing_worktree_verdict() {
+  local state=$1 self=$2 wt=$3 worker_home=$5 role=$6
+  local endpoint_state=${7:-unknown} backend=${8:-} target=${9:-}
+  local claim_status=1 stamp_path legacy_path
+  fm_slot_meta_referencing_tasks "$state" "$self" "$wt" >/dev/null 2>&1 || true
+  fm_slot_return_claim_record "$wt" >/dev/null 2>&1 || claim_status=$?
+  stamp_path=$(fm_slot_stamp_path "$wt" 2>/dev/null || true)
+  legacy_path=$(fm_slot_return_legacy_path "$wt" 2>/dev/null || true)
+  if [ "$claim_status" -eq 0 ] && [ -n "$stamp_path" ] && [ -L "$stamp_path" ] \
+    && [ "$(readlink "$stamp_path" 2>/dev/null || true)" = "$legacy_path" ]; then
+    fm_slot_owner_record_file "$legacy_path" >/dev/null 2>&1 || true
+  else
+    fm_slot_stamp_record "$wt" >/dev/null 2>&1 || true
+  fi
+  if [ "$endpoint_state" = live ]; then
+    fm_slot_endpoint_occupant_tasks \
+      "$wt" "$self" "$worker_home" "$role" "$backend" "$target" \
+      >/dev/null 2>&1 || true
+  fi
+  printf 'retain: recorded worktree is missing; pooled slot ownership evidence is incomplete'
+}
+
 # fm_slot_disposal_verdict <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <endpoint-state> <backend> <target>
 # Print exactly `dispose` or `retain: <reason>`.
 fm_slot_disposal_verdict() {
@@ -611,8 +634,10 @@ fm_slot_disposal_verdict() {
   local endpoint_state=${7:-unknown} backend=${8:-} target=${9:-}
   local stamp_task stamp_home stamp_status claim_status refs occupants stamp_path legacy_path
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    printf 'dispose'
-    return 0
+    fm_slot_disposal_missing_worktree_verdict \
+      "$state" "$self" "$wt" "$stamp_owner_home" "$worker_home" "$role" \
+      "$endpoint_state" "$backend" "$target"
+    return
   fi
   if refs=$(fm_slot_meta_referencing_tasks "$state" "$self" "$wt"); then
     printf '%s%s in this home' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"

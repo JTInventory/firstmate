@@ -1026,7 +1026,7 @@ if [ "$isolation_status" -ne 0 ] && [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
   echo "REFUSED: worker isolation is unproven; bootstrap remains read-only until every ISOLATION finding is resolved" >&2
   exit 1
 fi
-if ! fm_secondmate_lifecycle_preflight "$STATE" "$DATA/secondmates.md"; then
+if ! fm_secondmate_lifecycle_preflight "$STATE" "$DATA/secondmates.md" "$BOOTSTRAP_READ_ONLY"; then
   if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
     echo "REFUSED: secondmate lifecycle identity is ambiguous; bootstrap remains read-only" >&2
     exit 1

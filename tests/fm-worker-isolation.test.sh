@@ -409,8 +409,10 @@ test_secondmate_child_receives_only_its_own_home() {
     "unpublished spawn cleanup did not distinguish leases from stamp creation"
   assert_contains "$(cat "$SPAWN")" 'fm_slot_disposal_verdict' \
     "unpublished spawn cleanup did not use the slot ownership gate"
-  assert_contains "$(cat "$SPAWN")" '--if-lease-holder "$ID"' \
+  assert_contains "$(cat "$SPAWN")" 'spawn_treehouse_return_bounded "$SPAWN_SLOT_CLAIM_WT" "$ID"' \
     "unpublished spawn cleanup did not bind Treehouse return to its lease holder"
+  assert_contains "$(cat "$SPAWN")" '--if-lease-holder "$3"' \
+    "bounded Treehouse return did not preserve the exact lease-holder guard"
   assert_contains "$(cat "$SPAWN")" 'SPAWN_TREEHOUSE_LEASE_ACQUIRED=1' \
     "spawn did not record Treehouse lease acquisition independently"
   lease_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
@@ -441,6 +443,13 @@ test_secondmate_child_receives_only_its_own_home() {
     "treehouse acquisition lacks the macOS timeout fallback"
   assert_contains "$lease_source" "perl -e 'alarm shift; exec @ARGV'" \
     "treehouse acquisition lacks the portable timeout fallback"
+  publication_line=$(grep -n '^SPAWN_SLOT_CLAIM_PUBLISHED=1' "$SPAWN" \
+    | tail -1 | cut -d: -f1)
+  final_submit_line=$(grep -n 'fm_backend_send_key "\$BACKEND" "\$WID" Enter' \
+    "$SPAWN" | tail -1 | cut -d: -f1)
+  [ -n "$publication_line" ] && [ -n "$final_submit_line" ] \
+    && [ "$final_submit_line" -lt "$publication_line" ] \
+    || fail "spawn published pooled ownership before final command submission"
   pass "a secondmate child receives its own home and no inherited override"
 }
 
@@ -467,11 +476,18 @@ SH
 }
 
 test_matching_preexisting_stamp_returns_exact_new_lease() {
-  local function_source marker out
+  local function_source marker fakebin out
   marker="$TMP_ROOT/preexisting-stamp-new-lease-returned"
-  function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+  fakebin=$(fm_fakebin "$TMP_ROOT/preexisting-stamp-return")
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ "${1:-}" = return ] && [ "${4:-}" = --if-lease-holder ] \
+  && [ "${5:-}" = retry-task ] && : > "$marker"
+SH
+  chmod +x "$fakebin/treehouse"
+  function_source=$(sed -n '/^spawn_treehouse_return_bounded()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
-  out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
+  out=$(ROOT="$ROOT" PATH="$fakebin:$PATH" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
     bash -c '
       eval "$FUNCTION_SOURCE"
       SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
@@ -489,10 +505,6 @@ test_matching_preexisting_stamp_returns_exact_new_lease() {
       BACKEND=tmux
       fm_slot_disposal_verdict() { printf "%s" dispose; }
       fm_slot_stamp_stage_return() { FM_SLOT_RETURN_STAGED=0; }
-      treehouse() {
-        [ "$1" = return ] && [ "$4" = --if-lease-holder ] \
-          && [ "$5" = retry-task ] && : > "$RETURN_MARKER"
-      }
       spawn_return_unpublished_treehouse_lease
     ' 2>&1) || fail "a matching preexisting stamp blocked exact lease rollback: $out"
   [ -f "$marker" ] || fail "a matching preexisting stamp stranded the new lease"
@@ -502,7 +514,7 @@ test_matching_preexisting_stamp_returns_exact_new_lease() {
 test_contested_exact_new_lease_is_retained() {
   local function_source marker out
   marker="$TMP_ROOT/contested-exact-lease-not-returned"
-  function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+  function_source=$(sed -n '/^spawn_treehouse_return_bounded()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
     bash -c '
@@ -529,7 +541,7 @@ test_invalid_acquired_path_is_retained_without_private_stamp() {
   marker="$TMP_ROOT/invalid-acquired-not-returned"
   acquire_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
     "$SPAWN" | sed '$d')
-  rollback_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+  rollback_source=$(sed -n '/^spawn_treehouse_return_bounded()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   function_source="$acquire_source
 $rollback_source"
@@ -562,10 +574,11 @@ SH
 }
 
 test_treehouse_acquisition_timeout_is_bounded() {
-  local acquire_source rollback_source function_source fakebin out marker acquired_marker started finished
+  local acquire_source rollback_source function_source fakebin out marker acquired_marker
+  local return_started_marker started finished child_status
   acquire_source=$(sed -n '/^spawn_treehouse_get_bounded()/,/^spawn_settle_path/p' \
     "$SPAWN" | sed '$d')
-  rollback_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+  rollback_source=$(sed -n '/^spawn_treehouse_return_bounded()/,/^parse_orca_worktree_result/p' \
     "$SPAWN" | sed '$d')
   function_source="$acquire_source
 $rollback_source"
@@ -578,14 +591,19 @@ if [ "${1:-}" = get ]; then
   : > "$ACQUIRED_MARKER"
   sleep 5
 elif [ "${1:-}" = return ]; then
-  : > "$RETURN_MARKER"
+  : > "$RETURN_STARTED_MARKER"
+  exec sleep 5
 fi
 SH
   chmod +x "$fakebin/treehouse"
   started=$(date +%s)
+  return_started_marker="$TMP_ROOT/timeout-lease-return-started"
+  set +e
   out=$(PATH="$fakebin:$PATH" FUNCTION_SOURCE="$function_source" \
     ACQUIRED_MARKER="$acquired_marker" RETURN_MARKER="$marker" \
+    RETURN_STARTED_MARKER="$return_started_marker" \
     bash -c '
+      set +e
       eval "$FUNCTION_SOURCE"
       PROJ_ABS=/tmp
       ID=timeout-task
@@ -593,14 +611,22 @@ SH
       spawn_acquire_treehouse_lease && exit 31
       [ "$SPAWN_TREEHOUSE_LEASE_UNKNOWN" = 1 ] || exit 32
       [ -f "$ACQUIRED_MARKER" ] || exit 33
-      SPAWN_SLOT_CLAIMED=1
-      spawn_return_unpublished_treehouse_lease
-      [ ! -f "$RETURN_MARKER" ] || exit 34
-    ' 2>&1) || fail "a timed-out Treehouse acquisition did not fail closed: $out"
+      FM_ROOT=/tmp
+      FM_SPAWN_TREEHOUSE_RETURN_TIMEOUT_SECS=1
+      return_status=0
+      spawn_treehouse_return_bounded /tmp/timeout-return-path timeout-task || return_status=$?
+      [ "$return_status" -ne 0 ] || exit 34
+      [ ! -f "$RETURN_MARKER" ] || exit 35
+    ' 2>&1)
+  child_status=$?
+  set -e
+  [ "$child_status" -eq 0 ] \
+    || fail "a timed-out Treehouse acquisition did not fail closed (status=$child_status): $out"
   finished=$(date +%s)
   [ $((finished - started)) -lt 4 ] \
     || fail "a blocked Treehouse acquisition exceeded its hard deadline: $out"
   [ -f "$acquired_marker" ] || fail "the timeout fixture did not simulate a possible lease acquisition"
+  [ -f "$return_started_marker" ] || fail "the timeout fixture did not simulate a blocked lease return"
   [ ! -f "$marker" ] || fail "a possible timed-out lease received guessed cleanup"
   assert_contains "$out" "manual recovery" \
     "a timed-out lease acquisition did not surface manual recovery"
@@ -2018,6 +2044,23 @@ test_enrollment_validator_trace_is_stage_only() {
   pass "enrollment validator trace accepts only fixed non-secret stage facts"
 }
 
+test_post_start_validation_failures_arm_durable_cleanup() {
+  local herdr_source signer_source cleanup_calls
+  herdr_source=$(sed -n '/^fm_backend_herdr_launch_trusted_process()/,/^fm_backend_herdr_launch_process_is_current/p' \
+    "$ROOT/bin/backends/herdr.sh")
+  assert_contains "$herdr_source" 'fm_backend_herdr_launch_cleanup_uncertainty_record' \
+    "Herdr launch validation does not persist cleanup uncertainty"
+  assert_not_contains "$herdr_source" '|| true' \
+    "Herdr launch validation still discards a close failure"
+  signer_source=$(sed -n '/^fm_session_enrollment_ticket_write()/,/^fm_session_enrollment_acceptance_validate/p' \
+    "$ROOT/bin/fm-session-lock-lib.sh")
+  cleanup_calls=$(printf '%s\n' "$signer_source" \
+    | grep -c 'fm_session_enrollment_signer_cleanup')
+  [ "$cleanup_calls" -ge 6 ] \
+    || fail "signer validation has too few armed cleanup paths: $cleanup_calls"
+  pass "post-start Herdr and enrollment validation failures retain durable cleanup guards"
+}
+
 test_forged_key_cannot_issue_secondmate_enrollment() {
   local issuer home key ticket endpoint_start endpoint_identity
   issuer=$(make_primary_home "$TMP_ROOT/forged-secondmate-issuer")
@@ -2769,6 +2812,30 @@ test_ambiguous_sibling_scope_metadata_retains_the_slot() {
   assert_contains "$verdict" "paused-scope (scope metadata unproven)" \
     "unreadable sibling metadata did not retain"
   pass "ambiguous sibling scope metadata retains pooled-slot ownership"
+}
+
+test_missing_worktree_runs_all_ownership_gates_before_retaining() {
+  local rec log verdict
+  rec=$(make_slot_world slot-missing-gates)
+  read_slot_world "$rec"
+  log="$WORLD/missing-gates.log"
+  verdict=$(ROOT="$ROOT" STATE_DIR="$WORLD/home/state" WT="$WORLD/missing" \
+    LOG="$log" bash -c '
+      . "$ROOT/bin/fm-slot-owner-lib.sh"
+      fm_slot_meta_referencing_tasks() { printf meta >> "$LOG"; return 1; }
+      fm_slot_return_claim_record() { printf claim >> "$LOG"; return 2; }
+      fm_slot_stamp_path() { printf stamp-path >> "$LOG"; return 1; }
+      fm_slot_return_legacy_path() { printf legacy-path >> "$LOG"; return 1; }
+      fm_slot_stamp_record() { printf stamp >> "$LOG"; return 2; }
+      fm_slot_endpoint_occupant_tasks() { printf endpoint >> "$LOG"; return 2; }
+      fm_slot_disposal_verdict "$STATE_DIR" missing-gates "$WT" \
+        "$STATE_DIR" "$STATE_DIR" crewmate live tmux test:pane
+    ')
+  [ "$verdict" = 'retain: recorded worktree is missing; pooled slot ownership evidence is incomplete' ] \
+    || fail "missing worktree did not retain conservatively: $verdict"
+  [ "$(cat "$log")" = metaclaimstamp-pathlegacy-pathstampendpoint ] \
+    || fail "missing worktree skipped an ownership gate: $(cat "$log")"
+  pass "missing worktrees run sibling, claim, stamp, and endpoint gates before retaining"
 }
 
 test_a_stamp_naming_another_task_retains_the_slot() {
@@ -3689,9 +3756,34 @@ make_sweep_home() {
   printf '%s\n' "$world"
 }
 
-run_sweep() {  # <world>
+run_sweep() {
+  local status=0
   FM_ROOT_OVERRIDE="$1/project" FM_HOME="$1/home" \
-    FM_STATE_OVERRIDE="$1/home/state" "$SWEEP" 2>&1 || true
+    FM_STATE_OVERRIDE="$1/home/state" "$SWEEP" 2>&1 || status=$?
+  return "$status"
+}
+
+test_sweep_preserves_fail_closed_exit_status() {
+  local world out id status=0 healthy healthy_id
+  require_procfs || { pass "skip: this host has no readable procfs for sweep status"; return 0; }
+  world=$(make_sweep_home sweep-status-finding)
+  id="task-f11-$RUN_TAG"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  out=$(run_sweep "$world") || status=$?
+  expect_code 1 "$status" "a sweep finding was masked by its test helper"
+  healthy=$(make_sweep_home sweep-status-healthy)
+  healthy_id="task-f12-$RUN_TAG"
+  fm_write_meta "$healthy/home/state/$healthy_id.meta" \
+    "window=firstmate:fm-$healthy_id" "worktree=$healthy/wt" "project=$healthy/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  start_declared_agent "$healthy/wt" "$healthy_id" "$healthy/home" >/dev/null
+  status=0
+  out=$(run_sweep "$healthy") || status=$?
+  expect_code 0 "$status" "a healthy sweep did not preserve its zero status"
+  [ -z "$out" ] || fail "healthy sweep emitted an unexpected finding: $out"
+  pass "sweep tests preserve both fail-closed and healthy exit statuses"
 }
 
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout() {
@@ -3724,6 +3816,23 @@ test_sweep_is_silent_for_a_correctly_isolated_worker() {
   out=$(run_sweep "$world")
   [ -z "$out" ] || fail "the resume sweep reported a correctly isolated worker: $out"
   pass "the resume sweep stays silent for a worker that is genuinely in its worktree"
+}
+
+test_sweep_canonicalizes_declared_owner_home_aliases() {
+  local world out id alias status=0
+  require_procfs || { pass "skip: this host has no readable procfs for owner-home alias proof"; return 0; }
+  world=$(make_sweep_home sweep-owner-home-alias)
+  id="task-f13-$RUN_TAG"
+  alias="$world/home-alias"
+  ln -s "$world/home" "$alias"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  start_declared_agent "$world/wt" "$id" "$alias" >/dev/null
+  out=$(run_sweep "$world") || status=$?
+  expect_code 0 "$status" "a canonical owner-home alias caused a false sweep finding: $out"
+  [ -z "$out" ] || fail "the sweep did not recognize a canonical owner-home alias: $out"
+  pass "the sweep recognizes a worker whose owner home was declared through a symlink alias"
 }
 
 test_sweep_never_promotes_a_pane_path_to_evidence() {
@@ -3995,8 +4104,10 @@ fi
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-sweep ]; then
   test_sweep_uses_read_only_target_derivation
+  test_sweep_preserves_fail_closed_exit_status
   test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
   test_sweep_is_silent_for_a_correctly_isolated_worker
+  test_sweep_canonicalizes_declared_owner_home_aliases
   echo "# focused isolation-sweep tests passed"
   exit 0
 fi
@@ -4013,6 +4124,7 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = session-authority ]; then
   test_authority_fds_require_sibling_proc_isolation
   test_authority_fds_reprove_isolation_after_exec
   test_secondmate_authority_delegation_uses_no_node
+  test_post_start_validation_failures_arm_durable_cleanup
   test_unrelated_process_cannot_consume_endpoint_enrollment
   test_backend_owned_launch_proof_covers_tmux_and_herdr
   test_darwin_session_identity_uses_supported_fields
@@ -4032,6 +4144,17 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-hardening ]; then
   test_invalid_acquired_path_is_retained_without_private_stamp
   test_treehouse_acquisition_timeout_is_bounded
   echo "# focused isolation-hardening test passed"
+  exit 0
+fi
+
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = review-fixes ]; then
+  test_secondmate_child_receives_only_its_own_home
+  test_treehouse_acquisition_timeout_is_bounded
+  test_missing_worktree_runs_all_ownership_gates_before_retaining
+  test_post_start_validation_failures_arm_durable_cleanup
+  test_sweep_preserves_fail_closed_exit_status
+  test_sweep_canonicalizes_declared_owner_home_aliases
+  echo "# focused review-fixes tests passed"
   exit 0
 fi
 
@@ -4068,6 +4191,7 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr
 test_darwin_session_identity_uses_supported_fields
 test_secondmate_spawn_waits_for_enrollment_acceptance
 test_enrollment_validator_trace_is_stage_only
+test_post_start_validation_failures_arm_durable_cleanup
 test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker
@@ -4095,6 +4219,7 @@ test_unclassified_live_process_retains
 test_undeclared_in_slot_process_retains
 test_a_second_recorded_task_retains_the_slot
 test_ambiguous_sibling_scope_metadata_retains_the_slot
+test_missing_worktree_runs_all_ownership_gates_before_retaining
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot
 test_same_task_in_another_home_or_role_retains_the_slot
@@ -4125,8 +4250,10 @@ test_teardown_finishes_fallible_cleanup_before_provider_boundaries
 test_verification_capture_includes_lifecycle_clears
 unset FM_TEST_AGENT_PIDS
 test_sweep_uses_read_only_target_derivation
+test_sweep_preserves_fail_closed_exit_status
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
+test_sweep_canonicalizes_declared_owner_home_aliases
 test_sweep_never_promotes_a_pane_path_to_evidence
 test_sweep_reports_corrupt_scope_metadata
 test_sweep_reports_an_agent_declared_for_another_home

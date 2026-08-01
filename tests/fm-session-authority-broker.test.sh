@@ -39,6 +39,22 @@ test_process_identity() {
   printf 'exe:%s' "$(readlink "/proc/$1/exe")"
 }
 
+test_broker_client_deadline_covers_connect_and_send() {
+  local source first_timeout connect second_timeout send
+  source=$(sed -n '/^def client(/,/^def parse_args/p' "$BROKER")
+  first_timeout=$(printf '%s\n' "$source" | grep -n 'connection.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)' | head -1 | cut -d: -f1)
+  connect=$(printf '%s\n' "$source" | grep -n 'connection.connect(' | head -1 | cut -d: -f1)
+  second_timeout=$(printf '%s\n' "$source" | grep -n 'connection.settimeout(timeout)' | head -1 | cut -d: -f1)
+  send=$(printf '%s\n' "$source" | grep -n 'connection.sendall' | head -1 | cut -d: -f1)
+  [ -n "$first_timeout" ] && [ -n "$connect" ] && [ "$first_timeout" -lt "$connect" ] \
+    || fail "broker client did not bound AF_UNIX connect"
+  [ -n "$second_timeout" ] && [ -n "$send" ] && [ "$second_timeout" -lt "$send" ] \
+    || fail "broker client did not bound request send"
+  pass "broker client applies its deadline before connect and send"
+}
+
+test_broker_client_deadline_covers_connect_and_send
+
 prepare_launch() {
   local home=$1 launch_script
   local launch_start launch_identity receipt_body receipt_hmac

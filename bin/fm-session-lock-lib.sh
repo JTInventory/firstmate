@@ -1564,6 +1564,21 @@ fm_session_enrollment_signer_run() {
   return 1
 }
 
+fm_session_enrollment_signer_cleanup() {
+  local file=$1 signer=${2:-}
+  if [ -n "$signer" ]; then
+    kill "$signer" 2>/dev/null || true
+    wait "$signer" 2>/dev/null || true
+  fi
+  rm -f "$file" "${file}.ready" "${file}.consume" "${file}.accepted" \
+    "${file}.accepted.ack" "${file}.accepted.final"
+  if [ "${FM_SESSION_ENROLLMENT_SIGNER_PID:-}" = "$signer" ]; then
+    unset FM_SESSION_ENROLLMENT_SIGNER_PID
+  fi
+  unset FM_SESSION_ENROLLMENT_NONCE FM_SESSION_ENROLLMENT_PUBLIC_KEY \
+    FM_SESSION_ENROLLMENT_PUBLIC_SHA256
+}
+
 fm_session_enrollment_ticket_write() {
   local file=$1 task=$2 home=$3 issuer=$4 endpoint=$5 endpoint_start=$6
   local endpoint_identity=$7 signer ready nonce public_key public_digest
@@ -1593,16 +1608,35 @@ fm_session_enrollment_ticket_write() {
   while [ "$attempts" -lt 250 ]; do
     if [ -f "$ready" ] && [ ! -L "$ready" ]; then
       nonce=$(sed -n '1s/^nonce=//p' "$ready")
-      [ "${#nonce}" -eq 64 ] || return 1
-      case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
+      [ "${#nonce}" -eq 64 ] || {
+        fm_session_enrollment_signer_cleanup "$file" "$signer"
+        return 1
+      }
+      case "$nonce" in
+        *[!0-9a-f]*)
+          fm_session_enrollment_signer_cleanup "$file" "$signer"
+          return 1
+          ;;
+      esac
       FM_SESSION_ENROLLMENT_NONCE=$nonce
       public_key=$(sed -n '2s/^public-key=//p' "$ready")
       public_digest=$(sed -n '3s/^public-key-sha256=//p' "$ready")
-      [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] || return 1
-      case "$public_digest" in *[!0-9a-f]*) return 1 ;; esac
+      [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] || {
+        fm_session_enrollment_signer_cleanup "$file" "$signer"
+        return 1
+      }
+      case "$public_digest" in
+        *[!0-9a-f]*)
+          fm_session_enrollment_signer_cleanup "$file" "$signer"
+          return 1
+          ;;
+      esac
       [ "$(fm_session_process_argument_value \
         "$signer" --public-sha256 2>/dev/null || true)" = "$public_digest" ] \
-        || return 1
+        || {
+          fm_session_enrollment_signer_cleanup "$file" "$signer"
+          return 1
+        }
       FM_SESSION_ENROLLMENT_PUBLIC_KEY=$public_key
       FM_SESSION_ENROLLMENT_PUBLIC_SHA256=$public_digest
       export FM_SESSION_ENROLLMENT_NONCE FM_SESSION_ENROLLMENT_PUBLIC_KEY
@@ -1610,16 +1644,13 @@ fm_session_enrollment_ticket_write() {
       return 0
     fi
     kill -0 "$signer" 2>/dev/null || {
-      wait "$signer" 2>/dev/null || true
+      fm_session_enrollment_signer_cleanup "$file" "$signer"
       return 1
     }
     sleep 0.02
     attempts=$((attempts + 1))
   done
-  kill "$signer" 2>/dev/null || true
-  wait "$signer" 2>/dev/null || true
-  rm -f "$file" "$ready" "${file}.consume" "${file}.accepted" \
-    "${file}.accepted.ack" "${file}.accepted.final"
+  fm_session_enrollment_signer_cleanup "$file" "$signer"
   return 1
 }
 

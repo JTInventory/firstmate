@@ -447,6 +447,8 @@ def client(args: argparse.Namespace) -> int:
             return 1
         kind = b"L" if args.kind == "live" else b"D"
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        request_deadline = time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
+        connection.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)
         socket_value = metadata["socket"]
         connection.connect(
             f"\0{socket_value.removeprefix('abstract:')}"
@@ -456,9 +458,13 @@ def client(args: argparse.Namespace) -> int:
         with connection:
             if not connected_peer_matches_record(connection, metadata):
                 return 1
+            timeout = request_deadline - time.monotonic()
+            if timeout <= 0:
+                return 1
+            connection.settimeout(timeout)
             connection.sendall(struct.pack("!cI", kind, len(body)) + body)
             response = recv_exact(
-                connection, 65, time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
+                connection, 65, request_deadline
             )
         if response[:1] != b"O" or any(value not in b"0123456789abcdef" for value in response[1:]):
             return 1

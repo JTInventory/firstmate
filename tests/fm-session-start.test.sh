@@ -766,6 +766,23 @@ EOF
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
 }
 
+test_read_only_preflight_does_not_migrate_legacy_metadata() {
+  local state meta marker out status=0
+  state="$TMP_ROOT/read-only-legacy-preflight/state"
+  meta="$state/legacy.meta"
+  marker="$TMP_ROOT/read-only-legacy-preflight/migrated"
+  mkdir -p "$state"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'projects=' > "$meta"
+  out=$(ROOT="$ROOT" META="$meta" STATE="$state" MARKER="$marker" bash -c '
+    . "$ROOT/bin/fm-ff-lib.sh"
+    fm_backend_tmux_meta_migrate_legacy() { : > "$MARKER"; return 0; }
+    ! fm_secondmate_lifecycle_preflight "$STATE" "" 1
+  ' 2>&1) || status=$?
+  expect_code 0 "$status" "read-only lifecycle preflight fixture failed: $out"
+  [ ! -e "$marker" ] || fail "read-only preflight invoked legacy metadata migration"
+  pass "read-only lifecycle preflight parses legacy metadata without migration"
+}
+
 test_lock_write_failure_read_only_path() {
   local rec root home fakebin out status
   if [ "$(id -u)" -eq 0 ]; then
@@ -1487,6 +1504,11 @@ if [ "${FM_SESSION_START_FOCUS:-}" = read-only-target ]; then
   exit 0
 fi
 
+if [ "${FM_SESSION_START_FOCUS:-}" = read-only-preflight ]; then
+  test_read_only_preflight_does_not_migrate_legacy_metadata
+  exit 0
+fi
+
 if [ "${FM_SESSION_START_FOCUS:-}" = lock-race ]; then
   test_session_lock_concurrent_single_winner
   exit 0
@@ -1495,6 +1517,7 @@ fi
 test_fleet_digest_uses_read_only_target_derivation
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_read_only_preflight_does_not_migrate_legacy_metadata
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead

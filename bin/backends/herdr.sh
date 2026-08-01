@@ -1890,11 +1890,46 @@ fm_backend_herdr_foreground_process_pid() {
   printf '%s' "$foreground"
 }
 
+fm_backend_herdr_launch_cleanup_uncertainty_record() {
+  local task=$1 target=$2 reason=$3
+  local file=${FM_BACKEND_HERDR_CLEANUP_UNCERTAINTY_FILE:-}
+  local dir tmp
+  if [ -z "$file" ]; then
+    file="${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/state}/$task.herdr-cleanup-uncertain"
+  fi
+  dir=${file%/*}
+  [ "$dir" != "$file" ] || dir=.
+  mkdir -p "$dir" 2>/dev/null || return 1
+  tmp=$(mktemp "${file}.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$task"
+    printf 'reason=%s\n' "$reason"
+    printf 'target=%s\n' "$target"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$file"
+}
+
+fm_backend_herdr_launch_cleanup_after_start() {
+  local session=$1 pane=$2 task=$3 reason=$4 close_status=0
+  fm_backend_herdr_projection_close_pane_focus_preserving \
+    "$session" "$pane" >/dev/null 2>&1 || close_status=$?
+  [ "$close_status" -eq 0 ] && return 0
+  fm_backend_herdr_launch_cleanup_uncertainty_record \
+    "$task" "$session:$pane" "$reason" || {
+      printf 'error: could not persist Herdr cleanup uncertainty for %s:%s\n' \
+        "$session" "$pane" >&2
+      return 1
+    }
+}
+
 fm_backend_herdr_launch_trusted_process() {
   local target=$1 name=$2 cwd=$3 command=$4 expected=$5
   local replacement_generation=${6:-}
   local session pane identity live_session workspace tab live_pane generation
   local out returned returned_target response_command pid topology new_identity
+  local old_close_status returned_close_status
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
@@ -1912,7 +1947,30 @@ EOF
   response_command="exec env $command"
   out=$(fm_backend_herdr_cli "$session" agent start "$name" \
     --tab "$tab" \
-    --cwd "$cwd" --no-focus -- sh -c "$response_command" 2>/dev/null) || return 1
+    --cwd "$cwd" --no-focus -- sh -c "$response_command" 2>/dev/null) || {
+      fm_backend_herdr_launch_cleanup_uncertainty_record "$name" \
+        "$session:<unknown>" "agent start returned no trustworthy result" || {
+          printf 'error: could not persist Herdr cleanup uncertainty for %s\n' "$name" >&2
+        }
+      return 1
+    }
+  returned=$(printf '%s' "$out" \
+    | jq -r '.result.agent.pane_id // empty' 2>/dev/null) || {
+      fm_backend_herdr_launch_cleanup_uncertainty_record "$name" \
+        "$session:<unknown>" "agent start response could not identify its pane" || {
+          printf 'error: could not persist Herdr cleanup uncertainty for %s\n' "$name" >&2
+        }
+      return 1
+    }
+  case "$returned" in
+    *[!A-Za-z0-9._:-]*|"")
+      fm_backend_herdr_launch_cleanup_uncertainty_record "$name" \
+        "$session:<unknown>" "agent start response contained an invalid pane" || {
+          printf 'error: could not persist Herdr cleanup uncertainty for %s\n' "$name" >&2
+        }
+      return 1
+      ;;
+  esac
   printf '%s' "$out" | jq -e \
     --arg tab "$tab" --arg workspace "$workspace" \
     --arg command "$response_command" '
@@ -1923,55 +1981,81 @@ EOF
       and .result.agent.tab_id == $tab
       and .result.agent.workspace_id == $workspace
       and .result.argv == ["sh", "-c", $command]
-    ' >/dev/null 2>&1 || return 1
-  returned=$(printf '%s' "$out" \
-    | jq -r '.result.agent.pane_id // empty' 2>/dev/null) || return 1
-  case "$returned" in *[!A-Za-z0-9._:-]*|"") return 1 ;; esac
+    ' >/dev/null 2>&1 || {
+      if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+        "$name" "agent start response failed topology validation"; then
+        return 1
+      fi
+      return 1
+    }
   returned_target="$session:$returned"
   topology=$(fm_backend_herdr_pane_topology_identity "$returned_target") || {
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$session" "$returned" >/dev/null 2>&1 || true
+    if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+      "$name" "returned pane topology could not be verified"; then
+      return 1
+    fi
     return 1
   }
   [ "$topology" = "$session|$workspace|$tab|$returned" ] || {
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$session" "$returned" >/dev/null 2>&1 || true
+    if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+      "$name" "returned pane topology did not match the requested endpoint"; then
+      return 1
+    fi
     return 1
   }
   fm_backend_herdr_bind_endpoint_generation \
     "$returned_target" "$replacement_generation" || {
-      fm_backend_herdr_projection_close_pane_focus_preserving \
-        "$session" "$returned" >/dev/null 2>&1 || true
+      if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+        "$name" "returned pane endpoint generation could not be bound"; then
+        return 1
+      fi
       return 1
     }
   new_identity=$(fm_backend_herdr_endpoint_identity "$returned_target") || {
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$session" "$returned" >/dev/null 2>&1 || true
+    if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+      "$name" "returned pane endpoint identity could not be read"; then
+      return 1
+    fi
     return 1
   }
   [ "$new_identity" = \
     "$session|$workspace|$tab|$returned|$replacement_generation" ] || {
-      fm_backend_herdr_projection_close_pane_focus_preserving \
-        "$session" "$returned" >/dev/null 2>&1 || true
+      if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+        "$name" "returned pane endpoint identity did not match its generation"; then
+        return 1
+      fi
       return 1
     }
   pid=$(fm_backend_herdr_foreground_process_pid "$returned_target") || {
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$session" "$returned" >/dev/null 2>&1 || true
+    if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+      "$name" "returned pane foreground process could not be verified"; then
+      return 1
+    fi
     return 1
   }
   if [ "$returned" != "$pane" ]; then
+    old_close_status=0
     fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$session" "$pane" >/dev/null 2>&1 || {
-        fm_backend_herdr_projection_close_pane_focus_preserving \
-          "$session" "$returned" >/dev/null 2>&1 || true
+      "$session" "$pane" >/dev/null 2>&1 || old_close_status=$?
+    if [ "$old_close_status" -ne 0 ]; then
+      returned_close_status=0
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$session" "$returned" >/dev/null 2>&1 || returned_close_status=$?
+      fm_backend_herdr_launch_cleanup_uncertainty_record "$name" \
+        "$session:$pane,$session:$returned" \
+        "old endpoint close failed (old=$old_close_status returned=$returned_close_status)" || {
+          printf 'error: could not persist Herdr cleanup uncertainty for %s\n' "$name" >&2
+          return 1
+        }
         return 1
-      }
+    fi
   fi
   fm_backend_herdr_launch_process_is_current \
     "$returned_target" "$pid" "$new_identity" || {
-      fm_backend_herdr_projection_close_pane_focus_preserving \
-        "$session" "$returned" >/dev/null 2>&1 || true
+      if ! fm_backend_herdr_launch_cleanup_after_start "$session" "$returned" \
+        "$name" "returned pane process identity changed after validation"; then
+        return 1
+      fi
       return 1
     }
   printf '%s\t%s\t%s' "$pid" "$returned" "$new_identity"
