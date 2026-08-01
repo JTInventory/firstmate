@@ -1448,6 +1448,7 @@ test_secondmate_delivery_is_one_locked_generation_transaction() {
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     FM_FAKE_TMUX_LOG="$w/send-fake/tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$w/send-fake/pane.txt" \
+    FM_FAKE_ENDPOINT_GENERATION=endpoint-sm1 \
     FM_FAKE_REQUIRED_LOCK="$lock" FM_SEND_SETTLE=0 \
     "$UPDATE" --deliver-secondmate-nudge "$target" "$generation")
 
