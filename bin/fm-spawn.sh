@@ -445,6 +445,10 @@ spawn_abort_retire_unpublished_endpoint() {
     if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ] \
       && ! spawn_herdr_presentation_order_lock_acquire \
         "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
+      spawn_herdr_flat_uncertainty_record \
+        "presentation lock unavailable during projected abort cleanup" \
+        "${HERDR_PROJECTION_ABORT_SESSION:-}:${HERDR_PROJECTION_ABORT_TASK_PANE:-}" \
+        "" "" || echo "error: could not persist Herdr projected cleanup uncertainty for $ID" >&2
       status=1
     elif fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
@@ -461,6 +465,10 @@ spawn_abort_retire_unpublished_endpoint() {
     cleanup_session=${HERDR_FLAT_ABORT_TARGET%%:*}
     if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ] \
       && ! spawn_herdr_presentation_order_lock_acquire "$cleanup_session"; then
+      spawn_herdr_flat_uncertainty_record \
+        "presentation lock unavailable during abort cleanup" \
+        "$HERDR_FLAT_ABORT_TARGET" "" "" \
+        || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
       status=1
     elif fm_backend_herdr_parse_target "$HERDR_FLAT_ABORT_TARGET" \
       && fm_backend_herdr_projection_teardown_close \
@@ -491,18 +499,14 @@ spawn_submit_final_enter() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? i
-  if [ -n "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" ]; then
-    kill "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" 2>/dev/null || true
-    wait "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" 2>/dev/null || true
+  local status=$? i enrollment
+  if [ -n "$SPAWN_AUTHORITY_ENROLLMENT" ] \
+    || [ -n "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" ]; then
+    enrollment=${SPAWN_AUTHORITY_ENROLLMENT:-"$STATE/$ID.session-authority-enrollment"}
+    fm_session_enrollment_signer_cleanup \
+      "$enrollment" "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" \
+      || echo "error: unresolved signer cleanup for $ID" >&2
   fi
-  [ -z "$SPAWN_AUTHORITY_ENROLLMENT" ] \
-    || rm -f "$SPAWN_AUTHORITY_ENROLLMENT" \
-      "${SPAWN_AUTHORITY_ENROLLMENT}.ready" \
-      "${SPAWN_AUTHORITY_ENROLLMENT}.consume" \
-      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted" \
-      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted.ack" \
-      "${SPAWN_AUTHORITY_ENROLLMENT}.accepted.final"
   [ -z "$SPAWN_AUTHORITY_LAUNCH_RECEIPT" ] \
     || rm -f -- "$SPAWN_AUTHORITY_LAUNCH_RECEIPT"
   if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
@@ -2103,7 +2107,6 @@ if [ "$KIND" != secondmate ]; then
 fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
 if [ "$KIND" = secondmate ]; then
@@ -2134,7 +2137,8 @@ EOF
         "$SPAWN_AUTHORITY_REPLACEMENT_PANE" \
         "$SPAWN_AUTHORITY_REPLACEMENT_IDENTITY" \
         "$SPAWN_AUTHORITY_REPLACEMENT_GENERATION"; then
-      if ! fm_backend_herdr_projection_close_pane_focus_preserving \
+      HERDR_FLAT_ABORT_TARGET="$HERDR_SES:$SPAWN_AUTHORITY_REPLACEMENT_PANE"
+      if ! fm_backend_herdr_projection_teardown_close \
         "$HERDR_SES" "$SPAWN_AUTHORITY_REPLACEMENT_PANE" \
         >/dev/null 2>&1; then
         spawn_herdr_flat_uncertainty_record \
@@ -2238,6 +2242,7 @@ else
 fi
 SPAWN_SLOT_CLAIM_PUBLISHED=1
 HERDR_FLAT_ABORT_CLEANUP=0
+HERDR_PROJECTION_ABORT_CLEANUP=0
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 SPAWN_AUTHORITY_LAUNCH_RECEIPT=

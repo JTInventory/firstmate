@@ -1461,8 +1461,9 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
   pass "fm-spawn: one task lock spans every backend creation path through metadata publication"
 }
 
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
-  local literal_pattern disarm_pattern release_pattern enter_pattern literal_line disarm_line release_line enter_line
+test_projected_spawn_keeps_cleanup_armed_through_submission() {
+  local literal_pattern disarm_pattern release_pattern enter_pattern publication_pattern
+  local literal_line disarm_line release_line enter_line publication_line
   # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
   # shellcheck disable=SC2016
   literal_pattern='fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"'
@@ -1470,18 +1471,23 @@ test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
   disarm_pattern='HERDR_PROJECTION_ABORT_CLEANUP=0'
   release_pattern='spawn_herdr_presentation_order_lock_release'
   # shellcheck disable=SC2016
-  enter_pattern='fm_backend_send_key "$BACKEND" "$WID" Enter'
+  enter_pattern='  spawn_submit_final_enter ||'
+  publication_pattern='SPAWN_SLOT_CLAIM_PUBLISHED=1'
   literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
   enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] && [ -n "$enter_line" ] \
+  publication_line=$(grep -nF "$publication_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
+  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] \
+    && [ -n "$enter_line" ] && [ -n "$publication_line" ] \
     || fail "could not locate the projected launch cleanup boundary"
   [ "$literal_line" -lt "$disarm_line" ] \
-    && [ "$disarm_line" -lt "$release_line" ] \
+    && [ "$literal_line" -lt "$release_line" ] \
     && [ "$release_line" -lt "$enter_line" ] \
-    || fail "projected spawn must disarm cleanup before releasing its lock and submitting ambiguous Enter"
-  pass "fm-spawn: projected cleanup disarms before lock release and ambiguous launch submission"
+    && [ "$enter_line" -lt "$publication_line" ] \
+    && [ "$publication_line" -lt "$disarm_line" ] \
+    || fail "projected cleanup must stay armed through verified submission and publication"
+  pass "fm-spawn: projected cleanup stays armed through verified submission and publication"
 }
 
 test_projected_abort_cleanup_holds_presentation_lock() {
@@ -1527,7 +1533,7 @@ test_projected_abort_cleanup_holds_presentation_lock() {
 }
 
 test_flat_abort_cleanup_is_locked_focus_safe_and_durable() {
-  local dir close_log lock_log function_source marker
+  local dir close_log lock_log function_source marker lock_marker
   dir="$TMP_ROOT/flat-abort-cleanup"; mkdir -p "$dir"
   close_log="$dir/close"
   lock_log="$dir/lock"
@@ -1590,6 +1596,25 @@ test_flat_abort_cleanup_is_locked_focus_safe_and_durable() {
   [ -f "$marker" ] || fail "unconfirmed flat abort cleanup did not persist durable endpoint identity"
   assert_contains "$(cat "$marker")" "target=fmtest:w9:p4" \
     "flat abort uncertainty marker lost the exact endpoint"
+  lock_marker="$dir/state/task-a.lock-herdr-cleanup-uncertain"
+  LOCK_LOG="$lock_log" FUNCTION_SOURCE="$function_source" \
+    STATE="$dir/state" ID=task-a bash -c '
+    eval "$FUNCTION_SOURCE"
+    spawn_herdr_presentation_order_lock_acquire() { return 1; }
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    HERDR_FLAT_ABORT_CLEANUP=1
+    HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/task-a.lock-herdr-cleanup-uncertain"
+    HERDR_FLAT_ABORT_UNCERTAINTY_FALLBACK_FILE="$STATE/task-a.lock-herdr-cleanup-uncertain.fallback"
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    ORCA_ABORT_CLEANUP=0
+    SPAWN_TASK_LOCK_HELD=0
+    spawn_abort_cleanup
+  ' 2>/dev/null
+  [ -f "$lock_marker" ] || fail "presentation-lock failure did not persist Herdr cleanup uncertainty"
+  assert_contains "$(cat "$lock_marker")" "target=fmtest:w9:p4" \
+    "presentation-lock uncertainty marker lost the exact endpoint"
   grep -Fq 'unresolved Herdr cleanup uncertainty' "$ROOT/bin/fm-spawn.sh" \
     || fail "future spawn does not refuse a durable Herdr cleanup uncertainty marker"
   grep -Fq "cleanup-uncertain" "$ROOT/bin/fm-spawn.sh" \
@@ -3644,6 +3669,8 @@ test_wait_transition_clean_timeout_returns_1() {
 . "$ROOT/bin/fm-backend.sh"
 
 if [ "${FM_BACKEND_HERDR_FOCUS:-}" = review-fixes ]; then
+  test_projected_spawn_keeps_cleanup_armed_through_submission
+  test_flat_abort_cleanup_is_locked_focus_safe_and_durable
   test_projection_teardown_requires_confirmed_absence
   test_launch_cleanup_after_start_is_behaviorally_fail_closed
   echo "# focused Herdr review-fix tests passed"
@@ -3711,7 +3738,7 @@ test_presentation_lock_malformed_socket_falls_back
 test_projection_order_rejects_malformed_socket
 test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
+test_projected_spawn_keeps_cleanup_armed_through_submission
 test_projected_abort_cleanup_holds_presentation_lock
 test_flat_abort_cleanup_is_locked_focus_safe_and_durable
 test_projection_reclaim_refusal_matrix_is_non_mutating

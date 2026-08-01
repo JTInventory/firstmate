@@ -720,6 +720,34 @@ test_abort_retires_endpoint_before_returning_lease() {
   pass "abort cleanup proves endpoint retirement before returning a Treehouse lease"
 }
 
+test_spawn_abort_uses_guarded_signer_cleanup() {
+  local function_source dir log out
+  dir="$TMP_ROOT/spawn-signer-cleanup"
+  log="$dir/helper.log"
+  mkdir -p "$dir"
+  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' \
+    "$SPAWN" | sed '$d')
+  out=$(FUNCTION_SOURCE="$function_source" LOG="$log" bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_session_enrollment_signer_cleanup() {
+      printf "%s|%s" "$1" "$2" > "$LOG"
+    }
+    SPAWN_AUTHORITY_ENROLLMENT=/tmp/enrollment-ticket
+    SPAWN_AUTHORITY_ENROLLMENT_SIGNER=4242
+    SPAWN_AUTHORITY_LAUNCH_RECEIPT=
+    SPAWN_SLOT_CLAIM_PUBLISHED=1
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    SPAWN_TASK_LOCK_HELD=0
+    SPAWN_ADMISSION_LOCKS=()
+    ORCA_ABORT_CLEANUP=0
+    spawn_abort_cleanup
+  ' 2>&1) || fail "spawn abort signer cleanup fixture failed: $out"
+  [ "$(cat "$log")" = '/tmp/enrollment-ticket|4242' ] \
+    || fail "spawn abort bypassed guarded signer cleanup: $(cat "$log")"
+  pass "spawn abort routes enrollment cleanup through the guarded signer helper"
+}
+
 # --- C. a declared worker is inert and refused -------------------------------
 
 make_primary_home() {
@@ -1803,7 +1831,7 @@ test_unrelated_process_cannot_consume_endpoint_enrollment() {
 }
 
 test_backend_owned_launch_proof_covers_tmux_and_herdr() {
-  local out
+  local out close_log status
   out=$(bash -c '
     . "$1/bin/backends/herdr.sh"
     fm_backend_herdr_endpoint_identity() {
@@ -1819,7 +1847,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     fm_backend_herdr_bind_endpoint_generation() {
       [ "$1" = default:w1:p3 ] && [ "$2" = g8 ]
     }
-    fm_backend_herdr_projection_close_pane_focus_preserving() {
+    fm_backend_herdr_projection_close_pane_focus_preserving() { return 1; }
+    fm_backend_herdr_projection_teardown_close() {
       [ "$1" = default ] && [ "$2" = w1:p2 ]
     }
     fm_backend_herdr_foreground_process_pid() {
@@ -1840,6 +1869,54 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
   ' _ "$ROOT") || fail "Herdr direct launch proof rejected its backend-owned replacement pane"
   [ "$out" = $'4242\tw1:p3\tdefault|w1|w1:t2|w1:p3|g8' ] \
     || fail "Herdr direct launch proof did not return the replacement endpoint: $out"
+  close_log="$TMP_ROOT/herdr-replacement-close-proof"
+  rm -f "$close_log"
+  set +e
+  out=$(CLOSE_LOG="$close_log" bash -c '
+    . "$1/bin/backends/herdr.sh"
+    fm_backend_herdr_endpoint_identity() {
+      case "$1" in
+        default:w1:p2) printf "default|w1|w1:t2|w1:p2|g7" ;;
+        default:w1:p3) printf "default|w1|w1:t2|w1:p3|g8" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_topology_identity() {
+      [ "$1" = default:w1:p3 ] && printf "default|w1|w1:t2|w1:p3"
+    }
+    fm_backend_herdr_bind_endpoint_generation() {
+      [ "$1" = default:w1:p3 ] && [ "$2" = g8 ]
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving() { return 1; }
+    fm_backend_herdr_projection_teardown_close() {
+      printf "%s\n" "$2" >> "$CLOSE_LOG"
+      [ "$2" = w1:p3 ]
+    }
+    fm_backend_herdr_foreground_process_pid() {
+      [ "$1" = default:w1:p3 ] && printf "4242"
+    }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"agent start"*)
+          printf "%s\n" \
+            "{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"w1:p3\",\"tab_id\":\"w1:t2\",\"workspace_id\":\"w1\"},\"argv\":[\"sh\",\"-c\",\"exec env GOTMPDIR=/g wrapper\"]}}"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_launch_cleanup_uncertainty_record() { printf recorded; }
+    result=$(fm_backend_herdr_launch_trusted_process \
+      default:w1:p2 domain /work "GOTMPDIR=/g wrapper" \
+      "default|w1|w1:t2|w1:p2|g7" g8)
+    status=$?
+    [ "$status" -eq 1 ] || exit 31
+    [ "$result" = recorded ] || exit 32
+  ' _ "$ROOT" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] || fail "Herdr replacement cleanup proof fixture failed: $out"
+  [ "$(cat "$close_log")" = $'w1:p2\nw1:p3' ] \
+    || fail "Herdr launch did not prove both old and replacement pane closure: $(cat "$close_log")"
   out=$(bash -c '
     FM_BACKEND_LIB_DIR="$1/bin"
     . "$1/bin/backends/tmux.sh"
@@ -4294,9 +4371,11 @@ fi
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = review-fixes ]; then
   test_secondmate_child_receives_only_its_own_home
   test_final_submission_failure_does_not_publish
+  test_backend_owned_launch_proof_covers_tmux_and_herdr
   test_treehouse_acquisition_timeout_is_bounded
   test_treehouse_return_records_unknown_and_committed_outcomes
   test_abort_retires_endpoint_before_returning_lease
+  test_spawn_abort_uses_guarded_signer_cleanup
   test_missing_worktree_runs_all_ownership_gates_before_retaining
   test_missing_worktree_accepts_valid_return_claim_before_stamp
   test_signer_cleanup_failure_is_durable
@@ -4340,6 +4419,7 @@ test_darwin_session_identity_uses_supported_fields
 test_secondmate_spawn_waits_for_enrollment_acceptance
 test_enrollment_validator_trace_is_stage_only
 test_signer_cleanup_failure_is_durable
+test_spawn_abort_uses_guarded_signer_cleanup
 test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker

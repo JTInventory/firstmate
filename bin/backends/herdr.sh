@@ -2051,11 +2051,11 @@ EOF
   }
   if [ "$returned" != "$pane" ]; then
     old_close_status=0
-    fm_backend_herdr_projection_close_pane_focus_preserving \
+    fm_backend_herdr_projection_teardown_close \
       "$session" "$pane" >/dev/null 2>&1 || old_close_status=$?
     if [ "$old_close_status" -ne 0 ]; then
       returned_close_status=0
-      fm_backend_herdr_projection_close_pane_focus_preserving \
+      fm_backend_herdr_projection_teardown_close \
         "$session" "$returned" >/dev/null 2>&1 || returned_close_status=$?
       fm_backend_herdr_launch_cleanup_uncertainty_record "$name" \
         "$session:$pane,$session:$returned" \
