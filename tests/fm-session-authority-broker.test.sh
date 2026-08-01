@@ -74,6 +74,41 @@ if (cd "$HOME_DIR" && FM_AGENT_ROLE=crewmate FM_AGENT_TASK=nested \
 fi
 pass "peer-credential broker rejects crewmate callers and forged descendants"
 
+if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+home = "/test/home"
+script = str(broker_path)
+
+def canonical(value):
+    return script if value == script else home
+
+broker.canonical = canonical
+broker.os.readlink = lambda path: home if path.endswith("/cwd") else "/usr/bin/python3"
+broker.process_command = lambda pid: ["python3", script, "client"]
+broker.process_environment = lambda pid: {
+    "FM_AGENT_ROLE": "secondmate",
+    "FM_AGENT_TASK": "alpha",
+    "FM_AGENT_OWNER_HOME": home,
+}
+broker.parent_pid = lambda pid: pid + 1
+
+if broker.peer_is_authorized(42, home=home, task="alpha", script=script):
+    raise SystemExit("bounded ancestry walk authorized without reaching PID 1")
+PY
+then
+  fail "the broker authorized a bounded ancestry walk that never reached PID 1"
+fi
+pass "peer-credential broker fails closed when ancestry depth is exhausted"
+
 library_live=$(cd "$HOME_DIR" && printf 'library-public-test-body' | env \
   FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_AGENT_ROLE=secondmate \
   FM_AGENT_TASK=alpha FM_AGENT_OWNER_HOME="$HOME_DIR" bash -c '

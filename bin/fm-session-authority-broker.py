@@ -19,6 +19,7 @@ import tempfile
 
 MAX_BODY = 1024 * 1024
 PROTOCOL_VERSION = 1
+MAX_ANCESTRY_DEPTH = 128
 
 
 def canonical(value: str) -> str:
@@ -92,7 +93,7 @@ def peer_is_authorized(
             return False
         current = pid
         matched_secondmate = False
-        for _ in range(128):
+        for _ in range(MAX_ANCESTRY_DEPTH):
             environment = process_environment(current)
             role = environment.get("FM_AGENT_ROLE", "")
             if role == "crewmate":
@@ -104,13 +105,15 @@ def peer_is_authorized(
                 ):
                     return False
                 matched_secondmate = True
-            if current <= 1:
-                break
+            if current == 1:
+                return matched_secondmate
+            if current < 1:
+                return False
             parent = parent_pid(current)
             if parent == current or parent < 1:
                 return False
             current = parent
-        return matched_secondmate
+        return matched_secondmate and current == 1
     except (OSError, UnicodeError, ValueError):
         return False
 

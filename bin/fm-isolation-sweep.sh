@@ -83,8 +83,11 @@ for meta in "$STATE"/*.meta; do
     ISOLATION_FAILED=1
     continue
   fi
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
+  if ! target=$(fm_backend_recorded_target_of_meta "$meta") || [ -z "$target" ]; then
+    echo "ISOLATION: task $id is unproven: recorded endpoint metadata could not be read; preserve its state and reconcile $meta before any mutation"
+    ISOLATION_FAILED=1
+    continue
+  fi
 
   kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
   kind=$(fm_meta_get "$meta" kind)

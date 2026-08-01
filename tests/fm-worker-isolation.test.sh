@@ -3447,6 +3447,18 @@ test_verification_capture_includes_lifecycle_clears() {
 
 # --- F. restore-time re-assertion -------------------------------------------
 
+test_sweep_uses_read_only_target_derivation() {
+  local source
+  source=$(sed -n '63,94p' "$SWEEP")
+  assert_contains "$source" 'fm_backend_recorded_target_of_meta "$meta"' \
+    "the isolation sweep did not use the read-only recorded target helper"
+  assert_not_contains "$source" 'fm_backend_target_of_meta "$meta"' \
+    "the isolation sweep still uses the lifecycle-bound target helper"
+  assert_not_contains "$source" 'fm_backend_tmux_meta_ensure_live_bound' \
+    "the isolation sweep directly invokes the metadata migration boundary"
+  pass "the isolation sweep derives endpoint targets without lifecycle mutation"
+}
+
 make_sweep_home() {
   local name=$1 world
   world="$TMP_ROOT/$name"
@@ -3756,6 +3768,14 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = enrollment-trace-launch ]; then
   exit 0
 fi
 
+if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-sweep ]; then
+  test_sweep_uses_read_only_target_derivation
+  test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
+  test_sweep_is_silent_for_a_correctly_isolated_worker
+  echo "# focused isolation-sweep tests passed"
+  exit 0
+fi
+
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = backend-launch ]; then
   test_backend_owned_launch_proof_covers_tmux_and_herdr
   echo "# focused backend-launch test passed"
@@ -3868,6 +3888,7 @@ test_normal_teardown_validates_receipts_before_commit
 test_teardown_finishes_fallible_cleanup_before_provider_boundaries
 test_verification_capture_includes_lifecycle_clears
 unset FM_TEST_AGENT_PIDS
+test_sweep_uses_read_only_target_derivation
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence
