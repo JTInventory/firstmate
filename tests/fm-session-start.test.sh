@@ -651,6 +651,18 @@ write_pi_loaded_markers() {
 
 # --- context digest: absent vs empty vs present -----------------------------
 
+test_fleet_digest_uses_read_only_target_derivation() {
+  local source
+  source=$(sed -n '345,362p' "$SESSION_START")
+  assert_contains "$source" 'fm_backend_recorded_target_of_meta "$meta"' \
+    "the fleet digest did not use the read-only recorded target helper"
+  assert_not_contains "$source" 'fm_backend_target_of_meta "$meta"' \
+    "the fleet digest still uses the lifecycle-bound target helper"
+  assert_not_contains "$source" 'fm_backend_tmux_meta_ensure_live_bound' \
+    "the fleet digest directly invokes the metadata migration boundary"
+  pass "the fleet digest derives endpoint targets without lifecycle mutation"
+}
+
 test_context_digest_absent_empty_present() {
   local rec root home fakebin out
   rec=$(new_world context-digest)
@@ -1472,6 +1484,12 @@ if [ "${FM_SESSION_START_FOCUS:-}" = missing-secondmate ]; then
   exit 0
 fi
 
+if [ "${FM_SESSION_START_FOCUS:-}" = read-only-target ]; then
+  test_fleet_digest_uses_read_only_target_derivation
+  exit 0
+fi
+
+test_fleet_digest_uses_read_only_target_derivation
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
