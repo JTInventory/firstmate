@@ -257,13 +257,7 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-} ${3:-}" = "agent start alpha" ]; then
             case "$pid" in ''|*[!0-9]*) continue ;; esac
             printf '%s\n' "--- proc-$pid ---"
             sed -n 's/^PPid:/parent:/p' "/proc/$pid/status" 2>/dev/null || true
-            printf 'cmdline:'
-            tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true
-            printf '\n'
-            for fd in "/proc/$pid/fd"/*; do
-              [ -e "$fd" ] || continue
-              printf 'fd:%s=%s\n' "${fd##*/}" "$(readlink "$fd" 2>/dev/null || true)"
-            done
+            printf '%s\n' 'process-private-fields=redacted'
           done
     fi
   ) >> "$ALPHA_LAUNCH_TRACE"
@@ -507,6 +501,30 @@ remember_meta_worktree() {  # <meta>
   [ -n "$wt" ] || fail "metadata did not record a worktree"
   RECORDED_WORKTREES="${RECORDED_WORKTREES}${wt}"$'\n'
   printf '%s' "$wt"
+}
+
+return_owned_test_worktree() {  # <worktree> <task-id> <home>
+  local wt=$1 id=$2 home=$3
+  (
+    local claim legacy stamp_task stamp_home
+    # Exercise the same private ownership transaction as production teardown.
+    # A raw Treehouse return leaves the private stamp behind when the pool keeps
+    # a slot's gitdir, so the next correct owner must refuse that recycled slot.
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    stamp_task=$(fm_slot_stamp_field "$wt" task) || return 1
+    stamp_home=$(fm_slot_stamp_field "$wt" home) || return 1
+    [ "$stamp_task" = "$id" ] && fm_slot_same_path "$stamp_home" "$home" || return 1
+    fm_slot_stamp_stage_return "$wt" "$id" "$home" "$home/state" "$id" || return 1
+    claim=$FM_SLOT_RETURN_CLAIM
+    legacy=$FM_SLOT_RETURN_LEGACY
+    if "$REAL_TREEHOUSE" return --force "$wt" --if-lease-holder "$id" >/dev/null; then
+      fm_slot_stamp_finalize_return "$claim" "$legacy"
+    else
+      fm_slot_stamp_restore_return "$wt" "$id" "$home" "$claim" "$id" \
+        "$FM_SLOT_RETURN_STAMP_PATH" "$legacy" || true
+      return 1
+    fi
+  )
 }
 
 make_project() {  # <dir>
@@ -1289,15 +1307,16 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
-    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    return_owned_test_worktree "$PRIOR_RESTART_WT" "$RESTART_ID" "$HOME_DIR" \
+      || fail "$RESTART_ID could not safely return its prior reclaimed slot"
   fi
 
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
-  "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
-  "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
+  return_owned_test_worktree "$OLD_RESTART_WT" "$RESTART_ID" "$HOME_DIR" \
+    || fail "$RESTART_ID could not safely return its original restart slot"
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
 
@@ -1332,8 +1351,8 @@ CROSS_NEW_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
   || fail "cross-home reclaim changed the secondmate child's presentation label"
 teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-teardown.out" 2> "$TMP_ROOT/cross-restart-teardown.err" \
   || fail "cross-home reclaimed teardown failed: $(cat "$TMP_ROOT/cross-restart-teardown.err")"
-"$REAL_TREEHOUSE" return --force "$CROSS_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
+return_owned_test_worktree "$CROSS_OLD_WT" "$CROSS_RESTART_ID" "$SECOND_HOME_A" \
+  || fail "cross-home restart could not safely return its original slot"
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
 
 # Two homes recovering concurrently serialize on the named session lock and
@@ -1385,10 +1404,10 @@ teardown_task "$PRIMARY_WAVE_ID" "$HOME_DIR" > "$TMP_ROOT/primary-wave-teardown.
   || fail "concurrent primary recovery teardown failed"
 teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown.out" 2> "$TMP_ROOT/bravo-wave-teardown.err" \
   || fail "concurrent secondmate recovery teardown failed"
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
+return_owned_test_worktree "$PRIMARY_WAVE_OLD_WT" "$PRIMARY_WAVE_ID" "$HOME_DIR" \
+  || fail "concurrent primary recovery could not safely return its original slot"
+return_owned_test_worktree "$BRAVO_WAVE_OLD_WT" "$BRAVO_WAVE_ID" "$SECOND_HOME_B" \
+  || fail "concurrent secondmate recovery could not safely return its original slot"
 pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
 
 # Seed a legacy old-format primary projection and a flat secondmate tab; correction must not migrate them.
