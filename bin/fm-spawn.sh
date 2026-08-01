@@ -241,8 +241,10 @@ SPAWN_TASK_LOCK_HELD=0
 SPAWN_ADMISSION_LOCKS=()
 SPAWN_SLOT_CLAIM_CREATED=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_SLOT_CLAIM_ATTEMPTED=0
 SPAWN_SLOT_CLAIM_PUBLISHED=0
 SPAWN_TREEHOUSE_LEASE_ACQUIRED=0
+SPAWN_TREEHOUSE_LEASE_WT=
 SPAWN_SLOT_CLAIM_WT=
 SPAWN_SLOT_CLAIM_HOME=
 SPAWN_AUTHORITY_ENROLLMENT=
@@ -255,6 +257,7 @@ claim_spawn_slot() {
   if [ "$KIND" = secondmate ] && fm_slot_is_plain_checkout "$WT"; then
     return 0
   fi
+  SPAWN_SLOT_CLAIM_ATTEMPTED=1
   if ! fm_slot_stamp_write "$WT" "$ID" "$home"; then
     echo "error: could not claim pooled-slot ownership for $WT; refusing to publish task $ID" >&2
     return 1
@@ -303,6 +306,23 @@ spawn_return_unpublished_slot() {
   if [ "$staged" = 1 ]; then
     fm_slot_stamp_finalize_return "$claim" "$legacy" || return 1
   fi
+}
+
+spawn_return_unpublished_treehouse_lease() {
+  local target=${SPAWN_TREEHOUSE_LEASE_WT:-}
+  [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ] || return 0
+  [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ] || return 0
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ]; then
+    spawn_return_unpublished_slot
+    return
+  fi
+  [ "$SPAWN_SLOT_CLAIM_ATTEMPTED" = 0 ] || {
+    echo "warning: retaining unpublished lease $target because slot ownership could not be proven" >&2
+    return 1
+  }
+  [ -n "$target" ] || return 1
+  ( cd "$FM_ROOT" && treehouse return --force "$target" \
+    --if-lease-holder "$ID" )
 }
 
 parse_orca_worktree_result() {
@@ -356,7 +376,7 @@ spawn_abort_cleanup() {
     || rm -f -- "$SPAWN_AUTHORITY_LAUNCH_RECEIPT"
   if [ "$SPAWN_SLOT_CLAIM_PUBLISHED" != 1 ]; then
     if [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" = 1 ]; then
-      spawn_return_unpublished_slot || true
+      spawn_return_unpublished_treehouse_lease || true
     elif [ "$SPAWN_SLOT_CLAIM_CREATED" = 1 ]; then
       fm_slot_stamp_clear_exact "$SPAWN_SLOT_CLAIM_WT" "$ID" \
         "$SPAWN_SLOT_CLAIM_HOME" || true
@@ -1564,14 +1584,23 @@ if [ "$KIND" = secondmate ]; then
     exit 1
   fi
 fi
+SPAWN_SETTLE_SOURCE=
+SPAWN_SETTLE_PATH=
 spawn_settle_path() {  # <target>
-  local record
+  local record path
+  SPAWN_SETTLE_SOURCE=
+  SPAWN_SETTLE_PATH=
   record=$(fm_agent_cwd_verdict "" "" "" "$BACKEND" "$1")
   if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
-    fm_agent_verdict_field "$record" cwd
+    SPAWN_SETTLE_SOURCE=proc
+    SPAWN_SETTLE_PATH=$(fm_agent_verdict_field "$record" cwd)
     return 0
   fi
-  fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true
+  path=$(fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true)
+  if [ -n "$path" ]; then
+    SPAWN_SETTLE_SOURCE=provider
+    SPAWN_SETTLE_PATH=$path
+  fi
 }
 
 if [ "$KIND" != secondmate ]; then
@@ -1584,11 +1613,20 @@ if [ "$KIND" != secondmate ]; then
   # transient foreign cwd is retained only for the eventual diagnostic.
   WT_CANDIDATE=
   for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
-    p=$(spawn_settle_path "$WID")
+    spawn_settle_path "$WID"
+    p=$SPAWN_SETTLE_PATH
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+      if [ "$SPAWN_SETTLE_SOURCE" = proc ]; then
+        SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+        SPAWN_TREEHOUSE_LEASE_WT=$p
+      fi
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then
         WT="$p"
+        if [ "$SPAWN_TREEHOUSE_LEASE_ACQUIRED" != 1 ]; then
+          SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+          SPAWN_TREEHOUSE_LEASE_WT=$p
+        fi
         break
       fi
     fi
@@ -1603,7 +1641,6 @@ if [ "$KIND" != secondmate ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
-  SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
   claim_spawn_slot || exit 1
 fi
 

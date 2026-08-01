@@ -403,6 +403,12 @@ test_secondmate_child_receives_only_its_own_home() {
     "unpublished spawn cleanup did not bind Treehouse return to its lease holder"
   assert_contains "$(cat "$SPAWN")" 'SPAWN_TREEHOUSE_LEASE_ACQUIRED=1' \
     "spawn did not record Treehouse lease acquisition independently"
+  lease_arm_line=$(grep -n 'SPAWN_TREEHOUSE_LEASE_ACQUIRED=1' "$SPAWN" \
+    | head -1 | cut -d: -f1)
+  validate_line=$(grep -n 'validate_spawn_worktree "treehouse get"' "$SPAWN" \
+    | head -1 | cut -d: -f1)
+  [ "$lease_arm_line" -lt "$validate_line" ] \
+    || fail "spawn armed the Treehouse rollback only after worktree validation"
   pass "a secondmate child receives its own home and no inherited override"
 }
 
@@ -434,6 +440,38 @@ test_unpublished_retry_returns_matching_lease() {
     ' 2>&1) || fail "an unpublished retry could not return its matching lease: $out"
   [ -f "$marker" ] || fail "an acquired lease with a preexisting stamp was not returned"
   pass "unpublished retries return leases even when the stamp preexists"
+}
+
+test_invalid_leased_path_returns_only_this_lease() {
+  local function_source marker out
+  marker="$TMP_ROOT/invalid-lease-returned"
+  function_source=$(sed -n '/^spawn_return_unpublished_slot()/,/^parse_orca_worktree_result/p' \
+    "$SPAWN" | sed '$d')
+  out=$(ROOT="$ROOT" FUNCTION_SOURCE="$function_source" RETURN_MARKER="$marker" \
+    bash -c '
+      eval "$FUNCTION_SOURCE"
+      SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+      SPAWN_TREEHOUSE_LEASE_WT=/tmp/invalid-leased-path
+      SPAWN_SLOT_CLAIM_ATTEMPTED=0
+      SPAWN_SLOT_CLAIMED=0
+      SPAWN_SLOT_CLAIM_PUBLISHED=0
+      ID=invalid-lease-task
+      FM_ROOT="$ROOT"
+      treehouse() {
+        [ "$1" = return ] && [ "$2" = --force ] \
+          && [ "$3" = /tmp/invalid-leased-path ] \
+          && [ "$4" = --if-lease-holder ] \
+          && [ "$5" = invalid-lease-task ] \
+          && : > "$RETURN_MARKER"
+      }
+      SPAWN_SLOT_CLAIM_ATTEMPTED=1
+      spawn_return_unpublished_treehouse_lease && exit 31
+      [ ! -f "$RETURN_MARKER" ] || exit 32
+      SPAWN_SLOT_CLAIM_ATTEMPTED=0
+      spawn_return_unpublished_treehouse_lease
+    ' 2>&1) || fail "an invalid leased path did not return its exact lease: $out"
+  [ -f "$marker" ] || fail "invalid leased path rollback did not use the exact lease holder gate"
+  pass "invalid leased paths return only the exact newly acquired lease"
 }
 
 # --- C. a declared worker is inert and refused -------------------------------
@@ -3852,6 +3890,7 @@ fi
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-hardening ]; then
   test_secondmate_child_receives_only_its_own_home
   test_unpublished_retry_returns_matching_lease
+  test_invalid_leased_path_returns_only_this_lease
   echo "# focused isolation-hardening test passed"
   exit 0
 fi
