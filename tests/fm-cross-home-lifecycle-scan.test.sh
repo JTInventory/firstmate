@@ -55,4 +55,34 @@ FM_ROOT_OVERRIDE=$SHARED_ROOT"
 [ "$(scope_result "$conflicting_environment")" -eq 2 ] \
   || fail "a split-home authoritative lifecycle declaration did not fail closed"
 
+predeclaration_foreign_environment="FM_HOME=$FOREIGN_HOME
+FM_ROOT_OVERRIDE=$SHARED_ROOT"
+[ "$(scope_result "$predeclaration_foreign_environment")" -eq 1 ] \
+  || fail "a foreign FM_HOME was conflated with its shared checkout before declaration export"
+
+predeclaration_local_environment="FM_HOME=$LOCAL_HOME
+FM_ROOT_OVERRIDE=$SHARED_ROOT"
+[ "$(scope_result "$predeclaration_local_environment")" -eq 0 ] \
+  || fail "a local FM_HOME escaped its target before declaration export"
+
 pass "lifecycle scan scopes complete declarations to their operational home"
+
+scan_with_one_ambiguous_lifecycle_pid() {
+  local expected_live=$1 ambiguous_pid=$$
+  fm_lifecycle_process_script() {
+    [ "$1" = "$ambiguous_pid" ] || return 1
+    return 2
+  }
+  fm_lifecycle_process_live() {
+    [ "$1" = "$ambiguous_pid" ] && [ "$expected_live" = yes ]
+  }
+  fm_spawn_legacy_lifecycle_process_busy \
+    "$LOCAL_HOME" "$LOCAL_HOME/state"
+}
+
+scan_with_one_ambiguous_lifecycle_pid yes \
+  || fail "a live lifecycle PID with unreadable identity did not fail closed"
+if scan_with_one_ambiguous_lifecycle_pid no; then
+  fail "an exited ambiguous lifecycle PID blocked home admission"
+fi
+pass "lifecycle scan ignores exited ambiguity but blocks live ambiguity"

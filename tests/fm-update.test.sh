@@ -1013,6 +1013,7 @@ SH
   assert_contains "$out" "fleet lifecycle serialization is busy" \
     "rewritten argv0 hid exact lifecycle work from executable identity"
 
+  rc=0
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_process_environment() {
@@ -1056,7 +1057,9 @@ FM_STATE_OVERRIDE=$w/home/state"
 FM_ROOT_OVERRIDE=$w/home"
     }
     fm_spawn_legacy_process_matches_scope 999 "$script" "$w/home" "$w/home/state"
-  ) || fail "target root override was ignored when FM_HOME named another home"
+  ) || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "FM_ROOT_OVERRIDE replaced an explicit foreign FM_HOME during lifecycle scope"
 
   (
     . "$ROOT/bin/fm-wake-lib.sh"

@@ -416,6 +416,10 @@ fm_spawn_legacy_process_matches_scope() {
     fi
     return 2
   fi
+  # FM_HOME owns operational scope when present. FM_ROOT_OVERRIDE is then the
+  # shared code checkout, not a second home; it retains legacy home meaning
+  # only when FM_HOME is absent.
+  [ -z "$home" ] || root=
   for raw in "$lifecycle_home" "$home" "$root"; do
     [ -n "$raw" ] || continue
     canonical=$(fm_lifecycle_canonical_path "$raw") || return 2
@@ -468,12 +472,18 @@ fm_spawn_legacy_lifecycle_process_busy() {
       pid=${entry#/proc/}
       fm_pid_list_contains "$exclude_pids" "$pid" && continue
       if fm_lifecycle_process_script "$pid"; then rc=0; else rc=$?; fi
-      fm_lifecycle_identity_result_busy "$rc" && return 0
+      if fm_lifecycle_identity_result_busy "$rc"; then
+        fm_lifecycle_process_live "$pid" || continue
+        return 0
+      fi
       [ "$rc" -eq 0 ] || continue
       script=$FM_LIFECYCLE_SCRIPT
       if fm_spawn_legacy_process_matches_scope \
         "$pid" "$script" "$target_home" "$target_state"; then rc=0; else rc=$?; fi
-      [ "$rc" -eq 1 ] || return 0
+      if [ "$rc" -ne 1 ]; then
+        fm_lifecycle_process_live "$pid" || continue
+        return 0
+      fi
     done
     return 1
   fi
@@ -482,12 +492,18 @@ fm_spawn_legacy_lifecycle_process_busy() {
   while read -r pid _; do
     fm_pid_list_contains "$exclude_pids" "$pid" && continue
     if fm_lifecycle_process_script "$pid"; then rc=0; else rc=$?; fi
-    fm_lifecycle_identity_result_busy "$rc" && return 0
+    if fm_lifecycle_identity_result_busy "$rc"; then
+      fm_lifecycle_process_live "$pid" || continue
+      return 0
+    fi
     [ "$rc" -eq 0 ] || continue
     script=$FM_LIFECYCLE_SCRIPT
     if fm_spawn_legacy_process_matches_scope \
       "$pid" "$script" "$target_home" "$target_state"; then rc=0; else rc=$?; fi
-    [ "$rc" -eq 1 ] || return 0
+    if [ "$rc" -ne 1 ]; then
+      fm_lifecycle_process_live "$pid" || continue
+      return 0
+    fi
   done <<< "$process_list"
   return 1
 }
