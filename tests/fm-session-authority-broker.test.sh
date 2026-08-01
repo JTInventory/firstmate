@@ -240,6 +240,96 @@ then
 fi
 pass "peer-credential broker fails closed when ancestry depth is exhausted"
 
+if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+home = "/test/home"
+script = str(broker_path)
+
+def canonical(value):
+    return script if value == script else home
+
+broker.canonical = canonical
+broker.os.readlink = lambda path: home if path.endswith("/cwd") else "/usr/bin/python3"
+broker.process_command = lambda pid: ["python3", script, "client"]
+broker.process_start = lambda pid: "proc:x"
+broker.process_identity = lambda pid: "exe:x"
+broker.parent_pid = lambda pid: pid
+
+def authorized(owner_home):
+    broker.process_environment = lambda pid: {
+        "FM_AGENT_ROLE": "secondmate",
+        "FM_AGENT_TASK": "alpha",
+        **({} if owner_home is None else {"FM_AGENT_OWNER_HOME": owner_home}),
+    }
+    return broker.peer_is_authorized(
+        42, uid=1000, gid=1000, home=home, task="alpha", script=script,
+        launch_pid=42, launch_start="proc:x", launch_identity="exe:x",
+        broker_uid=1000, broker_gid=1000
+    )
+
+if not authorized(home):
+    raise SystemExit("explicit absolute owner home was rejected")
+if authorized(None):
+    raise SystemExit("missing owner home was accepted")
+if authorized("relative/home"):
+    raise SystemExit("relative owner home was accepted")
+PY
+then
+  fail "the broker did not enforce an explicit absolute owner home"
+fi
+pass "peer-credential broker rejects missing and relative owner homes"
+
+if ! python3 - "$BROKER" "$BROKER_KEY" <<'PY'
+import hashlib
+import hmac
+import importlib.util
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+root_key = bytes.fromhex(sys.argv[2])
+body = b"durable-capability-boundary"
+root_digest = hmac.new(root_key, body, hashlib.sha256).hexdigest()
+scoped_key = broker.derive_broker_durable_key(
+    root_key, task="alpha", home="/test/home", launch_pid=42,
+    launch_start="proc:x", launch_identity="exe:x",
+    launch_script="/test/home/bin/fm-session-authority-exec.sh"
+)
+scoped_digest = hmac.new(scoped_key, body, hashlib.sha256).hexdigest()
+if scoped_digest == root_digest:
+    raise SystemExit("broker durable capability reused the primary root")
+if scoped_key == broker.derive_broker_durable_key(
+    root_key, task="beta", home="/test/home", launch_pid=42,
+    launch_start="proc:x", launch_identity="exe:x",
+    launch_script="/test/home/bin/fm-session-authority-exec.sh"
+):
+    raise SystemExit("broker durable capability was not task-bound")
+if scoped_key == broker.derive_broker_durable_key(
+    root_key, task="alpha", home="/test/other", launch_pid=42,
+    launch_start="proc:x", launch_identity="exe:x",
+    launch_script="/test/home/bin/fm-session-authority-exec.sh"
+):
+    raise SystemExit("broker durable capability was not home-bound")
+PY
+then
+  fail "the broker durable capability was not scoped to validated launch identity"
+fi
+pass "peer-credential broker derives a scoped durable capability"
+
 library_live=$(broker_library_hmac) \
   || fail "session-lock library did not adopt the peer-credential broker"
 [ "${#library_live}" -eq 64 ] \

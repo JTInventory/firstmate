@@ -102,10 +102,13 @@ def peer_is_authorized(
         if canonical(os.readlink(f"/proc/{pid}/cwd")) != home:
             return False
         peer_environment = process_environment(pid)
+        owner_home = peer_environment.get("FM_AGENT_OWNER_HOME", "")
         if (
             peer_environment.get("FM_AGENT_ROLE") != "secondmate"
             or peer_environment.get("FM_AGENT_TASK") != task
-            or canonical(peer_environment.get("FM_AGENT_OWNER_HOME", "")) != home
+            or not owner_home
+            or not os.path.isabs(owner_home)
+            or canonical(owner_home) != home
         ):
             return False
         peer_generation = process_generation(pid)
@@ -189,6 +192,24 @@ def read_launch_evidence(
     return key, launch_pid, fields["start"], fields["identity"]
 
 
+def derive_broker_durable_key(
+    root_key: bytes, *, task: str, home: str, launch_pid: int,
+    launch_start: str, launch_identity: str, launch_script: str
+) -> bytes:
+    context = b"\0".join(
+        (
+            b"firstmate/session-authority-broker/durable/v1",
+            task.encode("utf-8"),
+            home.encode("utf-8"),
+            str(launch_pid).encode("ascii"),
+            launch_start.encode("utf-8"),
+            launch_identity.encode("utf-8"),
+            launch_script.encode("utf-8"),
+        )
+    )
+    return hmac.new(root_key, context, hashlib.sha256).digest()
+
+
 def write_record(
     record: Path, *, pid: int, socket_address: str, home: str, checkout: str,
     task: str, script: str, launch_pid: int, launch_start: str,
@@ -244,7 +265,7 @@ def serve(args: argparse.Namespace) -> int:
     if not state.is_dir() or state.is_symlink() or not Path(home).is_dir():
         return 1
     try:
-        durable_key, launch_pid, launch_start, launch_identity = read_launch_evidence(
+        durable_root_key, launch_pid, launch_start, launch_identity = read_launch_evidence(
             args.launch_evidence_fd, home=home, task=args.task,
             launch_script=launch_script
         )
@@ -253,6 +274,11 @@ def serve(args: argparse.Namespace) -> int:
     record = state / ".session-authority-broker"
     if record.exists() or record.is_symlink():
         return 1
+    durable_key = derive_broker_durable_key(
+        durable_root_key, task=args.task, home=home, launch_pid=launch_pid,
+        launch_start=launch_start, launch_identity=launch_identity,
+        launch_script=launch_script
+    )
     socket_name = f"firstmate-{os.getpid()}-{secrets.token_hex(16)}"
     socket_address = f"abstract:{socket_name}"
     bind_address = f"\0{socket_name}"
