@@ -125,7 +125,7 @@ test_batched_complete_coverage_and_flags() {
 
   count=$(sed -n '1p' "$count_file")
   [ "$count" -gt 1 ] || fail "lint did not use multiple ShellCheck batches"
-  batch_size=5
+  batch_size=1
   expected_batches=$(( (expected_count + batch_size - 1) / batch_size ))
   [ "$count" -eq "$expected_batches" ] \
     || fail "lint used $count batches for $expected_count files"
