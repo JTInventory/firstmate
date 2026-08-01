@@ -33,6 +33,8 @@ SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 fm_test_session_authority_fd "$TMP_ROOT"
+fm_test_authority_broker_ensure "$TMP_ROOT" \
+  || fail "could not provision the session-start authority broker fixture"
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
 SESSION_START_HERDR_SECOND_MATE_ID="fmtest-herdr-${TMP_ROOT##*.}"
@@ -796,10 +798,6 @@ EOF
 
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
-  if [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
-    pass "legacy independent-session lock race is covered outside the shared test broker"
-    return
-  fi
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -849,7 +847,7 @@ SH
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
         sleep 0.01
       done
-      if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
+      if FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_LOCK_STATE="$home/state" \
         FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
@@ -1486,6 +1484,11 @@ fi
 
 if [ "${FM_SESSION_START_FOCUS:-}" = read-only-target ]; then
   test_fleet_digest_uses_read_only_target_derivation
+  exit 0
+fi
+
+if [ "${FM_SESSION_START_FOCUS:-}" = lock-race ]; then
+  test_session_lock_concurrent_single_winner
   exit 0
 fi
 

@@ -29,6 +29,8 @@ SWEEP="$ROOT/bin/fm-isolation-sweep.sh"
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-isolation)
 fm_test_session_authority_fd "$TMP_ROOT"
+fm_test_authority_broker_ensure "$TMP_ROOT" \
+  || fail "could not provision the worker-isolation authority broker fixture"
 unset NO_MISTAKES_GATE
 unset CLAUDECODE PI_CODING_AGENT GROK_AGENT
 CODEX_THREAD_ID=fm-worker-isolation-fixture
@@ -2292,10 +2294,10 @@ slot_verdict() {  # <state> <id> <wt> <stamp-home> [role] [worker-home]
 }
 
 slot_live_verdict() {  # <pid> <state> <id> <wt> <stamp-home> [role] [worker-home]
-  local pid=$1
+  local endpoint_pid=$1
   shift
   ( . "$ROOT/bin/fm-slot-owner-lib.sh"
-    fm_backend_foreground_process_pid() { printf '%s' "$pid"; }
+    fm_backend_foreground_process_pid() { printf '%s' "$endpoint_pid"; }
     fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" \
       "${5:-crewmate}" live test test:pane )
 }

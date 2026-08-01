@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import hmac
 import os
@@ -45,6 +47,10 @@ def process_identity(pid: int) -> str:
     return f"exe:{target}"
 
 
+def process_generation(pid: int) -> tuple[str, str]:
+    return process_start(pid), process_identity(pid)
+
+
 def parent_pid(pid: int) -> int:
     fields = proc_fields(pid)
     if len(fields) < 2:
@@ -83,44 +89,110 @@ def recv_exact(connection: socket.socket, length: int) -> bytes:
 
 
 def peer_is_authorized(
-    pid: int, *, home: str, task: str, script: str
+    pid: int, *, uid: int, gid: int, home: str, task: str, script: str,
+    launch_pid: int, launch_start: str, launch_identity: str,
+    broker_uid: int, broker_gid: int
 ) -> bool:
     try:
+        if uid != broker_uid or gid != broker_gid:
+            return False
         command = process_command(pid)
         if len(command) < 3 or canonical(command[1]) != script or command[2] != "client":
             return False
         if canonical(os.readlink(f"/proc/{pid}/cwd")) != home:
             return False
+        peer_environment = process_environment(pid)
+        if (
+            peer_environment.get("FM_AGENT_ROLE") != "secondmate"
+            or peer_environment.get("FM_AGENT_TASK") != task
+            or canonical(peer_environment.get("FM_AGENT_OWNER_HOME", "")) != home
+        ):
+            return False
+        peer_generation = process_generation(pid)
         current = pid
-        matched_secondmate = False
+        visited: set[int] = set()
         for _ in range(MAX_ANCESTRY_DEPTH):
-            environment = process_environment(current)
-            role = environment.get("FM_AGENT_ROLE", "")
-            if role == "crewmate":
+            if process_environment(current).get("FM_AGENT_ROLE") == "crewmate":
                 return False
-            if role == "secondmate":
-                if (
-                    environment.get("FM_AGENT_TASK") != task
-                    or canonical(environment.get("FM_AGENT_OWNER_HOME", "")) != home
-                ):
-                    return False
-                matched_secondmate = True
-            if current == 1:
-                return matched_secondmate
-            if current < 1:
+            if current == launch_pid:
+                return (
+                    process_generation(current) == (launch_start, launch_identity)
+                    and process_generation(pid) == peer_generation
+                )
+            if current <= 1 or current in visited:
                 return False
+            visited.add(current)
             parent = parent_pid(current)
             if parent == current or parent < 1:
                 return False
             current = parent
-        return matched_secondmate and current == 1
+        return False
     except (OSError, UnicodeError, ValueError):
         return False
 
 
+def read_launch_evidence(
+    fd: int, *, home: str, task: str, launch_script: str
+) -> tuple[bytes, int, str, str]:
+    with os.fdopen(os.dup(fd), "rb") as evidence:
+        key_line = evidence.readline()
+        receipt_line = evidence.readline()
+        if not key_line or not receipt_line or evidence.readline():
+            raise ValueError("malformed launch evidence")
+    key_text = key_line.decode("ascii").strip()
+    if len(key_text) < 64 or len(key_text) % 2:
+        raise ValueError("malformed launch key")
+    try:
+        key = bytes.fromhex(key_text)
+        receipt = base64.b64decode(receipt_line.strip(), validate=True)
+    except (binascii.Error, ValueError, UnicodeError):
+        raise ValueError("malformed launch evidence")
+    lines = receipt.splitlines(keepends=True)
+    if len(lines) != 7 or not receipt.endswith(b"\n"):
+        raise ValueError("malformed launch receipt")
+    fields: dict[str, str] = {}
+    ordered = (
+        "version", "task", "home", "pid", "start", "identity", "authority-hmac"
+    )
+    for expected, line in zip(ordered, lines):
+        prefix = f"{expected}=".encode()
+        if not line.startswith(prefix) or line.count(b"=") != 1:
+            raise ValueError("malformed launch receipt")
+        value = line[len(prefix):-1].decode("utf-8")
+        if not value or "\x00" in value or expected in fields:
+            raise ValueError("malformed launch receipt")
+        fields[expected] = value
+    if fields["version"] != "1" or fields["task"] != task:
+        raise ValueError("wrong launch receipt")
+    receipt_home = canonical(fields["home"])
+    if receipt_home != home:
+        raise ValueError("wrong launch home")
+    try:
+        launch_pid = int(fields["pid"])
+    except ValueError as error:
+        raise ValueError("malformed launch pid") from error
+    if launch_pid <= 1 or len(fields["authority-hmac"]) != 64:
+        raise ValueError("malformed launch receipt")
+    if any(value not in "0123456789abcdef" for value in fields["authority-hmac"]):
+        raise ValueError("malformed launch receipt")
+    body = b"".join(lines[:6])
+    expected_hmac = hmac.new(key, body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(fields["authority-hmac"], expected_hmac):
+        raise ValueError("invalid launch receipt")
+    if process_generation(launch_pid) != (fields["start"], fields["identity"]):
+        raise ValueError("stale launch receipt")
+    if canonical(os.readlink(f"/proc/{launch_pid}/cwd")) != home:
+        raise ValueError("wrong launch cwd")
+    command = process_command(launch_pid)
+    if len(command) < 2 or canonical(command[1]) != launch_script:
+        raise ValueError("wrong launch process")
+    return key, launch_pid, fields["start"], fields["identity"]
+
+
 def write_record(
     record: Path, *, pid: int, socket_address: str, home: str, checkout: str,
-    task: str, script: str
+    task: str, script: str, launch_pid: int, launch_start: str,
+    launch_identity: str, launch_script: str, uid: int, gid: int
 ) -> None:
     body = (
         f"version={PROTOCOL_VERSION}\n"
@@ -132,6 +204,12 @@ def write_record(
         f"checkout={checkout}\n"
         f"task={task}\n"
         f"script={script}\n"
+        f"uid={uid}\n"
+        f"gid={gid}\n"
+        f"launch-pid={launch_pid}\n"
+        f"launch-start={launch_start}\n"
+        f"launch-identity={launch_identity}\n"
+        f"launch-script={launch_script}\n"
     )
     descriptor, temporary = tempfile.mkstemp(prefix=f"{record.name}.", dir=record.parent)
     try:
@@ -160,9 +238,17 @@ def serve(args: argparse.Namespace) -> int:
     home = canonical(args.home)
     checkout = canonical(args.checkout)
     script = canonical(__file__)
+    launch_script = canonical(args.launch_script)
     if canonical(str(state.parent)) != home or state.name != "state":
         return 1
     if not state.is_dir() or state.is_symlink() or not Path(home).is_dir():
+        return 1
+    try:
+        durable_key, launch_pid, launch_start, launch_identity = read_launch_evidence(
+            args.launch_evidence_fd, home=home, task=args.task,
+            launch_script=launch_script
+        )
+    except (OSError, UnicodeError, ValueError):
         return 1
     record = state / ".session-authority-broker"
     if record.exists() or record.is_symlink():
@@ -171,7 +257,8 @@ def serve(args: argparse.Namespace) -> int:
     socket_address = f"abstract:{socket_name}"
     bind_address = f"\0{socket_name}"
     live_key = secrets.token_bytes(48)
-    durable_key = secrets.token_bytes(48)
+    broker_uid = os.geteuid()
+    broker_gid = os.getegid()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stopping = False
 
@@ -187,7 +274,9 @@ def serve(args: argparse.Namespace) -> int:
     server.settimeout(1.0)
     write_record(
         record, pid=os.getpid(), socket_address=socket_address, home=home,
-        checkout=checkout, task=args.task, script=script
+        checkout=checkout, task=args.task, script=script, launch_pid=launch_pid,
+        launch_start=launch_start, launch_identity=launch_identity,
+        launch_script=launch_script, uid=broker_uid, gid=broker_gid
     )
     try:
         while not stopping:
@@ -206,21 +295,24 @@ def serve(args: argparse.Namespace) -> int:
                     credentials = connection.getsockopt(
                         socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
                     )
-                    pid, _uid, _gid = struct.unpack("3i", credentials)
+                    pid, uid, gid = struct.unpack("3i", credentials)
                     header = recv_exact(connection, 5)
                     kind, length = struct.unpack("!cI", header)
                     if length > MAX_BODY or kind not in (b"L", b"D"):
                         raise ValueError("invalid broker request")
                     body = recv_exact(connection, length)
                     if not peer_is_authorized(
-                        pid, home=home, task=args.task, script=script
+                        pid, uid=uid, gid=gid, home=home, task=args.task, script=script,
+                        launch_pid=launch_pid, launch_start=launch_start,
+                        launch_identity=launch_identity, broker_uid=broker_uid,
+                        broker_gid=broker_gid
                     ):
                         connection.sendall(b"E")
                         continue
                     key = live_key if kind == b"L" else durable_key
                     digest = hmac.new(key, body, hashlib.sha256).hexdigest().encode()
                     connection.sendall(b"O" + digest)
-                except (OSError, ValueError):
+                except (OSError, struct.error, ValueError):
                     try:
                         connection.sendall(b"E")
                     except OSError:
@@ -249,15 +341,24 @@ def read_record(path: Path) -> dict[str, str]:
         if not key or key in metadata or "\x00" in value:
             raise ValueError("malformed broker record")
         metadata[key] = value
-    required = {"version", "pid", "start", "identity", "socket", "home", "checkout", "task", "script"}
+    required = {
+        "version", "pid", "start", "identity", "socket", "home", "checkout",
+        "task", "script", "uid", "gid", "launch-pid", "launch-start",
+        "launch-identity", "launch-script"
+    }
     if set(metadata) != required or metadata["version"] != str(PROTOCOL_VERSION):
         raise ValueError("malformed broker record")
     pid = int(metadata["pid"])
+    for key in ("uid", "gid", "launch-pid"):
+        if int(metadata[key]) < 0:
+            raise ValueError("malformed broker record")
     if process_start(pid) != metadata["start"] or process_identity(pid) != metadata["identity"]:
         raise ValueError("stale broker record")
     command = process_command(pid)
     if len(command) < 3 or canonical(command[1]) != canonical(metadata["script"]) or command[2] != "serve":
         raise ValueError("wrong broker process")
+    if canonical(metadata["launch-script"]) != metadata["launch-script"]:
+        raise ValueError("malformed launch script")
     socket_value = metadata["socket"]
     if socket_value.startswith("abstract:"):
         socket_name = socket_value.removeprefix("abstract:")
@@ -313,6 +414,8 @@ def parse_args() -> argparse.Namespace:
     client_parser = subparsers.add_parser("client", add_help=False)
     client_parser.add_argument("--record", required=True)
     client_parser.add_argument("--kind", choices=("live", "durable"), required=True)
+    server.add_argument("--launch-evidence-fd", type=int, required=True)
+    server.add_argument("--launch-script", required=True)
     return parser.parse_args()
 
 

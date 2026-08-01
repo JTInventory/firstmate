@@ -30,6 +30,7 @@ FM_TEST_LIB_SOURCED=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export FM_TEST_PROCESS=1
+export TMPDIR=${TMPDIR:-/tmp}
 unset FM_AGENT_ROLE FM_AGENT_TASK FM_AGENT_OWNER_HOME
 
 # --- ambient Herdr isolation ------------------------------------------------
@@ -70,9 +71,68 @@ pass() {
 # call fm_test_cleanup from inside it so registered dirs are still removed.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_AUTHORITY_BROKER_PIDS=()
+
+fm_test_authority_broker_ensure() {
+  local broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
+  local fd=${FM_TEST_DURABLE_AUTHORITY_FD:-}
+  local fixture_dir=${1:-${TMPDIR:-/tmp}}
+  local caller_target broker_target fixture source_fd attempts=0
+  case "$broker" in ''|*[!0-9]*) broker= ;; esac
+  case "$fd" in ''|*[!0-9]*) fd= ;; esac
+  if [ -n "$broker" ] && [ -n "$fd" ] \
+    && kill -0 "$broker" 2>/dev/null \
+    && caller_target=$(readlink "/proc/$$/fd/$fd" 2>/dev/null) \
+    && broker_target=$(readlink "/proc/$broker/fd/$fd" 2>/dev/null) \
+    && [ -n "$caller_target" ] && [ "$caller_target" = "$broker_target" ]; then
+    return 0
+  fi
+  unset FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID
+  FM_TEST_AUTHORITY_FD=${FM_TEST_AUTHORITY_FD:-9}
+  FM_TEST_DURABLE_AUTHORITY_FD=${FM_TEST_DURABLE_AUTHORITY_FD:-18}
+  export FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD
+  source_fd=$FM_TEST_AUTHORITY_FD
+  fixture="$fixture_dir/fm-test-authority-broker.$$.sh"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+set -u
+while :; do sleep 60; done
+SH
+  chmod 700 "$fixture"
+  (
+    if [ "$source_fd" != 19 ]; then
+      eval "exec 19<&$source_fd"
+    fi
+    FM_TEST_PROCESS=1 FM_TEST_AUTHORITY_FD=19 \
+      FM_TEST_DURABLE_AUTHORITY_FD=18 \
+      "$ROOT/bin/fm-session-authority-exec.sh" \
+      --behavior-test-authority-broker "$fixture"
+  ) >/dev/null 2>&1 &
+  FM_TEST_AUTHORITY_BROKER_PID=$!
+  FM_TEST_AUTHORITY_BROKER_PIDS+=("$FM_TEST_AUTHORITY_BROKER_PID")
+  export FM_TEST_AUTHORITY_BROKER_PID
+  while [ "$attempts" -lt 100 ]; do
+    if kill -0 "$FM_TEST_AUTHORITY_BROKER_PID" 2>/dev/null \
+      && [ "$(tr '\0' '\n' < "/proc/$FM_TEST_AUTHORITY_BROKER_PID/cmdline" \
+        2>/dev/null | sed -n '2p')" = "$ROOT/bin/fm-session-authority-exec.sh" ] \
+      && [ "$(tr '\0' '\n' < "/proc/$FM_TEST_AUTHORITY_BROKER_PID/cmdline" \
+        2>/dev/null | sed -n '3p')" = --behavior-test-authority-broker ]; then
+      return 0
+    fi
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
 
 fm_test_cleanup() {
   local d
+  local pid
+  for pid in "${FM_TEST_AUTHORITY_BROKER_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -123,6 +183,7 @@ fm_test_session_authority_fd() {
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
   export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+  . "$ROOT/bin/fm-session-lock-lib.sh"
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

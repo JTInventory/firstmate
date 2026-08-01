@@ -78,6 +78,44 @@ case "$verdict" in
 esac
 pass "a foreign endpoint-bound occupant retains the durable lease"
 
+generation_file="$TMP_ROOT/generation-reads"
+: > "$generation_file"
+fm_session_process_start() {
+  local count
+  count=$(cat "$generation_file")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$generation_file"
+  if [ "$count" -eq 1 ]; then
+    printf '%s' proc:first
+  else
+    printf '%s' proc:second
+  fi
+}
+fm_session_process_identity() {
+  printf '%s' exe:/usr/bin/sleep
+}
+fm_agent_proc_cwd() {
+  [ "$1" = "$ENDPOINT_PID" ] || return 1
+  printf '%s' "$WORKTREE"
+}
+fm_agent_environ() {
+  [ "$1" = "$ENDPOINT_PID" ] || return 1
+  printf '%s\n' \
+    FM_AGENT_TASK=foreign-task \
+    FM_AGENT_OWNER_HOME="$HOME_DIR" \
+    FM_AGENT_ROLE=crewmate
+}
+fm_backend_foreground_process_pid() {
+  [ "$1" = herdr ] && [ "$2" = lab:pane-a ] || return 1
+  printf '%s' "$ENDPOINT_PID"
+}
+status=0
+fm_slot_endpoint_occupant_tasks "$WORKTREE" task-a "$HOME_DIR" \
+  crewmate herdr lab:pane-a || status=$?
+[ "$status" -eq 2 ] \
+  || fail "endpoint generation replacement was not rejected: $status"
+pass "endpoint generation replacement retains the durable lease"
+
 fm_backend_foreground_process_pid() { return 1; }
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)

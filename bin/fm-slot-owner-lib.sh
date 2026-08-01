@@ -522,16 +522,26 @@ fm_slot_live_occupant_tasks() {
 # and 2 when the endpoint-bound process cannot be proved stably.
 fm_slot_endpoint_occupant_tasks() {
   local wt=$1 self=$2 self_home=$3 self_role=$4 backend=$5 target=$6
-  local wt_real pid current cwd env task home role
+  local wt_real pid current cwd env task home role start identity current_start current_identity
   wt_real=$(fm_agent_canonical_dir "$wt") || return 2
   command -v fm_backend_foreground_process_pid >/dev/null 2>&1 || return 2
   pid=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
   fm_agent_pid_is_numeric "$pid" || return 2
+  start=$(fm_session_process_start "$pid") || return 2
+  identity=$(fm_session_process_identity "$pid") || return 2
   cwd=$(fm_agent_proc_cwd "$pid") || return 2
   cwd=$(fm_agent_canonical_dir "$cwd") || return 2
   env=$(fm_agent_environ "$pid" 2>/dev/null || true)
   current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
   [ "$current" = "$pid" ] || return 2
+  current_start=$(fm_session_process_start "$current") || return 2
+  current_identity=$(fm_session_process_identity "$current") || return 2
+  [ "$current_start" = "$start" ] && [ "$current_identity" = "$identity" ] || return 2
+  current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  [ "$current" = "$pid" ] || return 2
+  [ "$(fm_session_process_start "$current" 2>/dev/null || true)" = "$start" ] \
+    && [ "$(fm_session_process_identity "$current" 2>/dev/null || true)" = "$identity" ] \
+    || return 2
   fm_agent_path_within "$wt_real" "$cwd" || return 1
   task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
   home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)

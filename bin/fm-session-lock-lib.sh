@@ -372,27 +372,54 @@ fm_session_authority_socket_broker_present() {
 
 fm_session_authority_socket_broker_start() {
   local state=$1 home=$2 checkout=$3 task=$4 script record pid attempts=0
+  local launch_script launch_receipt launch_start launch_identity durable_fd
+  local launch_key receipt_b64 evidence_fd
   script="$checkout/bin/fm-session-authority-broker.py"
   record="$state/.session-authority-broker"
+  launch_script="$home/bin/fm-session-authority-exec.sh"
+  launch_receipt="$state/.session-authority-launch"
   [ "${FM_AGENT_ROLE:-}" = secondmate ] \
     && [ "${FM_AGENT_TASK:-}" = "$task" ] \
     && [ "${FM_AGENT_OWNER_HOME:-}" = "$home" ] \
     && command -v python3 >/dev/null 2>&1 \
-    && [ -f "$script" ] && [ ! -L "$script" ] || return 1
+    && [ -f "$script" ] && [ ! -L "$script" ] \
+    && [ -f "$launch_script" ] && [ ! -L "$launch_script" ] \
+    && [ -f "$home/.fm-secondmate-home" ] \
+    && [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] \
+    || return 1
   if [ -e "$record" ] || [ -L "$record" ]; then
     fm_session_authority_socket_broker_present
     return
   fi
+  launch_start=$(fm_session_process_start "$$") || return 1
+  launch_identity=$(fm_session_process_identity "$$") || return 1
+  fm_session_launch_receipt_write "$launch_receipt" "$task" "$home" \
+    "$$" "$launch_start" "$launch_identity" || return 1
+  fm_session_launch_receipt_validate "$launch_receipt" "$task" "$home" \
+    "$$" "$launch_start" "$launch_identity" || return 1
+  durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  fm_session_authority_durable_capability_present || return 1
+  IFS= read -r launch_key <&"$durable_fd" || return 1
+  [ "${#launch_key}" -ge 64 ] || return 1
+  case "$launch_key" in *[!0-9a-f]*) return 1 ;; esac
+  receipt_b64=$(openssl base64 -A < "$launch_receipt" 2>/dev/null) || return 1
+  exec {evidence_fd}< <(printf '%s\n%s\n' "$launch_key" "$receipt_b64") || return 1
   if command -v setsid >/dev/null 2>&1; then
     setsid python3 "$script" serve --state "$state" --home "$home" \
-      --checkout "$checkout" --task "$task" </dev/null >/dev/null 2>&1 &
+      --checkout "$checkout" --task "$task" \
+      --launch-evidence-fd "$evidence_fd" --launch-script "$launch_script" \
+      </dev/null >/dev/null 2>&1 &
   elif command -v perl >/dev/null 2>&1; then
     perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
       python3 "$script" serve --state "$state" --home "$home" \
-      --checkout "$checkout" --task "$task" </dev/null >/dev/null 2>&1 &
+      --checkout "$checkout" --task "$task" \
+      --launch-evidence-fd "$evidence_fd" --launch-script "$launch_script" \
+      </dev/null >/dev/null 2>&1 &
   else
+    eval "exec ${evidence_fd}<&-"
     return 1
   fi
+  eval "exec ${evidence_fd}<&-"
   pid=$!
   while [ "$attempts" -lt 100 ]; do
     fm_session_authority_socket_broker_present && return 0
