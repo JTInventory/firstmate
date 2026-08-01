@@ -1459,12 +1459,12 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
 
 # fm_backend_herdr_projection_cleanup_exact: same-process abort cleanup for a
 # projection whose create calls returned complete exact IDs.
-# It performs no lookup and never calls workspace close.
+# It uses only the exact pane IDs and never calls workspace close.
 fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-pane>
   local session=$1 task_pane=$2 seeded_pane=$3
-  [ -z "$task_pane" ] || fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" || true
+  [ -z "$task_pane" ] || fm_backend_herdr_projection_teardown_close "$session" "$task_pane" || return 1
   if [ -n "$seeded_pane" ] && [ "$seeded_pane" != "$task_pane" ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" || true
+    fm_backend_herdr_projection_teardown_close "$session" "$seeded_pane" || return 1
   fi
 }
 

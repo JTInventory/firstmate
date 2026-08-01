@@ -2070,6 +2070,31 @@ EOF
   pass "projected teardown: already-dead is idempotent; close, focus, and absence failures stay closed"
 }
 
+test_projection_cleanup_exact_propagates_surviving_pane() {
+  local dir out
+  dir="$TMP_ROOT/projection-cleanup-exact-live"
+  mkdir -p "$dir"
+  out=$(ROOT="$ROOT" LOG="$dir/close.log" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() {
+      printf "%s\n" "$2" >> "$LOG"
+    }
+    fm_backend_herdr_pane_agent_state() {
+      if [ "$2" = w9:p2 ]; then
+        printf live
+      else
+        printf dead
+      fi
+    }
+    result=0
+    fm_backend_herdr_projection_cleanup_exact fmtest w9:p2 w9:p1 || result=$?
+    printf "%s:%s\n" "$result" "$(cat "$LOG")"
+  ' 2>&1) || fail "projected exact cleanup live-pane fixture failed: $out"
+  [ "$out" = $'1:w9:p2' ] \
+    || fail "projected exact cleanup accepted a surviving pane: $out"
+  pass "projected exact cleanup propagates surviving-pane proof failure"
+}
+
 test_launch_cleanup_after_start_is_behaviorally_fail_closed() {
   local dir out
   dir="$TMP_ROOT/launch-cleanup-after-start"
@@ -3672,6 +3697,7 @@ if [ "${FM_BACKEND_HERDR_FOCUS:-}" = review-fixes ]; then
   test_projected_spawn_keeps_cleanup_armed_through_submission
   test_flat_abort_cleanup_is_locked_focus_safe_and_durable
   test_projection_teardown_requires_confirmed_absence
+  test_projection_cleanup_exact_propagates_surviving_pane
   test_launch_cleanup_after_start_is_behaviorally_fail_closed
   echo "# focused Herdr review-fix tests passed"
   exit 0
@@ -3756,6 +3782,7 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_requires_close_and_confirmed_absence
 test_projection_teardown_requires_confirmed_absence
+test_projection_cleanup_exact_propagates_surviving_pane
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle

@@ -734,6 +734,7 @@ test_spawn_abort_uses_guarded_signer_cleanup() {
     }
     SPAWN_AUTHORITY_ENROLLMENT=/tmp/enrollment-ticket
     SPAWN_AUTHORITY_ENROLLMENT_SIGNER=4242
+    SPAWN_AUTHORITY_ENROLLMENT_OWNED=1
     SPAWN_AUTHORITY_LAUNCH_RECEIPT=
     SPAWN_SLOT_CLAIM_PUBLISHED=1
     HERDR_FLAT_ABORT_UNCERTAIN=0
@@ -746,6 +747,66 @@ test_spawn_abort_uses_guarded_signer_cleanup() {
   [ "$(cat "$log")" = '/tmp/enrollment-ticket|4242' ] \
     || fail "spawn abort bypassed guarded signer cleanup: $(cat "$log")"
   pass "spawn abort routes enrollment cleanup through the guarded signer helper"
+}
+
+test_spawn_abort_preserves_prior_signer_uncertainty() {
+  local function_source dir ticket marker called out
+  dir="$TMP_ROOT/spawn-signer-prior-marker"
+  ticket="$dir/.session-authority-enrollment"
+  marker="$ticket.cleanup-uncertain"
+  called="$dir/helper-called"
+  mkdir -p "$dir"
+  : > "$marker"
+  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' \
+    "$SPAWN" | sed '$d')
+  out=$(FUNCTION_SOURCE="$function_source" TICKET="$ticket" CALLED="$called" ID=prior-marker \
+    bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_session_enrollment_signer_cleanup() { : > "$CALLED"; }
+    SPAWN_AUTHORITY_ENROLLMENT="$TICKET"
+    SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
+    SPAWN_AUTHORITY_ENROLLMENT_OWNED=0
+    SPAWN_AUTHORITY_LAUNCH_RECEIPT=
+    SPAWN_SLOT_CLAIM_PUBLISHED=1
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    SPAWN_TASK_LOCK_HELD=0
+    SPAWN_ADMISSION_LOCKS=()
+    ORCA_ABORT_CLEANUP=0
+    spawn_abort_cleanup
+  ' 2>&1) || fail "spawn abort prior-marker fixture failed: $out"
+  [ -f "$marker" ] || fail "spawn abort erased a pre-existing signer uncertainty marker"
+  [ ! -e "$called" ] || fail "spawn abort cleaned signer state it did not own"
+  pass "spawn abort preserves signer uncertainty from an earlier transaction"
+}
+
+test_projected_abort_cleanup_retains_ownership_on_live_pane() {
+  local function_source dir marker out
+  dir="$TMP_ROOT/projected-abort-live-pane"
+  marker="$dir/task.herdr-cleanup-uncertain"
+  mkdir -p "$dir"
+  function_source=$(sed -n '/^spawn_abort_retire_unpublished_endpoint()/,/^trap spawn_abort_cleanup EXIT/p' \
+    "$SPAWN" | sed '$d')
+  out=$(FUNCTION_SOURCE="$function_source" STATE="$dir" ID=task \
+    MARKER="$marker" bash -c '
+    eval "$FUNCTION_SOURCE"
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+    HERDR_PROJECTION_ABORT_SESSION=fmtest
+    HERDR_PROJECTION_ABORT_TASK_PANE=w9:p2
+    HERDR_PROJECTION_ABORT_SEEDED_PANE=w9:p1
+    HERDR_FLAT_ABORT_CLEANUP=0
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+    SPAWN_SLOT_CLAIM_PUBLISHED=0
+    SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+    SPAWN_ABORT_ENDPOINT_RETIRED=0
+    fm_backend_herdr_projection_cleanup_exact() { return 1; }
+    spawn_herdr_flat_uncertainty_record() { : > "$MARKER"; }
+    spawn_abort_retire_unpublished_endpoint && exit 31
+    [ "$SPAWN_ABORT_ENDPOINT_RETIRED" = 0 ] || exit 32
+    [ -f "$MARKER" ] || exit 33
+  ' 2>&1) || fail "projected live-pane cleanup fixture failed: $out"
+  pass "projected live-pane cleanup retains ownership and durable uncertainty"
 }
 
 # --- C. a declared worker is inert and refused -------------------------------
@@ -4376,6 +4437,8 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = review-fixes ]; then
   test_treehouse_return_records_unknown_and_committed_outcomes
   test_abort_retires_endpoint_before_returning_lease
   test_spawn_abort_uses_guarded_signer_cleanup
+  test_spawn_abort_preserves_prior_signer_uncertainty
+  test_projected_abort_cleanup_retains_ownership_on_live_pane
   test_missing_worktree_runs_all_ownership_gates_before_retaining
   test_missing_worktree_accepts_valid_return_claim_before_stamp
   test_signer_cleanup_failure_is_durable

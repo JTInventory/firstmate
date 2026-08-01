@@ -250,6 +250,7 @@ SPAWN_SLOT_CLAIM_WT=
 SPAWN_SLOT_CLAIM_HOME=
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
+SPAWN_AUTHORITY_ENROLLMENT_OWNED=0
 SPAWN_AUTHORITY_LAUNCH_RECEIPT=
 SPAWN_ABORT_ENDPOINT_RETIRED=0
 
@@ -456,6 +457,10 @@ spawn_abort_retire_unpublished_endpoint() {
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
       HERDR_PROJECTION_ABORT_CLEANUP=0
     else
+      spawn_herdr_flat_uncertainty_record \
+        "exact projected abort cleanup unconfirmed" \
+        "${HERDR_PROJECTION_ABORT_SESSION:-}:${HERDR_PROJECTION_ABORT_TASK_PANE:-}" \
+        "" "" || echo "error: could not persist Herdr projected cleanup uncertainty for $ID" >&2
       status=1
     fi
   fi
@@ -500,8 +505,7 @@ spawn_submit_final_enter() {
 
 spawn_abort_cleanup() {
   local status=$? i enrollment
-  if [ -n "$SPAWN_AUTHORITY_ENROLLMENT" ] \
-    || [ -n "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" ]; then
+  if [ "${SPAWN_AUTHORITY_ENROLLMENT_OWNED:-0}" = 1 ]; then
     enrollment=${SPAWN_AUTHORITY_ENROLLMENT:-"$STATE/$ID.session-authority-enrollment"}
     fm_session_enrollment_signer_cleanup \
       "$enrollment" "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" \
@@ -2207,6 +2211,7 @@ EOF
       exit 1
   }
   SPAWN_AUTHORITY_ENROLLMENT_SIGNER=$FM_SESSION_ENROLLMENT_SIGNER_PID
+  SPAWN_AUTHORITY_ENROLLMENT_OWNED=1
   fm_session_enrollment_ticket_wait_accepted \
     "$SPAWN_AUTHORITY_ENROLLMENT" "$SPAWN_AUTHORITY_ENROLLMENT_SIGNER" \
     "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
@@ -2245,6 +2250,7 @@ HERDR_FLAT_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 SPAWN_AUTHORITY_ENROLLMENT=
 SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
+SPAWN_AUTHORITY_ENROLLMENT_OWNED=0
 SPAWN_AUTHORITY_LAUNCH_RECEIPT=
 
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
