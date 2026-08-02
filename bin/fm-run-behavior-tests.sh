@@ -225,10 +225,26 @@ my $bind_process = sub {
   }
   return { fd => $fd, identity => $info->{identity} };
 };
+my $root_fallback_info = $process_info->($pid);
 my $root = $bind_process->($pid, $$);
-exit 125 if $root->{gone} || $root->{error};
-my %tracked = ($pid => $root);
-my $tracking_ok = 1;
+my $root_bind_failed = $root->{gone} || $root->{error};
+my %tracked;
+$tracked{$pid} = $root unless $root_bind_failed;
+my $tracking_ok = $root_bind_failed ? 0 : 1;
+my $root_fallback_state = sub {
+  my $info = $process_info->($pid);
+  if (!defined $info) {
+    my $probe = kill 0, $pid;
+    return 0 if !$probe && $!{ESRCH};
+    $tracking_ok = 0;
+    return;
+  }
+  if (!defined $root_fallback_info || $info->{identity} ne $root_fallback_info->{identity} || $info->{parent} != $$) {
+    $tracking_ok = 0;
+    return;
+  }
+  return 1;
+};
 my @signal_numbers = (HUP => 1, INT => 2, QUIT => 3, TERM => 15, KILL => 9, TSTP => 20, CONT => 18);
 my %signal_numbers = @signal_numbers;
 my $refresh_tracked = sub {
@@ -326,17 +342,21 @@ my $signal_tracked = sub {
 my $signal_group = sub {
   my $signal = shift;
   my $root_entry = $tracked{$pid};
-  return unless defined $root_entry;
-  my $alive = $pidfd_alive->($root_entry->{fd});
-  if (!defined $alive) {
-    $tracking_ok = 0;
-    return;
-  }
-  return unless $alive;
-  my $info = $process_info->($pid);
-  if (!defined $info || $info->{identity} ne $root_entry->{identity}) {
-    $tracking_ok = 0;
-    return;
+  if (!defined $root_entry) {
+    my $fallback_state = $root_fallback_state->();
+    return unless defined $fallback_state && $fallback_state;
+  } else {
+    my $alive = $pidfd_alive->($root_entry->{fd});
+    if (!defined $alive) {
+      $tracking_ok = 0;
+      return;
+    }
+    return unless $alive;
+    my $info = $process_info->($pid);
+    if (!defined $info || $info->{identity} ne $root_entry->{identity} || $info->{parent} != $$) {
+      $tracking_ok = 0;
+      return;
+    }
   }
   my $probe = kill 0, -$pid;
   if ($probe) {
@@ -347,17 +367,22 @@ my $signal_group = sub {
 };
 my $group_gone = sub {
   my $root_entry = $tracked{$pid};
-  return 1 unless defined $root_entry;
-  my $alive = $pidfd_alive->($root_entry->{fd});
-  if (!defined $alive) {
-    $tracking_ok = 0;
-    return 0;
-  }
-  return 1 unless $alive;
-  my $info = $process_info->($pid);
-  if (!defined $info || $info->{identity} ne $root_entry->{identity}) {
-    $tracking_ok = 0;
-    return 0;
+  if (!defined $root_entry) {
+    my $fallback_state = $root_fallback_state->();
+    return 1 if defined $fallback_state && !$fallback_state;
+    return 0 unless defined $fallback_state;
+  } else {
+    my $alive = $pidfd_alive->($root_entry->{fd});
+    if (!defined $alive) {
+      $tracking_ok = 0;
+      return 0;
+    }
+    return 1 unless $alive;
+    my $info = $process_info->($pid);
+    if (!defined $info || $info->{identity} ne $root_entry->{identity} || $info->{parent} != $$) {
+      $tracking_ok = 0;
+      return 0;
+    }
   }
   for (1 .. 20) {
     my $probe = kill 0, -$pid;
@@ -442,6 +467,7 @@ $suspend = sub {
 };
 $SIG{TSTP} = $suspend;
 $SIG{CONT} = sub { kill "CONT", -$pid };
+$stop->("TERM", 125) if $root_bind_failed;
 $refresh_tracked->();
 alarm $seconds;
 defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
@@ -525,23 +551,68 @@ fm_refuse_if_gate_agent() { return 0; }
 SH
 fi
 RUNNING_TEST_PIDS=()
+supervisor_start_identity() {
+  local pid=$1 stat_line stat_fields start
+  if [ -r "/proc/$pid/stat" ]; then
+    IFS= read -r stat_line <"/proc/$pid/stat" || return 1
+    stat_fields=${stat_line##*) }
+    set -- $stat_fields
+    [ "$#" -ge 20 ] || return 1
+    printf '%s:%s\n' "$pid" "${20}"
+    return 0
+  fi
+  if command -v ps >/dev/null 2>&1; then
+    start=$(ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+    start=${start#"${start%%[![:space:]]*}"}
+    start=${start%"${start##*[![:space:]]}"}
+    [ -n "$start" ] || return 1
+    printf '%s:%s\n' "$pid" "$start"
+    return 0
+  fi
+  return 1
+}
+register_running_pid() {
+  local pid=$1 identity
+  identity=$(supervisor_start_identity "$pid" 2>/dev/null || true)
+  RUNNING_TEST_PIDS+=("$pid|$identity")
+  [ -n "$identity" ]
+}
 remove_running_pid() {
-  local target=$1 pid
+  local target=$1 entry entry_pid
   local remaining=()
-  for pid in "${RUNNING_TEST_PIDS[@]}"; do
-    [ "$pid" = "$target" ] || remaining+=("$pid")
+  for entry in "${RUNNING_TEST_PIDS[@]}"; do
+    entry_pid=${entry%%|*}
+    [ "$entry_pid" = "$target" ] || remaining+=("$entry")
   done
   RUNNING_TEST_PIDS=("${remaining[@]}")
 }
+signal_running_supervisor() {
+  local entry=$1 pid expected current
+  pid=${entry%%|*}
+  expected=${entry#*|}
+  [ -n "$expected" ] || return 1
+  current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
+  if [ -z "$current" ]; then
+    kill -0 "$pid" 2>/dev/null && return 1
+    return 0
+  fi
+  [ "$current" = "$expected" ] || return 1
+  kill -TERM "$pid" 2>/dev/null || {
+    current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
+    [ -z "$current" ] && ! kill -0 "$pid" 2>/dev/null
+  }
+}
 cleanup() {
-  local cleanup_ok=1 pid still_alive
-  for pid in "${RUNNING_TEST_PIDS[@]}"; do
-    kill -TERM "$pid" 2>/dev/null || true
+  local cleanup_ok=1 entry pid current still_alive
+  for entry in "${RUNNING_TEST_PIDS[@]}"; do
+    signal_running_supervisor "$entry" || cleanup_ok=0
   done
   for ((cleanup_tick = 0; cleanup_tick < 100; cleanup_tick++)); do
     still_alive=0
-    for pid in "${RUNNING_TEST_PIDS[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then
+    for entry in "${RUNNING_TEST_PIDS[@]}"; do
+      pid=${entry%%|*}
+      current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
+      if [ -n "$current" ] || kill -0 "$pid" 2>/dev/null; then
         still_alive=1
         break
       fi
@@ -549,11 +620,14 @@ cleanup() {
     [ "$still_alive" -eq 0 ] && break
     sleep 0.05
   done
-  for pid in "${RUNNING_TEST_PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
+  for entry in "${RUNNING_TEST_PIDS[@]}"; do
+    pid=${entry%%|*}
+    current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
+    if [ -n "$current" ] || kill -0 "$pid" 2>/dev/null; then
       cleanup_ok=0
+    else
+      wait "$pid" 2>/dev/null || true
     fi
-    wait "$pid" 2>/dev/null || true
   done
   rm -rf -- "$suite_tmp"
   if [ "$cleanup_ok" -ne 1 ]; then
@@ -713,8 +787,11 @@ while [ "$index" -lt "$total" ]; do
     printf 'START: %s (TMPDIR=%s GOTMPDIR=%s)\n' "$test_path" "$job_root/tmp" "$job_root/gotmp"
     run_one "$test_path" "$job_root" "$log_path" &
     job_pid=$!
+    if ! register_running_pid "$job_pid"; then
+      printf '%s\n' 'FAIL: could not bind an active behavior-test supervisor' >&2
+      exit 125
+    fi
     pids+=("$job_pid")
-    RUNNING_TEST_PIDS+=("$job_pid")
     batch_tests+=("$test_path")
     batch_logs+=("$log_path")
     batch_roots+=("$job_root")

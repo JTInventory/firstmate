@@ -291,7 +291,7 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must establish child-subreaper containment"
   assert_contains "$source" '/proc/$parent/task/$parent/children' \
     "bounded runner must read kernel-owned child containment"
-  assert_contains "$source" 'my %tracked = ($pid => $root)' \
+  assert_contains "$source" '$tracked{$pid} = $root unless $root_bind_failed' \
     "bounded runner must bind the root PID to a process handle"
   assert_contains "$source" 'syscall($sys_pidfd_open, $pid, 0)' \
     "bounded runner must open atomic process handles"
@@ -301,8 +301,14 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must not signal tracked numeric PIDs"
   assert_contains "$source" 'waitpid(-1, WNOHANG)' \
     "bounded runner must reap adopted descendants"
-  assert_contains "$source" 'RUNNING_TEST_PIDS+=("$job_pid")' \
+  assert_contains "$source" 'RUNNING_TEST_PIDS+=("$pid|$identity")' \
     "behavior runner must register every active supervisor"
+  assert_contains "$source" 'supervisor_start_identity()' \
+    "behavior runner must derive supervisor start identities"
+  assert_contains "$source" 'signal_running_supervisor "$entry"' \
+    "behavior runner must verify supervisors before signaling"
+  assert_contains "$source" '$stop->("TERM", 125) if $root_bind_failed' \
+    "bounded runner must clean up after root binding failure"
   pass "bounded behavior tests use stable process containment"
 }
 
@@ -338,6 +344,7 @@ test_pidfd_handles_do_not_follow_stale_pids() {
   perl <<'PERL' || fail "pidfd stale-handle regression failed"
 use strict;
 use warnings;
+use Errno qw(ESRCH);
 use POSIX qw(:sys_wait_h);
 my $first = fork;
 defined $first or die "first fork failed\n";
@@ -347,6 +354,8 @@ if (!$first) {
 }
 my $fd = syscall(434, $first, 0);
 defined $fd && $fd >= 0 or die "pidfd_open failed\n";
+my $valid = syscall(424, $fd, 0, 0, 0);
+defined $valid && $valid == 0 or die "pidfd_send_signal validity check failed\n";
 kill "TERM", $first or die "first child signal failed\n";
 waitpid($first, 0) == $first or die "first child reap failed\n";
 my $second = fork;
@@ -355,8 +364,13 @@ if (!$second) {
   sleep 3;
   exit 0;
 }
+my $reused_slot = $first;
+my %registry = ($reused_slot => $fd);
+$registry{$reused_slot} = $second;
+$registry{$reused_slot} == $second or die "numeric PID slot simulation failed\n";
 my $sent = syscall(424, $fd, 15, 0, 0);
-defined $sent && $sent < 0 or die "stale pidfd signaled a replacement\n";
+my $errno = 0 + $!;
+defined $sent && $sent == -1 && $errno == ESRCH or die "stale pidfd did not return ESRCH\n";
 kill 0, $second or die "replacement child did not survive\n";
 kill "TERM", $second or die "replacement child cleanup failed\n";
 waitpid($second, 0) == $second or die "replacement child reap failed\n";
