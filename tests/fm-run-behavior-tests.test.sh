@@ -143,7 +143,8 @@ run_fixture() {
   local fixture=$1 jobs=$2 output=$3 allow_ambient=${4:-0}
   local parallel_allowlist=${5:-} timeout_seconds=${6:-} path_override=${7:-}
   local force_root_failure=${8:-0} force_supervisor_failure=${9:-}
-  local supervisor_pid_file=${10:-} root_pid_file=${11:-} fixture_output
+  local supervisor_pid_file=${10:-} root_pid_file=${11:-}
+  local drop_launch_response=${12:-} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -159,6 +160,7 @@ run_fixture() {
       FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE="$force_supervisor_failure" \
       FM_TEST_SUPERVISOR_PID_FILE="$supervisor_pid_file" \
       FM_TEST_ROOT_PID_FILE="$root_pid_file" \
+      FM_TEST_SUPERVISOR_DROP_LAUNCH_RESPONSE="$drop_launch_response" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -306,7 +308,7 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must release a verified root handle"
   assert_contains "$source" 'syswrite($release_w, "0")' \
     "bounded runner must close the root gate after binding failure"
-  assert_contains "$source" '[ -n "$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY" ]' \
+  assert_contains "$source" '[ -z "$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY" ]' \
     "behavior runner must reject unknown supervisor identity"
   assert_contains "$source" 'my %tracked = ($pid => $root)' \
     "bounded runner must bind the root PID to a process handle"
@@ -336,6 +338,14 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must not reopen supervisor pidfds during cleanup"
   assert_contains "$source" 'supervisor_handle_request "wait|$key"' \
     "behavior runner must reap supervisors through the retained handle broker"
+  assert_contains "$source" 'supervisor_handle_abort "$key"' \
+    "behavior runner must abort an unregistered launch"
+  assert_contains "$source" 'waitpid($entry->{pid}, WNOHANG)' \
+    "supervisor broker waits without blocking its control loop"
+  assert_not_contains "$source" 'waitpid($entry->{pid}, 0)' \
+    "supervisor broker must not block while waiting for a job"
+  assert_contains "$source" 'shutdown|error' \
+    "supervisor broker must fail closed when hidden cleanup cannot be proven"
   assert_contains "$source" ': >"$start_gate"' \
     "behavior runner must release the start gate only after handle acquisition"
   assert_not_contains "$source" 'run_one "$test_path"' \
@@ -431,6 +441,26 @@ test_failure_injection_refuses_before_launch() {
   kill -TERM "$sentinel_pid" 2>/dev/null || true
   wait "$sentinel_pid" 2>/dev/null || true
   pass "failure injection refuses before launching behavior tests"
+}
+
+test_launch_response_loss_aborts_hidden_supervisor() {
+  local fixture output fixture_output rc supervisor_pid_file root_pid_file
+  fixture=$(make_fixture_root launch-response-loss)
+  output="$TMP_ROOT/launch-response-loss.out"
+  supervisor_pid_file="$TMP_ROOT/launch-response-loss-supervisor.identity"
+  root_pid_file="$TMP_ROOT/launch-response-loss-root.identity"
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 \
+    "$supervisor_pid_file" "$root_pid_file" 1)
+  rc=$?
+  set -u
+  expect_code 125 "$rc" "a lost launch response must fail closed"
+  [ ! -e "$fixture_output/pass-a.started" ] \
+    || fail "a lost launch response released an unregistered behavior test"
+  [ -s "$supervisor_pid_file" ] || fail "lost launch response did not record its supervisor"
+  assert_identity_gone "$(cat "$supervisor_pid_file")"
+  [ ! -e "$root_pid_file" ] || fail "lost launch response launched its root"
+  pass "lost behavior-test launch responses abort hidden supervisors"
 }
 
 test_pidfd_handles_do_not_follow_stale_pids() {
@@ -567,6 +597,7 @@ test_each_behavior_test_has_a_hard_timeout
 test_bounded_runner_uses_stable_containment
 test_fast_escape_after_test_exit_is_rejected
 test_failure_injection_refuses_before_launch
+test_launch_response_loss_aborts_hidden_supervisor
 test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial

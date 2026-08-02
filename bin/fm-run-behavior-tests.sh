@@ -3,6 +3,8 @@
 #
 # FM_TEST_JOBS controls the number of test processes in flight. Values above one
 # require FM_TEST_PARALLEL_ALLOWLIST to name isolated tests explicitly.
+# This runner is intentionally Linux-only: it requires pidfds and a child
+# subreaper; unsupported systems and architectures fail closed with exit 125.
 
 set -u
 
@@ -494,8 +496,8 @@ exit($status >> 8);
 '
 FM_TEST_SUPERVISOR_HANDLE_PERL='
 use Config;
-use Errno qw(ESRCH);
-use POSIX ();
+use Errno qw(ECHILD EINTR ESRCH);
+use POSIX qw(:sys_wait_h);
 my ($input_path, $output_path) = @ARGV;
 my $arch = $Config{archname} // "";
 my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
@@ -542,6 +544,28 @@ my $probe = sub {
   return 1 if defined $result && $result == 0;
   return 0 if defined $result && $result < 0 && $!{ESRCH};
   return;
+};
+my $reap_entry = sub {
+  my ($entry) = @_;
+  for (1 .. 50) {
+    my $waited = waitpid($entry->{pid}, WNOHANG);
+    return 1 if $waited == $entry->{pid};
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  return 0;
+};
+my $terminate_entry = sub {
+  my ($entry) = @_;
+  my $term = syscall($sys_pidfd_send_signal, $entry->{fd}, 15, 0, 0);
+  my $term_ok = defined $term && ($term == 0 || ($term < 0 && $!{ESRCH}));
+  return 0 unless $term_ok;
+  return 1 if $reap_entry->($entry);
+  my $kill = syscall($sys_pidfd_send_signal, $entry->{fd}, 9, 0, 0);
+  my $kill_ok = defined $kill && ($kill == 0 || ($kill < 0 && $!{ESRCH}));
+  return 0 unless $kill_ok;
+  return $reap_entry->($entry);
 };
 while (my $line = <$input>) {
   chomp $line;
@@ -605,7 +629,24 @@ while (my $line = <$input>) {
       next;
     }
     $handles{$key} = { fd => $fd, pid => $pid };
+    next if $ENV{FM_TEST_SUPERVISOR_DROP_LAUNCH_RESPONSE};
     print "$key|registered|$pid|$current\n";
+    next;
+  }
+  if ($command eq "abort" && @parts == 1) {
+    my $key = $parts[0];
+    my $entry = $handles{$key};
+    if (!defined $entry) {
+      print "$key|gone\n";
+      next;
+    }
+    if ($terminate_entry->($entry)) {
+      $close_handle->($entry);
+      delete $handles{$key};
+      print "$key|aborted\n";
+    } else {
+      print "$key|error\n";
+    }
     next;
   }
   if ($command eq "wait" && @parts == 1) {
@@ -616,7 +657,11 @@ while (my $line = <$input>) {
       next;
     }
     if (!defined $entry->{status}) {
-      my $waited = waitpid($entry->{pid}, 0);
+      my $waited = waitpid($entry->{pid}, WNOHANG);
+      if ($waited == 0) {
+        print "$key|running\n";
+        next;
+      }
       if ($waited < 0) {
         print "$key|error\n";
         next;
@@ -668,7 +713,17 @@ while (my $line = <$input>) {
     next;
   }
   if ($command eq "shutdown" && !@parts) {
-    print "shutdown|done\n";
+    my $shutdown_ok = 1;
+    for my $key (keys %handles) {
+      my $entry = $handles{$key};
+      if ($terminate_entry->($entry)) {
+        $close_handle->($entry);
+        delete $handles{$key};
+      } else {
+        $shutdown_ok = 0;
+      }
+    }
+    print $shutdown_ok ? "shutdown|done\n" : "shutdown|error\n";
     last;
   }
   print "error|malformed\n";
@@ -756,6 +811,11 @@ supervisor_handle_request() {
   [ "$SUPERVISOR_HANDLE_READY" -eq 1 ] || return 1
   SUPERVISOR_HANDLE_RESPONSE=
   printf '%s\n' "$1" >&"$SUPERVISOR_HANDLE_WRITE" || return 1
+  supervisor_handle_read_response
+}
+supervisor_handle_read_response() {
+  [ "$SUPERVISOR_HANDLE_READY" -eq 1 ] || return 1
+  SUPERVISOR_HANDLE_RESPONSE=
   IFS= read -r -t 2 SUPERVISOR_HANDLE_RESPONSE <&"$SUPERVISOR_HANDLE_READ" || return 1
 }
 supervisor_handle_signal() {
@@ -765,6 +825,19 @@ supervisor_handle_signal() {
     "$key|signaled"|"$key|gone") return 0 ;;
     *) return 1 ;;
   esac
+}
+supervisor_handle_abort() {
+  local key=$1
+  local abort_tick
+  [ "$SUPERVISOR_HANDLE_READY" -eq 1 ] || return 1
+  printf '%s\n' "abort|$key" >&"$SUPERVISOR_HANDLE_WRITE" || return 1
+  for ((abort_tick = 0; abort_tick < 3; abort_tick++)); do
+    supervisor_handle_read_response || return 1
+    case "$SUPERVISOR_HANDLE_RESPONSE" in
+      "$key|aborted"|"$key|gone") return 0 ;;
+    esac
+  done
+  return 1
 }
 supervisor_handle_state() {
   local key=$1
@@ -793,27 +866,39 @@ supervisor_handle_launch() {
   printf -v request 'launch\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
     "$key" "$runner" "$test_path" "$job_root" "$log_path" "$start_gate" \
     "$abort_gate" "$test_root" "$timeout" "$bounded_script"
-  supervisor_handle_request "$request" || return 1
+  if ! supervisor_handle_request "$request"; then
+    supervisor_handle_abort "$key" || true
+    return 1
+  fi
   IFS='|' read -r response_key response_state SUPERVISOR_HANDLE_LAUNCHED_PID \
     SUPERVISOR_HANDLE_LAUNCHED_IDENTITY <<<"$SUPERVISOR_HANDLE_RESPONSE"
-  [ "$response_key" = "$key" ] || return 1
-  [ "$response_state" = registered ] || return 1
-  [[ "$SUPERVISOR_HANDLE_LAUNCHED_PID" =~ ^[0-9]+$ ]] || return 1
-  [ -n "$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY" ]
+  if [ "$response_key" != "$key" ] || [ "$response_state" != registered ] || \
+    ! [[ "$SUPERVISOR_HANDLE_LAUNCHED_PID" =~ ^[0-9]+$ ]] || \
+    [ -z "$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY" ]; then
+    supervisor_handle_abort "$key" || true
+    return 1
+  fi
 }
 SUPERVISOR_HANDLE_EXIT_STATUS=
 supervisor_handle_wait() {
   local key=$1 response_key response_state raw_status
-  supervisor_handle_request "wait|$key" || return 1
-  IFS='|' read -r response_key response_state raw_status <<<"$SUPERVISOR_HANDLE_RESPONSE"
-  [ "$response_key" = "$key" ] || return 1
-  [ "$response_state" = exit ] || return 1
-  [[ "$raw_status" =~ ^[0-9]+$ ]] || return 1
-  if [ $((raw_status & 127)) -ne 0 ]; then
-    SUPERVISOR_HANDLE_EXIT_STATUS=$((128 + (raw_status & 127)))
-  else
-    SUPERVISOR_HANDLE_EXIT_STATUS=$((raw_status >> 8))
-  fi
+  while :; do
+    supervisor_handle_request "wait|$key" || return 1
+    IFS='|' read -r response_key response_state raw_status <<<"$SUPERVISOR_HANDLE_RESPONSE"
+    [ "$response_key" = "$key" ] || return 1
+    if [ "$response_state" = running ]; then
+      sleep 0.02
+      continue
+    fi
+    [ "$response_state" = exit ] || return 1
+    [[ "$raw_status" =~ ^[0-9]+$ ]] || return 1
+    if [ $((raw_status & 127)) -ne 0 ]; then
+      SUPERVISOR_HANDLE_EXIT_STATUS=$((128 + (raw_status & 127)))
+    else
+      SUPERVISOR_HANDLE_EXIT_STATUS=$((raw_status >> 8))
+    fi
+    return 0
+  done
 }
 remove_running_pid() {
   local target=$1 entry entry_key

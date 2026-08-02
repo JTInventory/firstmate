@@ -19,6 +19,7 @@ Each file also starts with a short header comment.
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
 | `fm-herdr-ci-cleanup.sh` | Snapshot and tear down only job-owned `fm-lab-*` sessions in the Herdr CI lane       |
 | `fm-test-run.sh`         | Serial behavior-test runner: selection, timing markers, family totals, JSON artifact |
+| `fm-run-behavior-tests.sh` | Linux-only behavior-test runner with pidfd containment; unsupported systems fail closed with exit 125 |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
@@ -82,3 +83,9 @@ Each file also starts with a short header comment.
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+
+The local `fm-run-behavior-tests.sh` gate is intentionally Linux-only. Its
+supervisor broker requires Linux pidfds and child-subreaper support to retain
+atomic process handles and prove descendant cleanup. macOS and unsupported
+architectures are not fallback targets for this runner; they refuse with exit
+125 until a separate containment implementation exists.
