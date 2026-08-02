@@ -144,7 +144,8 @@ run_fixture() {
   local parallel_allowlist=${5:-} timeout_seconds=${6:-} path_override=${7:-}
   local force_root_failure=${8:-0} force_supervisor_failure=${9:-}
   local supervisor_pid_file=${10:-} root_pid_file=${11:-}
-  local drop_launch_response=${12:-} block_fifo=${13:-} broker_pid_file=${14:-} fixture_output
+  local drop_launch_response=${12:-} block_fifo=${13:-} broker_pid_file=${14:-}
+  local guard_pid_file=${15:-} break_control=${16:-0} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -163,6 +164,8 @@ run_fixture() {
       FM_TEST_SUPERVISOR_DROP_LAUNCH_RESPONSE="$drop_launch_response" \
       FM_TEST_SUPERVISOR_BLOCK_FIFO="$block_fifo" \
       FM_TEST_SUPERVISOR_BROKER_PID_FILE="$broker_pid_file" \
+      FM_TEST_SUPERVISOR_GUARD_PID_FILE="$guard_pid_file" \
+      FM_TEST_SUPERVISOR_BREAK_CONTROL="$break_control" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -350,6 +353,12 @@ test_bounded_runner_uses_stable_containment() {
     "supervisor broker must fail closed when hidden cleanup cannot be proven"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PERL' \
     "behavior runner must retain a broker pidfd guard"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_WORKER_PERL' \
+    "behavior runner must isolate the guard worker"
+  assert_contains "$source" 'my $guard_fd = syscall($sys_pidfd_open, $pid, 0)' \
+    "broker guard must retain the outer guard pidfd"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PID_FILE' \
+    "broker guard regression must record its identity"
   assert_contains "$source" 'supervisor_handle_close_channels' \
     "behavior runner must close broker channels on teardown failure"
   assert_contains "$source" 'supervisor_handle_force_broker_teardown' \
@@ -476,22 +485,37 @@ test_launch_response_loss_aborts_hidden_supervisor() {
 }
 
 test_blocked_broker_fifo_teardown_is_bounded() {
-  local fixture output fixture_output rc broker_pid_file start_seconds elapsed
+  local fixture output fixture_output rc broker_pid_file guard_pid_file supervisor_pid_file
+  local sentinel_marker sentinel_pid start_seconds elapsed
   fixture=$(make_fixture_root blocked-broker-fifo)
   output="$TMP_ROOT/blocked-broker-fifo.out"
+  supervisor_pid_file="$TMP_ROOT/blocked-broker-fifo-supervisor.identity"
+  guard_pid_file="$TMP_ROOT/blocked-broker-fifo-guard.identity"
   broker_pid_file="$TMP_ROOT/blocked-broker-fifo-broker.identity"
+  sentinel_marker="$TMP_ROOT/blocked-broker-fifo-sentinel-term"
+  (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
+  sentinel_pid=$!
   start_seconds=$SECONDS
   set +e
-  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 '' '' '' 1 "$broker_pid_file")
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 \
+    "$supervisor_pid_file" '' '' 1 "$broker_pid_file" "$guard_pid_file" 1)
   rc=$?
   set -u
   elapsed=$((SECONDS - start_seconds))
   expect_code 125 "$rc" "a broker blocked on its FIFO must fail closed"
   [ "$elapsed" -lt 10 ] || fail "blocked broker teardown exceeded its hard bound"
+  [ -s "$supervisor_pid_file" ] || fail "blocked broker teardown did not record its supervisor"
+  assert_identity_gone "$(cat "$supervisor_pid_file")"
+  [ -s "$guard_pid_file" ] || fail "blocked broker teardown did not record its guard"
+  assert_identity_gone "$(cat "$guard_pid_file")"
   [ -s "$broker_pid_file" ] || fail "blocked broker teardown did not record its broker"
   assert_identity_gone "$(cat "$broker_pid_file")"
   [ ! -e "$fixture_output/pass-a.started" ] \
     || fail "a blocked broker released a behavior test"
+  [ ! -e "$sentinel_marker" ] \
+    || fail "blocked broker teardown signaled an unrelated process"
+  kill -TERM "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
   pass "blocked broker FIFO teardown is bounded and reaped"
 }
 
