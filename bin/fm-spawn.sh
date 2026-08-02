@@ -109,9 +109,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
-# shellcheck source=bin/fm-worker-isolation-lib.sh
+# ShellCheck lints shared libraries in their own batches; keep spawn's
+# bootstrap-only source edges opaque so this large entrypoint stays bounded.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "spawn" || exit 1
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -123,23 +126,23 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tool-path-lib.sh
 . "$SCRIPT_DIR/fm-tool-path-lib.sh"
 fm_normalize_tool_path
-# shellcheck source=bin/fm-ff-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-config-inherit-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-cbm-lib.sh
 . "$SCRIPT_DIR/fm-cbm-lib.sh"
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-task-label-lib.sh
 . "$SCRIPT_DIR/fm-task-label-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-agent-cwd-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-agent-cwd-lib.sh"
-# shellcheck source=bin/fm-slot-owner-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
@@ -1701,7 +1704,6 @@ if [ "$KIND" = secondmate ]; then
     exit 1
   fi
 fi
-SPAWN_SETTLE_SOURCE=
 SPAWN_SETTLE_PATH=
 spawn_treehouse_get_bounded() {
   local seconds=${FM_SPAWN_TREEHOUSE_GET_TIMEOUT_SECS:-60}
@@ -1727,6 +1729,7 @@ spawn_treehouse_get_bounded() {
   fi
 }
 
+# shellcheck disable=SC2034 # failure state is observed by teardown/test callers.
 spawn_acquire_treehouse_lease() {
   local result status
   SPAWN_TREEHOUSE_LEASE_UNKNOWN=0
@@ -1760,17 +1763,14 @@ spawn_acquire_treehouse_lease() {
 
 spawn_settle_path() {  # <target>
   local record path
-  SPAWN_SETTLE_SOURCE=
   SPAWN_SETTLE_PATH=
   record=$(fm_agent_cwd_verdict "" "" "" "$BACKEND" "$1")
   if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
-    SPAWN_SETTLE_SOURCE=proc
     SPAWN_SETTLE_PATH=$(fm_agent_verdict_field "$record" cwd)
     return 0
   fi
   path=$(fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true)
   if [ -n "$path" ]; then
-    SPAWN_SETTLE_SOURCE=provider
     SPAWN_SETTLE_PATH=$path
   fi
 }
@@ -1787,12 +1787,10 @@ if [ "$KIND" != secondmate ]; then
   # where no process id is available.
   lease_real=$(real_path_or_raw "$WT")
   lease_settled=0
-  WT_CANDIDATE=
   for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
     spawn_settle_path "$WID"
     p=$SPAWN_SETTLE_PATH
     if [ -n "$p" ]; then
-      WT_CANDIDATE="$p"
       if [ "$(real_path_or_raw "$p")" = "$lease_real" ]; then
         lease_settled=1
         break

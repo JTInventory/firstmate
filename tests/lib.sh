@@ -155,6 +155,7 @@ fm_test_session_authority_fd() {
   inherited_fd=${FM_TEST_AUTHORITY_FD:-}
   inherited_durable_fd=${FM_TEST_DURABLE_AUTHORITY_FD:-}
   if [ -n "$inherited_fd" ] && [ -n "$inherited_durable_fd" ]; then
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-session-lock-lib.sh"
     FM_SESSION_AUTHORITY_FD=$inherited_fd
     FM_SESSION_AUTHORITY_DURABLE_FD=$inherited_durable_fd
@@ -169,6 +170,7 @@ fm_test_session_authority_fd() {
     FM_SESSION_AUTHORITY_FD=9
     FM_SESSION_AUTHORITY_DURABLE_FD=18
     export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-session-lock-lib.sh"
     fm_session_authority_capability_present \
       && fm_session_authority_durable_capability_present || {
@@ -183,6 +185,7 @@ fm_test_session_authority_fd() {
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
   export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
 }
 

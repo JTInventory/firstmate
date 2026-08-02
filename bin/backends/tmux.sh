@@ -2,7 +2,7 @@
 # tmux session-provider adapter. This file is sourced by fm-backend.sh.
 # The command shapes intentionally match the pre-abstraction JT scripts.
 
-# shellcheck source=bin/fm-tmux-lib.sh
+# shellcheck source=/dev/null
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 
 fm_backend_tmux_resolve_bare_selector() {  # <name>

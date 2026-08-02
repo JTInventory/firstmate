@@ -19,17 +19,20 @@
 #     re-processed as one of its own secondmates.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=tests/secondmate-helpers.sh
+# shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 UPDATE_IMPL="$ROOT/bin/fm-update.sh"
-# shellcheck source=bin/fm-ff-lib.sh
+# shellcheck source=/dev/null
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# shellcheck source=/dev/null
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-secondmate-delivery-lib.sh
+# shellcheck source=/dev/null
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-secondmate-delivery-lib.sh"
 
 # Deterministic, isolated git identity for fixture commits.
@@ -46,6 +49,7 @@ if [ "${FM_UPDATE_FOCUS:-}" = exact-pane-delivery ] \
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
   export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
   if ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
     || ! fm_session_descriptor_channel_isolated \
@@ -125,6 +129,7 @@ new_world() {
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
   local owner
   owner=$(fm_session_lock_owner)
@@ -184,6 +189,7 @@ run_under_replacement_broker() {
     old_live=$3
     old_durable=$4
     shift 4
+    # shellcheck source=/dev/null
     . "$root/bin/fm-session-lock-lib.sh"
     "$root/bin/fm-lock.sh" >/dev/null || exit 1
     new_live=$(printf rotation-proof | fm_session_authority_hmac) || exit 1
@@ -225,6 +231,7 @@ STATE=${FM_STATE_OVERRIDE:?}
 HOME_DIR=${FM_HOME:?}
 FM_WAKE_LIB_READ_ONLY=1
 export FM_WAKE_LIB_READ_ONLY
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-wake-lib.sh"
 locks=()
 release_predecessor_locks() {
@@ -257,6 +264,7 @@ SH
   git -C "$w/seed" push -q origin main
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
   fm_session_lock_owner > "$w/home/state/.lock"
   printf '%s\n' "$w/main" > "$w/home/state/.primary-checkout"
@@ -575,6 +583,7 @@ test_replays_interrupted_reread_and_nudge_obligations() {
 test_first_protocol_upgrade_requires_installed_updater_pass() {
   local w fakebin watcher arm out rc owner
   w=$(new_protocol_migration_world t13)
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
   owner=$(fm_session_lock_owner)
   printf '%s\n' "$owner" > "$w/home/state/.lock"
@@ -837,6 +846,7 @@ test_update_waits_for_legacy_admission_and_task_locks() {
 
   for lock in "$w/home/state/.spawn-admission.lock" "$w/home/state/.spawn-old-task.lock"; do
     (
+      # shellcheck source=/dev/null
       . "$ROOT/bin/fm-wake-lib.sh"
       fm_lock_try_acquire "$lock" || exit 1
       touch "$w/lock-ready"
@@ -963,6 +973,7 @@ test_lifecycle_identity_uses_command_position_and_fail_closed_scope() {
   rc=0
   (
     FM_STATE_OVERRIDE="$w/helper-state"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     ps() {
       case "$*" in
@@ -981,6 +992,7 @@ test_lifecycle_identity_uses_command_position_and_fail_closed_scope() {
 while :; do sleep 1; done
 SH
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_script_from_argv bash --norc "$script"
     [ "$FM_LIFECYCLE_SCRIPT" = "$script" ]
@@ -1015,6 +1027,7 @@ SH
 
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_process_environment() {
       FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
@@ -1025,6 +1038,7 @@ FM_STATE_OVERRIDE=$w/home/state"
   ) || fail "exact target-state evidence was ignored when home evidence differed"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_process_environment() {
       FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
@@ -1036,6 +1050,7 @@ FM_STATE_OVERRIDE=$w/other-home/state"
 
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_process_environment() {
       FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
@@ -1050,6 +1065,7 @@ FM_STATE_OVERRIDE=$w/home/state"
     || fail "complete authoritative foreign lifecycle markers did not override legacy target evidence"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_process_environment() {
       FM_LIFECYCLE_ENVIRONMENT_SOURCE=proc
@@ -1062,6 +1078,7 @@ FM_ROOT_OVERRIDE=$w/home"
     || fail "FM_ROOT_OVERRIDE replaced an explicit foreign FM_HOME during lifecycle scope"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() {
       FM_LIFECYCLE_ARGV=(bash --norc "$script")
@@ -1073,6 +1090,7 @@ FM_ROOT_OVERRIDE=$w/home"
 
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() {
       FM_LIFECYCLE_ARGV=(fm-spawn.sh)
@@ -1083,6 +1101,7 @@ FM_ROOT_OVERRIDE=$w/home"
   [ "$rc" -eq 3 ] || fail "argv0 lifecycle spoof was not rejected by executable identity"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() {
       FM_LIFECYCLE_ARGV=(masked --norc "$script")
@@ -1093,6 +1112,7 @@ FM_ROOT_OVERRIDE=$w/home"
   ) || fail "rewritten argv0 hid a lifecycle script from executable reconciliation"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 1; }
     fm_lifecycle_process_live() { return 0; }
@@ -1106,6 +1126,7 @@ FM_ROOT_OVERRIDE=$w/home"
   ) || fail "boundary-preserving fallback argv was not parsed by script position"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 1; }
     fm_lifecycle_process_live() { return 0; }
@@ -1118,6 +1139,7 @@ FM_ROOT_OVERRIDE=$w/home"
   ) || fail "fallback argv invented lifecycle identity from an arbitrary argument"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 2; }
     fm_lifecycle_process_live() { return 1; }
@@ -1125,6 +1147,7 @@ FM_ROOT_OVERRIDE=$w/home"
   ) || fail "a vanished process was treated as live identity uncertainty"
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 2; }
     fm_lifecycle_process_live() { return 0; }
@@ -1134,6 +1157,7 @@ FM_ROOT_OVERRIDE=$w/home"
 
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 2; }
     fm_lifecycle_process_live() { return 0; }
@@ -1144,6 +1168,7 @@ FM_ROOT_OVERRIDE=$w/home"
   [ "$rc" -eq 2 ] || fail "unresolved live process identity did not remain fail-closed"
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_read_proc_argv() { return 1; }
     fm_lifecycle_process_live() { return 0; }
@@ -1153,15 +1178,19 @@ FM_ROOT_OVERRIDE=$w/home"
   ) || rc=$?
   [ "$rc" -eq 2 ] || fail "missing proc argv and unavailable fallback were classified as unrelated"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_identity_result_busy 2
   ) || fail "live identity uncertainty was skipped by the lifecycle census"
 
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lifecycle_process_environment() {
-      FM_LIFECYCLE_ENVIRONMENT_SOURCE=ps
+      # shellcheck disable=SC2034 # consumed by the scope helper under test.
+      FM_LIFECYCLE_ENVIRONMENT_SOURCE='ps'
+      # shellcheck disable=SC2034 # consumed by the scope helper under test.
       FM_LIFECYCLE_ENVIRONMENT="bash $script FM_HOME=$w/home with space"
     }
     fm_spawn_legacy_process_matches_scope \
@@ -1176,6 +1205,7 @@ test_lifecycle_quiescence_clamps_timing_overrides() {
   w=$(new_world t25)
   log="$w/quiescence-sleeps"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_spawn_legacy_lifecycle_process_busy() { return 1; }
     sleep() { printf '%s\n' "$1" >> "$log"; }
@@ -1197,6 +1227,7 @@ test_secondmate_fast_forward_requires_lock_capability() {
   rc=0
   out=$(
     FM_ROOT="$w/main" FM_HOME="$w/home" bash -c '
+      # shellcheck source=/dev/null
       . "$1/bin/fm-ff-lib.sh"
       unset -f fm_ff_target_lock_acquire fm_ff_target_lock_release
       process_secondmate sm1 "$2" "" origin no
@@ -1212,6 +1243,7 @@ test_fallback_argv_provider_fails_closed_without_boundaries() {
   local rc script
   script="/tmp/fm-spawn.sh"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     sysctl() {
       printf '\003\000\000\000/usr/bin/bash\000\000bash\000%s\000later argument\000' "$script"
@@ -1223,6 +1255,7 @@ test_fallback_argv_provider_fails_closed_without_boundaries() {
   ) || fail "kern.procargs2 fallback did not preserve argv boundaries"
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     sysctl() { return 1; }
     fm_lifecycle_read_fallback_argv 999
@@ -1238,13 +1271,17 @@ test_secondmate_lock_covers_recovery_callback() {
   printf 'sm1\n' > "$w/sm1/.fm-secondmate-home"
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-ff-lib.sh"
+    # shellcheck disable=SC2034 # consumed by the fast-forward helper under test.
     FM_ROOT="$w/main"
     FM_HOME="$w/home"
+    # shellcheck disable=SC2034 # consumed by the fast-forward helper under test.
     STATE="$w/home/state"
     lock_held=0
     resolve_path() { cd "$1" && pwd -P; }
     validate_secondmate_home() {
+      # shellcheck disable=SC2034 # consumed by the fast-forward helper under test.
       VALIDATED_HOME=$(cd "$2" && pwd -P)
       return 0
     }
@@ -1253,8 +1290,11 @@ test_secondmate_lock_covers_recovery_callback() {
     fm_ff_target_lock_release() { lock_held=0; }
     ff_target() {
       [ "$lock_held" -eq 1 ] || return 1
+      # shellcheck disable=SC2034 # consumed by the fast-forward helper under test.
       FF_STATUS=updated
+      # shellcheck disable=SC2034 # consumed by the fast-forward helper under test.
       FF_INSTR=instructions
+      # shellcheck disable=SC2034 # consumed by the fast-forward helper under test.
       FF_OBLIGATION_GENERATION=generation
     }
     fm_update_obligation_pending() { return 1; }
@@ -1279,9 +1319,11 @@ test_locked_secondmate_action_revalidates_after_acquire() {
   callback_file="$w/callback-ran"
   rc=0
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-ff-lib.sh"
     validate_secondmate_home() {
       [ "$(cat "$2/.fm-secondmate-home" 2>/dev/null || true)" = "$1" ] || return 1
+      # shellcheck disable=SC2034 # consumed by the fast-forward helper under test.
       VALIDATED_HOME=$(cd "$2" && pwd -P)
     }
     fm_ff_target_lock_acquire() {
@@ -1303,6 +1345,7 @@ test_secondmate_acknowledgement_respects_lifecycle_lock() {
   generation=$(git -C "$w/sm1" rev-parse HEAD)
   mkdir -p "$w/sm1/state"
   printf 'generation=%s\n' "$generation" > "$w/sm1/state/.watch-protocol-reread-required"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-wake-lib.sh"
   while IFS= read -r lock; do
     mkdir -p "$(dirname "$lock")"
@@ -1494,6 +1537,7 @@ test_secondmate_delivery_uses_recorded_exact_tmux_pane() {
 printf '%s|%s|%s\n' \
   "${FM_SEND_BOUND_BACKEND:-}" "${FM_SEND_BOUND_TARGET:-}" "$1" \
   > "$FM_TEST_SEND_LOG"
+# shellcheck source=/dev/null
 . "$FM_TEST_PENDING_LIB"
 fm_pending_reply_confirm_delivery \
   "$FM_STATE_OVERRIDE" "$FM_PENDING_REPLY_EXISTING_CORR"
@@ -1722,6 +1766,7 @@ SH
       FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
       FM_STATE_OVERRIDE="$w/home/state" \
       run_under_replacement_broker '
+        # shellcheck source=/dev/null
         . "$1/bin/fm-backend.sh"
         fixture_root=$2
         fixture_pid=$3

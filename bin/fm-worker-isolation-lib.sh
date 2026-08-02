@@ -45,6 +45,7 @@ FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DAT
 FM_WORKER_ISOLATION_LIFECYCLE_VARS="FM_LIFECYCLE_HOME FM_LIFECYCLE_STATE FM_LIFECYCLE_SCRIPT FM_LOCK_PROCESS_TOKEN"
 FM_WORKER_ISOLATION_AUTHORITY_VARS="FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID FM_TEST_SESSION_LOCK_STABLE_OWNER"
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
 . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-procargs-lib.sh"
 
 fm_worker_shell_quote() {  # <text>
@@ -72,7 +73,7 @@ fm_worker_treehouse_lease_command() {
 # unknown role, an empty id, or a non-absolute home rather than emitting a
 # partial prefix that would leave the child inheriting a home.
 fm_worker_launch_env_prefix() {
-  local role=$1 id=$2 home=$3 var authority_fd closed_fds= strip_authority=0
+  local role=$1 id=$2 home=$3 var authority_fd closed_fds='' strip_authority=0
   local current_home target_home
   case "$role" in
     crewmate|secondmate) ;;
@@ -239,6 +240,7 @@ fm_worker_test_authority_capability_present() {
   local live_fd durable_fd key live_identity test_live_identity
   [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
+  # shellcheck source=/dev/null
   . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
   fm_session_test_authority_broker_present || return 1
   live_fd=${FM_SESSION_AUTHORITY_FD:-${FM_TEST_AUTHORITY_FD:-}}
@@ -381,6 +383,7 @@ fm_worker_primary_bootstrap_matches() {
   [ "$branch" = "$default" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
     || return 1
+  # shellcheck source=/dev/null
   . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
   common=$(git -C "$root_real" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
     || return 1
@@ -407,7 +410,7 @@ fm_worker_primary_bootstrap_matches() {
 fm_worker_primary_authority_matches_unlocked() {
   local operation=${1:-} root home root_real home_real cwd branch default ref
   local pid ppid env binding lock authority old marker authority_state binding_bound=0
-  local test_tmp test_state test_bind_state= legacy_test_state root_top
+  local test_tmp test_state test_bind_state='' legacy_test_state root_top
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -453,6 +456,7 @@ fm_worker_primary_authority_matches_unlocked() {
       && [ ! -L "$legacy_test_state/.lock" ] \
       && [ ! -e "$legacy_test_state/.session-authority" ] \
       && [ ! -L "$legacy_test_state/.session-authority" ]; then
+      # shellcheck source=/dev/null
       . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
       fm_session_test_authority_broker_present
       return
@@ -499,6 +503,7 @@ fm_worker_primary_authority_matches_unlocked() {
   [ "$branch" = "$default" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] && [ ! -L "$root_real/.fm-secondmate-home" ] \
     || return 1
+  # shellcheck source=/dev/null
   . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
   binding="$home_real/state/.primary-checkout"
   lock="$home_real/state/.lock"

@@ -3,13 +3,13 @@
 # private atomic artifacts, non-executing migration, and teardown cleanup.
 set -u
 
-# shellcheck source=tests/lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
-# shellcheck source=bin/fm-x-lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-x-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-check-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
@@ -814,7 +814,6 @@ test_guarded_replacement_receipt_crash_recovery() {
     write_task_meta "$dir"
     FM_TEST_GH_HEAD=$prior run_check_entry "$dir" task-a https://github.com/o/r/pull/37 \
       >/dev/null 2>/dev/null || fail "$boundary could not seed prior generation"
-    FM_PR_POLL_TEMPLATE=$POLL
     fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
       || fail "$boundary could not capture prior generation"
     fm_pr_poll_replacement_publish "$state" task-a "$prior" "$current" \

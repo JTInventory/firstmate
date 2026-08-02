@@ -77,10 +77,10 @@ fm_ff_target_lock_acquire() {
 }
 
 fm_update_fleet_lock_acquire() {
-  local id home state_dir lock meta generation provider
+  local id home state_dir lock meta generation
   local candidates=""
   candidates="$STATE|$FM_HOME"
-  while IFS='|' read -r id home _ meta generation provider; do
+  while IFS='|' read -r id home _ meta generation _provider; do
     [ -n "$id" ] || continue
     validate_secondmate_home "$id" "$home" || return 1
     home=$VALIDATED_HOME
@@ -207,8 +207,8 @@ deliver_secondmate_nudge_locked() {
 }
 
 deliver_secondmate_nudge() {
-  local target=$1 generation=$2 id= record_id home= candidate window meta
-  local endpoint_generation= record_generation provider_identity= record_provider matches=0
+  local target=$1 generation=$2 id='' record_id='' home='' candidate window meta
+  local endpoint_generation='' record_generation provider_identity='' record_provider matches=0
   while IFS='|' read -r record_id candidate window meta record_generation record_provider; do
     [ "$window" = "$target" ] || continue
     matches=$((matches + 1))

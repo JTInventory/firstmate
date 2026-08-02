@@ -7,7 +7,7 @@
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
 set -u
 
-# shellcheck source=tests/secondmate-helpers.sh
+# shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
@@ -19,6 +19,7 @@ hold_test_task_lock() {
   local state=$1 id=$2 ready=$3
   (
     exec env FM_STATE_OVERRIDE="$state" bash -c '
+      # shellcheck source=/dev/null
       . "$1/bin/fm-wake-lib.sh"
       lock=$2
       fm_lock_try_acquire "$lock" || exit 1
@@ -1084,7 +1085,9 @@ test_secondmate_spawn_allows_plain_clone_home_without_stamp() {
     || fail "successful plain-clone spawn left its task lock held"
   [ ! -e "$home/state/.locks/spawn-admission.lock" ] \
     || fail "successful plain-clone spawn left its admission lock held"
-  if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  if (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$subhome" task >/dev/null 2>&1 ); then
     fail "plain-clone secondmate spawn wrote a pooled-slot stamp"
   fi
@@ -1141,7 +1144,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$subhome" domain "$home" ) \
     || fail "could not stamp the secondmate teardown fixture"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
@@ -1207,7 +1212,9 @@ test_secondmate_teardown_refuses_mismatched_lease_holder() {
   [ -d "$subhome" ] && [ -e "$home/state/domain.meta" ] \
     || fail "missing ownership stamp changed secondmate lifecycle state"
 
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$subhome" domain "$home" ) \
     || fail "could not stamp the conditional-holder fixture"
   printf 'replacement\n' > "$lease"
@@ -1391,7 +1398,9 @@ test_secondmate_teardown_blocks_child_publication_during_census() {
     "window=firstmate:fm-blocker" "worktree=" "project=" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=unknown"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$subhome" domain "$home" ) \
     || fail "could not stamp the child-census fixture"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-admission-fake")
@@ -1489,7 +1498,9 @@ yolo=off
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
   # shellcheck source=/dev/null
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$subhome" domain "$home" ) \
     || fail "the contested secondmate home fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-contested-fake")
@@ -1518,7 +1529,9 @@ EOF
   # A refused operation mutates nothing: the ownership stamp is the rule-2
   # evidence that stops a stale sibling disposing of this still-owned home.
   # shellcheck source=/dev/null
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$(
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$subhome" task || printf 'none' )
   [ "$stamp" = domain ] \
     || fail "a refused secondmate teardown erased its own ownership stamp: $stamp"
@@ -1575,7 +1588,9 @@ EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$primary_home/data/secondmates.md"
   # Stamped the way each home's own spawn stamps it: the child by the parent
   # secondmate's home, the parent by the primary's.
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$nested" child "$subhome" \
     && fm_slot_stamp_write "$subhome" domain "$primary_home" ) \
     || fail "the nested home fixture could not be stamped"
@@ -1623,7 +1638,9 @@ test_secondmate_force_teardown_preflights_nested_home_ownership() {
     "window=firstmate:fm-paused-child" "worktree=$nested" "project=$nested" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$primary_home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$nested" child "$subhome" \
     && fm_slot_stamp_write "$subhome" domain "$primary_home" ) \
     || fail "the nested ownership-preflight fixture could not be stamped"
@@ -1670,7 +1687,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$subhome" domain "$home" ) \
     || fail "failed-return fixture could not publish its ownership stamp"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-return-fail-fake")
@@ -1688,7 +1707,9 @@ EOF
   grep -F 'treehouse return failed for secondmate home' "$err" >/dev/null || fail "teardown did not report failed leased home return"
   [ -d "$subhome" ] || fail "teardown removed a leased home after return failed"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared meta after leased home return failed"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$(
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$subhome" task || printf 'none' )
   [ "$stamp" = domain ] || fail "teardown cleared ownership evidence before leased-home return succeeded"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null || fail "teardown removed registry route after leased home return failed"
@@ -1898,6 +1919,7 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
   owner="$$|codex:$CODEX_THREAD_ID|fallback"
   printf '%s\n' "$owner" > "$home/state/.lock"
   printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
   fm_session_authority_write_file "$home/state/.session-authority" "$$" \
     "$owner" "$home" "$ROOT" || fail "could not create teardown authority fixture"
@@ -1919,7 +1941,9 @@ test_secondmate_force_teardown_preserves_child_hooks_on_return_failure() {
     "window=firstmate:fm-child" "worktree=$childwt" "project=$childproj" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off" "task=child" \
     "home=$subhome" "endpoint_generation=endpoint-child"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$childwt" child "$subhome" ) \
     || fail "child return failure fixture could not stamp child ownership"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
@@ -2067,6 +2091,7 @@ test_secondmate_force_teardown_finalizes_state_before_child_disposal() {
   owner="$$|codex:$CODEX_THREAD_ID|fallback"
   printf '%s\n' "$owner" > "$home/state/.lock"
   printf '%s\n' "$ROOT" > "$home/state/.primary-checkout"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
   fm_session_authority_write_file "$home/state/.session-authority" "$$" \
     "$owner" "$home" "$ROOT" || fail "could not create hierarchy authority fixture"
@@ -2091,11 +2116,15 @@ test_secondmate_force_teardown_finalizes_state_before_child_disposal() {
     "home=$subhome" "endpoint_generation=endpoint-child-b"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha, beta; added 2026-06-22)' \
     > "$home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$child_a" child-a "$subhome" \
     && fm_slot_stamp_write "$child_b" child-b "$subhome" ) \
     || fail "staged hierarchy fixture could not stamp child ownership"
-  claim=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  claim=$(
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_return_claim_path "$child_a" )
   printf 'child-a\n' > "$lease_dir/$(basename "$child_a").lease"
   printf 'child-b\n' > "$lease_dir/$(basename "$child_b").lease"
@@ -2217,7 +2246,9 @@ test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
     "window=firstmate:fm-child" "worktree=$childwt" "project=$childproj" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$childwt" child "$subhome" ) \
     || fail "no-treehouse child fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/no-treehouse-fake")
@@ -2238,7 +2269,9 @@ test_secondmate_force_teardown_preserves_linked_child_without_treehouse() {
     || fail "missing-treehouse preflight removed the secondmate route"
   [ -d "$childwt" ] || fail "missing treehouse removed the linked child worktree"
   [ -e "$subhome/state/child.meta" ] || fail "missing treehouse removed child metadata"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$(
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$childwt" task || printf 'none' )
   [ "$stamp" = child ] || fail "missing treehouse cleared linked-child ownership evidence"
   pass "force teardown preserves linked child ownership when treehouse is unavailable"
@@ -2274,14 +2307,20 @@ test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
     "window=firstmate:fm-grand" "worktree=$grandwt" "project=$grandproj" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$grandwt" grand "$nested" ) \
     || fail "recursive missing-treehouse fixture could not be stamped"
   home_before=$(snapshot_tree_identity "$home")
   sub_before=$(snapshot_tree_identity "$subhome")
   nested_before=$(snapshot_tree_identity "$nested")
   grand_before=$(snapshot_tree_identity "$grandwt")
-  grand_stamp_path=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$grandwt" )
+  grand_stamp_path=$(
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_path "$grandwt"
+  )
   grand_stamp_before=$(cksum "$grand_stamp_path")
   fakebin=$(make_fake_tmux "$TMP_ROOT/no-treehouse-recursive-fake")
   log="$TMP_ROOT/no-treehouse-recursive-fake/tmux.log"
@@ -2307,9 +2346,17 @@ test_secondmate_force_teardown_recursively_preserves_without_treehouse() {
   [ ! -s "$log" ] || fail "recursive preflight closed an endpoint"
   [ -d "$subhome" ] && [ -d "$nested" ] && [ -d "$grandwt" ] \
     || fail "recursive preflight removed a home or worktree"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$subhome" ) 2>/dev/null \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_path "$subhome"
+  ) 2>/dev/null \
     && fail "recursive preflight added a stamp to the plain parent home"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$nested" ) 2>/dev/null \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    fm_slot_stamp_path "$nested"
+  ) 2>/dev/null \
     && fail "recursive preflight added a stamp to the plain nested home"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
     || fail "recursive preflight removed the parent route"
@@ -2326,7 +2373,7 @@ test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
     mkdir -p "$home/state" "$home/data"
     git clone --quiet "$ROOT" "$subhome"
     git -C "$subhome" remote set-url origin "$(git -C "$ROOT" remote get-url origin)"
-    rm -rf "$subhome/$opdir"
+    rm -rf "${subhome:?}/$opdir"
     mkdir -p "$target"
     printf 'domain\n' > "$subhome/.fm-secondmate-home"
     ln -s "$target" "$subhome/$opdir"
@@ -2729,7 +2776,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$subhome" domain "$home" ) \
     || fail "could not stamp the repo-descendant parent fixture"
   cat > "$subhome/state/child.meta" <<EOF

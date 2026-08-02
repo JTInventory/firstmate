@@ -36,6 +36,7 @@
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend herdr-presentation-spaces}"
 _FM_CONFIG_INHERIT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
 . "$_FM_CONFIG_INHERIT_LIB_DIR/fm-secondmate-delivery-lib.sh"
 
 copy_inheritable_file() {

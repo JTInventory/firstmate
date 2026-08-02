@@ -5,7 +5,7 @@
 
 _FM_PRIMARY_SCOPE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The declared-agent-role contract has one owner; this predicate only consumes it.
-# shellcheck source=bin/fm-worker-isolation-lib.sh
+# shellcheck source=/dev/null
 . "$_FM_PRIMARY_SCOPE_LIB_DIR/fm-worker-isolation-lib.sh"
 
 # Return 0 when $1 carries a genuine secondmate-home marker.

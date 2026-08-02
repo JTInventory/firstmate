@@ -62,7 +62,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
-# shellcheck source=bin/fm-composer-lib.sh
+# shellcheck source=/dev/null
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
 
 # Shared, backend-neutral normalized-transition shape and the single-owner
@@ -70,9 +70,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # subscriber (fm_backend_herdr_wait_transition) normalizes every
 # pane.agent_status_changed edge through fm_transition_record and routes it
 # through fm_transition_policy - it never re-encodes the mapping.
-# shellcheck source=bin/fm-transition-lib.sh
+# shellcheck source=/dev/null
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
-# shellcheck source=bin/fm-task-label-lib.sh
+# shellcheck source=/dev/null
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-task-label-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14

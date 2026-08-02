@@ -52,7 +52,7 @@
 # This file is sourced by scripts and has no side effects on source.
 
 _FM_SLOT_OWNER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-agent-cwd-lib.sh
+# shellcheck source=/dev/null
 . "$_FM_SLOT_OWNER_LIB_DIR/fm-agent-cwd-lib.sh"
 
 FM_SLOT_OWNER_STAMP_NAME=fm-slot-owner

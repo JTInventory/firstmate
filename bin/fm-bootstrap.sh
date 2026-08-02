@@ -91,7 +91,9 @@ BOOTSTRAP_READ_ONLY=0
 if [ "$BOOTSTRAP_MODE" != install ] && [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
   BOOTSTRAP_READ_ONLY=1
 fi
-# shellcheck source=bin/fm-worker-isolation-lib.sh
+# ShellCheck lints every canonical source file in its own batch; keep these
+# bootstrap-only edges opaque so the shared dependency graph stays bounded.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
   fm_worker_refuse_primary_operation "bootstrap" || exit 1
@@ -110,15 +112,15 @@ export FM_WAKE_LIB_READ_ONLY
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-secondmate-delivery-lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-secondmate-delivery-lib.sh"
-# shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
-# shellcheck source=bin/fm-backend.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-backend.sh"
 if [ "$BOOTSTRAP_READ_ONLY" != 1 ]; then
   # shellcheck source=bin/fm-watcher-protocol-lib.sh disable=SC1091
@@ -209,6 +211,7 @@ fleet_sync() {
 }
 
 secondmate_sync() {
+  # shellcheck disable=SC2034 # passed by name to fm_lifecycle_admission_* via eval.
   local -a bootstrap_admission_locks=()
   fm_ff_target_lock_acquire() {
     local state_dir=$1 _label=${2:-target} target_home=${3:-}
@@ -1005,6 +1008,7 @@ crew_dispatch_validate() {
   fi
 }
 
+# shellcheck disable=SC2034 # passed by name to fm_lifecycle_admission_* via eval.
 FM_BOOTSTRAP_FLEET_LOCKS=()
 bootstrap_locks_release() {
   local status=$?

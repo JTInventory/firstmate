@@ -65,10 +65,10 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
-# shellcheck source=bin/fm-worker-isolation-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "teardown" || exit 1
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -78,22 +78,22 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 export FM_LIFECYCLE_HOME="$FM_HOME" FM_LIFECYCLE_STATE="$STATE"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
-# shellcheck source=bin/fm-tool-path-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-tool-path-lib.sh"
 fm_normalize_tool_path
-# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-# shellcheck source=bin/fm-task-identity-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-slot-owner-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
 fm_session_authority_capability_present || {
   echo "REFUSED: protected session authority is required for teardown receipts" >&2
@@ -644,8 +644,8 @@ fi
 fm_backend_validate "$BACKEND" || exit 1
 if [ "$BACKEND" = herdr ]; then
   HERDR_SCOPE_SESSION=$(teardown_meta_value_exact "$META" herdr_session required) || exit 1
-  HERDR_SCOPE_WORKSPACE=$(teardown_meta_value_exact "$META" herdr_workspace_id required) || exit 1
-  HERDR_SCOPE_TAB=$(teardown_meta_value_exact "$META" herdr_tab_id required) || exit 1
+  teardown_meta_value_exact "$META" herdr_workspace_id required >/dev/null || exit 1
+  teardown_meta_value_exact "$META" herdr_tab_id required >/dev/null || exit 1
   HERDR_SCOPE_PANE=$(teardown_meta_value_exact "$META" herdr_pane_id required) || exit 1
   [ "$T" = "$HERDR_SCOPE_SESSION:$HERDR_SCOPE_PANE" ] || {
     echo "REFUSED: task endpoint metadata representations conflict" >&2
@@ -1043,7 +1043,7 @@ teardown_mark_return_transaction_committed() {
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_check=${4:-} state_scope=${5:-}
   local stamp_id=${6:-} stamp_home=${7:-} lease_holder=${8:-}
-  local out attempt=0 retries claim= legacy= stamp_path= staged=0 return_status
+  local out attempt=0 retries claim='' legacy='' stamp_path='' staged=0 return_status
   retries=$TREEHOUSE_RETURN_LOCK_RETRIES
   case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
   if [ -n "$post_check" ]; then
@@ -1182,6 +1182,7 @@ teardown_herdr_endpoint_focus_safe() {
   pane=$FM_BACKEND_HERDR_PANE
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   [ "$state" = dead ] && return 0
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   lock=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   while [ "$attempt" -lt 50 ]; do
@@ -2556,7 +2557,7 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   TOP_SLOT_RETAIN_VERDICT=
   if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "$FM_HOME" \
     crewmate "worktree" retire "$endpoint_state" "$BACKEND" "$T"; then
-    TOP_SLOT_ACTION=return
+    TOP_SLOT_ACTION='return'
   else
     TOP_SLOT_ACTION=retain
     TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT

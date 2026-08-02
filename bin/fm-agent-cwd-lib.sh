@@ -44,9 +44,10 @@
 # This file is sourced by scripts and has no side effects on source.
 
 _FM_AGENT_CWD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
 . "$_FM_AGENT_CWD_LIB_DIR/fm-procargs-lib.sh"
 # FM_HARNESS_RE and the harness-identity contract have one owner.
-# shellcheck source=bin/fm-session-lock-lib.sh
+# shellcheck source=/dev/null
 . "$_FM_AGENT_CWD_LIB_DIR/fm-session-lock-lib.sh"
 
 FM_AGENT_CWD_MAX_DESCEND=16
@@ -139,11 +140,12 @@ fm_agent_proc_env() {
 # Returns 1 when no supported process list/identity can be read or no live
 # process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid task home role env found=1 pids comm args
+  local pid task home role env found=1 pids comm args
   if [ -n "${FM_TEST_AGENT_PIDS:-}" ]; then
     [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
     # A bounded process list is a test-only performance fixture. The protected
     # broker capability prevents an ordinary same-UID worker from enabling it.
+    # shellcheck source=/dev/null
     . "$_FM_AGENT_CWD_LIB_DIR/fm-session-lock-lib.sh"
     fm_session_test_authority_broker_present || return 1
     pids=$FM_TEST_AGENT_PIDS

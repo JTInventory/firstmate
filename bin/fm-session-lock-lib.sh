@@ -4,6 +4,7 @@
 
 FM_HARNESS_RE='claude|codex|opencode|grok|^pi$'
 _FM_SESSION_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
 . "$_FM_SESSION_LOCK_LIB_DIR/fm-procargs-lib.sh"
 
 fm_session_process_start() {
@@ -1110,7 +1111,9 @@ fm_session_durable_custodian_ensure() {
   local state=$1 home=$2 checkout=$3 lock status attempts=0
   lock="$state/.session-durable-authority-transaction.lock"
   if ! type fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck disable=SC2034 # consumed by the lazily sourced wake library.
     FM_WAKE_LIB_READ_ONLY=1
+    # shellcheck source=/dev/null
     . "$_FM_SESSION_LOCK_LIB_DIR/fm-wake-lib.sh"
   fi
   while [ "$attempts" -lt 400 ]; do

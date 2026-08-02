@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 _FM_SECONDMATE_DELIVERY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
 . "$_FM_SECONDMATE_DELIVERY_LIB_DIR/fm-pending-reply-lib.sh"
 
 fm_secondmate_delivery_receipt_path() {
@@ -214,6 +215,7 @@ fm_secondmate_delivery_send_locked() {
     "$message_signature" "$delivery_state" || return 1
   fm_secondmate_lifecycle_identity_matches "$state" "$id" "$home" "$target" \
     "$endpoint_generation" "$provider_identity" || return 1
+  # shellcheck disable=SC2034 # consumed by the caller after return.
   FM_SECONDMATE_DELIVERY_RECEIPT=$receipt
 }
 

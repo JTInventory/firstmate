@@ -18,8 +18,13 @@
 # Every harness in FM_HARNESS_RE is driven end to end here.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck disable=SC1090
+# shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+FM_TEST_ROOT="$ROOT"
+FM_TEST_ROOT_VAR=FM_TEST_ROOT
+export FM_TEST_ROOT FM_TEST_ROOT_VAR
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -109,7 +114,8 @@ require_procfs() {
 
 test_crewmate_declaration_clears_every_inherited_home() {
   local prefix close_live close_durable
-  prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+  prefix=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
   close_live="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
   close_durable="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_DURABLE_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
@@ -120,15 +126,17 @@ test_crewmate_declaration_clears_every_inherited_home() {
 
 test_secondmate_declaration_pins_only_its_own_home() {
   local prefix close_live close_durable same_home_prefix same_home="$TMP_ROOT/same-home-declaration"
-  prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+  prefix=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
   close_live="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
   close_durable="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_DURABLE_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
   [ "$prefix" = ":; ${close_live}${close_durable}FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   mkdir -p "$same_home"
+  # shellcheck source=/dev/null
   same_home_prefix=$( FM_HOME="$same_home" \
-    . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh" \
     && FM_HOME="$same_home" \
       fm_worker_launch_env_prefix secondmate dom-b2 "$same_home" )
   assert_not_contains "$same_home_prefix" "exec $FM_TEST_DURABLE_AUTHORITY_FD>&-" \
@@ -140,7 +148,8 @@ test_secondmate_declaration_pins_only_its_own_home() {
 
 test_worker_declaration_tolerates_authority_fds_already_closed() {
   local prefix out status
-  prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+  prefix=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
   status=0
   out=$(sh -c "PATH=/bin GOTMPDIR=/tmp ${prefix}printf '%s|%s' \"\$PATH\" \"\$GOTMPDIR\"" \
@@ -166,18 +175,21 @@ test_worker_declaration_tolerates_authority_fds_already_closed() {
 
 test_declaration_refuses_rather_than_emitting_a_partial_prefix() {
   local out status
-  out=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix auditor task-a3 /home/cap/firstmate 2>&1 )
   status=$?
   expect_code 1 "$status" "an unknown role must refuse"
   assert_contains "$out" "unknown agent role" "unknown role refusal lost its reason"
 
-  out=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate '' /home/cap/firstmate 2>&1 )
   status=$?
   expect_code 1 "$status" "an empty task id must refuse"
 
-  out=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a3 relative/home 2>&1 )
   status=$?
   expect_code 1 "$status" "a relative owning home must refuse"
@@ -280,7 +292,8 @@ make_launch_case() {
   wt="$case_dir/wt"
   fakebin=$(make_launch_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"
   fm_worker_test_primary_identity_bind "$ROOT" "$home" \
     || fail "could not create launch authority fixture"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
@@ -817,7 +830,8 @@ make_primary_home() {
   fm_git_init_commit "$dir"
   git -C "$dir" branch -M main
   printf '# agents\n' > "$dir/AGENTS.md"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   owner=$(fm_session_lock_owner) || fail "could not resolve primary test owner"
   broker=$FM_TEST_AUTHORITY_BROKER_PID
   printf '%s\n' "$owner" > "$dir/state/.lock"
@@ -833,28 +847,33 @@ test_declared_worker_is_never_a_primary_scope_match() {
   # local, and reusing the name here makes shellcheck read the two as one.
   local primary_home out
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
+  # shellcheck source=/dev/null
   out=$( cd "$primary_home" \
     && export FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    && . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    && . "${!FM_TEST_ROOT_VAR}/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" \
     && printf 'primary' || printf 'not-primary' )
   [ "$out" = primary ] || fail "the fixture is not recognized as a genuine primary at all"
   out=$( export FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
-    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] \
     || fail "a declared crewmate matched primary scope inside a genuine primary checkout"
   out=$( export FM_AGENT_ROLE=quartermaster FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
-    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "an unknown declared worker role matched primary scope"
-  out=$( export FM_AGENT_ROLE= FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME=
-    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+  out=$( export FM_AGENT_ROLE='' FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME=''
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "a partial undeclared identity matched primary scope"
   printf 'trusted-task\n' > "$primary_home/.fm-secondmate-home"
   out=$( export FM_AGENT_ROLE=secondmate FM_AGENT_TASK=other-task FM_AGENT_OWNER_HOME="$primary_home"
-    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "a secondmate mismatched to its trusted marker matched primary scope"
   pass "primary scope rejects crewmates, unknown identities, partial identities, and mismatched secondmates"
@@ -864,7 +883,8 @@ test_unbound_identity_has_no_primary_mutation_authority() {
   local out status
   status=0
   out=$(cd "$TMP_ROOT" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME bash -c \
-    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 1 "$status" "an identity outside the primary checkout must refuse mutation"
   assert_contains "$out" "primary identity is not bound" \
@@ -877,18 +897,21 @@ test_fixture_primary_requires_protected_authority() {
   home="$TMP_ROOT/protected-fixture-primary"
   mkdir -p "$home/state"
   out=$(cd "$TMP_ROOT" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
+    bash -c '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 0 "$status" "a protected fixture primary must bind"
   [ -z "$out" ] || fail "protected fixture primary emitted unexpected output: $out"
   status=0
   out=$(cd "$TMP_ROOT" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    bash -c 'eval "exec ${FM_TEST_AUTHORITY_FD}<&-"; . "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
+    bash -c 'eval "exec ${FM_TEST_AUTHORITY_FD}<&-"; # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 0 "$status" "a fixture primary must recover live authority from the durable channel"
   status=0
   out=$(cd "$TMP_ROOT" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
-    bash -c 'eval "exec ${FM_TEST_DURABLE_AUTHORITY_FD}<&-"; . "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
+    bash -c 'eval "exec ${FM_TEST_DURABLE_AUTHORITY_FD}<&-"; # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 1 "$status" "a fixture primary without durable authority must refuse"
   assert_contains "$out" "primary identity is not bound" \
@@ -901,7 +924,8 @@ test_real_primary_needs_no_ambient_role() {
   primary_home=$(make_primary_home "$TMP_ROOT/real-primary")
   out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    bash -c '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 0 "$status" "a real primary checkout must work without an ambient role"
   [ -z "$out" ] || fail "real primary authority emitted unexpected output: $out"
@@ -917,7 +941,8 @@ test_fresh_primary_requires_durable_session_binding() {
     env -u FM_TEST_AUTHORITY_FD -u FM_TEST_DURABLE_AUTHORITY_FD \
       -u FM_TEST_AUTHORITY_BROKER_PID -u FM_TEST_AUTHORITY_OWNER_PID bash -c '
       exec 9<&- 18<&-
-      . "$1/bin/fm-worker-isolation-lib.sh"
+      # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"
       ps() {
         case "$*" in *"-o comm="*"-p $$"*) printf "codex\n" ;; *) command ps "$@" ;; esac
       }
@@ -957,14 +982,16 @@ test_caller_marker_cannot_replace_exact_session_authority() {
   sleep 60 & sleeper=$!
   owner="$sleeper|codex:forged-thread|harness"
   printf '%s\n' "$owner" > "$primary_home/state/.lock"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   fm_session_authority_write_file "$primary_home/state/.session-authority" \
     "$sleeper" "$owner" "$primary_home" "$primary_home" \
     || fail "could not create foreign live authority fixture"
   out=$(cd "$primary_home" && CODEX_THREAD_ID=forged-thread \
     FM_SESSION_AUTHORITY_FD=999 \
     FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    bash -c '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1) || status=$?
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
@@ -1088,7 +1115,8 @@ test_foreign_session_lock_defeats_primary_topology() {
   printf '%s\n' '999999|codex:foreign-thread|fallback' > "$primary_home/state/.lock"
   out=$(cd "$primary_home" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    bash -c '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 1 "$status" "a foreign #82 session lock must defeat primary topology"
   assert_contains "$out" "primary identity is not bound" \
@@ -1107,14 +1135,16 @@ test_linked_main_worktree_can_prove_primary_authority() {
   printf '# agents\n' > "$primary/AGENTS.md"
   printf '%s|codex:%s|fallback\n' "$$" "$CODEX_THREAD_ID" > "$primary/state/.lock"
   printf '%s\n' "$primary" > "$primary/state/.primary-checkout"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   fm_session_authority_write_file "$primary/state/.session-authority" "$$" \
     "$$|codex:$CODEX_THREAD_ID|fallback" "$primary" "$primary" \
     || fail "could not create linked primary authority fixture"
   out=$(cd "$primary" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK \
     -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
     bash -c '
-      . "$1/bin/fm-worker-isolation-lib.sh"
+      # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"
       ps() {
         case "$*" in *"-o comm="*"-p $$"*) printf "codex\n" ;; *) command ps "$@" ;; esac
       }
@@ -1147,7 +1177,8 @@ test_primary_authority_refuses_unreadable_ancestry() {
   primary_home=$(make_primary_home "$TMP_ROOT/unreadable-ancestry")
   out=$(cd "$primary_home" && FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
     bash -c '
-      . "$1/bin/fm-worker-isolation-lib.sh"
+      # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"
       fm_worker_process_environment() { return 1; }
       fm_worker_refuse_primary_operation lock
     ' _ "$ROOT" 2>&1) || status=$?
@@ -1163,7 +1194,8 @@ test_stale_session_lock_reaches_verified_recovery() {
   sleep 60 & sleeper=$!
   owner="$sleeper|codex:stale-thread|harness"
   printf '%s\n' "$owner" > "$primary_home/state/.lock"
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   fm_session_authority_write_file "$primary_home/state/.session-authority" \
     "$sleeper" "$owner" "$primary_home" "$primary_home" \
     || fail "could not create stale authority fixture"
@@ -1184,7 +1216,8 @@ test_unregistered_cross_home_primary_is_refused() {
   home=$(make_primary_home "$TMP_ROOT/cross-home-owner")
   rm -f "$home/state/.primary-checkout" "$home/state/.lock"
   out=$(cd "$root" && FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    bash -c '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation "session lock acquisition"' \
+    bash -c '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation "session lock acquisition"' \
     _ "$ROOT" 2>&1) || status=$?
   expect_code 1 "$status" "unregistered unrelated checkouts must not claim a fresh home"
   pass "fresh cross-home authority requires shared registered Git topology"
@@ -1246,7 +1279,8 @@ test_procargs2_parser_separates_argv_and_environment() {
   printf '\001\000\000\000/bin/bash\000bash\000not-an-environment-record\000' \
     > "$malformed"
   out=$(TMPDIR="$snapshots" bash -c '
-    . "$1/bin/fm-procargs-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-procargs-lib.sh"
     DUMP=$2
     CALLS=$3
     exec 8< "$4"
@@ -1268,7 +1302,8 @@ test_procargs2_parser_separates_argv_and_environment() {
   [ "$(cat "$TMP_ROOT/fd-nine")" = preserved ] \
     || fail "procargs2 parser clobbered a caller-owned descriptor"
   if TMPDIR="$snapshots" bash -c '
-    . "$1/bin/fm-procargs-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-procargs-lib.sh"
     DUMP=$2
     fm_procargs2_dump() { command cat "$DUMP"; }
     fm_procargs2_read 1
@@ -1280,7 +1315,8 @@ test_procargs2_parser_separates_argv_and_environment() {
 
 write_session_authority_recovery_manifest() {
   local txn=$1 body hmac
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   fm_session_random_hex 48 > "$txn/key" || return 1
   chmod 600 "$txn/key" || return 1
   body=$(printf 'version=2\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=sha256:%064d\nnew-binding=sha256:%064d\nnew-authority=sha256:%064d\n' \
@@ -1362,7 +1398,8 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
 issue_secondmate_enrollment() {
   local issuer=$1 home=$2 task=$3 endpoint=${4:-$$} endpoint_start endpoint_identity
   local owner ready release attempts=0
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   owner=$(cat "$issuer/state/.lock") || return 1
   endpoint_start=$(fm_session_process_start "$endpoint") || return 1
   endpoint_identity=$(fm_session_process_identity "$endpoint") || return 1
@@ -1375,7 +1412,8 @@ issue_secondmate_enrollment() {
     cd "$ROOT" || exit 1
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$issuer" \
       "$AUTHORITY_EXEC" bash -c '
-        . "$1/bin/fm-session-lock-lib.sh"
+        # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
         owner=$FM_SESSION_AUTHORITY_BROKER_PID
         printf "%s\n" "$owner" > "$2/state/.lock"
         printf "%s\n" "$1" > "$2/state/.primary-checkout"
@@ -1406,7 +1444,8 @@ issue_secondmate_enrollment() {
 test_secondmate_authority_delegation_uses_no_node() {
   local issuer home fakebin out status=0 ticket launch consumer attempts=0
   local forged private public body signature digest
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   if ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
     || ! fm_session_descriptor_channel_isolated 8 \
     || ! fm_session_descriptor_channel_isolated 9 \
@@ -1473,7 +1512,8 @@ test_secondmate_authority_delegation_uses_no_node() {
   cp "$body" "$forged"
   printf 'signature=%s\n' "$(openssl base64 -A < "$signature")" >> "$forged"
   (
-    . "$ROOT/bin/fm-session-lock-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
     ! fm_session_enrollment_ticket_validate "$forged" domain "$home"
   ) || fail "a ticket self-signed by an unbound public key was accepted"
   ! grep -qE 'openssl (ecparam|ec|dgst).* /dev/fd/(10|11)' \
@@ -1508,7 +1548,8 @@ test_secondmate_authority_delegation_uses_no_node() {
 
 test_authority_fds_require_sibling_proc_isolation() {
   local parent=$$ sibling_can_open=0 fd authority_fds
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   case "$(uname -s 2>/dev/null)" in
     Linux)
       exec 8</dev/null
@@ -1596,7 +1637,8 @@ test_durable_receipts_survive_live_key_rotation() {
     || fail "durable teardown receipt could not be issued"
   registration="$txn/pr-registration"
   printf 'invalid\n' > "$registration"
-  . "$ROOT/bin/fm-pr-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-pr-lib.sh"
   fm_pr_poll_registration_parse "$registration" >/dev/null 2>&1 || true
   after=$(teardown_transaction_receipt_binding endpoint-proof) \
     || fail "PR registration parsing destroyed durable receipt authority"
@@ -1661,7 +1703,8 @@ test_durable_custodian_is_root_bound_and_scoped() {
     unset FM_SESSION_AUTHORITY_DURABLE_FD
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
       "$AUTHORITY_EXEC" bash -c '
-        . "$1/bin/fm-session-lock-lib.sh"
+        # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
         printf partial-descriptor-proof | fm_session_authority_durable_hmac
       ' _ "$ROOT"
   ) || fail "live-only replacement could not recover the custodian root"
@@ -1786,7 +1829,8 @@ test_authority_hmac_needs_only_openssl() {
 
 test_authority_fds_reprove_isolation_after_exec() {
   local original_fd authority_tmp consume
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   original_fd=$FM_SESSION_AUTHORITY_FD
   authority_tmp=$(mktemp "$TMP_ROOT/post-exec-authority.XXXXXX")
   printf '%064d\n' 0 > "$authority_tmp"
@@ -1820,7 +1864,9 @@ test_authority_fds_reprove_isolation_after_exec() {
     ! ( : <&8 ) 2>/dev/null
     [ -n "${FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY:-}" ]
     ! export -p | grep -q 'FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY='
+    # shellcheck disable=SC2034 # consumed by the enrollment request helper.
     FM_SESSION_ENROLLMENT_SIGNER_PID=123
+    # shellcheck disable=SC2034 # consumed by the enrollment request helper.
     FM_SESSION_ENROLLMENT_NONCE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     fm_session_enrollment_consumption_request "$consume" task "$TMP_ROOT"
     grep -q '^consumer-public-key=.' "$consume.consume"
@@ -1830,6 +1876,7 @@ test_authority_fds_reprove_isolation_after_exec() {
   rm -f "$consume.consume"
   (
     exec 10< <(printf 'private\n')
+    # shellcheck disable=SC2034 # consumed by the enrollment signer helper.
     FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD=10
     fm_session_descriptor_channel_isolated() { return 1; }
     ! fm_session_enrollment_signer_run x x x x 2 x x
@@ -1852,7 +1899,8 @@ test_authority_fds_reprove_isolation_after_exec() {
 
 test_unrelated_process_cannot_consume_endpoint_enrollment() {
   local issuer home endpoint signer out status=0 launch
-  . "$ROOT/bin/fm-session-lock-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
   if ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD" \
     || ! fm_session_descriptor_channel_isolated 10; then
     pass "skip: sibling process access to authority descriptors is not isolated"
@@ -1894,7 +1942,8 @@ test_unrelated_process_cannot_consume_endpoint_enrollment() {
 test_backend_owned_launch_proof_covers_tmux_and_herdr() {
   local out close_log status
   out=$(bash -c '
-    . "$1/bin/backends/herdr.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/herdr.sh"
     fm_backend_herdr_endpoint_identity() {
       case "$1" in
         default:w1:p2) printf "default|w1|w1:t2|w1:p2|g7" ;;
@@ -1934,7 +1983,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
   rm -f "$close_log"
   set +e
   out=$(CLOSE_LOG="$close_log" bash -c '
-    . "$1/bin/backends/herdr.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/herdr.sh"
     fm_backend_herdr_endpoint_identity() {
       case "$1" in
         default:w1:p2) printf "default|w1|w1:t2|w1:p2|g7" ;;
@@ -1980,7 +2030,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     || fail "Herdr launch did not prove both old and replacement pane closure: $(cat "$close_log")"
   out=$(bash -c '
     FM_BACKEND_LIB_DIR="$1/bin"
-    . "$1/bin/backends/tmux.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/tmux.sh"
     tmux() {
       case "$1" in
         respawn-pane)
@@ -2004,7 +2055,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
   [ "$out" = 4242 ] || fail "tmux serialized launch proof returned $out"
   out=$(bash -c '
     FM_BACKEND_LIB_DIR="$1/bin"
-    . "$1/bin/backends/tmux.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/tmux.sh"
     tmux() {
       case "$1" in
         respawn-pane) printf "4242\n" ;;
@@ -2024,7 +2076,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
   ' _ "$ROOT") || fail "tmux accepted a pane replaced after its serialized launch"
   out=$(bash -c '
     FM_BACKEND_LIB_DIR="$1/bin"
-    . "$1/bin/backends/tmux.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/tmux.sh"
     tmux() {
       case "$1" in
         respawn-pane) printf "4242\n" ;;
@@ -2044,7 +2097,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
   ' _ "$ROOT") || fail "tmux accepted an exact pane moved to another window"
   out=$(bash -c '
     FM_BACKEND_LIB_DIR="$1/bin"
-    . "$1/bin/backends/tmux.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/tmux.sh"
     tmux() {
       case "$1" in
         list-panes) printf "%%3\n" ;;
@@ -2064,7 +2118,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     || fail "tmux legacy generation compatibility returned $out"
   out=$(bash -c '
     FM_BACKEND_LIB_DIR="$1/bin"
-    . "$1/bin/backends/tmux.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/tmux.sh"
     tmux() {
       case "$1" in
         list-panes) printf "%%3\n%%4\n" ;;
@@ -2074,7 +2129,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
     ! fm_backend_tmux_endpoint_generation @7 legacy-window
   ' _ "$ROOT") || fail "tmux accepted ambiguous multi-pane legacy generation"
   out=$(bash -c '
-    . "$1/bin/backends/herdr.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/herdr.sh"
     fm_backend_herdr_endpoint_identity() {
       printf "default|other-workspace|w9:t9|w1:p2|g7"
     }
@@ -2083,7 +2139,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
       default:w1:p2 domain /work "wrapper" "default|w1|w1:t2|w1:p2|g7"
   ' _ "$ROOT") || fail "Herdr accepted a moved pane with only a matching generation"
   out=$(bash -c '
-    . "$1/bin/backends/herdr.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/backends/herdr.sh"
     fm_backend_herdr_endpoint_identity() {
       printf "default|w1|w1:t2|w1:p2|g7"
     }
@@ -2105,7 +2162,8 @@ test_backend_owned_launch_proof_covers_tmux_and_herdr() {
 test_darwin_session_identity_uses_supported_fields() {
   local out
   out=$(bash -c '
-    . "$1/bin/fm-session-lock-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
     uname() { printf "Darwin\n"; }
     fm_session_darwin_getsid() { printf "987652\n"; }
     fm_session_parent_pid() {
@@ -2121,7 +2179,8 @@ test_darwin_session_identity_uses_supported_fields() {
   [ "$out" = 987652 ] || fail "Darwin session identity did not resolve the numeric leader: $out"
   (
     bash -c '
-      . "$1/bin/fm-session-lock-lib.sh"
+      # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
       uname() { printf "Darwin\n"; }
       fm_session_darwin_getsid() { printf "987650\n"; }
       fm_session_parent_pid() {
@@ -2246,7 +2305,8 @@ test_enrollment_validator_trace_is_stage_only() {
   : > "$trace"
   out=$(bash -c '
     FM_SESSION_ENROLLMENT_STAGE_TRACE=1
-    . "$2/bin/fm-session-lock-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
     fm_session_enrollment_trace_bind "$1/.session-authority-enrollment"
     fm_session_enrollment_trace nonce-presence present
     fm_session_enrollment_trace endpoint-generation-presence present
@@ -2285,7 +2345,8 @@ exec /bin/rm "\$@"
 SH
   chmod +x "$fakebin/rm"
   out=$(ROOT="$ROOT" PATH="$fakebin:$PATH" TICKET="$ticket" bash -c '
-    . "$ROOT/bin/fm-session-lock-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
     FM_SESSION_ENROLLMENT_SIGNER_PID=999999
     export FM_SESSION_ENROLLMENT_SIGNER_PID
     if fm_session_enrollment_signer_cleanup "$TICKET" 999999; then
@@ -2329,7 +2390,8 @@ test_forged_key_cannot_issue_secondmate_enrollment() {
     export FM_SESSION_AUTHORITY_FD
     unset FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
     unset FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
-    . "$ROOT/bin/fm-session-lock-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
     endpoint_start=$(fm_session_process_start "$$")
     endpoint_identity=$(fm_session_process_identity "$$")
     ! fm_session_enrollment_ticket_write "$ticket" domain "$home" "$issuer" \
@@ -2530,7 +2592,8 @@ test_secondmate_primary_operations_require_its_declared_home() {
 
   out=$(FM_HOME="$alias" FM_AGENT_ROLE=secondmate FM_AGENT_TASK=domain \
     FM_AGENT_OWNER_HOME="$home" bash -c \
-    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1)
   status=$?
   expect_code 0 "$status" "a canonical alias of a secondmate's declared home must remain usable"
@@ -2562,20 +2625,23 @@ test_secondmate_primary_operations_require_its_declared_home() {
 
   out=$(FM_HOME="$home" FM_AGENT_ROLE=secondmate FM_AGENT_TASK=other \
     FM_AGENT_OWNER_HOME="$home" bash -c \
-    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1)
   status=$?
   expect_code 1 "$status" "a secondmate task must match its trusted home marker"
 
   out=$(FM_HOME="$home" FM_AGENT_TASK=domain FM_AGENT_OWNER_HOME="$home" bash -c \
-    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1)
   status=$?
   expect_code 1 "$status" "a partial worker declaration must refuse primary operations"
 
   out=$(FM_HOME="$home" FM_AGENT_ROLE=quartermaster FM_AGENT_TASK=domain \
     FM_AGENT_OWNER_HOME="$home" bash -c \
-    '. "$1/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
+    '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation lock' \
     _ "$ROOT" 2>&1)
   status=$?
   expect_code 1 "$status" "an unknown worker role must refuse primary operations"
@@ -2590,7 +2656,8 @@ test_proc_cwd_is_read_from_the_live_process() {
   dir="$TMP_ROOT/proc-cwd"
   mkdir -p "$dir"
   pid=$(start_declared_agent "$dir" "proc-d1-$RUN_TAG" "$TMP_ROOT/proc-home")
-  cwd=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_proc_cwd "$pid" )
+  cwd=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" && fm_agent_proc_cwd "$pid" )
   [ "$cwd" = "$(cd "$dir" && pwd -P)" ] \
     || fail "the process cwd was not read from /proc: $cwd"
   pass "an agent's working directory is read from the live process, not a record"
@@ -2609,10 +2676,12 @@ test_declared_agent_lookup_returns_the_root_most_process() {
   root_pid=$!
   BG_PIDS+=("$root_pid")
   sleep 0.5
-  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" \
     && fm_agent_root_pids_for_identity "$id" "$TMP_ROOT/proc-home" crewmate )
   [ -n "$out" ] || fail "the declared agent process was not found at all"
-  child=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+  child=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" \
     && fm_agent_pids_for_identity "$id" "$TMP_ROOT/proc-home" crewmate | wc -l )
   [ "$child" -ge 2 ] || fail "the fixture did not produce a declared parent and child"
   [ "$out" = "$root_pid" ] \
@@ -2622,14 +2691,16 @@ test_declared_agent_lookup_returns_the_root_most_process() {
 
 test_provider_process_id_matrix_is_explicit() {
   local out
-  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh"
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh"
     for backend in herdr zellij cmux orca unknown; do
       if fm_agent_backend_shell_pid "$backend" "session:pane" >/dev/null 2>&1; then
         printf '%s-exposes-a-pid\n' "$backend"
       fi
     done )
   [ -z "$out" ] || fail "a provider with no verified per-pane process id claimed one: $out"
-  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" \
     && fm_agent_cwd_verdict '' '' '' herdr 'ses:pane' )
   case "$out" in
     unknown*) : ;;
@@ -2674,7 +2745,8 @@ SH
 agent_cwd_call() {
   local fakebin=$1
   shift
-  PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-agent-cwd-lib.sh" || exit 1; shift; "$@"' \
+  PATH="$fakebin:$PATH" bash -c '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" || exit 1; shift; "$@"' \
     _ "$ROOT" "$@"
 }
 
@@ -2712,10 +2784,12 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
   two="index-two-d6-$RUN_TAG"
   start_declared_agent "$dir" "$one" "$TMP_ROOT/proc-home" >/dev/null
   start_declared_agent "$dir" "$two" "$TMP_ROOT/proc-home" >/dev/null
-  index=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_task_pid_index )
+  index=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" && fm_agent_task_pid_index )
   assert_contains "$index" "$one" "the single process walk missed a declared task"
   assert_contains "$index" "$two" "the single process walk missed a declared task"
-  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" \
     && fm_agent_cwd_verdict "$two" "$TMP_ROOT/proc-home" crewmate '' '' "$index" )
   case "$out" in
     proc*"$dir_real") : ;;
@@ -2723,7 +2797,8 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
   esac
   # An index with no entry for the task is a real answer, not a missing
   # argument: it must not silently fall back to a fresh walk that finds one.
-  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+  out=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh" \
     && fm_agent_cwd_verdict "$two" "$TMP_ROOT/proc-home" crewmate '' '' '' )
   case "$out" in
     unknown*) : ;;
@@ -2735,7 +2810,8 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
 test_unreadable_agent_candidate_is_indexed_as_unproven() {
   local out
   out=$(bash -c '
-    . "$1/bin/fm-agent-cwd-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh"
     fm_agent_environ() { return 1; }
     ps() {
       case " $* " in
@@ -2789,7 +2865,8 @@ make_slot_world() {
   wt="$world/wt"
   other="$world/wt-other"
   mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
-  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"
   fm_worker_test_primary_identity_bind "$ROOT" "$world/home" \
     || fail "could not create slot authority fixture"
   fm_git_worktree "$proj" "$wt" "slot-$name"
@@ -2804,7 +2881,8 @@ EOF
 }
 
 slot_verdict() {  # <state> <id> <wt> <stamp-home> [role] [worker-home]
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" \
       "${5:-crewmate}" closed "" "" )
 }
@@ -2812,7 +2890,8 @@ slot_verdict() {  # <state> <id> <wt> <stamp-home> [role] [worker-home]
 slot_live_verdict() {  # <pid> <state> <id> <wt> <stamp-home> [role] [worker-home]
   local endpoint_pid=$1
   shift
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh"
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_backend_foreground_process_pid() { printf '%s' "$endpoint_pid"; }
     fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "${6:-$4}" \
       "${5:-crewmate}" live test test:pane )
@@ -2844,21 +2923,27 @@ test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
   local rec task home
   rec=$(make_slot_world slot-stamp)
   read_slot_world "$rec"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e1 "$WORLD/home" ) \
     || fail "a linked worktree could not be stamped"
-  task=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
+  task=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
   [ "$task" = task-e1 ] || fail "the slot stamp did not record its task: $task"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" foreign-e1 "$WORLD/foreign-home" ) 2>/dev/null \
     && fail "a foreign owner replaced the slot stamp"
-  task=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
-  home=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" home )
+  task=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
+  home=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" home )
   [ "$task" = task-e1 ] && [ "$home" = "$WORLD/home" ] \
     || fail "a failed foreign claim changed the existing ownership stamp"
   [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
     || fail "the slot stamp dirtied the working tree"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$PROJ_DIR" task-e1 "$WORLD/home" ) 2>/dev/null \
     && fail "a plain checkout was stamped as a disposable slot"
   pass "slot ownership claims never replace another owner or stamp a plain checkout"
@@ -2870,11 +2955,13 @@ test_exact_stamp_clear_accepts_canonical_home_alias() {
   read_slot_world "$rec"
   alias="$WORLD/home-alias"
   ln -s "$WORLD/home" "$alias"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e1-alias "$WORLD/home" \
     && fm_slot_stamp_clear_exact "$WT_DIR" task-e1-alias "$alias" ) \
     || fail "exact stamp clear rejected a canonical owner-home alias"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = none ] || fail "canonical owner-home alias stranded an exact stamp"
   pass "exact ownership cleanup compares canonical home identity"
@@ -2892,7 +2979,8 @@ test_clean_ownership_disposes() {
   fm_write_meta "$WORLD/home/state/neighbour-e2.meta" \
     "window=firstmate:fm-neighbour-e2" "worktree=$OTHER_WT" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e2 "$WORLD/home" )
   verdict=$(slot_verdict "$WORLD/home/state" task-e2 "$WT_DIR" "$WORLD/home")
   [ "$verdict" = dispose ] || fail "clean ownership did not dispose: $verdict"
@@ -2903,7 +2991,8 @@ test_malformed_or_partial_stamp_retains() {
   local rec verdict stamp_path
   rec=$(make_slot_world slot-malformed)
   read_slot_world "$rec"
-  stamp_path=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$WT_DIR" )
+  stamp_path=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_path "$WT_DIR" )
   printf 'task=task-malformed\n' > "$stamp_path"
   verdict=$(slot_verdict "$WORLD/home/state" task-malformed "$WT_DIR" "$WORLD/home")
   case "$verdict" in
@@ -2917,15 +3006,18 @@ test_malformed_or_partial_stamp_retains() {
     *) fail "empty ownership stamp field did not retain: $verdict" ;;
   esac
   printf 'task=task-malformed\nhome=%s\ntask=task-malformed\n' "$WORLD/home" > "$stamp_path"
-  if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  if ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-malformed "$WORLD/home" ); then
     fail "duplicate ownership stamp fields were accepted by claim validation"
   fi
-  if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  if ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task >/dev/null ); then
     fail "duplicate ownership stamp fields were accepted by field validation"
   fi
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_clear_exact "$WT_DIR" task-malformed "$WORLD/home" ) \
     || fail "malformed exact clear did not retain safely"
   [ -e "$stamp_path" ] || fail "malformed exact clear removed ambiguous ownership evidence"
@@ -2958,10 +3050,12 @@ test_unavailable_occupant_evidence_retains() {
   fm_write_meta "$WORLD/home/state/task-unknown.meta" \
     "window=firstmate:fm-task-unknown" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-unknown "$WORLD/home" )
   verdict=$(
-    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_slot_endpoint_occupant_tasks() { return 2; }
     fm_slot_disposal_verdict "$WORLD/home/state" task-unknown "$WT_DIR" \
       "$WORLD/home" "$WORLD/home" crewmate live test test:pane
@@ -2981,10 +3075,12 @@ test_unclassified_live_process_retains() {
   fm_write_meta "$WORLD/home/state/task-unclassified.meta" \
     "window=firstmate:fm-task-unclassified" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-unclassified "$WORLD/home" )
   verdict=$(
-    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_slot_endpoint_occupant_tasks() { return 2; }
     fm_slot_disposal_verdict "$WORLD/home/state" task-unclassified "$WT_DIR" \
       "$WORLD/home" "$WORLD/home" crewmate live test test:pane
@@ -3002,7 +3098,8 @@ test_undeclared_in_slot_process_retains() {
   fm_write_meta "$WORLD/home/state/task-undeclared.meta" \
     "window=firstmate:fm-task-undeclared" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-undeclared "$WORLD/home" )
   ( cd "$WT_DIR" \
     && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
@@ -3074,7 +3171,8 @@ test_missing_worktree_runs_all_ownership_gates_before_retaining() {
   log="$WORLD/missing-gates.log"
   verdict=$(ROOT="$ROOT" STATE_DIR="$WORLD/home/state" WT="$WORLD/missing" \
     LOG="$log" bash -c '
-      . "$ROOT/bin/fm-slot-owner-lib.sh"
+      # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
       fm_slot_meta_referencing_tasks() { printf meta >> "$LOG"; return 1; }
       fm_slot_return_claim_record() { printf claim >> "$LOG"; return 2; }
       fm_slot_stamp_path() { printf stamp-path >> "$LOG"; return 1; }
@@ -3103,7 +3201,8 @@ test_missing_worktree_accepts_valid_return_claim_before_stamp() {
   ln -s "$legacy" "$stamp"
   verdict=$(ROOT="$ROOT" STATE_DIR="$WORLD/home/state" WT="$WORLD/missing" \
     LOG="$log" STAMP="$stamp" LEGACY="$legacy" bash -c '
-      . "$ROOT/bin/fm-slot-owner-lib.sh"
+      # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
       fm_slot_meta_referencing_tasks() { return 1; }
       fm_slot_return_claim_record() { printf claim >> "$LOG"; return 0; }
       fm_slot_stamp_path() { printf "%s" "$STAMP"; }
@@ -3127,7 +3226,8 @@ test_a_stamp_naming_another_task_retains_the_slot() {
   fm_write_meta "$WORLD/home/state/task-e4.meta" \
     "window=firstmate:fm-task-e4" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" reissued-e4 "$WORLD/home" )
   verdict=$(slot_verdict "$WORLD/home/state" task-e4 "$WT_DIR" "$WORLD/home")
   case "$verdict" in
@@ -3146,7 +3246,8 @@ test_a_live_agent_of_another_task_retains_the_slot() {
   fm_write_meta "$WORLD/home/state/task-e5.meta" \
     "window=firstmate:fm-task-e5" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e5 "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$occupant" "$WORLD/home" >/dev/null
   pid=${BG_PIDS[${#BG_PIDS[@]}-1]}
@@ -3164,7 +3265,8 @@ test_same_task_in_another_home_or_role_retains_the_slot() {
   rec=$(make_slot_world slot-same-task-foreign-identity)
   read_slot_world "$rec"
   id="same-task-e9-$RUN_TAG"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" "$id" "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$id" "$WORLD/other-home" crewmate >/dev/null
   pid=${BG_PIDS[${#BG_PIDS[@]}-1]}
@@ -3176,7 +3278,8 @@ test_same_task_in_another_home_or_role_retains_the_slot() {
   rec=$(make_slot_world slot-same-task-foreign-role)
   read_slot_world "$rec"
   id="same-task-role-e9-$RUN_TAG"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" "$id" "$WORLD/home" )
   start_declared_agent "$WT_DIR" "$id" "$WORLD/home" secondmate >/dev/null
   pid=${BG_PIDS[${#BG_PIDS[@]}-1]}
@@ -3202,7 +3305,8 @@ test_a_relinquished_slot_requires_remaining_ownership_proof() {
   fm_write_meta "$WORLD/home/state/paused-e7.meta" \
     "window=firstmate:fm-paused-e7" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" owner-e7 "$WORLD/home" )
 
   verdict=$(slot_verdict "$WORLD/home/state" owner-e7 "$WT_DIR" "$WORLD/home")
@@ -3210,9 +3314,11 @@ test_a_relinquished_slot_requires_remaining_ownership_proof() {
     "retain: slot is also recorded by task(s) paused-e7"*) : ;;
     *) fail "the stamped owner did not retain against the paused task's record: $verdict" ;;
   esac
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_relinquish "$WT_DIR" owner-e7 "$WORLD/home" "$verdict" )
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = none ] \
     || fail "the retiring owner's own stamp outlived it and still names $stamp"
@@ -3238,7 +3344,8 @@ test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
   fm_write_meta "$WORLD/home/state/other-e8.meta" \
     "window=firstmate:fm-other-e8" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" reissued-e8 "$WORLD/home" )
 
   verdict=$(slot_verdict "$WORLD/home/state" stale-e8 "$WT_DIR" "$WORLD/home")
@@ -3246,9 +3353,11 @@ test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
     "retain: slot is also recorded by task(s) other-e8"*) : ;;
     *) fail "the metadata conflict was not the retain reason under test: $verdict" ;;
   esac
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_relinquish "$WT_DIR" stale-e8 "$WORLD/home" "$verdict" )
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = reissued-e8 ] \
     || fail "a stamp naming another task was cleared on retain: $stamp"
@@ -3267,13 +3376,16 @@ test_same_task_stamp_in_another_home_survives_relinquish() {
   rec=$(make_slot_world slot-same-task-foreign-home)
   read_slot_world "$rec"
   mkdir -p "$WORLD/foreign-home"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" shared-e10 "$WORLD/foreign-home" ) \
     || fail "could not stamp the foreign-home same-task fixture"
   verdict="retain: slot is also recorded by task(s) paused-e10 in this home"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_relinquish "$WT_DIR" shared-e10 "$WORLD/home" "$verdict" )
-  stamp_home=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp_home=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" home || printf 'none' )
   [ "$stamp_home" = "$WORLD/foreign-home" ] \
     || fail "same task id from another home cleared the foreign ownership stamp: $stamp_home"
@@ -3285,7 +3397,8 @@ test_relinquish_retires_exact_transition_artifacts() {
   rec=$(make_slot_world slot-transition-relinquish)
   read_slot_world "$rec"
   (
-    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_slot_stamp_write "$WT_DIR" transition-owner "$WORLD/home"
     fm_slot_stamp_stage_return "$WT_DIR" transition-owner "$WORLD/home" \
       "$WORLD/home/state" transition-owner
@@ -3295,7 +3408,8 @@ test_relinquish_retires_exact_transition_artifacts() {
       "retain: slot is also recorded by task(s) paused-owner in this home"
     [ ! -e "$claim" ] && [ ! -e "$legacy" ] && [ ! -L "$claim" ] && [ ! -L "$legacy" ]
   ) || fail "exact same-task transition artifacts survived relinquish"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf none )
   [ "$stamp" = none ] || fail "exact transition stamp survived relinquish"
   pass "relinquish retires exact transition claim, owner, and stamp together"
@@ -3321,7 +3435,8 @@ SH
   fm_write_meta "$WORLD/home/state/quarantined-e6.meta" \
     "window=firstmate:fm-quarantined-e6" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e6 "$WORLD/home" ) \
     || fail "the contested-slot fixture could not be stamped"
 
@@ -3345,7 +3460,8 @@ SH
   assert_present "$WORLD/home/state/quarantined-e6.meta" "teardown cleared the other holder's record"
   # This path DID complete and delete its own records, so its stamp must not
   # outlive it, or the slot could never be released again.
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = none ] \
     || fail "a completed teardown left its own ownership stamp behind: $stamp"
@@ -3365,7 +3481,8 @@ test_retained_stamp_survives_failed_metadata_retirement() {
   fm_write_meta "$WORLD/home/state/paused-e11.meta" \
     "window=firstmate:fm-paused-e11" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e11 "$WORLD/home" ) \
     || fail "failed-retirement fixture could not be stamped"
   git_dir=$(git -C "$WT_DIR" rev-parse --path-format=absolute --git-common-dir)
@@ -3381,7 +3498,8 @@ test_retained_stamp_survives_failed_metadata_retirement() {
   set -e
   [ "$status" -ne 0 ] || fail "metadata-retirement failure unexpectedly completed"$'\n'"$out"
   assert_present "$WORLD/home/state/task-e11.meta" "failed metadata retirement removed task metadata"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = task-e11 ] \
     || fail "failed metadata retirement cleared ownership evidence: $stamp"
@@ -3417,7 +3535,8 @@ SH
   write_current_meta "$WORLD/home/state/task-e12.meta" task-e12 "$WORLD/home" endpoint-task-e12 \
     "window=firstmate:fm-task-e12" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e12 "$WORLD/home" ) \
     || fail "failed-return fixture could not be stamped"
   branch=$(git -C "$WT_DIR" rev-parse --abbrev-ref HEAD)
@@ -3435,7 +3554,8 @@ SH
   set -e
   [ "$status" -ne 0 ] || fail "failed pool return unexpectedly completed"$'\n'"$out"
   assert_present "$WORLD/home/state/task-e12.meta" "failed pool return removed task metadata"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_return_claim_record "$WT_DIR" \
     && printf '%s' "$FM_SLOT_RETURN_CLAIM_TASK" || printf 'none' )
   [ "$stamp" = task-e12 ] || fail "failed pool return cleared transition evidence: $stamp"
@@ -3455,7 +3575,8 @@ test_return_transition_never_uses_a_worktree_path() {
   read_slot_world "$rec"
   collision="$WT_DIR/.fm-slot-return-owner"
   printf 'tracked user data\n' > "$collision"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-collision "$WORLD/home" \
     && fm_slot_stamp_stage_return "$WT_DIR" task-collision "$WORLD/home" \
       "$WORLD/home/state" task-collision \
@@ -3508,7 +3629,8 @@ SH
   write_current_meta "$WORLD/home/state/task-reuse.meta" task-reuse "$WORLD/home" endpoint-task-reuse \
     "window=firstmate:fm-task-reuse" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-reuse "$WORLD/home" )
   set +e
   out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
@@ -3524,7 +3646,8 @@ SH
   assert_present "$WT_DIR/.claude/settings.local.json" "teardown removed the replacement Claude hook"
   assert_present "$WT_DIR/.opencode/plugins/fm-turn-end.js" "teardown removed the replacement OpenCode hook"
   assert_present "$WT_DIR/.fm-grok-turnend" "teardown removed the replacement Grok hook"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf none )
   [ "$stamp" = replacement ] || fail "teardown cleared replacement ownership after return: $stamp"
   pass "successful pool return never mutates a slot after reuse"
@@ -3554,7 +3677,8 @@ SH
   write_current_meta "$WORLD/home/state/task-failed-reuse.meta" task-failed-reuse "$WORLD/home" endpoint-task-failed-reuse \
     "window=firstmate:fm-task-failed-reuse" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-failed-reuse "$WORLD/home" )
   set +e
   out=$(cd "$ROOT" && env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
@@ -3565,7 +3689,8 @@ SH
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "failed reused-slot return unexpectedly succeeded"$'\n'"$out"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf none )
   [ "$stamp" = replacement ] \
     || fail "failed return restored stale ownership over replacement: $stamp"
@@ -3578,7 +3703,8 @@ test_committed_return_claim_reconciles_after_cleanup_crash() {
   read_slot_world "$rec"
   (
     local claim legacy marker
-    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
     fm_slot_stamp_stage_return \
       "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
@@ -3600,7 +3726,8 @@ test_committed_return_cleanup_retries_after_legacy_unlink() {
   read_slot_world "$rec"
   (
     local claim legacy marker
-    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
     fm_slot_stamp_stage_return \
       "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
@@ -3622,7 +3749,8 @@ test_foreign_committed_return_holder_blocks_reuse() {
   read_slot_world "$rec"
   (
     local claim legacy marker
-    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
     fm_slot_stamp_stage_return \
       "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
@@ -3645,7 +3773,8 @@ test_manual_reclaim_has_no_task_identity_exemption() {
   pid=$(start_declared_agent "$WT_DIR" __manual-reclaim__ "$WORLD/home")
   occupants=$( FM_TEST_AGENT_PIDS="$FM_TEST_AGENT_PIDS $pid"
     export FM_TEST_AGENT_PIDS
-    . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_manual_reclaim_occupants "$WT_DIR" )
   assert_contains "$occupants" "__manual-reclaim__" \
     "manual reclaim excluded a live task that matched its old sentinel identity"
@@ -3659,7 +3788,8 @@ test_malformed_committed_return_marker_blocks_reuse() {
   read_slot_world "$rec"
   (
     local claim legacy marker
-    . "$ROOT/bin/fm-slot-owner-lib.sh"
+    # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh"
     fm_slot_stamp_write "$WT_DIR" old-task "$WORLD/home"
     fm_slot_stamp_stage_return \
       "$WT_DIR" old-task "$WORLD/home" "$WORLD/home/state" old-task
@@ -3678,12 +3808,14 @@ test_foreign_transition_holder_retains_before_mutation() {
   local rec claim verdict
   rec=$(make_slot_world slot-foreign-transition-holder)
   read_slot_world "$rec"
-  claim=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  claim=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_return_claim_path "$WT_DIR" )
   mkdir -p "${claim%/*}"
   printf 'task=task-holder\nhome=%s\nlease_holder=foreign-holder\n' \
     "$WORLD/home" > "$claim"
-  verdict=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  verdict=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_disposal_verdict "$WORLD/home/state" task-holder "$WT_DIR" \
       "$WORLD/home" "$WORLD/home" crewmate )
   assert_contains "$verdict" "transition lease holder foreign-holder, not task-holder" \
@@ -3702,12 +3834,14 @@ test_ordinary_teardown_acquires_admission_before_task_lock() {
   write_current_meta "$WORLD/home/state/task-e13.meta" task-e13 "$WORLD/home" endpoint-task-e13 \
     "window=firstmate:fm-task-e13" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e13 "$WORLD/home" ) \
     || fail "lock-order fixture could not be stamped"
   (
     exec env FM_STATE_OVERRIDE="$WORLD/home/state" bash -c '
-      . "$1/bin/fm-wake-lib.sh"
+      # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-wake-lib.sh"
       admission=$(fm_spawn_admission_lock_path "$STATE")
       mkdir -p "$(dirname "$admission")"
       fm_lock_try_acquire "$admission" || exit 1
@@ -3742,7 +3876,8 @@ test_ordinary_teardown_acquires_admission_before_task_lock() {
   assert_contains "$out" "spawn or an older lifecycle operation is still changing $WORLD/home/state" \
     "ordinary teardown checked its task lock before home admission"
   assert_present "$WORLD/home/state/task-e13.meta" "admission refusal removed task metadata"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = task-e13 ] || fail "admission refusal cleared ownership evidence"
   pass "ordinary teardown acquires home admission before its task lock"
@@ -3761,7 +3896,8 @@ test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation() {
     "window=firstmate:fm-task-e14" "worktree=$WT_DIR" \
     "project=$WORLD/corrupt-project" "harness=claude" "kind=scout" \
     "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-e14 "$WORLD/home" ) \
     || fail "ambiguous-disposal fixture could not be stamped"
   set +e
@@ -3777,7 +3913,8 @@ test_ordinary_teardown_refuses_ambiguous_disposal_before_mutation() {
   [ ! -s "$log" ] || fail "ambiguous disposal preflight closed the endpoint"
   assert_present "$WORLD/home/state/task-e14.meta" \
     "ambiguous disposal preflight removed task metadata"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
   [ "$stamp" = task-e14 ] || fail "ambiguous disposal preflight changed ownership evidence"
   pass "ordinary teardown refuses ambiguous disposal before lifecycle mutation"
@@ -3898,8 +4035,9 @@ test_receipt_validation_rejects_symlinked_stage_and_malformed_sibling() {
   local ID META TEARDOWN_TXN_DIR
   txn="$TMP_ROOT/receipt-validation"
   outside="$TMP_ROOT/receipt-stage-outside"
-  ID=task-receipt
+  ID='task-receipt'
   META="$txn/task-receipt.meta"
+  # shellcheck disable=SC2034 # consumed by the sourced teardown receipt helper.
   TEARDOWN_TXN_DIR="$txn"
   mkdir -p "$txn/closed-endpoints" "$outside"
   printf 'meta\n' > "$META"
@@ -3987,7 +4125,8 @@ SH
   write_current_meta "$WORLD/home/state/task-live.meta" task-live "$WORLD/home" endpoint-live \
     "window=firstmate:fm-task-live" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" task-live "$WORLD/home" ) \
     || fail "live transaction fixture could not be stamped"
   set +e
@@ -4223,13 +4362,15 @@ SH
   status=$?
   set -e
   expect_code 1 "$status" "spawn should abort when metadata publication cannot start"
-  if stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task 2>/dev/null); then
+  if stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task 2>/dev/null); then
     fail "an aborted spawn left its newly-created claim behind: $stamp"
   fi
   assert_grep 'kill-window' "$CASE_DIR/kill.log" "aborted spawn did not close its new endpoint"
 
   home_real=$(cd "$HOME_DIR" && pwd -P)
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_write "$WT_DIR" "$id" "$home_real" ) \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_write "$WT_DIR" "$id" "$home_real" ) \
     || fail "could not install the preexisting exact claim fixture"
   : > "$CASE_DIR/kill.log"
   set +e
@@ -4244,7 +4385,8 @@ SH
   status=$?
   set -e
   expect_code 1 "$status" "idempotent-claim spawn should reach the metadata abort"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
   [ "$stamp" = "$id" ] || fail "abort cleared a preexisting idempotent claim"
   pass "spawn abort clears only a claim newly created by that invocation"
 }
@@ -4255,7 +4397,8 @@ test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
   make_launch_case foreign-claim "$id"
   rec=$MAKE_LAUNCH_CASE_RESULT
   read_launch_record "$rec"
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  ( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" \
     && fm_slot_stamp_write "$WT_DIR" foreign-g2 "$CASE_DIR/foreign-home" ) \
     || fail "could not install foreign claim fixture"
   : > "$CASE_DIR/kill.log"
@@ -4276,7 +4419,8 @@ test_spawn_refuses_a_foreign_claim_before_slot_mutation() {
   exclude=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
   ! grep -qxF '.claude/settings.local.json' "$exclude" 2>/dev/null \
     || fail "spawn mutated the slot exclude file before refusing the foreign claim"
-  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
+  stamp=$( # shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-slot-owner-lib.sh" && fm_slot_stamp_field "$WT_DIR" task )
   [ "$stamp" = foreign-g2 ] || fail "foreign claim was cleared or replaced"
   assert_grep 'kill-window' "$CASE_DIR/kill.log" "foreign claim refusal did not close the new endpoint"
   pass "spawn claims immediately and a foreign owner leaves the contested slot untouched"

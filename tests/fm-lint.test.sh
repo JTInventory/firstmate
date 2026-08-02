@@ -9,6 +9,7 @@ LINT="$ROOT/bin/fm-lint.sh"
 CI="$ROOT/.github/workflows/ci.yml"
 NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
+BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 
 write_logging_shellcheck() {
   local fake_shellcheck=$1
@@ -63,6 +64,22 @@ test_owner_and_gate_wiring() {
   assert_grep 'bin/fm-lint.sh' "$NM" "no-mistakes does not invoke the lint owner"
   assert_grep 'fm-lint.sh" --required-version' "$INSTALLER" "installer does not read the lint owner version"
   pass "CI and no-mistakes share one lint owner"
+}
+
+test_bootstrap_source_graph_isolated() {
+  local source
+  for source in \
+    fm-worker-isolation-lib.sh \
+    fm-wake-lib.sh \
+    fm-secondmate-delivery-lib.sh \
+    fm-config-inherit-lib.sh \
+    fm-backend.sh; do
+    if ! grep -B1 -F -- ". \"\$SCRIPT_DIR/$source\"" "$BOOTSTRAP" \
+      | grep -F -- '# shellcheck source=/dev/null' >/dev/null; then
+      fail "bootstrap source graph is not isolated for $source"
+    fi
+  done
+  pass "bootstrap source graph remains bounded"
 }
 
 test_version_pin_and_rejection() {
@@ -214,6 +231,7 @@ SH
 }
 
 test_owner_and_gate_wiring
+test_bootstrap_source_graph_isolated
 test_version_pin_and_rejection
 test_batched_complete_coverage_and_flags
 test_explicit_paths_remain_single_arguments

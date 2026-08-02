@@ -273,12 +273,10 @@ ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
 HOME_REAL=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || exit 1
 BINDING="$STATE/.primary-checkout"
 OLD_LOCK_PRESENT=0
-OLD_LOCK=
 OLD_BINDING_PRESENT=0
-OLD_BINDING=
 OLD_AUTHORITY_PRESENT=0
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
-  OLD_LOCK=$(cat "$LOCK") || exit 1
+  cat "$LOCK" >/dev/null || exit 1
   OLD_LOCK_PRESENT=1
 fi
 if [ -e "$BINDING" ] || [ -L "$BINDING" ]; then
@@ -286,7 +284,7 @@ if [ -e "$BINDING" ] || [ -L "$BINDING" ]; then
     echo "error: cannot bind the session lock to its primary checkout" >&2
     exit 1
   fi
-  OLD_BINDING=$(cat "$BINDING") || exit 1
+  cat "$BINDING" >/dev/null || exit 1
   OLD_BINDING_PRESENT=1
 fi
 if [ -e "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then

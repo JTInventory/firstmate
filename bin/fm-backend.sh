@@ -20,6 +20,7 @@ if ! command -v fm_lock_try_acquire >/dev/null 2>&1; then
   _FM_BACKEND_WAKE_READ_ONLY_SET=${FM_WAKE_LIB_READ_ONLY+x}
   _FM_BACKEND_WAKE_READ_ONLY_VALUE=${FM_WAKE_LIB_READ_ONLY:-}
   FM_WAKE_LIB_READ_ONLY=1
+  # shellcheck source=/dev/null
   . "$FM_BACKEND_LIB_DIR/fm-wake-lib.sh"
   if [ "$_FM_BACKEND_WAKE_READ_ONLY_SET" = x ]; then
     FM_WAKE_LIB_READ_ONLY=$_FM_BACKEND_WAKE_READ_ONLY_VALUE
@@ -29,6 +30,7 @@ if ! command -v fm_lock_try_acquire >/dev/null 2>&1; then
   unset _FM_BACKEND_WAKE_READ_ONLY_SET _FM_BACKEND_WAKE_READ_ONLY_VALUE
 fi
 if ! command -v fm_agent_proc_cwd >/dev/null 2>&1; then
+  # shellcheck source=/dev/null
   . "$FM_BACKEND_LIB_DIR/fm-agent-cwd-lib.sh"
 fi
 

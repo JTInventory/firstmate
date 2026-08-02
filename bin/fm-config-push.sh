@@ -70,7 +70,9 @@ export FM_WAKE_LIB_READ_ONLY
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
+# shellcheck disable=SC2034 # passed by name to fm_lifecycle_admission_* via eval.
 FM_CONFIG_PUSH_ADMISSION_LOCKS=()
+# shellcheck disable=SC2034 # passed by name to fm_lifecycle_admission_* via eval.
 FM_CONFIG_PUSH_FLEET_LOCKS=()
 fm_ff_target_lock_acquire() {
   local state_dir=$1 _label=${2:-target} target_home=${3:-}
