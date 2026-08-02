@@ -49,7 +49,7 @@ fi
 
 FM_TEST_BOUNDED_GROUP_PERL='
 use Errno qw(ECHILD ESRCH);
-use POSIX qw(:signal_h setpgid);
+use POSIX qw(:signal_h :sys_wait_h setpgid);
 my $seconds = shift;
 my $blocked = POSIX::SigSet->new(SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGCONT);
 my $old = POSIX::SigSet->new();
@@ -78,6 +78,44 @@ if (!$ready_count) {
   exit(128 + ($status & 127)) if $status & 127;
   exit($status >> 8);
 }
+my %tracked = ($pid => 1);
+my $tracking_ok = 1;
+my $process_children = sub {
+  my %children;
+  open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return;
+  while (my $line = <$ps>) {
+    next if $line =~ /^\s*$/;
+    $line =~ /^\s*(\d+)\s+(\d+)\s*$/ or return;
+    push @{$children{$2}}, $1;
+  }
+  close $ps or return;
+  return \%children;
+};
+my $refresh_tracked = sub {
+  my $children = $process_children->();
+  if (!$children) {
+    $tracking_ok = 0;
+    return;
+  }
+  my %seen = %tracked;
+  my @queue = keys %tracked;
+  while (@queue) {
+    my $parent = shift @queue;
+    for my $child (@{$children->{$parent} || []}) {
+      next if exists $seen{$child};
+      $seen{$child} = 1;
+      $tracked{$child} = 1;
+      push @queue, $child;
+    }
+  }
+};
+my $signal_tracked = sub {
+  my $signal = shift;
+  for my $tracked_pid (keys %tracked) {
+    next if $tracked_pid == $$;
+    kill $signal, $tracked_pid;
+  }
+};
 my $group_gone = sub {
   for (1 .. 20) {
     my $probe = kill 0, -$pid;
@@ -87,16 +125,27 @@ my $group_gone = sub {
   }
   return 0;
 };
+my $tracked_gone = sub {
+  for my $tracked_pid (keys %tracked) {
+    my $probe = kill 0, $tracked_pid;
+    return 0 if $probe;
+    return 0 if !$probe && !$!{ESRCH};
+  }
+  return 1;
+};
 my $stop = sub {
   my ($signal, $code) = @_;
+  $refresh_tracked->();
   $SIG{ALRM} = $SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = $SIG{TSTP} = $SIG{CONT} = "IGNORE";
   sigprocmask(SIG_BLOCK, $blocked);
   kill $signal, -$pid;
+  $signal_tracked->($signal);
   select undef, undef, undef, 0.2;
   kill "KILL", -$pid;
+  $signal_tracked->("KILL");
   my $waited = waitpid $pid, 0;
   my $wait_ok = $waited == $pid || ($waited < 0 && $!{ECHILD});
-  exit 125 unless $wait_ok && $group_gone->();
+  exit 125 unless $wait_ok && $tracking_ok && $group_gone->() && $tracked_gone->();
   exit $code;
 };
 $SIG{ALRM} = sub { $stop->("TERM", 124) };
@@ -113,13 +162,24 @@ $suspend = sub {
 };
 $SIG{TSTP} = $suspend;
 $SIG{CONT} = sub { kill "CONT", -$pid };
+$refresh_tracked->();
 alarm $seconds;
 defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
-my $waited = waitpid $pid, 0;
-my $status = $?;
+my $waited = 0;
+my $status = 0;
+while (1) {
+  $waited = waitpid $pid, WNOHANG;
+  last if $waited == $pid || $waited < 0;
+  $refresh_tracked->();
+  select undef, undef, undef, 0.05;
+}
+if ($waited == $pid) {
+  $status = $?;
+}
 alarm 0;
 exit 125 if $waited < 0;
-if (!$group_gone->()) {
+ $refresh_tracked->();
+if (!$tracking_ok || !$group_gone->() || !$tracked_gone->()) {
   $stop->("TERM", 125);
 }
 exit(128 + ($status & 127)) if $status & 127;

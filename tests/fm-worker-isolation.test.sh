@@ -2872,6 +2872,15 @@ test_sweep_binds_unreadable_candidates_to_the_recorded_endpoint() {
     fi
   ' 2>&1) || status=$?
   expect_code 0 "$status" "an unrelated unreadable candidate matched the recorded endpoint"
+  status=0
+  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_backend_foreground_process_pid() { return 1; }
+    fm_isolation_unreadable_candidate_matches_endpoint "4242" herdr recorded-target
+    status=$?
+    [ "$status" -eq 2 ]
+  ' 2>&1) || status=$?
+  expect_code 0 "$status" "an endpoint lookup failure was not kept distinct from no-match"
   pass "unreadable sweep evidence is bound to the recorded endpoint process"
 }
 

@@ -249,14 +249,15 @@ test_each_behavior_test_has_a_hard_timeout() {
 #!/usr/bin/env bash
 set -eu
 (sleep 2; printf 'survived\n' > "$FM_FIXTURE_OUTPUT_DIR/descendant-survived") &
+setsid bash -c 'sleep 2; printf "escaped\n" > "$FM_FIXTURE_OUTPUT_DIR/escaped-descendant-survived"' &
 sleep 10
 SH
   chmod +x "$fixture/tests/hang.test.sh"
   fallback_bin="$fixture/fallback-bin"
   mkdir -p "$fallback_bin"
   for tool in awk bash basename cat cp cut date dirname diff env git grep head \
-    mkdir mktemp od perl ps python3 readlink realpath rm rmdir sed sleep sort \
-    tail tmux tr wc; do
+    mkdir mktemp od perl ps python3 readlink realpath rm rmdir sed setsid sleep \
+    sort tail tmux tr wc; do
     target=$(command -v "$tool" || true)
     [ -n "$target" ] || fail "fallback timeout fixture could not find $tool"
     ln -s "$target" "$fallback_bin/$tool"
@@ -272,6 +273,8 @@ SH
   sleep 2
   [ ! -e "$fixture_output/descendant-survived" ] \
     || fail "a timed-out behavior descendant survived process-group cleanup"
+  [ ! -e "$fixture_output/escaped-descendant-survived" ] \
+    || fail "a timed-out escaped descendant survived process-tree cleanup"
   pass "behavior tests have a hard per-test timeout"
 }
 
