@@ -195,7 +195,9 @@ if (!$pid) {
 }
 close $ready_w;
 close $release_r;
-my $pre_fd = syscall($sys_pidfd_open, $pid, 0);
+my $pre_fd = $ENV{FM_TEST_FORCE_ROOT_PIDFD_OPEN_FAILURE}
+  ? -1
+  : syscall($sys_pidfd_open, $pid, 0);
 my $pre_reap = sub {
   for (1 .. 100) {
     my $waited = waitpid $pid, WNOHANG;
@@ -219,12 +221,14 @@ my $pre_terminate = sub {
 };
 my $abort_before_bind = sub {
   close $release_w;
+  my $cleanup_ok;
   if (defined $pre_fd && $pre_fd >= 0) {
-    $pre_terminate->($pre_fd);
-    POSIX::close($pre_fd);
+    $cleanup_ok = $pre_terminate->($pre_fd);
   } else {
-    $pre_reap->();
+    $cleanup_ok = $pre_reap->();
   }
+  exit 125 unless $cleanup_ok;
+  POSIX::close($pre_fd) if defined $pre_fd && $pre_fd >= 0;
   exit 125;
 };
 if (!defined $pre_fd || $pre_fd < 0) {
@@ -526,7 +530,7 @@ exit($status >> 8);
 '
 FM_TEST_SUPERVISOR_HANDLE_PERL='
 use Config;
-use Errno qw(ECHILD EINTR ESRCH);
+use Errno qw(ECHILD EINTR EIO EPERM ESRCH);
 use POSIX qw(:sys_wait_h);
 my ($input_path, $output_path) = @ARGV;
 my $arch = $Config{archname} // "";
@@ -577,6 +581,10 @@ my $probe = sub {
 };
 my $reap_entry = sub {
   my ($entry) = @_;
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
+    $! = EIO;
+    return 0;
+  }
   for (1 .. 50) {
     my $waited = waitpid($entry->{pid}, WNOHANG);
     return 1 if $waited == $entry->{pid};
@@ -588,6 +596,10 @@ my $reap_entry = sub {
 };
 my $terminate_entry = sub {
   my ($entry) = @_;
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE}) {
+    $! = EPERM;
+    return 0;
+  }
   my $term = syscall($sys_pidfd_send_signal, $entry->{fd}, 15, 0, 0);
   my $term_ok = defined $term && ($term == 0 || ($term < 0 && $!{ESRCH}));
   return 0 unless $term_ok;
@@ -633,13 +645,16 @@ while (my $line = <$input>) {
       exec "/usr/bin/bash", $runner, $test_path, $job_root, $log_path, $start_gate, $abort_gate, $test_root, $timeout, $bounded_script;
       exit 127;
     }
-    my $fd = syscall($sys_pidfd_open, $pid, 0);
+    my $fd = $ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_OPEN_FAILURE}
+      ? -1
+      : syscall($sys_pidfd_open, $pid, 0);
     if (!defined $fd || $fd < 0) {
       if (open my $abort, ">", $abort_gate) {
         close $abort;
       }
-      $reap_entry->({ pid => $pid });
+      my $cleanup_ok = $reap_entry->({ pid => $pid });
       print "$key|error-open\n";
+      exit 125 unless $cleanup_ok;
       next;
     }
     my $entry = { fd => $fd, pid => $pid };
@@ -791,9 +806,10 @@ exit($cleanup_ok ? 0 : 125);
 '
 FM_TEST_SUPERVISOR_GUARD_WORKER_PERL='
 use Config;
-use Errno qw(ECHILD EINTR ESRCH);
+use Errno qw(ECHILD EINTR EIO EPERM ESRCH);
 use Fcntl qw(F_SETFD);
 use POSIX qw(:sys_wait_h);
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 my ($worker_path, $input_path, $output_path) = @ARGV;
 my $arch = $Config{archname} // "";
 my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
@@ -826,8 +842,14 @@ if (!$pid) {
   exit 127;
 }
 close $gate_r;
-my $fd = syscall($sys_pidfd_open, $pid, 0);
+my $fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}
+  ? -1
+  : syscall($sys_pidfd_open, $pid, 0);
 my $reap_bounded = sub {
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
+    $! = EIO;
+    return 0;
+  }
   for (1 .. 100) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
@@ -839,41 +861,51 @@ my $reap_bounded = sub {
 };
 if (!defined $fd || $fd < 0) {
   close $gate_w;
-  $reap_bounded->();
+  my $cleanup_ok = $reap_bounded->();
+  exit 125 unless $cleanup_ok;
   exit 125;
 }
 my $terminate = sub {
+  my ($deadline) = @_;
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE}) {
+    $! = EPERM;
+    return 0;
+  }
   my $sent = syscall($sys_pidfd_send_signal, $fd, 15, 0, 0);
   my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
   return 0 unless $term_ok;
-  for (1 .. 100) {
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
-    select undef, undef, undef, 0.02;
+    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
+    last if $remaining <= 0;
+    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
   }
+  return 0 if clock_gettime(CLOCK_MONOTONIC) >= $deadline;
   my $killed = syscall($sys_pidfd_send_signal, $fd, 9, 0, 0);
   my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
   return 0 unless $kill_ok;
-  for (1 .. 100) {
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
-    select undef, undef, undef, 0.02;
+    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
+    last if $remaining <= 0;
+    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
   }
   return 0;
 };
 my $abort_before_release = sub {
   close $gate_w;
-  while (1) {
-    if ($terminate->()) {
-      POSIX::close($fd);
-      exit 125;
-    }
-    select undef, undef, undef, 0.05;
+  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
+  if ($cleanup_ok) {
+    POSIX::close($fd);
+    exit 125;
   }
+  exit 125;
 };
 my $probe = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
 if (!defined $probe || $probe != 0) {
@@ -903,7 +935,9 @@ my $terminate_command = sub {
   my $waited = waitpid($pid, WNOHANG);
   $finish->($?) if $waited == $pid;
   $finish->(125) if $waited < 0 && !$!{EINTR};
-  $finish->(125) if $terminate->();
+  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
+  $finish->(125) if $cleanup_ok;
+  exit 125;
 };
 $SIG{INT} = $terminate_command;
 $SIG{TERM} = $terminate_command;
@@ -918,7 +952,7 @@ while (1) {
 '
 FM_TEST_SUPERVISOR_GUARD_PERL='
 use Config;
-use Errno qw(ECHILD EINTR ESRCH);
+use Errno qw(ECHILD EINTR EIO EPERM ESRCH);
 use POSIX qw(:sys_wait_h);
 my ($guard_worker_path, $worker_path, $input_path, $output_path, $release_fd) = @ARGV;
 my $arch = $Config{archname} // "";
@@ -956,8 +990,14 @@ if (!$pid) {
   exit 127;
 }
 close $gate_r;
-my $guard_fd = syscall($sys_pidfd_open, $pid, 0);
+my $guard_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}
+  ? -1
+  : syscall($sys_pidfd_open, $pid, 0);
 my $reap_bounded = sub {
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
+    $! = EIO;
+    return 0;
+  }
   for (1 .. 100) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
@@ -969,41 +1009,51 @@ my $reap_bounded = sub {
 };
 if (!defined $guard_fd || $guard_fd < 0) {
   close $gate_w;
-  $reap_bounded->();
+  my $cleanup_ok = $reap_bounded->();
+  exit 125 unless $cleanup_ok;
   exit 125;
 }
 my $terminate = sub {
+  my ($deadline) = @_;
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE}) {
+    $! = EPERM;
+    return 0;
+  }
   my $sent = syscall($sys_pidfd_send_signal, $guard_fd, 15, 0, 0);
   my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
   return 0 unless $term_ok;
-  for (1 .. 100) {
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
-    select undef, undef, undef, 0.02;
+    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
+    last if $remaining <= 0;
+    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
   }
+  return 0 if clock_gettime(CLOCK_MONOTONIC) >= $deadline;
   my $killed = syscall($sys_pidfd_send_signal, $guard_fd, 9, 0, 0);
   my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
   return 0 unless $kill_ok;
-  for (1 .. 100) {
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
-    select undef, undef, undef, 0.02;
+    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
+    last if $remaining <= 0;
+    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
   }
   return 0;
 };
 my $abort_before_release = sub {
   close $gate_w;
-  while (1) {
-    if ($terminate->()) {
-      POSIX::close($guard_fd);
-      exit 125;
-    }
-    select undef, undef, undef, 0.05;
+  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
+  if ($cleanup_ok) {
+    POSIX::close($guard_fd);
+    exit 125;
   }
+  exit 125;
 };
 if (defined $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE} &&
     length $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE}) {
@@ -1033,7 +1083,9 @@ my $terminate_command = sub {
   my $waited = waitpid($pid, WNOHANG);
   $finish->($?) if $waited == $pid;
   $finish->(125) if $waited < 0 && !$!{EINTR};
-  $finish->(125) if $terminate->();
+  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
+  $finish->(125) if $cleanup_ok;
+  exit 125;
 };
 $SIG{INT} = $terminate_command;
 $SIG{TERM} = $terminate_command;
@@ -1048,9 +1100,10 @@ while (1) {
 '
 FM_TEST_SUPERVISOR_GUARD_PARENT_PERL='
 use Config;
-use Errno qw(EAGAIN ECHILD EINTR ESRCH);
+use Errno qw(EAGAIN ECHILD EINTR EIO EPERM ESRCH);
 use Fcntl qw(F_SETFD O_NONBLOCK O_RDONLY);
 use POSIX qw(:sys_wait_h);
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 my ($guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, $control_path) = @ARGV;
 my $arch = $Config{archname} // "";
 my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
@@ -1080,6 +1133,10 @@ if (!$pid) {
 }
 close $release_r;
 my $reap_bounded = sub {
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
+    $! = EIO;
+    return 0;
+  }
   for (1 .. 100) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
@@ -1089,32 +1146,45 @@ my $reap_bounded = sub {
   }
   return 0;
 };
-my $outer_fd = syscall($sys_pidfd_open, $pid, 0);
+my $outer_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}
+  ? -1
+  : syscall($sys_pidfd_open, $pid, 0);
 if (!defined $outer_fd || $outer_fd < 0) {
   close $release_w;
-  $reap_bounded->();
+  my $cleanup_ok = $reap_bounded->();
+  exit 125 unless $cleanup_ok;
   exit 125;
 }
 my $terminate = sub {
+  my ($deadline) = @_;
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE}) {
+    $! = EPERM;
+    return 0;
+  }
   my $sent = syscall($sys_pidfd_send_signal, $outer_fd, 15, 0, 0);
   my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
   return 0 unless $term_ok;
-  for (1 .. 100) {
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
-    select undef, undef, undef, 0.02;
+    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
+    last if $remaining <= 0;
+    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
   }
+  return 0 if clock_gettime(CLOCK_MONOTONIC) >= $deadline;
   my $killed = syscall($sys_pidfd_send_signal, $outer_fd, 9, 0, 0);
   my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
   return 0 unless $kill_ok;
-  for (1 .. 100) {
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
-    select undef, undef, undef, 0.02;
+    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
+    last if $remaining <= 0;
+    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
   }
   return 0;
 };
@@ -1128,12 +1198,9 @@ $SIG{INT} = sub { $stop = 1; };
 $SIG{TERM} = sub { $stop = 1; };
 my $abort_before_release = sub {
   close $release_w;
-  while (1) {
-    if ($terminate->()) {
-      $finish->(125);
-    }
-    select undef, undef, undef, 0.05;
-  }
+  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
+  $finish->(125) if $cleanup_ok;
+  exit 125;
 };
 my $outer_probe = syscall($sys_pidfd_send_signal, $outer_fd, 0, 0, 0);
 if (!defined $outer_probe || $outer_probe != 0) {
@@ -1174,9 +1241,9 @@ while (1) {
   $finish->($?) if $waited == $pid;
   $stop = 1 if $waited < 0 && !$!{EINTR};
   if ($stop) {
-    $finish->(0) if $terminate->();
-    select undef, undef, undef, 0.05;
-    next;
+    my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
+    $finish->(0) if $cleanup_ok;
+    exit 125;
   }
   my $readable = "";
   vec($readable, fileno($control), 1) = 1;
@@ -1283,12 +1350,18 @@ supervisor_handle_broker_state() {
   if [ ! -e "/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat" ]; then
     return 0
   fi
-  IFS= read -r stat <"/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat" || return 2
+  if ! IFS= read -r stat <"/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat"; then
+    kill -0 "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null && return 2
+    return 0
+  fi
   fields=${stat##*) }
   set -- $fields
   [ "$#" -ge 20 ] || return 2
   process_state=$1
-  current=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID") || return 2
+  if ! current=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID"); then
+    kill -0 "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null && return 2
+    return 0
+  fi
   [ "$current" = "$SUPERVISOR_HANDLE_BROKER_IDENTITY" ] || return 2
   [ "$process_state" = Z ] && return 3
   return 1
@@ -1557,6 +1630,12 @@ if ! supervisor_handle_request ping || [ "$SUPERVISOR_HANDLE_RESPONSE" != 'ping|
   exit 125
 fi
 if [ -n "${FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN:-}" ]; then
+  eval "exec $SUPERVISOR_HANDLE_CONTROL>&-"
+  SUPERVISOR_HANDLE_CONTROL=
+  exit 125
+fi
+if [ "${FM_TEST_SUPERVISOR_FORCE_TERMINATE_CONTROL:-0}" -eq 1 ]; then
+  printf '%s\n' terminate >&"$SUPERVISOR_HANDLE_CONTROL" || true
   eval "exec $SUPERVISOR_HANDLE_CONTROL>&-"
   SUPERVISOR_HANDLE_CONTROL=
   exit 125

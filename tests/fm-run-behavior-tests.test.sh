@@ -147,6 +147,10 @@ run_fixture() {
   local drop_launch_response=${12:-} block_fifo=${13:-} broker_pid_file=${14:-}
   local guard_pid_file=${15:-} break_control=${16:-0} delay_control_open=${17:-}
   local worker_pid_file=${18:-}
+  local force_signal_failure=${19:-0} force_reap_failure=${20:-0}
+  local force_root_open_failure=${21:-0} force_nested_open_failure=${22:-0}
+  local force_job_open_failure=${23:-0} force_job_signal_failure=${24:-0}
+  local force_terminate_control=${25:-0}
   local fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
@@ -170,6 +174,13 @@ run_fixture() {
       FM_TEST_SUPERVISOR_WORKER_PID_FILE="$worker_pid_file" \
       FM_TEST_SUPERVISOR_BREAK_CONTROL="$break_control" \
       FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN="$delay_control_open" \
+      FM_TEST_FORCE_ROOT_PIDFD_OPEN_FAILURE="$force_root_open_failure" \
+      FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE="$force_nested_open_failure" \
+      FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE="$force_reap_failure" \
+      FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE="$force_signal_failure" \
+      FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_OPEN_FAILURE="$force_job_open_failure" \
+      FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE="$force_job_signal_failure" \
+      FM_TEST_SUPERVISOR_FORCE_TERMINATE_CONTROL="$force_terminate_control" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -329,6 +340,12 @@ test_bounded_runner_uses_stable_containment() {
     "nested supervisors must verify their parent after containment"
   assert_contains "$source" 'syscall($sys_pidfd_send_signal, $fd, $signal, 0, 0)' \
     "bounded runner must signal through process handles"
+  assert_contains "$source" 'CLOCK_MONOTONIC' \
+    "nested cleanup must use a monotonic deadline"
+  assert_contains "$source" 'exit 125 unless $cleanup_ok' \
+    "cleanup failures must propagate as fail-closed exits"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE' \
+    "pidfd signal failure injection must remain covered"
   assert_not_contains "$source" 'kill $signal, $tracked_pid' \
     "bounded runner must not signal tracked numeric PIDs"
   assert_contains "$source" 'waitpid(-1, WNOHANG)' \
@@ -370,9 +387,9 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must retain a parent-owned guard controller"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_WORKER_PERL' \
     "behavior runner must isolate the guard worker"
-  assert_contains "$source" 'my $outer_fd = syscall($sys_pidfd_open, $pid, 0)' \
+  assert_contains "$source" 'my $outer_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}' \
     "guard controller must retain the outer guard pidfd"
-  assert_contains "$source" 'my $guard_fd = syscall($sys_pidfd_open, $pid, 0)' \
+  assert_contains "$source" 'my $guard_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}' \
     "broker guard must retain the outer guard pidfd"
   assert_contains "$source" 'use Fcntl qw(F_SETFD O_NONBLOCK O_RDONLY);' \
     "broker guard must open its control FIFO without blocking"
@@ -485,6 +502,57 @@ test_failure_injection_refuses_before_launch() {
   kill -TERM "$sentinel_pid" 2>/dev/null || true
   wait "$sentinel_pid" 2>/dev/null || true
   pass "failure injection refuses before launching behavior tests"
+}
+
+run_cleanup_failure_case() {
+  local case_name=$1 force_signal=$2 force_reap=$3 force_root_open=$4
+  local force_nested_open=$5 force_job_open=$6 force_job_signal=$7
+  local drop_launch=$8 break_control=$9 force_terminate_control=${10:-0}
+  local fixture output fixture_output rc start_seconds elapsed sentinel_marker sentinel_pid
+  local supervisor_pid_file root_pid_file guard_pid_file worker_pid_file broker_pid_file pid_file
+  fixture=$(make_fixture_root "$case_name")
+  output="$TMP_ROOT/$case_name.out"
+  supervisor_pid_file="$TMP_ROOT/$case_name-supervisor.identity"
+  root_pid_file="$TMP_ROOT/$case_name-root.identity"
+  guard_pid_file="$TMP_ROOT/$case_name-guard.identity"
+  worker_pid_file="$TMP_ROOT/$case_name-worker.identity"
+  broker_pid_file="$TMP_ROOT/$case_name-broker.identity"
+  sentinel_marker="$TMP_ROOT/$case_name-sentinel-term"
+  (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
+  sentinel_pid=$!
+  start_seconds=$SECONDS
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 \
+    "$supervisor_pid_file" "$root_pid_file" "$drop_launch" 0 \
+    "$broker_pid_file" "$guard_pid_file" "$break_control" '' \
+    "$worker_pid_file" "$force_signal" "$force_reap" "$force_root_open" \
+    "$force_nested_open" "$force_job_open" "$force_job_signal" \
+    "$force_terminate_control")
+  rc=$?
+  set -u
+  elapsed=$((SECONDS - start_seconds))
+  expect_code 125 "$rc" "$case_name must fail closed"
+  [ "$elapsed" -lt 10 ] || fail "$case_name exceeded its hard bound"
+  for pid_file in "$supervisor_pid_file" "$root_pid_file" "$guard_pid_file" \
+    "$worker_pid_file" "$broker_pid_file"; do
+    if [ -s "$pid_file" ]; then
+      assert_identity_gone "$(cat "$pid_file")"
+    fi
+  done
+  [ ! -e "$fixture_output/pass-a.started" ] || fail "$case_name released a behavior test"
+  [ ! -e "$sentinel_marker" ] || fail "$case_name signaled an unrelated process"
+  kill -TERM "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+}
+
+test_cleanup_failure_injections_are_bounded() {
+  run_cleanup_failure_case root-pidfd-open-failure 0 0 1 0 0 0 0 0
+  run_cleanup_failure_case nested-pidfd-open-failure 0 0 0 1 0 0 0 0
+  run_cleanup_failure_case job-pidfd-open-failure 0 0 0 0 1 0 0 0
+  run_cleanup_failure_case job-pidfd-signal-failure 0 0 0 0 0 1 1 0
+  run_cleanup_failure_case job-pidfd-reap-failure 0 1 0 0 0 0 1 0
+  run_cleanup_failure_case nested-pidfd-signal-failure 1 0 0 0 0 0 0 0 1
+  pass "pidfd cleanup failures are bounded and fail closed"
 }
 
 test_launch_response_loss_aborts_hidden_supervisor() {
@@ -722,6 +790,7 @@ test_each_behavior_test_has_a_hard_timeout
 test_bounded_runner_uses_stable_containment
 test_fast_escape_after_test_exit_is_rejected
 test_failure_injection_refuses_before_launch
+test_cleanup_failure_injections_are_bounded
 test_launch_response_loss_aborts_hidden_supervisor
 test_blocked_broker_fifo_teardown_is_bounded
 test_pre_control_open_teardown_is_bounded
