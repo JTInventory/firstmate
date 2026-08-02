@@ -205,6 +205,26 @@ if (!$ready_count) {
   exit(128 + ($status & 127)) if $status & 127;
   exit($status >> 8);
 }
+if (defined $ENV{FM_TEST_ROOT_PID_FILE} && length $ENV{FM_TEST_ROOT_PID_FILE}) {
+  my $record_ok = 1;
+  my $record_info = $process_info->($pid);
+  $record_ok = 0 unless defined $record_info && defined $record_info->{identity};
+  if ($record_ok) {
+    if (open my $record, ">", $ENV{FM_TEST_ROOT_PID_FILE}) {
+      my $written = print $record "$record_info->{identity}\n";
+      my $closed = close $record;
+      $record_ok = 0 unless $written && $closed;
+    } else {
+      $record_ok = 0;
+    }
+  }
+  if (!$record_ok) {
+    syswrite($release_w, "0");
+    close $release_w;
+    waitpid $pid, 0;
+    exit 125;
+  }
+}
 my $bind_process = sub {
   my ($candidate, $expected_parent) = @_;
   my $opened = $pidfd_open->($candidate);
@@ -472,6 +492,192 @@ if (!$tracking_ok || !$reap_nonblocking->() || !$group_gone->() || !$tracked_gon
 exit(128 + ($status & 127)) if $status & 127;
 exit($status >> 8);
 '
+FM_TEST_SUPERVISOR_HANDLE_PERL='
+use Config;
+use Errno qw(ESRCH);
+use POSIX ();
+my ($input_path, $output_path) = @ARGV;
+my $arch = $Config{archname} // "";
+my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
+if ($arch =~ /(?:x86_64|amd64)/) {
+  $sys_prctl = 157;
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+} elsif ($arch =~ /(?:aarch64|riscv64|s390x|ppc64|i[3-6]86|arm)/) {
+  $sys_prctl = 167 if $arch =~ /(?:aarch64|riscv64|s390x)/;
+  $sys_prctl = 171 if $arch =~ /ppc64/;
+  $sys_prctl = 172 if $arch =~ /(?:i[3-6]86|arm)/;
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+}
+defined $sys_prctl && defined $sys_pidfd_open && defined $sys_pidfd_send_signal or exit 125;
+my $parent = getppid();
+syscall($sys_prctl, 1, 15, 0, 0, 0) == 0 or exit 125;
+exit 125 if getppid() != $parent;
+open my $input, "<", $input_path or exit 125;
+open my $output, ">", $output_path or exit 125;
+select $output;
+$| = 1;
+my %handles;
+my $close_handle = sub {
+  my ($entry) = @_;
+  POSIX::close($entry->{fd});
+};
+my $identity = sub {
+  my ($pid) = @_;
+  open my $stat, "<", "/proc/$pid/stat" or return;
+  my $line = <$stat>;
+  close $stat;
+  return unless defined $line;
+  my $comm_end = rindex($line, ")");
+  return if $comm_end < 0;
+  my @fields = split /\s+/, substr($line, $comm_end + 2);
+  my $start = $fields[19];
+  return unless defined $start && $start =~ /^\d+\z/;
+  return "$pid:$start";
+};
+my $probe = sub {
+  my ($fd) = @_;
+  my $result = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
+  return 1 if defined $result && $result == 0;
+  return 0 if defined $result && $result < 0 && $!{ESRCH};
+  return;
+};
+while (my $line = <$input>) {
+  chomp $line;
+  my @parts;
+  if (index($line, "\t") >= 0) {
+    @parts = split /\t/, $line;
+  } else {
+    @parts = split /\|/, $line, 4;
+  }
+  my $command = shift @parts // "";
+  if ($command eq "ping") {
+    print "ping|ready\n";
+    next;
+  }
+  if ($command eq "launch" && @parts == 10) {
+    my ($key, $runner, $test_path, $job_root, $log_path, $start_gate, $abort_gate, $test_root, $timeout, $bounded_script) = @parts;
+    my $pid = fork;
+    if (!defined $pid) {
+      print "$key|error-fork\n";
+      next;
+    }
+    if (!$pid) {
+      my $child_parent = getppid();
+      syscall($sys_prctl, 1, 15, 0, 0, 0) == 0 or exit 125;
+      exit 125 if getppid() != $child_parent;
+      exec "/usr/bin/bash", $runner, $test_path, $job_root, $log_path, $start_gate, $abort_gate, $test_root, $timeout, $bounded_script;
+      exit 127;
+    }
+    my $abort_child = sub {
+      if (open my $abort, ">", $abort_gate) {
+        close $abort;
+      }
+    };
+    if ($ENV{FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE}) {
+      $abort_child->();
+      waitpid $pid, 0;
+      print "$key|error-identity\n";
+      next;
+    }
+    my $fd = syscall($sys_pidfd_open, $pid, 0);
+    if (!defined $fd || $fd < 0) {
+      $abort_child->();
+      waitpid $pid, 0;
+      print "$key|error-open\n";
+      next;
+    }
+    my $current = $identity->($pid);
+    if (!defined $current) {
+      POSIX::close($fd);
+      $abort_child->();
+      waitpid $pid, 0;
+      print "$key|error-identity\n";
+      next;
+    }
+    my $alive = $probe->($fd);
+    if (!defined $alive || !$alive) {
+      POSIX::close($fd);
+      $abort_child->();
+      waitpid $pid, 0;
+      print "$key|error-probe\n";
+      next;
+    }
+    $handles{$key} = { fd => $fd, pid => $pid };
+    print "$key|registered|$pid|$current\n";
+    next;
+  }
+  if ($command eq "wait" && @parts == 1) {
+    my $key = $parts[0];
+    my $entry = $handles{$key};
+    if (!defined $entry) {
+      print "$key|error\n";
+      next;
+    }
+    if (!defined $entry->{status}) {
+      my $waited = waitpid($entry->{pid}, 0);
+      if ($waited < 0) {
+        print "$key|error\n";
+        next;
+      }
+      $entry->{status} = $?;
+    }
+    print "$key|exit|$entry->{status}\n";
+    next;
+  }
+  if ($command eq "signal" && @parts == 1) {
+    my $key = $parts[0];
+    my $entry = $handles{$key};
+    if (!defined $entry) {
+      print "$key|error\n";
+      next;
+    }
+    my $sent = syscall($sys_pidfd_send_signal, $entry->{fd}, 15, 0, 0);
+    if (defined $sent && $sent == 0) {
+      print "$key|signaled\n";
+    } elsif (defined $sent && $sent < 0 && $!{ESRCH}) {
+      print "$key|gone\n";
+    } else {
+      print "$key|error\n";
+    }
+    next;
+  }
+  if ($command eq "state" && @parts == 1) {
+    my $key = $parts[0];
+    my $entry = $handles{$key};
+    if (!defined $entry) {
+      print "$key|error\n";
+      next;
+    }
+    my $alive = $probe->($entry->{fd});
+    if (!defined $alive) {
+      print "$key|error\n";
+    } elsif ($alive) {
+      print "$key|alive\n";
+    } else {
+      print "$key|gone\n";
+    }
+    next;
+  }
+  if ($command eq "close" && @parts == 1) {
+    my $key = $parts[0];
+    my $entry = delete $handles{$key};
+    $close_handle->($entry) if defined $entry;
+    print "$key|closed\n";
+    next;
+  }
+  if ($command eq "shutdown" && !@parts) {
+    print "shutdown|done\n";
+    last;
+  }
+  print "error|malformed\n";
+}
+for my $entry (values %handles) {
+  $close_handle->($entry);
+}
+exit 0;
+'
 run_bounded() {
   local seconds=$1
   shift
@@ -541,124 +747,105 @@ fm_refuse_if_gate_agent() { return 0; }
 SH
 fi
 RUNNING_TEST_PIDS=()
-supervisor_start_identity() {
-  local pid=$1 stat_line stat_fields start
-  [ "${FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE:-0}" = 1 ] && return 1
-  if [ -r "/proc/$pid/stat" ]; then
-    IFS= read -r stat_line <"/proc/$pid/stat" || return 1
-    stat_fields=${stat_line##*) }
-    set -- $stat_fields
-    [ "$#" -ge 20 ] || return 1
-    printf '%s:%s\n' "$pid" "${20}"
-    return 0
-  fi
-  if command -v ps >/dev/null 2>&1; then
-    start=$(ps -p "$pid" -o lstart= 2>/dev/null) || return 1
-    start=${start#"${start%%[![:space:]]*}"}
-    start=${start%"${start##*[![:space:]]}"}
-    [ -n "$start" ] || return 1
-    printf '%s:%s\n' "$pid" "$start"
-    return 0
-  fi
-  return 1
+SUPERVISOR_HANDLE_BROKER_PID=
+SUPERVISOR_HANDLE_READY=0
+SUPERVISOR_HANDLE_WRITE=
+SUPERVISOR_HANDLE_READ=
+SUPERVISOR_HANDLE_RESPONSE=
+supervisor_handle_request() {
+  [ "$SUPERVISOR_HANDLE_READY" -eq 1 ] || return 1
+  SUPERVISOR_HANDLE_RESPONSE=
+  printf '%s\n' "$1" >&"$SUPERVISOR_HANDLE_WRITE" || return 1
+  IFS= read -r -t 2 SUPERVISOR_HANDLE_RESPONSE <&"$SUPERVISOR_HANDLE_READ" || return 1
 }
-supervisor_pidfd_action() {
-  local action=$1 pid=$2 expected=$3
-  command -v perl >/dev/null 2>&1 || return 2
-  perl -e '
-use Config;
-use Errno qw(ESRCH);
-use POSIX ();
-my $arch = $Config{archname} // "";
-my ($sys_pidfd_open, $sys_pidfd_send_signal);
-if ($arch =~ /(?:x86_64|amd64)/) {
-  $sys_pidfd_open = 434;
-  $sys_pidfd_send_signal = 424;
-} elsif ($arch =~ /(?:aarch64|riscv64|s390x|ppc64|i[3-6]86|arm)/) {
-  $sys_pidfd_open = 434;
-  $sys_pidfd_send_signal = 424;
+supervisor_handle_signal() {
+  local key=$1
+  supervisor_handle_request "signal|$key" || return 1
+  case "$SUPERVISOR_HANDLE_RESPONSE" in
+    "$key|signaled"|"$key|gone") return 0 ;;
+    *) return 1 ;;
+  esac
 }
-my ($action, $pid, $expected) = @ARGV;
-defined $sys_pidfd_open && defined $sys_pidfd_send_signal or exit 2;
-my $fd = syscall($sys_pidfd_open, $pid, 0);
-if (!defined $fd || $fd < 0) {
-  exit $!{ESRCH} ? 0 : 2;
-}
-open my $stat, "<", "/proc/$pid/stat" or do { POSIX::close($fd); exit 2; };
-my $line = <$stat>;
-close $stat;
-if (!defined $line) {
-  POSIX::close($fd);
-  exit 2;
-}
-my $comm_end = rindex($line, ")");
-if ($comm_end < 0) {
-  POSIX::close($fd);
-  exit 2;
-}
-my @fields = split /\s+/, substr($line, $comm_end + 2);
-my $start = $fields[19];
-if (!defined $start || $start !~ /^\d+\z/ || "$pid:$start" ne $expected) {
-  POSIX::close($fd);
-  exit 3;
-}
-my $probe = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
-if (!defined $probe || $probe < 0) {
-  my $gone = $!{ESRCH};
-  POSIX::close($fd);
-  exit $gone ? 0 : 2;
-}
-if ($action eq "gone") {
-  POSIX::close($fd);
-  exit 1;
-}
-if ($action eq "signal") {
-  my $sent = syscall($sys_pidfd_send_signal, $fd, 15, 0, 0);
-  my $gone = defined $sent && $sent < 0 && $!{ESRCH};
-  POSIX::close($fd);
-  exit 0 if (defined $sent && $sent == 0) || $gone;
-}
-POSIX::close($fd);
-exit 2;
-' "$action" "$pid" "$expected"
-}
-register_running_pid() {
-  local pid=$1 identity
-  identity=$(supervisor_start_identity "$pid" 2>/dev/null || true)
-  [ -n "$identity" ] || return 1
-  RUNNING_TEST_PIDS+=("$pid|$identity")
-}
-remove_running_pid() {
-  local target=$1 entry entry_pid
-  local remaining=()
-  for entry in "${RUNNING_TEST_PIDS[@]}"; do
-    entry_pid=${entry%%|*}
-    [ "$entry_pid" = "$target" ] || remaining+=("$entry")
-  done
-  RUNNING_TEST_PIDS=("${remaining[@]}")
-}
-signal_running_supervisor() {
-  local entry=$1 pid expected
-  pid=${entry%%|*}
-  expected=${entry#*|}
-  [ -n "$expected" ] || return 1
-  supervisor_pidfd_action signal "$pid" "$expected"
-}
-supervisor_is_gone() {
-  local entry=$1 pid expected state
-  pid=${entry%%|*}
-  expected=${entry#*|}
-  [ -n "$expected" ] || return 2
-  supervisor_pidfd_action gone "$pid" "$expected"
-  state=$?
-  case "$state" in
-    0) return 0 ;;
-    1) return 1 ;;
+supervisor_handle_state() {
+  local key=$1
+  supervisor_handle_request "state|$key" || return 2
+  case "$SUPERVISOR_HANDLE_RESPONSE" in
+    "$key|gone") return 0 ;;
+    "$key|alive") return 1 ;;
     *) return 2 ;;
   esac
 }
+supervisor_handle_close() {
+  local key=$1
+  supervisor_handle_request "close|$key" || return 1
+  [ "$SUPERVISOR_HANDLE_RESPONSE" = "$key|closed" ]
+}
+supervisor_handle_shutdown() {
+  supervisor_handle_request shutdown || return 1
+  [ "$SUPERVISOR_HANDLE_RESPONSE" = 'shutdown|done' ]
+}
+SUPERVISOR_HANDLE_LAUNCHED_PID=
+SUPERVISOR_HANDLE_LAUNCHED_IDENTITY=
+supervisor_handle_launch() {
+  local key=$1 runner=$2 test_path=$3 job_root=$4 log_path=$5
+  local start_gate=$6 abort_gate=$7 test_root=$8 timeout=$9 bounded_script=${10}
+  local request response_key response_state
+  printf -v request 'launch\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$key" "$runner" "$test_path" "$job_root" "$log_path" "$start_gate" \
+    "$abort_gate" "$test_root" "$timeout" "$bounded_script"
+  supervisor_handle_request "$request" || return 1
+  IFS='|' read -r response_key response_state SUPERVISOR_HANDLE_LAUNCHED_PID \
+    SUPERVISOR_HANDLE_LAUNCHED_IDENTITY <<<"$SUPERVISOR_HANDLE_RESPONSE"
+  [ "$response_key" = "$key" ] || return 1
+  [ "$response_state" = registered ] || return 1
+  [[ "$SUPERVISOR_HANDLE_LAUNCHED_PID" =~ ^[0-9]+$ ]] || return 1
+  [ -n "$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY" ]
+}
+SUPERVISOR_HANDLE_EXIT_STATUS=
+supervisor_handle_wait() {
+  local key=$1 response_key response_state raw_status
+  supervisor_handle_request "wait|$key" || return 1
+  IFS='|' read -r response_key response_state raw_status <<<"$SUPERVISOR_HANDLE_RESPONSE"
+  [ "$response_key" = "$key" ] || return 1
+  [ "$response_state" = exit ] || return 1
+  [[ "$raw_status" =~ ^[0-9]+$ ]] || return 1
+  if [ $((raw_status & 127)) -ne 0 ]; then
+    SUPERVISOR_HANDLE_EXIT_STATUS=$((128 + (raw_status & 127)))
+  else
+    SUPERVISOR_HANDLE_EXIT_STATUS=$((raw_status >> 8))
+  fi
+}
+remove_running_pid() {
+  local target=$1 entry entry_key
+  local remaining=()
+  for entry in "${RUNNING_TEST_PIDS[@]}"; do
+    entry_key=${entry%%|*}
+    [ "$entry_key" = "$target" ] || remaining+=("$entry")
+  done
+  RUNNING_TEST_PIDS=("${remaining[@]}")
+}
+supervisor_entry_for_key() {
+  local target=$1 entry
+  for entry in "${RUNNING_TEST_PIDS[@]}"; do
+    [ "${entry%%|*}" = "$target" ] && {
+      printf '%s\n' "$entry"
+      return 0
+    }
+  done
+  return 1
+}
+signal_running_supervisor() {
+  local entry=$1 key
+  key=${entry%%|*}
+  supervisor_handle_signal "$key"
+}
+supervisor_is_gone() {
+  local entry=$1 key
+  key=${entry%%|*}
+  supervisor_handle_state "$key"
+}
 cleanup() {
-  local cleanup_ok=1 entry pid state still_alive
+  local cleanup_ok=1 entry key state still_alive
   for entry in "${RUNNING_TEST_PIDS[@]}"; do
     signal_running_supervisor "$entry" || cleanup_ok=0
   done
@@ -676,15 +863,24 @@ cleanup() {
     sleep 0.05
   done
   for entry in "${RUNNING_TEST_PIDS[@]}"; do
-    pid=${entry%%|*}
+    key=${entry%%|*}
     state=0
     supervisor_is_gone "$entry" || state=$?
     if [ "$state" -eq 0 ]; then
-      wait "$pid" 2>/dev/null || true
+      supervisor_handle_wait "$key" || cleanup_ok=0
+      supervisor_handle_close "$key" || cleanup_ok=0
     else
       cleanup_ok=0
     fi
   done
+  if [ "$SUPERVISOR_HANDLE_READY" -eq 1 ]; then
+    supervisor_handle_shutdown || cleanup_ok=0
+    SUPERVISOR_HANDLE_READY=0
+  fi
+  if [ -n "$SUPERVISOR_HANDLE_BROKER_PID" ]; then
+    wait "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null || cleanup_ok=0
+    SUPERVISOR_HANDLE_BROKER_PID=
+  fi
   rm -rf -- "$suite_tmp"
   if [ "$cleanup_ok" -ne 1 ]; then
     printf '%s\n' 'FAIL: could not prove cleanup of active behavior tests' >&2
@@ -693,6 +889,32 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+supervisor_handle_input="$suite_tmp/supervisor-handles.in"
+supervisor_handle_output="$suite_tmp/supervisor-handles.out"
+if ! mkfifo "$supervisor_handle_input" "$supervisor_handle_output"; then
+  printf '%s\n' 'FAIL: could not create supervisor handle channels' >&2
+  exit 125
+fi
+if ! command -v perl >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL: perl is required for retained supervisor handles' >&2
+  exit 125
+fi
+perl -e "$FM_TEST_SUPERVISOR_HANDLE_PERL" "$supervisor_handle_input" "$supervisor_handle_output" &
+SUPERVISOR_HANDLE_BROKER_PID=$!
+if ! exec {SUPERVISOR_HANDLE_WRITE}<>"$supervisor_handle_input"; then
+  printf '%s\n' 'FAIL: could not open supervisor handle input' >&2
+  exit 125
+fi
+if ! exec {SUPERVISOR_HANDLE_READ}<>"$supervisor_handle_output"; then
+  printf '%s\n' 'FAIL: could not open supervisor handle output' >&2
+  exit 125
+fi
+SUPERVISOR_HANDLE_READY=1
+if ! supervisor_handle_request ping || [ "$SUPERVISOR_HANDLE_RESPONSE" != 'ping|ready' ]; then
+  printf '%s\n' 'FAIL: supervisor handle broker did not become ready' >&2
+  exit 125
+fi
 
 mapfile -t tests < <(
   cd "$test_root" || exit 1
@@ -743,83 +965,7 @@ parallel_test_allowed() {
 printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_jobs"
 
 run_one() {
-  local test_path=$1 job_root=$2 log_path=$3 start_gate=$4
-  (
-    for ((start_tick = 0; start_tick < 100; start_tick++)); do
-      [ -f "$start_gate" ] && break
-      sleep 0.01
-    done
-    [ -f "$start_gate" ] || exit 125
-    cd "$test_root" || exit 1
-    # A Firstmate supervisor may export its operational home into the shell that
-    # launches this gate. Do not let tests share that live state; fixture tests
-    # that need a home set their own FM_* overrides explicitly.
-    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
-      FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
-    if [ "${FM_HERDR_ALLOW_AMBIENT:-0}" != 1 ]; then
-      unset HERDR_ENV HERDR_SESSION HERDR_PANE_ID HERDR_TAB_ID \
-        HERDR_WORKSPACE_ID HERDR_SOCKET_PATH
-      if [ -z "${FM_BACKEND:-}" ]; then
-        export FM_BACKEND=tmux
-      fi
-    fi
-    export TMPDIR="$job_root/tmp"
-    export GOTMPDIR="$job_root/gotmp"
-    if ! command -v perl >/dev/null 2>&1; then
-      printf '%s\n' 'FAIL: perl is required for child-subreaper timeout enforcement' >&2
-      exit 125
-    fi
-    exec perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$test_timeout" python3 - "$test_path" \
-      "$test_root/bin/fm-session-authority-exec.sh" <<'PY'
-import os
-import socket
-import sys
-import threading
-
-keys = {
-    19: b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
-    18: b"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\n",
-}
-
-writers = []
-for target_fd, key in keys.items():
-    reader, writer = socket.socketpair()
-    os.dup2(reader.fileno(), target_fd)
-    os.set_inheritable(target_fd, True)
-    reader.close()
-    writers.append((writer, key))
-
-def serve(writer, key):
-    while True:
-        try:
-            writer.sendall(key)
-        except (BrokenPipeError, ConnectionResetError):
-            return
-
-for writer, key in writers:
-    threading.Thread(target=serve, args=(writer, key), daemon=True).start()
-
-env = os.environ.copy()
-env["FM_TEST_AUTHORITY_FD"] = "19"
-env["FM_TEST_DURABLE_AUTHORITY_FD"] = "18"
-env["FM_TEST_PROCESS"] = "1"
-env["FM_TEST_SESSION_LOCK_STABLE_OWNER"] = "1"
-status = os.spawnve(
-    os.P_WAIT,
-    "/usr/bin/bash",
-    [
-        "bash",
-        sys.argv[2],
-        "--behavior-test-authority-broker",
-        sys.argv[1],
-    ],
-    env,
-)
-for writer, _ in writers:
-    writer.close()
-sys.exit(status)
-PY
-  ) >"$log_path" 2>&1
+  :
 }
 
 failed_count=0
@@ -829,6 +975,7 @@ while [ "$index" -lt "$total" ]; do
   batch_tests=()
   batch_logs=()
   batch_roots=()
+  batch_keys=()
   batch_count=0
 
   batch_limit=$active_jobs
@@ -845,31 +992,44 @@ while [ "$index" -lt "$total" ]; do
     job_root="$suite_tmp/$test_id"
     log_path="$job_root/output.log"
     start_gate="$job_root/start"
+    abort_gate="$job_root/abort"
     mkdir -p "$job_root/tmp" "$job_root/gotmp"
+    bounded_script="$job_root/bounded-group.pl"
+    printf '%s' "$FM_TEST_BOUNDED_GROUP_PERL" >"$bounded_script" || exit 125
     printf 'START: %s (TMPDIR=%s GOTMPDIR=%s)\n' "$test_path" "$job_root/tmp" "$job_root/gotmp"
-    run_one "$test_path" "$job_root" "$log_path" "$start_gate" &
-    job_pid=$!
-    if ! register_running_pid "$job_pid"; then
-      printf '%s\n' 'FAIL: could not bind an active behavior-test supervisor' >&2
-      wait "$job_pid" 2>/dev/null || true
+    if ! supervisor_handle_launch "$test_id" "$test_root/bin/fm-run-behavior-job.sh" \
+      "$test_path" "$job_root" "$log_path" "$start_gate" "$abort_gate" \
+      "$test_root" "$test_timeout" "$bounded_script"; then
+      printf 'FAIL: could not bind an active behavior-test supervisor (%s)\n' "$SUPERVISOR_HANDLE_RESPONSE" >&2
       exit 125
     fi
+    RUNNING_TEST_PIDS+=("$test_id|$SUPERVISOR_HANDLE_LAUNCHED_PID|$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY")
     : >"$start_gate" || {
       printf '%s\n' 'FAIL: could not release a bound behavior-test supervisor' >&2
       exit 125
     }
-    pids+=("$job_pid")
+    pids+=("$SUPERVISOR_HANDLE_LAUNCHED_PID")
     batch_tests+=("$test_path")
     batch_logs+=("$log_path")
     batch_roots+=("$job_root")
+    batch_keys+=("$test_id")
     index=$((index + 1))
     batch_count=$((batch_count + 1))
   done
 
   for batch_index in "${!pids[@]}"; do
-    test_rc=0
-    wait "${pids[$batch_index]}" || test_rc=$?
-    remove_running_pid "${pids[$batch_index]}"
+    test_key=${batch_keys[$batch_index]}
+    if ! supervisor_handle_wait "$test_key"; then
+      printf '%s\n' 'FAIL: could not reap behavior-test supervisor' >&2
+      exit 125
+    fi
+    test_rc=$SUPERVISOR_HANDLE_EXIT_STATUS
+    test_entry=$(supervisor_entry_for_key "$test_key") || exit 125
+    if ! supervisor_is_gone "$test_entry" || ! supervisor_handle_close "$test_key"; then
+      printf '%s\n' 'FAIL: could not prove behavior-test supervisor exit' >&2
+      exit 125
+    fi
+    remove_running_pid "$test_key"
     if [ "$test_rc" -eq 0 ]; then
       printf 'PASS: %s\n' "${batch_tests[$batch_index]}"
     elif [ "$test_rc" -eq 125 ]; then

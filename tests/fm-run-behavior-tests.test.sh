@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 HELPER="$ROOT/bin/fm-run-behavior-tests.sh"
+JOB_HELPER="$ROOT/bin/fm-run-behavior-job.sh"
 TMP_ROOT=$(fm_test_tmproot fm-run-behavior-tests)
 
 make_fixture_root() {
@@ -14,8 +15,10 @@ make_fixture_root() {
   cp "$HELPER" "$fixture/bin/fm-run-behavior-tests.sh" \
     || fail "fixture could not copy the behavior-test runner"
   cp "$ROOT/bin/fm-session-authority-exec.sh" \
-    "$ROOT/bin/fm-session-lock-lib.sh" "$fixture/bin/" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-procargs-lib.sh" "$fixture/bin/" \
     || fail "fixture could not copy the behavior authority broker"
+  cp "$ROOT/bin/fm-run-behavior-job.sh" "$fixture/bin/" \
+    || fail "fixture could not copy the behavior-test job helper"
   cat > "$fixture/bin/fm-no-mistakes-pr-target-guard.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -139,7 +142,8 @@ SH
 run_fixture() {
   local fixture=$1 jobs=$2 output=$3 allow_ambient=${4:-0}
   local parallel_allowlist=${5:-} timeout_seconds=${6:-} path_override=${7:-}
-  local force_root_failure=${8:-0} force_supervisor_failure=${9:-} fixture_output
+  local force_root_failure=${8:-0} force_supervisor_failure=${9:-}
+  local supervisor_pid_file=${10:-} root_pid_file=${11:-} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -153,6 +157,8 @@ run_fixture() {
       FM_TEST_TIMEOUT_SECONDS="$timeout_seconds" \
       FM_TEST_FORCE_ROOT_HANDLE_FAILURE="$force_root_failure" \
       FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE="$force_supervisor_failure" \
+      FM_TEST_SUPERVISOR_PID_FILE="$supervisor_pid_file" \
+      FM_TEST_ROOT_PID_FILE="$root_pid_file" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -265,7 +271,7 @@ SH
   fallback_bin="$fixture/fallback-bin"
   mkdir -p "$fallback_bin"
   for tool in awk bash basename cat cp cut date dirname diff env git grep head \
-    mkdir mktemp od perl ps python3 readlink realpath rm rmdir sed setsid sleep \
+    mkdir mkfifo mktemp od perl ps python3 readlink realpath rm rmdir sed setsid sleep \
     sort tail tmux tr wc; do
     target=$(command -v "$tool" || true)
     [ -n "$target" ] || fail "fallback timeout fixture could not find $tool"
@@ -300,7 +306,7 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must release a verified root handle"
   assert_contains "$source" 'syswrite($release_w, "0")' \
     "bounded runner must close the root gate after binding failure"
-  assert_contains "$source" '[ -n "$identity" ] || return 1' \
+  assert_contains "$source" '[ -n "$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY" ]' \
     "behavior runner must reject unknown supervisor identity"
   assert_contains "$source" 'my %tracked = ($pid => $root)' \
     "bounded runner must bind the root PID to a process handle"
@@ -312,22 +318,28 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must not signal tracked numeric PIDs"
   assert_contains "$source" 'waitpid(-1, WNOHANG)' \
     "bounded runner must reap adopted descendants"
-  assert_contains "$source" 'RUNNING_TEST_PIDS+=("$pid|$identity")' \
+  assert_contains "$source" 'RUNNING_TEST_PIDS+=("$test_id|$SUPERVISOR_HANDLE_LAUNCHED_PID|$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY")' \
     "behavior runner must register every active supervisor"
-  assert_contains "$source" 'supervisor_start_identity()' \
-    "behavior runner must derive supervisor start identities"
   assert_contains "$source" 'signal_running_supervisor "$entry"' \
     "behavior runner must verify supervisors before signaling"
-  assert_contains "$source" 'supervisor_pidfd_action signal "$pid" "$expected"' \
-    "behavior runner must signal supervisors through pidfds"
-  assert_contains "$source" 'supervisor_pidfd_action gone "$pid" "$expected"' \
-    "behavior runner must prove supervisor disappearance through pidfds"
-  assert_not_contains "$source" 'kill -TERM "$pid"' \
-    "behavior runner must not signal supervisors through numeric PIDs"
-  assert_not_contains "$source" 'kill -0 "$pid"' \
-    "behavior runner must not treat kill lookup failure as disappearance"
-  assert_contains "$source" 'wait "$job_pid" 2>/dev/null || true' \
-    "behavior runner must reap an unbound supervisor before refusing"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_HANDLE_PERL' \
+    "behavior runner must start a retained handle broker"
+  assert_contains "$source" 'supervisor_handle_launch "$test_id" "$test_root/bin/fm-run-behavior-job.sh"' \
+    "behavior runner must retain each supervisor pidfd before launch"
+  assert_contains "$source" 'supervisor_handle_request "signal|$key"' \
+    "behavior runner must signal supervisors through retained pidfds"
+  assert_contains "$source" 'supervisor_handle_request "state|$key"' \
+    "behavior runner must prove supervisor disappearance through retained pidfds"
+  assert_contains "$source" 'supervisor_handle_request shutdown' \
+    "behavior runner must shut down the retained handle broker"
+  assert_not_contains "$source" 'supervisor_pidfd_action' \
+    "behavior runner must not reopen supervisor pidfds during cleanup"
+  assert_contains "$source" 'supervisor_handle_request "wait|$key"' \
+    "behavior runner must reap supervisors through the retained handle broker"
+  assert_contains "$source" ': >"$start_gate"' \
+    "behavior runner must release the start gate only after handle acquisition"
+  assert_not_contains "$source" 'run_one "$test_path"' \
+    "behavior runner must not launch jobs through an unbound shell child"
   pass "bounded behavior tests use stable process containment"
 }
 
@@ -355,15 +367,30 @@ SH
   pass "behavior tests reject escaped descendants after test exit"
 }
 
+assert_identity_gone() {
+  local identity=$1 pid stat_line stat_fields current
+  pid=${identity%%:*}
+  if [ -r "/proc/$pid/stat" ]; then
+    IFS= read -r stat_line <"/proc/$pid/stat" || fail "could not read recorded process identity"
+    stat_fields=${stat_line##*) }
+    set -- $stat_fields
+    [ "$#" -ge 20 ] || fail "recorded process identity was malformed"
+    current="$pid:${20}"
+    [ "$current" != "$identity" ] || fail "recorded process identity survived cleanup"
+  fi
+}
+
 test_failure_injection_refuses_before_launch() {
-  local fixture output fixture_output rc sentinel_pid sentinel_marker
+  local fixture output fixture_output rc sentinel_pid sentinel_marker supervisor_pid_file root_pid_file
   fixture=$(make_fixture_root root-handle-failure)
   output="$TMP_ROOT/root-handle-failure.out"
   sentinel_marker="$TMP_ROOT/root-handle-sentinel-term"
+  supervisor_pid_file="$TMP_ROOT/root-handle-supervisor.identity"
+  root_pid_file="$TMP_ROOT/root-handle-root.identity"
   (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
   sentinel_pid=$!
   set +e
-  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 1)
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 1 0 "$supervisor_pid_file" "$root_pid_file")
   rc=$?
   set -u
   expect_code 125 "$rc" "root handle failure must refuse before launch"
@@ -371,6 +398,10 @@ test_failure_injection_refuses_before_launch() {
     "root handle failure launched a behavior test"
   [ ! -e "$fixture_output/pass-a.started" ] \
     || fail "root handle failure launched a fixture process"
+  [ -s "$supervisor_pid_file" ] || fail "root handle failure did not record its supervisor"
+  [ -s "$root_pid_file" ] || fail "root handle failure did not record its root"
+  assert_identity_gone "$(cat "$supervisor_pid_file")"
+  assert_identity_gone "$(cat "$root_pid_file")"
   [ ! -e "$sentinel_marker" ] \
     || fail "root handle failure signaled an unrelated process"
   kill -TERM "$sentinel_pid" 2>/dev/null || true
@@ -379,10 +410,12 @@ test_failure_injection_refuses_before_launch() {
   fixture=$(make_fixture_root supervisor-registration-failure)
   output="$TMP_ROOT/supervisor-registration-failure.out"
   sentinel_marker="$TMP_ROOT/supervisor-registration-sentinel-term"
+  supervisor_pid_file="$TMP_ROOT/supervisor-registration-supervisor.identity"
+  root_pid_file="$TMP_ROOT/supervisor-registration-root.identity"
   (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
   sentinel_pid=$!
   set +e
-  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 1)
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 1 "$supervisor_pid_file" "$root_pid_file")
   rc=$?
   set -u
   expect_code 125 "$rc" "supervisor registration failure must refuse before launch"
@@ -390,6 +423,9 @@ test_failure_injection_refuses_before_launch() {
     "supervisor registration failure launched a behavior test"
   [ ! -e "$fixture_output/pass-a.started" ] \
     || fail "supervisor registration failure launched a fixture process"
+  [ -s "$supervisor_pid_file" ] || fail "supervisor registration failure did not record its supervisor"
+  assert_identity_gone "$(cat "$supervisor_pid_file")"
+  [ ! -e "$root_pid_file" ] || fail "supervisor registration failure launched its root"
   [ ! -e "$sentinel_marker" ] \
     || fail "supervisor registration failure signaled an unrelated process"
   kill -TERM "$sentinel_pid" 2>/dev/null || true
@@ -484,7 +520,7 @@ test_serial_mode_remains_serial() {
 
 test_delta_overlay_contract_is_checked_and_portable() {
   local source
-  source=$(cat "$HELPER")
+  source=$(cat "$HELPER" "$JOB_HELPER")
   assert_not_contains "$source" 'sort -z' \
     "behavior runner must not depend on GNU-only sort -z"
   assert_contains "$source" 'if ! copy_worktree_delta' \
