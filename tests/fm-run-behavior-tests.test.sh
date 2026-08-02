@@ -138,7 +138,8 @@ SH
 
 run_fixture() {
   local fixture=$1 jobs=$2 output=$3 allow_ambient=${4:-0}
-  local parallel_allowlist=${5:-} timeout_seconds=${6:-} path_override=${7:-} fixture_output
+  local parallel_allowlist=${5:-} timeout_seconds=${6:-} path_override=${7:-}
+  local force_root_failure=${8:-0} force_supervisor_failure=${9:-} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -150,6 +151,8 @@ run_fixture() {
       FM_TEST_JOBS="$jobs" \
       FM_TEST_PARALLEL_ALLOWLIST="$parallel_allowlist" \
       FM_TEST_TIMEOUT_SECONDS="$timeout_seconds" \
+      FM_TEST_FORCE_ROOT_HANDLE_FAILURE="$force_root_failure" \
+      FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE="$force_supervisor_failure" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -315,6 +318,14 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must derive supervisor start identities"
   assert_contains "$source" 'signal_running_supervisor "$entry"' \
     "behavior runner must verify supervisors before signaling"
+  assert_contains "$source" 'supervisor_pidfd_action signal "$pid" "$expected"' \
+    "behavior runner must signal supervisors through pidfds"
+  assert_contains "$source" 'supervisor_pidfd_action gone "$pid" "$expected"' \
+    "behavior runner must prove supervisor disappearance through pidfds"
+  assert_not_contains "$source" 'kill -TERM "$pid"' \
+    "behavior runner must not signal supervisors through numeric PIDs"
+  assert_not_contains "$source" 'kill -0 "$pid"' \
+    "behavior runner must not treat kill lookup failure as disappearance"
   assert_contains "$source" 'wait "$job_pid" 2>/dev/null || true' \
     "behavior runner must reap an unbound supervisor before refusing"
   pass "bounded behavior tests use stable process containment"
@@ -342,6 +353,48 @@ SH
   [ ! -e "$fixture_output/fast-escaped-descendant" ] \
     || fail "a fast escaped descendant survived cleanup"
   pass "behavior tests reject escaped descendants after test exit"
+}
+
+test_failure_injection_refuses_before_launch() {
+  local fixture output fixture_output rc sentinel_pid sentinel_marker
+  fixture=$(make_fixture_root root-handle-failure)
+  output="$TMP_ROOT/root-handle-failure.out"
+  sentinel_marker="$TMP_ROOT/root-handle-sentinel-term"
+  (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
+  sentinel_pid=$!
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 1)
+  rc=$?
+  set -u
+  expect_code 125 "$rc" "root handle failure must refuse before launch"
+  assert_not_contains "$output" 'PASS: tests/pass-a.test.sh' \
+    "root handle failure launched a behavior test"
+  [ ! -e "$fixture_output/pass-a.started" ] \
+    || fail "root handle failure launched a fixture process"
+  [ ! -e "$sentinel_marker" ] \
+    || fail "root handle failure signaled an unrelated process"
+  kill -TERM "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+
+  fixture=$(make_fixture_root supervisor-registration-failure)
+  output="$TMP_ROOT/supervisor-registration-failure.out"
+  sentinel_marker="$TMP_ROOT/supervisor-registration-sentinel-term"
+  (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
+  sentinel_pid=$!
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 1)
+  rc=$?
+  set -u
+  expect_code 125 "$rc" "supervisor registration failure must refuse before launch"
+  assert_not_contains "$output" 'PASS: tests/pass-a.test.sh' \
+    "supervisor registration failure launched a behavior test"
+  [ ! -e "$fixture_output/pass-a.started" ] \
+    || fail "supervisor registration failure launched a fixture process"
+  [ ! -e "$sentinel_marker" ] \
+    || fail "supervisor registration failure signaled an unrelated process"
+  kill -TERM "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+  pass "failure injection refuses before launching behavior tests"
 }
 
 test_pidfd_handles_do_not_follow_stale_pids() {
@@ -477,6 +530,7 @@ test_default_mode_is_serial
 test_each_behavior_test_has_a_hard_timeout
 test_bounded_runner_uses_stable_containment
 test_fast_escape_after_test_exit_is_rejected
+test_failure_injection_refuses_before_launch
 test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial

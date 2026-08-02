@@ -233,7 +233,7 @@ my $bind_process = sub {
   }
   return { fd => $fd, identity => $info->{identity} };
 };
-my $root = $bind_process->($pid, $$);
+my $root = $ENV{FM_TEST_FORCE_ROOT_HANDLE_FAILURE} ? { error => 1 } : $bind_process->($pid, $$);
 if ($root->{gone} || $root->{error}) {
   syswrite($release_w, "0");
   close $release_w;
@@ -543,6 +543,7 @@ fi
 RUNNING_TEST_PIDS=()
 supervisor_start_identity() {
   local pid=$1 stat_line stat_fields start
+  [ "${FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE:-0}" = 1 ] && return 1
   if [ -r "/proc/$pid/stat" ]; then
     IFS= read -r stat_line <"/proc/$pid/stat" || return 1
     stat_fields=${stat_line##*) }
@@ -561,6 +562,66 @@ supervisor_start_identity() {
   fi
   return 1
 }
+supervisor_pidfd_action() {
+  local action=$1 pid=$2 expected=$3
+  command -v perl >/dev/null 2>&1 || return 2
+  perl -e '
+use Config;
+use Errno qw(ESRCH);
+use POSIX ();
+my $arch = $Config{archname} // "";
+my ($sys_pidfd_open, $sys_pidfd_send_signal);
+if ($arch =~ /(?:x86_64|amd64)/) {
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+} elsif ($arch =~ /(?:aarch64|riscv64|s390x|ppc64|i[3-6]86|arm)/) {
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+}
+my ($action, $pid, $expected) = @ARGV;
+defined $sys_pidfd_open && defined $sys_pidfd_send_signal or exit 2;
+my $fd = syscall($sys_pidfd_open, $pid, 0);
+if (!defined $fd || $fd < 0) {
+  exit $!{ESRCH} ? 0 : 2;
+}
+open my $stat, "<", "/proc/$pid/stat" or do { POSIX::close($fd); exit 2; };
+my $line = <$stat>;
+close $stat;
+if (!defined $line) {
+  POSIX::close($fd);
+  exit 2;
+}
+my $comm_end = rindex($line, ")");
+if ($comm_end < 0) {
+  POSIX::close($fd);
+  exit 2;
+}
+my @fields = split /\s+/, substr($line, $comm_end + 2);
+my $start = $fields[19];
+if (!defined $start || $start !~ /^\d+\z/ || "$pid:$start" ne $expected) {
+  POSIX::close($fd);
+  exit 3;
+}
+my $probe = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
+if (!defined $probe || $probe < 0) {
+  my $gone = $!{ESRCH};
+  POSIX::close($fd);
+  exit $gone ? 0 : 2;
+}
+if ($action eq "gone") {
+  POSIX::close($fd);
+  exit 1;
+}
+if ($action eq "signal") {
+  my $sent = syscall($sys_pidfd_send_signal, $fd, 15, 0, 0);
+  my $gone = defined $sent && $sent < 0 && $!{ESRCH};
+  POSIX::close($fd);
+  exit 0 if (defined $sent && $sent == 0) || $gone;
+}
+POSIX::close($fd);
+exit 2;
+' "$action" "$pid" "$expected"
+}
 register_running_pid() {
   local pid=$1 identity
   identity=$(supervisor_start_identity "$pid" 2>/dev/null || true)
@@ -577,46 +638,51 @@ remove_running_pid() {
   RUNNING_TEST_PIDS=("${remaining[@]}")
 }
 signal_running_supervisor() {
-  local entry=$1 pid expected current
+  local entry=$1 pid expected
   pid=${entry%%|*}
   expected=${entry#*|}
   [ -n "$expected" ] || return 1
-  current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
-  if [ -z "$current" ]; then
-    kill -0 "$pid" 2>/dev/null && return 1
-    return 0
-  fi
-  [ "$current" = "$expected" ] || return 1
-  kill -TERM "$pid" 2>/dev/null || {
-    current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
-    [ -z "$current" ] && ! kill -0 "$pid" 2>/dev/null
-  }
+  supervisor_pidfd_action signal "$pid" "$expected"
+}
+supervisor_is_gone() {
+  local entry=$1 pid expected state
+  pid=${entry%%|*}
+  expected=${entry#*|}
+  [ -n "$expected" ] || return 2
+  supervisor_pidfd_action gone "$pid" "$expected"
+  state=$?
+  case "$state" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 cleanup() {
-  local cleanup_ok=1 entry pid current still_alive
+  local cleanup_ok=1 entry pid state still_alive
   for entry in "${RUNNING_TEST_PIDS[@]}"; do
     signal_running_supervisor "$entry" || cleanup_ok=0
   done
   for ((cleanup_tick = 0; cleanup_tick < 100; cleanup_tick++)); do
     still_alive=0
     for entry in "${RUNNING_TEST_PIDS[@]}"; do
-      pid=${entry%%|*}
-      current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
-      if [ -n "$current" ] || kill -0 "$pid" 2>/dev/null; then
-        still_alive=1
-        break
-      fi
+      state=0
+      supervisor_is_gone "$entry" || state=$?
+      case "$state" in
+        0) ;;
+        1|2) still_alive=1; [ "$state" -eq 2 ] && cleanup_ok=0; break ;;
+      esac
     done
     [ "$still_alive" -eq 0 ] && break
     sleep 0.05
   done
   for entry in "${RUNNING_TEST_PIDS[@]}"; do
     pid=${entry%%|*}
-    current=$(supervisor_start_identity "$pid" 2>/dev/null || true)
-    if [ -n "$current" ] || kill -0 "$pid" 2>/dev/null; then
-      cleanup_ok=0
-    else
+    state=0
+    supervisor_is_gone "$entry" || state=$?
+    if [ "$state" -eq 0 ]; then
       wait "$pid" 2>/dev/null || true
+    else
+      cleanup_ok=0
     fi
   done
   rm -rf -- "$suite_tmp"
