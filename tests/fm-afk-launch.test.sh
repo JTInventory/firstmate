@@ -10,6 +10,8 @@ set -u
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-afk-launch-tests)
 AFK_TEST_PIDS=()
+fm_test_primary_authority_setup "$TMP_ROOT" \
+  || fail "could not provision the AFK primary authority fixture"
 
 cleanup_afk_tests() {
   local pid

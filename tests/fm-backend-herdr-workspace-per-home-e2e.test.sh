@@ -36,6 +36,8 @@ if [ "${FM_HERDR_E2E:-0}" != 1 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$ROOT/tests/lib.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all 1; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -66,6 +68,8 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
+fm_test_primary_authority_setup "$TMP_ROOT" \
+  || { echo 'not ok - could not provision the Herdr primary authority fixture' >&2; exit 1; }
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=
@@ -79,6 +83,7 @@ cleanup_all() {
     treehouse return --force "$WT2" >/dev/null 2>&1 || rc=1
   fi
   herdr_safe_stop_and_delete "$SESSION" || rc=1
+  fm_test_cleanup
   rm -rf "$TMP_ROOT" || rc=1
   return "$rc"
 }
@@ -94,10 +99,14 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
+fm_test_primary_identity_bind "$ROOT" "$PRIMARY_HOME" \
+  || fail "could not bind the primary-shaped Herdr home authority"
 printf 'trivial e2e primary crewmate brief: nothing to do.\n' > "$PRIMARY_HOME/data/cm1/brief.md"
 
 SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
+fm_test_primary_identity_bind "$ROOT" "$SM_HOME" \
+  || fail "could not bind the secondmate-shaped Herdr home authority"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"

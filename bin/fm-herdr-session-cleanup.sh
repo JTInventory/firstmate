@@ -134,7 +134,6 @@ fm_herdr_cleanup_process_is_idle_shell() { # <session> <pane-id>
     '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
-  [ "$foreground_pgid" = "$shell_pid" ] || return 1
   count=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 1
   [ "$count" -eq 1 ] || return 1
@@ -150,13 +149,18 @@ fm_herdr_cleanup_process_is_idle_shell() { # <session> <pane-id>
   [ "$argv0" = "$shell_name" ] || return 1
   case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
 
+  # A restored shell may not be the process-group leader. Match the actual
+  # Herdr foreground group and require it to remain a childless singleton.
   ps_bin=${FM_HERDR_PS_BIN:-ps}
   command -v "$ps_bin" >/dev/null 2>&1 || return 1
-  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
-  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
-    $1 == shell { found++ }
+  rows=$("$ps_bin" -axo pid=,ppid=,pgid= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$shell_pid" -v pgid="$foreground_pgid" '
+    $1 == shell { found++; shell_group = $3 }
     $2 == shell { child++ }
-    END { exit(found == 1 && child == 0 ? 0 : 1) }
+    $3 == pgid { group++ }
+    END {
+      exit(found == 1 && shell_group == pgid && child == 0 && group == 1 ? 0 : 1)
+    }
   ' || return 1
   stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
   case "$stat" in S*|I*) ;; *) return 1 ;; esac

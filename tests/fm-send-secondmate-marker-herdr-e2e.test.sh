@@ -10,6 +10,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$ROOT/tests/lib.sh"
 
 if [ "${FM_HERDR_E2E:-0}" != 1 ] && [ "${FM_SEND_MARKER_HERDR_E2E:-0}" != 1 ]; then
   echo "skip: set FM_HERDR_E2E=1 or FM_SEND_MARKER_HERDR_E2E=1 to run the real Herdr secondmate-marker lab e2e"
@@ -31,6 +33,8 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 SESSION="fm-lab-send-secondmate-marker-$$"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-marker-e2e.XXXXXX")
+fm_test_primary_authority_setup "$TMP_ROOT" \
+  || { echo 'not ok - could not provision the Herdr primary authority fixture' >&2; exit 1; }
 HOME_DIR="$TMP_ROOT/secondmate-home"
 PROJECT="$TMP_ROOT/project"
 LOG_FILE="$TMP_ROOT/submitted.log"
@@ -46,6 +50,7 @@ cleanup_all() {
   trap - EXIT
   [ -z "$TARGET" ] || fm_backend_herdr_kill "$TARGET" >/dev/null 2>&1 || true
   herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || rc=1
+  fm_test_cleanup
   rm -rf "$TMP_ROOT" || rc=1
   return "$rc"
 }
@@ -53,6 +58,8 @@ on_exit() { local rc=$?; cleanup_all "$rc"; exit "$?"; }
 trap on_exit EXIT
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config" "$HOME_DIR/projects" "$PROJECT"
+fm_test_primary_identity_bind "$ROOT" "$HOME_DIR" \
+  || fail "could not bind the Herdr secondmate home authority"
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 export HERDR_SESSION="$SESSION"

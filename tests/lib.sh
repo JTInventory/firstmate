@@ -125,6 +125,28 @@ SH
   return 1
 }
 
+fm_test_primary_authority_setup() {
+  local fixture_dir=$1
+  fm_test_session_authority_fd "$fixture_dir" \
+    && fm_test_authority_broker_ensure "$fixture_dir" \
+    || return 1
+  # Real-Herdr fixtures invoke guarded commands in several child processes.
+  # Keep their synthetic lock owner stable across those invocations while the
+  # authority descriptors still prove that the test shell is the issuer.
+  FM_TEST_SESSION_LOCK_STABLE_OWNER=1
+  FM_TEST_AUTHORITY_OWNER_PID=$$
+  export FM_TEST_SESSION_LOCK_STABLE_OWNER FM_TEST_AUTHORITY_OWNER_PID
+}
+
+fm_test_primary_identity_bind() {
+  local root=$1 home=$2
+  local state=${3:-$home/state}
+  # shellcheck source=/dev/null
+  . "$root/bin/fm-worker-isolation-lib.sh"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$state" \
+    fm_worker_test_primary_identity_bind "$root" "$home" "$state"
+}
+
 fm_test_cleanup() {
   local d
   local pid

@@ -35,6 +35,28 @@ if fm_herdr_cleanup_process_argv0 \
 fi
 pass "process proof reads Linux Herdr argv arrays and rejects malformed executable identities"
 
+FM_HERDR_PS_BIN="$TMP_ROOT/ps-singleton-group"
+cat > "$FM_HERDR_PS_BIN" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'-axo pid=,ppid=,pgid='*) printf '%s\n' '67 40 9001' ;;
+  *'-p 67 -o stat='*) printf '%s\n' S ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FM_HERDR_PS_BIN"
+fm_backend_herdr_cli() {
+  cat <<'JSON'
+{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p1","shell_pid":67,"foreground_process_group_id":9001,"foreground_processes":[{"argv0":"sh","argv":["/bin/sh"],"name":"sh","pid":67}]}}}
+JSON
+}
+if ! FM_HERDR_PS_BIN="$FM_HERDR_PS_BIN" \
+  fm_herdr_cleanup_process_is_idle_shell test w2:p1; then
+  fail "process proof rejected a singleton foreground group whose shell is not its group leader"
+fi
+unset -f fm_backend_herdr_cli
+pass "process proof accepts a childless singleton foreground group without assuming shell pid equals pgid"
+
 TOKEN=AbCdEfGhIjKlMnOpQrStUv
 ID=task
 WS=w2

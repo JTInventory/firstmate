@@ -8,6 +8,8 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+# shellcheck source=tests/lib.sh
+. "$ROOT/tests/lib.sh"
 
 overlay_current_suite_bytes() {  # <source-worktree> <destination-clone>
   local source=$1 destination=$2 manifest path source_path destination_path
@@ -108,6 +110,8 @@ HERDR_ORIGINAL_PATH=$PATH
 TMPDIR=$(cd "${TMPDIR:-/tmp}" && pwd -P) || exit 1
 export TMPDIR
 TMP_ROOT=$(mktemp -d "$TMPDIR/fm-herdr-presentation.XXXXXX")
+fm_test_primary_authority_setup "$TMP_ROOT" \
+  || { echo 'not ok - could not provision the Herdr primary authority fixture' >&2; exit 1; }
 EVIDENCE_DIR=${FM_HERDR_PRESENTATION_EVIDENCE_DIR:-}
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
@@ -402,6 +406,7 @@ EOF
     mkdir -p "$EVIDENCE_DIR" 2>/dev/null || true
     cp -a "$TMP_ROOT/." "$EVIDENCE_DIR/" 2>/dev/null || true
   fi
+  fm_test_cleanup
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
@@ -624,6 +629,8 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/wheelhouse-healing-r1"
 mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b" \
   "$HOME_DIR/data/lock-contended"
+fm_test_primary_identity_bind "$ROOT" "$HOME_DIR" \
+  || fail "could not bind the Herdr primary home authority"
 touch "$HOME_DIR/state/.last-watcher-beat"
 printf 'Projection anchor fixture.\n' > "$HOME_DIR/data/anchor/brief.md"
 printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
