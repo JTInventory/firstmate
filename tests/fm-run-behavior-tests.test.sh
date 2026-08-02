@@ -291,7 +291,15 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must establish child-subreaper containment"
   assert_contains "$source" '/proc/$parent/task/$parent/children' \
     "bounded runner must read kernel-owned child containment"
-  assert_contains "$source" '$tracked{$pid} = $root unless $root_bind_failed' \
+  assert_contains "$source" 'my $release_count = sysread($release_r, $release, 1)' \
+    "bounded runner must hold the root before executing the test"
+  assert_contains "$source" 'syswrite($release_w, "1") == 1' \
+    "bounded runner must release a verified root handle"
+  assert_contains "$source" 'syswrite($release_w, "0")' \
+    "bounded runner must close the root gate after binding failure"
+  assert_contains "$source" '[ -n "$identity" ] || return 1' \
+    "behavior runner must reject unknown supervisor identity"
+  assert_contains "$source" 'my %tracked = ($pid => $root)' \
     "bounded runner must bind the root PID to a process handle"
   assert_contains "$source" 'syscall($sys_pidfd_open, $pid, 0)' \
     "bounded runner must open atomic process handles"
@@ -307,8 +315,8 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must derive supervisor start identities"
   assert_contains "$source" 'signal_running_supervisor "$entry"' \
     "behavior runner must verify supervisors before signaling"
-  assert_contains "$source" '$stop->("TERM", 125) if $root_bind_failed' \
-    "bounded runner must clean up after root binding failure"
+  assert_contains "$source" 'wait "$job_pid" 2>/dev/null || true' \
+    "behavior runner must reap an unbound supervisor before refusing"
   pass "bounded behavior tests use stable process containment"
 }
 

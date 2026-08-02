@@ -174,22 +174,30 @@ my $blocked = POSIX::SigSet->new(SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGC
 my $old = POSIX::SigSet->new();
 defined(sigprocmask(SIG_BLOCK, $blocked, $old)) or exit 125;
 pipe(my $ready_r, my $ready_w) or exit 125;
+pipe(my $release_r, my $release_w) or exit 125;
 my $pid = fork;
 defined($pid) or exit 125;
 if (!$pid) {
   close $ready_r;
+  close $release_w;
   setpgid(0, 0) == 0 or exit 125;
   syswrite($ready_w, "1") == 1 or exit 125;
   close $ready_w;
+  my $release = "";
+  my $release_count = sysread($release_r, $release, 1);
+  close $release_r;
+  exit 125 unless $release_count == 1 && $release eq "1";
   defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
   exec @ARGV;
   exit 127;
 }
 close $ready_w;
+close $release_r;
 my $ready = "";
 my $ready_count = sysread($ready_r, $ready, 1);
 close $ready_r;
 if (!$ready_count) {
+  close $release_w;
   my $waited = waitpid $pid, 0;
   my $status = $?;
   defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
@@ -225,26 +233,18 @@ my $bind_process = sub {
   }
   return { fd => $fd, identity => $info->{identity} };
 };
-my $root_fallback_info = $process_info->($pid);
 my $root = $bind_process->($pid, $$);
-my $root_bind_failed = $root->{gone} || $root->{error};
-my %tracked;
-$tracked{$pid} = $root unless $root_bind_failed;
-my $tracking_ok = $root_bind_failed ? 0 : 1;
-my $root_fallback_state = sub {
-  my $info = $process_info->($pid);
-  if (!defined $info) {
-    my $probe = kill 0, $pid;
-    return 0 if !$probe && $!{ESRCH};
-    $tracking_ok = 0;
-    return;
-  }
-  if (!defined $root_fallback_info || $info->{identity} ne $root_fallback_info->{identity} || $info->{parent} != $$) {
-    $tracking_ok = 0;
-    return;
-  }
-  return 1;
-};
+if ($root->{gone} || $root->{error}) {
+  syswrite($release_w, "0");
+  close $release_w;
+  my $waited = waitpid $pid, 0;
+  exit 125 if $waited < 0;
+  exit 125;
+}
+syswrite($release_w, "1") == 1 or exit 125;
+close $release_w;
+my %tracked = ($pid => $root);
+my $tracking_ok = 1;
 my @signal_numbers = (HUP => 1, INT => 2, QUIT => 3, TERM => 15, KILL => 9, TSTP => 20, CONT => 18);
 my %signal_numbers = @signal_numbers;
 my $refresh_tracked = sub {
@@ -342,21 +342,17 @@ my $signal_tracked = sub {
 my $signal_group = sub {
   my $signal = shift;
   my $root_entry = $tracked{$pid};
-  if (!defined $root_entry) {
-    my $fallback_state = $root_fallback_state->();
-    return unless defined $fallback_state && $fallback_state;
-  } else {
-    my $alive = $pidfd_alive->($root_entry->{fd});
-    if (!defined $alive) {
-      $tracking_ok = 0;
-      return;
-    }
-    return unless $alive;
-    my $info = $process_info->($pid);
-    if (!defined $info || $info->{identity} ne $root_entry->{identity} || $info->{parent} != $$) {
-      $tracking_ok = 0;
-      return;
-    }
+  return unless defined $root_entry;
+  my $alive = $pidfd_alive->($root_entry->{fd});
+  if (!defined $alive) {
+    $tracking_ok = 0;
+    return;
+  }
+  return unless $alive;
+  my $info = $process_info->($pid);
+  if (!defined $info || $info->{identity} ne $root_entry->{identity} || $info->{parent} != $$) {
+    $tracking_ok = 0;
+    return;
   }
   my $probe = kill 0, -$pid;
   if ($probe) {
@@ -367,22 +363,17 @@ my $signal_group = sub {
 };
 my $group_gone = sub {
   my $root_entry = $tracked{$pid};
-  if (!defined $root_entry) {
-    my $fallback_state = $root_fallback_state->();
-    return 1 if defined $fallback_state && !$fallback_state;
-    return 0 unless defined $fallback_state;
-  } else {
-    my $alive = $pidfd_alive->($root_entry->{fd});
-    if (!defined $alive) {
-      $tracking_ok = 0;
-      return 0;
-    }
-    return 1 unless $alive;
-    my $info = $process_info->($pid);
-    if (!defined $info || $info->{identity} ne $root_entry->{identity} || $info->{parent} != $$) {
-      $tracking_ok = 0;
-      return 0;
-    }
+  return 1 unless defined $root_entry;
+  my $alive = $pidfd_alive->($root_entry->{fd});
+  if (!defined $alive) {
+    $tracking_ok = 0;
+    return 0;
+  }
+  return 1 unless $alive;
+  my $info = $process_info->($pid);
+  if (!defined $info || $info->{identity} ne $root_entry->{identity} || $info->{parent} != $$) {
+    $tracking_ok = 0;
+    return 0;
   }
   for (1 .. 20) {
     my $probe = kill 0, -$pid;
@@ -467,7 +458,6 @@ $suspend = sub {
 };
 $SIG{TSTP} = $suspend;
 $SIG{CONT} = sub { kill "CONT", -$pid };
-$stop->("TERM", 125) if $root_bind_failed;
 $refresh_tracked->();
 alarm $seconds;
 defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
@@ -574,8 +564,8 @@ supervisor_start_identity() {
 register_running_pid() {
   local pid=$1 identity
   identity=$(supervisor_start_identity "$pid" 2>/dev/null || true)
+  [ -n "$identity" ] || return 1
   RUNNING_TEST_PIDS+=("$pid|$identity")
-  [ -n "$identity" ]
 }
 remove_running_pid() {
   local target=$1 entry entry_pid
@@ -687,8 +677,13 @@ parallel_test_allowed() {
 printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_jobs"
 
 run_one() {
-  local test_path=$1 job_root=$2 log_path=$3
+  local test_path=$1 job_root=$2 log_path=$3 start_gate=$4
   (
+    for ((start_tick = 0; start_tick < 100; start_tick++)); do
+      [ -f "$start_gate" ] && break
+      sleep 0.01
+    done
+    [ -f "$start_gate" ] || exit 125
     cd "$test_root" || exit 1
     # A Firstmate supervisor may export its operational home into the shell that
     # launches this gate. Do not let tests share that live state; fixture tests
@@ -783,14 +778,20 @@ while [ "$index" -lt "$total" ]; do
     test_id=${test_name%.test.sh}
     job_root="$suite_tmp/$test_id"
     log_path="$job_root/output.log"
+    start_gate="$job_root/start"
     mkdir -p "$job_root/tmp" "$job_root/gotmp"
     printf 'START: %s (TMPDIR=%s GOTMPDIR=%s)\n' "$test_path" "$job_root/tmp" "$job_root/gotmp"
-    run_one "$test_path" "$job_root" "$log_path" &
+    run_one "$test_path" "$job_root" "$log_path" "$start_gate" &
     job_pid=$!
     if ! register_running_pid "$job_pid"; then
       printf '%s\n' 'FAIL: could not bind an active behavior-test supervisor' >&2
+      wait "$job_pid" 2>/dev/null || true
       exit 125
     fi
+    : >"$start_gate" || {
+      printf '%s\n' 'FAIL: could not release a bound behavior-test supervisor' >&2
+      exit 125
+    }
     pids+=("$job_pid")
     batch_tests+=("$test_path")
     batch_logs+=("$log_path")
