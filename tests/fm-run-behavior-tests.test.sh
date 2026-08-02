@@ -146,6 +146,7 @@ run_fixture() {
   local supervisor_pid_file=${10:-} root_pid_file=${11:-}
   local drop_launch_response=${12:-} block_fifo=${13:-} broker_pid_file=${14:-}
   local guard_pid_file=${15:-} break_control=${16:-0} delay_control_open=${17:-}
+  local worker_pid_file=${18:-}
   local fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
@@ -166,6 +167,7 @@ run_fixture() {
       FM_TEST_SUPERVISOR_BLOCK_FIFO="$block_fifo" \
       FM_TEST_SUPERVISOR_BROKER_PID_FILE="$broker_pid_file" \
       FM_TEST_SUPERVISOR_GUARD_PID_FILE="$guard_pid_file" \
+      FM_TEST_SUPERVISOR_WORKER_PID_FILE="$worker_pid_file" \
       FM_TEST_SUPERVISOR_BREAK_CONTROL="$break_control" \
       FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN="$delay_control_open" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
@@ -321,6 +323,10 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must bind the root PID to a process handle"
   assert_contains "$source" 'syscall($sys_pidfd_open, $pid, 0)' \
     "bounded runner must open atomic process handles"
+  assert_contains "$source" 'syscall($sys_prctl, 1, 15, 0, 0, 0) == 0' \
+    "nested supervisors must establish parent-death containment"
+  assert_contains "$source" 'exit 125 if getppid() != $parent' \
+    "nested supervisors must verify their parent after containment"
   assert_contains "$source" 'syscall($sys_pidfd_send_signal, $fd, $signal, 0, 0)' \
     "bounded runner must signal through process handles"
   assert_not_contains "$source" 'kill $signal, $tracked_pid' \
@@ -351,6 +357,8 @@ test_bounded_runner_uses_stable_containment() {
     "supervisor broker waits without blocking its control loop"
   assert_not_contains "$source" 'waitpid($entry->{pid}, 0)' \
     "supervisor broker must not block while waiting for a job"
+  assert_not_contains "$source" 'waitpid($pid, 0)' \
+    "nested supervisors must not use unbounded pre-release waits"
   assert_contains "$source" 'shutdown|error' \
     "supervisor broker must fail closed when hidden cleanup cannot be proven"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PERL' \
@@ -369,6 +377,8 @@ test_bounded_runner_uses_stable_containment() {
     "broker guard must acquire its control channel before releasing its worker"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PID_FILE' \
     "broker guard regression must record its identity"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_WORKER_PID_FILE' \
+    "broker worker regression must record its identity"
   assert_contains "$source" 'supervisor_handle_close_channels' \
     "behavior runner must close broker channels on teardown failure"
   assert_contains "$source" 'supervisor_handle_force_broker_teardown' \
@@ -495,12 +505,13 @@ test_launch_response_loss_aborts_hidden_supervisor() {
 }
 
 test_blocked_broker_fifo_teardown_is_bounded() {
-  local fixture output fixture_output rc broker_pid_file guard_pid_file supervisor_pid_file
+  local fixture output fixture_output rc broker_pid_file guard_pid_file worker_pid_file supervisor_pid_file
   local sentinel_marker sentinel_pid start_seconds elapsed
   fixture=$(make_fixture_root blocked-broker-fifo)
   output="$TMP_ROOT/blocked-broker-fifo.out"
   supervisor_pid_file="$TMP_ROOT/blocked-broker-fifo-supervisor.identity"
   guard_pid_file="$TMP_ROOT/blocked-broker-fifo-guard.identity"
+  worker_pid_file="$TMP_ROOT/blocked-broker-fifo-worker.identity"
   broker_pid_file="$TMP_ROOT/blocked-broker-fifo-broker.identity"
   sentinel_marker="$TMP_ROOT/blocked-broker-fifo-sentinel-term"
   (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
@@ -508,7 +519,7 @@ test_blocked_broker_fifo_teardown_is_bounded() {
   start_seconds=$SECONDS
   set +e
   fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 \
-    "$supervisor_pid_file" '' '' 1 "$broker_pid_file" "$guard_pid_file" 1)
+    "$supervisor_pid_file" '' '' 1 "$broker_pid_file" "$guard_pid_file" 1 '' "$worker_pid_file")
   rc=$?
   set -u
   elapsed=$((SECONDS - start_seconds))
@@ -518,6 +529,8 @@ test_blocked_broker_fifo_teardown_is_bounded() {
   assert_identity_gone "$(cat "$supervisor_pid_file")"
   [ -s "$guard_pid_file" ] || fail "blocked broker teardown did not record its guard"
   assert_identity_gone "$(cat "$guard_pid_file")"
+  [ -s "$worker_pid_file" ] || fail "blocked broker teardown did not record its worker"
+  assert_identity_gone "$(cat "$worker_pid_file")"
   [ -s "$broker_pid_file" ] || fail "blocked broker teardown did not record its broker"
   assert_identity_gone "$(cat "$broker_pid_file")"
   [ ! -e "$fixture_output/pass-a.started" ] \
@@ -530,12 +543,14 @@ test_blocked_broker_fifo_teardown_is_bounded() {
 }
 
 test_pre_control_open_teardown_is_bounded() {
-  local fixture output fixture_output rc guard_pid_file supervisor_pid_file open_gate
+  local fixture output fixture_output rc guard_pid_file worker_pid_file supervisor_pid_file broker_pid_file open_gate
   local sentinel_marker sentinel_pid start_seconds elapsed
   fixture=$(make_fixture_root pre-control-open-race)
   output="$TMP_ROOT/pre-control-open-race.out"
   supervisor_pid_file="$TMP_ROOT/pre-control-open-race-supervisor.identity"
   guard_pid_file="$TMP_ROOT/pre-control-open-race-guard.identity"
+  worker_pid_file="$TMP_ROOT/pre-control-open-race-worker.identity"
+  broker_pid_file="$TMP_ROOT/pre-control-open-race-broker.identity"
   open_gate="$TMP_ROOT/pre-control-open-race.open"
   sentinel_marker="$TMP_ROOT/pre-control-open-race-sentinel-term"
   (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
@@ -543,7 +558,7 @@ test_pre_control_open_teardown_is_bounded() {
   start_seconds=$SECONDS
   set +e
   fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 \
-    "$supervisor_pid_file" '' '' 1 '' "$guard_pid_file" 0 "$open_gate")
+    "$supervisor_pid_file" '' '' 0 "$broker_pid_file" "$guard_pid_file" 0 "$open_gate" "$worker_pid_file")
   rc=$?
   set -u
   elapsed=$((SECONDS - start_seconds))
@@ -553,6 +568,10 @@ test_pre_control_open_teardown_is_bounded() {
   assert_identity_gone "$(cat "$supervisor_pid_file")"
   [ -s "$guard_pid_file" ] || fail "pre-control-open teardown did not record its guard"
   assert_identity_gone "$(cat "$guard_pid_file")"
+  [ -s "$worker_pid_file" ] || fail "pre-control-open teardown did not record its worker"
+  assert_identity_gone "$(cat "$worker_pid_file")"
+  [ -s "$broker_pid_file" ] || fail "pre-control-open teardown did not record its broker"
+  assert_identity_gone "$(cat "$broker_pid_file")"
   [ ! -e "$fixture_output/pass-a.started" ] \
     || fail "pre-control-open teardown released a behavior test"
   [ ! -e "$sentinel_marker" ] \
