@@ -53,26 +53,39 @@ use Errno qw(ECHILD ESRCH);
 use POSIX qw(:signal_h :sys_wait_h setpgid);
 my $arch = $Config{archname} // "";
 my $sys_prctl;
+my $sys_pidfd_open;
+my $sys_pidfd_send_signal;
 if ($^O eq "linux") {
   if ($arch =~ /(?:x86_64|amd64)/) {
     $sys_prctl = 157;
-  } elsif ($arch =~ /aarch64/) {
+  } elsif ($arch =~ /(?:aarch64|riscv64|s390x)/) {
     $sys_prctl = 167;
   } elsif ($arch =~ /(?:i[3-6]86|arm)/) {
     $sys_prctl = 172;
   } elsif ($arch =~ /ppc64/) {
     $sys_prctl = 171;
   }
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
 }
 my $containment_ready = sub {
   return 0 unless $^O eq "linux" && defined $sys_prctl;
   return syscall($sys_prctl, 36, 1, 0, 0, 0) == 0;
 };
-$containment_ready->() or do {
+my $handles_ready = sub {
+  return 0 unless $^O eq "linux" && defined $sys_pidfd_open && defined $sys_pidfd_send_signal;
+  my $self = $$;
+  my $fd = syscall($sys_pidfd_open, $self, 0);
+  return 0 unless defined $fd && $fd >= 0;
+  my $ok = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0) == 0;
+  POSIX::close($fd);
+  return $ok;
+};
+$containment_ready->() && $handles_ready->() or do {
   print STDERR "FAIL: bounded behavior tests require Linux child-subreaper containment\n";
   exit 125;
 };
-my $process_identity = sub {
+my $process_info = sub {
   my $pid = shift;
   if ($^O eq "linux") {
     open my $stat, "<", "/proc/$pid/stat" or return;
@@ -83,8 +96,10 @@ my $process_identity = sub {
     return if $comm_end < 0;
     my @fields = split /\s+/, substr($line, $comm_end + 2);
     my $start = $fields[19];
+    my $parent = $fields[1];
     return unless defined $start && $start =~ /^\d+\z/;
-    return "$pid:$start";
+    return unless defined $parent && $parent =~ /^\d+\z/;
+    return { identity => "$pid:$start", parent => 0 + $parent };
   }
   if ($^O eq "darwin") {
     open my $ps, "-|", "ps", "-p", "$pid", "-o", "lstart=" or return;
@@ -93,7 +108,7 @@ my $process_identity = sub {
     return unless $ok && defined $start;
     $start =~ s/^\s+//;
     $start =~ s/\s+\z//;
-    return "$pid:$start" if length $start;
+    return { identity => "$pid:$start", parent => undef } if length $start;
   }
   return;
 };
@@ -126,10 +141,33 @@ my $read_children = sub {
   }
   return;
 };
-my $process_gone = sub {
+my $pidfd_open = sub {
   my $pid = shift;
-  my $probe = kill 0, $pid;
-  return !$probe && $!{ESRCH};
+  my $fd = syscall($sys_pidfd_open, $pid, 0);
+  if (!defined $fd || $fd < 0) {
+    return { gone => 1 } if $!{ESRCH};
+    return { error => 1 };
+  }
+  return { fd => $fd };
+};
+my $pidfd_alive = sub {
+  my $fd = shift;
+  my $probe = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
+  return 1 if defined $probe && $probe == 0;
+  return 0 if defined $probe && $probe < 0 && $!{ESRCH};
+  return;
+};
+my $pidfd_signal = sub {
+  my ($fd, $signal) = @_;
+  my $sent = syscall($sys_pidfd_send_signal, $fd, $signal, 0, 0);
+  return 1 if defined $sent && $sent == 0;
+  return 0 if defined $sent && $sent < 0 && $!{ESRCH};
+  return;
+};
+my $close_handle = sub {
+  my $entry = shift;
+  POSIX::close($entry->{fd}) if defined $entry->{fd};
+  $entry->{fd} = undef;
 };
 my $seconds = shift;
 my $blocked = POSIX::SigSet->new(SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGCONT);
@@ -159,69 +197,168 @@ if (!$ready_count) {
   exit(128 + ($status & 127)) if $status & 127;
   exit($status >> 8);
 }
-my $root_identity = $process_identity->($pid);
-defined $root_identity or exit 125;
-my %tracked = ($pid => $root_identity);
+my $bind_process = sub {
+  my ($candidate, $expected_parent) = @_;
+  my $opened = $pidfd_open->($candidate);
+  return $opened if $opened->{gone};
+  return { error => 1 } if $opened->{error};
+  my $fd = $opened->{fd};
+  my $info = $process_info->($candidate);
+  if (!defined $info || !defined $info->{parent}) {
+    my $gone = $pidfd_alive->($fd);
+    POSIX::close($fd);
+    return { gone => 1 } if defined $gone && !$gone;
+    return { error => 1 };
+  }
+  my $alive = $pidfd_alive->($fd);
+  if (!defined $alive) {
+    POSIX::close($fd);
+    return { error => 1 };
+  }
+  if (!$alive) {
+    POSIX::close($fd);
+    return { gone => 1 };
+  }
+  if ($info->{parent} != $expected_parent) {
+    POSIX::close($fd);
+    return { error => 1 };
+  }
+  return { fd => $fd, identity => $info->{identity} };
+};
+my $root = $bind_process->($pid, $$);
+exit 125 if $root->{gone} || $root->{error};
+my %tracked = ($pid => $root);
 my $tracking_ok = 1;
+my @signal_numbers = (HUP => 1, INT => 2, QUIT => 3, TERM => 15, KILL => 9, TSTP => 20, CONT => 18);
+my %signal_numbers = @signal_numbers;
 my $refresh_tracked = sub {
   my %seen;
-  my @queue = ($$, $pid, keys %tracked);
+  my @queue = ($$, keys %tracked);
   while (@queue) {
     my $parent = shift @queue;
     next if $seen{$parent}++;
+    if ($parent != $$) {
+      my $parent_entry = $tracked{$parent};
+      next unless defined $parent_entry;
+      my $parent_alive = $pidfd_alive->($parent_entry->{fd});
+      if (!defined $parent_alive) {
+        $tracking_ok = 0;
+        return;
+      }
+      if (!$parent_alive) {
+        $close_handle->($parent_entry);
+        delete $tracked{$parent};
+        next;
+      }
+    }
     my $children = $read_children->($parent);
     if (!defined $children) {
-      next if $parent != $$ && $process_gone->($parent);
       $tracking_ok = 0;
       return;
     }
     for my $child (@$children) {
       next if $child == $$;
-      my $identity = $process_identity->($child);
-      if (!defined $identity) {
-        next if $process_gone->($child);
-        $tracking_ok = 0;
-        return;
-      }
       if (exists $tracked{$child}) {
-        if ($tracked{$child} ne $identity) {
+        my $entry = $tracked{$child};
+        my $alive = $pidfd_alive->($entry->{fd});
+        if (!defined $alive) {
           $tracking_ok = 0;
           return;
         }
-      } else {
-        $tracked{$child} = $identity;
+        if ($alive) {
+          my $info = $process_info->($child);
+          if (!defined $info || !defined $info->{parent} || $info->{parent} != $parent || $info->{identity} ne $entry->{identity}) {
+            $tracking_ok = 0;
+            return;
+          }
+          push @queue, $child;
+          next;
+        }
+        $close_handle->($entry);
+        delete $tracked{$child};
       }
+      my $bound = $bind_process->($child, $parent);
+      next if $bound->{gone};
+      if ($bound->{error}) {
+        $tracking_ok = 0;
+        return;
+      }
+      $tracked{$child} = $bound;
       push @queue, $child;
     }
   }
 };
 my $signal_tracked = sub {
   my $signal = shift;
+  my $number = $signal_numbers{$signal};
+  if (!defined $number) {
+    $tracking_ok = 0;
+    return;
+  }
   for my $tracked_pid (keys %tracked) {
-    next if $tracked_pid == $$;
-    my $identity = $process_identity->($tracked_pid);
-    if (!defined $identity) {
-      next if $process_gone->($tracked_pid);
+    my $entry = $tracked{$tracked_pid};
+    my $alive = $pidfd_alive->($entry->{fd});
+    if (!defined $alive) {
       $tracking_ok = 0;
       next;
     }
-    if ($identity ne $tracked{$tracked_pid}) {
+    if (!$alive) {
+      $close_handle->($entry);
+      delete $tracked{$tracked_pid};
+      next;
+    }
+    my $info = $process_info->($tracked_pid);
+    if (!defined $info || $info->{identity} ne $entry->{identity}) {
       $tracking_ok = 0;
       next;
     }
-    kill $signal, $tracked_pid;
+    my $sent = $pidfd_signal->($entry->{fd}, $number);
+    if (!defined $sent) {
+      $tracking_ok = 0;
+      next;
+    }
+    if (!$sent) {
+      $close_handle->($entry);
+      delete $tracked{$tracked_pid};
+    }
   }
 };
 my $signal_group = sub {
   my $signal = shift;
+  my $root_entry = $tracked{$pid};
+  return unless defined $root_entry;
+  my $alive = $pidfd_alive->($root_entry->{fd});
+  if (!defined $alive) {
+    $tracking_ok = 0;
+    return;
+  }
+  return unless $alive;
+  my $info = $process_info->($pid);
+  if (!defined $info || $info->{identity} ne $root_entry->{identity}) {
+    $tracking_ok = 0;
+    return;
+  }
   my $probe = kill 0, -$pid;
   if ($probe) {
-    kill $signal, -$pid;
+    kill $signal, -$pid or $tracking_ok = 0;
   } elsif (!$probe && !$!{ESRCH}) {
     $tracking_ok = 0;
   }
 };
 my $group_gone = sub {
+  my $root_entry = $tracked{$pid};
+  return 1 unless defined $root_entry;
+  my $alive = $pidfd_alive->($root_entry->{fd});
+  if (!defined $alive) {
+    $tracking_ok = 0;
+    return 0;
+  }
+  return 1 unless $alive;
+  my $info = $process_info->($pid);
+  if (!defined $info || $info->{identity} ne $root_entry->{identity}) {
+    $tracking_ok = 0;
+    return 0;
+  }
   for (1 .. 20) {
     my $probe = kill 0, -$pid;
     return 1 if !$probe && $!{ESRCH};
@@ -232,13 +369,19 @@ my $group_gone = sub {
 };
 my $tracked_gone = sub {
   for my $tracked_pid (keys %tracked) {
-    my $identity = $process_identity->($tracked_pid);
-    if (!defined $identity) {
-      next if $process_gone->($tracked_pid);
+    my $entry = $tracked{$tracked_pid};
+    my $alive = $pidfd_alive->($entry->{fd});
+    if (!defined $alive) {
       $tracking_ok = 0;
       return 0;
     }
-    if ($identity ne $tracked{$tracked_pid}) {
+    if (!$alive) {
+      $close_handle->($entry);
+      delete $tracked{$tracked_pid};
+      next;
+    }
+    my $info = $process_info->($tracked_pid);
+    if (!defined $info || $info->{identity} ne $entry->{identity}) {
       $tracking_ok = 0;
       return 0;
     }
@@ -569,7 +712,9 @@ while [ "$index" -lt "$total" ]; do
     mkdir -p "$job_root/tmp" "$job_root/gotmp"
     printf 'START: %s (TMPDIR=%s GOTMPDIR=%s)\n' "$test_path" "$job_root/tmp" "$job_root/gotmp"
     run_one "$test_path" "$job_root" "$log_path" &
-    pids+=("$!")
+    job_pid=$!
+    pids+=("$job_pid")
+    RUNNING_TEST_PIDS+=("$job_pid")
     batch_tests+=("$test_path")
     batch_logs+=("$log_path")
     batch_roots+=("$job_root")

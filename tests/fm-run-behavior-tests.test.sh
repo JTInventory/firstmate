@@ -291,13 +291,78 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must establish child-subreaper containment"
   assert_contains "$source" '/proc/$parent/task/$parent/children' \
     "bounded runner must read kernel-owned child containment"
-  assert_contains "$source" 'my %tracked = ($pid => $root_identity)' \
-    "bounded runner must bind the root PID to its start identity"
-  assert_contains "$source" 'if ($identity ne $tracked{$tracked_pid})' \
-    "bounded runner must reject PID identity reuse"
+  assert_contains "$source" 'my %tracked = ($pid => $root)' \
+    "bounded runner must bind the root PID to a process handle"
+  assert_contains "$source" 'syscall($sys_pidfd_open, $pid, 0)' \
+    "bounded runner must open atomic process handles"
+  assert_contains "$source" 'syscall($sys_pidfd_send_signal, $fd, $signal, 0, 0)' \
+    "bounded runner must signal through process handles"
+  assert_not_contains "$source" 'kill $signal, $tracked_pid' \
+    "bounded runner must not signal tracked numeric PIDs"
   assert_contains "$source" 'waitpid(-1, WNOHANG)' \
     "bounded runner must reap adopted descendants"
+  assert_contains "$source" 'RUNNING_TEST_PIDS+=("$job_pid")' \
+    "behavior runner must register every active supervisor"
   pass "bounded behavior tests use stable process containment"
+}
+
+test_fast_escape_after_test_exit_is_rejected() {
+  local fixture output fixture_output rc
+  fixture=$(make_fixture_root fast-escape)
+  cat > "$fixture/tests/fast-escape.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+setsid bash -c "setsid bash -c 'sleep 2; printf \"escaped\\n\" > \"\$FM_FIXTURE_OUTPUT_DIR/fast-escaped-descendant\"' & exit 0" &
+exit 0
+SH
+  chmod +x "$fixture/tests/fast-escape.test.sh"
+  output="$TMP_ROOT/fast-escape.out"
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1)
+  rc=$?
+  set -u
+  expect_code 125 "$rc" "a fast escaped descendant must fail the runner closed"
+  assert_grep 'FAIL: tests/fast-escape.test.sh (fail-closed exit 125)' "$output" \
+    "the runner did not reject a descendant after the test exited"
+  sleep 2
+  [ ! -e "$fixture_output/fast-escaped-descendant" ] \
+    || fail "a fast escaped descendant survived cleanup"
+  pass "behavior tests reject escaped descendants after test exit"
+}
+
+test_pidfd_handles_do_not_follow_stale_pids() {
+  if [ "$(uname -s)" != Linux ]; then
+    pass "skip stale PID handle regression outside Linux"
+    return
+  fi
+  perl <<'PERL' || fail "pidfd stale-handle regression failed"
+use strict;
+use warnings;
+use POSIX qw(:sys_wait_h);
+my $first = fork;
+defined $first or die "first fork failed\n";
+if (!$first) {
+  sleep 1;
+  exit 0;
+}
+my $fd = syscall(434, $first, 0);
+defined $fd && $fd >= 0 or die "pidfd_open failed\n";
+kill "TERM", $first or die "first child signal failed\n";
+waitpid($first, 0) == $first or die "first child reap failed\n";
+my $second = fork;
+defined $second or die "second fork failed\n";
+if (!$second) {
+  sleep 3;
+  exit 0;
+}
+my $sent = syscall(424, $fd, 15, 0, 0);
+defined $sent && $sent < 0 or die "stale pidfd signaled a replacement\n";
+kill 0, $second or die "replacement child did not survive\n";
+kill "TERM", $second or die "replacement child cleanup failed\n";
+waitpid($second, 0) == $second or die "replacement child reap failed\n";
+POSIX::close($fd);
+PERL
+  pass "pidfd handles do not follow stale numeric PIDs"
 }
 
 test_gate_refusal_has_a_hard_timeout() {
@@ -389,6 +454,8 @@ test_parallel_mode_requires_an_explicit_allowlist
 test_default_mode_is_serial
 test_each_behavior_test_has_a_hard_timeout
 test_bounded_runner_uses_stable_containment
+test_fast_escape_after_test_exit_is_rejected
+test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
 test_delta_overlay_contract_is_checked_and_portable
