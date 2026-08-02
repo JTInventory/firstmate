@@ -755,6 +755,7 @@ exit($cleanup_ok ? 0 : 125);
 FM_TEST_SUPERVISOR_GUARD_WORKER_PERL='
 use Config;
 use Errno qw(ECHILD EINTR ESRCH);
+use Fcntl qw(F_SETFD);
 use POSIX qw(:sys_wait_h);
 my ($worker_path, $input_path, $output_path) = @ARGV;
 my $arch = $Config{archname} // "";
@@ -856,10 +857,9 @@ while (1) {
 '
 FM_TEST_SUPERVISOR_GUARD_PERL='
 use Config;
-use Errno qw(EAGAIN ECHILD EINTR ESRCH);
-use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+use Errno qw(ECHILD EINTR ESRCH);
 use POSIX qw(:sys_wait_h);
-my ($guard_worker_path, $worker_path, $input_path, $output_path, $control_path) = @ARGV;
+my ($guard_worker_path, $worker_path, $input_path, $output_path, $release_fd) = @ARGV;
 my $arch = $Config{archname} // "";
 my ($sys_pidfd_open, $sys_pidfd_send_signal);
 if ($arch =~ /(?:x86_64|amd64)/) {
@@ -870,6 +870,11 @@ if ($arch =~ /(?:x86_64|amd64)/) {
   $sys_pidfd_send_signal = 424;
 }
 defined $sys_pidfd_open && defined $sys_pidfd_send_signal or exit 125;
+open my $release, "<&=$release_fd" or exit 125;
+my $release_value = "";
+my $release_count = sysread($release, $release_value, 1);
+close $release;
+exit 125 unless $release_count == 1 && $release_value eq "1";
 pipe(my $gate_r, my $gate_w) or exit 125;
 my $pid = fork;
 defined $pid or exit 125;
@@ -896,26 +901,19 @@ if (!defined $guard_probe || $guard_probe != 0) {
   waitpid($pid, 0);
   exit 125;
 }
-if (defined $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE} &&
-    length $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE}) {
-  open my $record, ">", $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE} or exit 125;
-  print $record "$pid:";
-  open my $stat, "<", "/proc/$pid/stat" or exit 125;
-  my $line = <$stat>;
-  close $stat;
-  my $comm_end = defined $line ? rindex($line, ")") : -1;
-  exit 125 if $comm_end < 0;
-  my @fields = split /\s+/, substr($line, $comm_end + 2);
-  my $start = $fields[19];
-  exit 125 unless defined $start && $start =~ /^\d+\z/;
-  print $record "$start\n";
-  close $record or exit 125;
-}
-syswrite($gate_w, "1") == 1 or exit 125;
+my $abort_before_release = sub {
+  close $gate_w;
+  while (1) {
+    my $waited = waitpid($pid, 0);
+    last if $waited == $pid;
+    next if $waited < 0 && $!{EINTR};
+    last;
+  }
+  POSIX::close($guard_fd);
+  exit 125;
+};
+syswrite($gate_w, "1") == 1 or $abort_before_release->();
 close $gate_w;
-open my $control, "<", $control_path or exit 125;
-my $flags = fcntl($control, F_GETFL, 0);
-defined $flags && defined fcntl($control, F_SETFL, $flags | O_NONBLOCK) or exit 125;
 my $terminate = sub {
   my $sent = syscall($sys_pidfd_send_signal, $guard_fd, 15, 0, 0);
   my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
@@ -956,6 +954,129 @@ while (1) {
   my $waited = waitpid($pid, WNOHANG);
   $finish->($?) if $waited == $pid;
   $finish->(125) if $waited < 0 && !$!{EINTR};
+  select undef, undef, undef, 0.05;
+}
+'
+FM_TEST_SUPERVISOR_GUARD_PARENT_PERL='
+use Config;
+use Errno qw(EAGAIN ECHILD EINTR ESRCH);
+use Fcntl qw(F_SETFD O_NONBLOCK O_RDONLY);
+use POSIX qw(:sys_wait_h);
+my ($guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, $control_path) = @ARGV;
+my $arch = $Config{archname} // "";
+my ($sys_pidfd_open, $sys_pidfd_send_signal);
+if ($arch =~ /(?:x86_64|amd64)/) {
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+} elsif ($arch =~ /(?:aarch64|riscv64|s390x|ppc64|i[3-6]86|arm)/) {
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+}
+defined $sys_pidfd_open && defined $sys_pidfd_send_signal or exit 125;
+pipe(my $release_r, my $release_w) or exit 125;
+defined fcntl($release_r, F_SETFD, 0) or exit 125;
+my $pid = fork;
+defined $pid or exit 125;
+if (!$pid) {
+  close $release_w;
+  exec $^X, "-e", $guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, fileno($release_r);
+  exit 127;
+}
+close $release_r;
+my $outer_fd = syscall($sys_pidfd_open, $pid, 0);
+if (!defined $outer_fd || $outer_fd < 0) {
+  close $release_w;
+  waitpid($pid, 0);
+  exit 125;
+}
+my $outer_probe = syscall($sys_pidfd_send_signal, $outer_fd, 0, 0, 0);
+if (!defined $outer_probe || $outer_probe != 0) {
+  POSIX::close($outer_fd);
+  close $release_w;
+  waitpid($pid, 0);
+  exit 125;
+}
+my $abort_before_release = sub {
+  close $release_w;
+  while (1) {
+    my $waited = waitpid($pid, 0);
+    last if $waited == $pid;
+    next if $waited < 0 && $!{EINTR};
+    last;
+  }
+  POSIX::close($outer_fd);
+  exit 125;
+};
+if (defined $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE} &&
+    length $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE}) {
+  open my $record, ">", $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE} or $abort_before_release->();
+  print $record "$pid:";
+  open my $stat, "<", "/proc/$pid/stat" or $abort_before_release->();
+  my $line = <$stat>;
+  close $stat;
+  my $comm_end = defined $line ? rindex($line, ")") : -1;
+  $abort_before_release->() if $comm_end < 0;
+  my @fields = split /\s+/, substr($line, $comm_end + 2);
+  my $start = $fields[19];
+  $abort_before_release->() unless defined $start && $start =~ /^\d+\z/;
+  print $record "$start\n";
+  close $record or $abort_before_release->();
+}
+if (defined $ENV{FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN} &&
+    length $ENV{FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN}) {
+  my $released = 0;
+  for (1 .. 200) {
+    if (-e $ENV{FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN}) {
+      $released = 1;
+      last;
+    }
+    select undef, undef, undef, 0.01;
+  }
+  $abort_before_release->() unless $released;
+}
+sysopen my $control, $control_path, O_RDONLY | O_NONBLOCK or $abort_before_release->();
+syswrite($release_w, "1") == 1 or $abort_before_release->();
+close $release_w;
+my $terminate = sub {
+  my $sent = syscall($sys_pidfd_send_signal, $outer_fd, 15, 0, 0);
+  my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
+  return 0 unless $term_ok;
+  for (1 .. 100) {
+    my $waited = waitpid($pid, WNOHANG);
+    return 1 if $waited == $pid;
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  my $killed = syscall($sys_pidfd_send_signal, $outer_fd, 9, 0, 0);
+  my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
+  return 0 unless $kill_ok;
+  for (1 .. 100) {
+    my $waited = waitpid($pid, WNOHANG);
+    return 1 if $waited == $pid;
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  return 0;
+};
+my $finish = sub {
+  my ($status) = @_;
+  POSIX::close($outer_fd);
+  exit $status;
+};
+my $stop = 0;
+$SIG{INT} = sub { $stop = 1; };
+$SIG{TERM} = sub { $stop = 1; };
+while (1) {
+  my $waited = waitpid($pid, WNOHANG);
+  $finish->($?) if $waited == $pid;
+  $stop = 1 if $waited < 0 && !$!{EINTR};
+  if ($stop) {
+    $finish->(0) if $terminate->();
+    select undef, undef, undef, 0.05;
+    next;
+  }
   my $readable = "";
   vec($readable, fileno($control), 1) = 1;
   my $selected = select($readable, undef, undef, 0.05);
@@ -964,14 +1085,10 @@ while (1) {
   my $count = sysread($control, $command, 4096);
   if (!defined $count) {
     next if $!{EAGAIN} || $!{EINTR};
-    $terminate_command->();
+    $stop = 1;
+    next;
   }
-  if ($count == 0) {
-    $terminate_command->();
-  }
-  if ($command =~ /(?:^|\n)terminate(?:\n|$)/) {
-    $terminate_command->();
-  }
+  $stop = 1 if $count == 0 || $command =~ /(?:^|\n)terminate(?:\n|$)/;
 }
 '
 run_bounded() {
@@ -1310,7 +1427,8 @@ if ! printf '%s' "$FM_TEST_SUPERVISOR_GUARD_WORKER_PERL" >"$supervisor_handle_gu
   printf '%s\n' 'FAIL: could not write supervisor guard worker' >&2
   exit 125
 fi
-perl -e "$FM_TEST_SUPERVISOR_GUARD_PERL" "$supervisor_handle_guard_worker" \
+perl -e "$FM_TEST_SUPERVISOR_GUARD_PARENT_PERL" "$FM_TEST_SUPERVISOR_GUARD_PERL" \
+  "$supervisor_handle_guard_worker" \
   "$supervisor_handle_worker" \
   "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control" &
 SUPERVISOR_HANDLE_BROKER_PID=$!
@@ -1320,6 +1438,10 @@ if ! SUPERVISOR_HANDLE_BROKER_IDENTITY=$(supervisor_handle_process_identity "$SU
 fi
 if [ -n "${FM_TEST_SUPERVISOR_PID_FILE:-}" ]; then
   printf '%s\n' "$SUPERVISOR_HANDLE_BROKER_IDENTITY" >"$FM_TEST_SUPERVISOR_PID_FILE" || exit 125
+fi
+if [ -n "${FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN:-}" ]; then
+  printf '%s\n' terminate >&"$SUPERVISOR_HANDLE_CONTROL" || exit 125
+  : >"$FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN" || exit 125
 fi
 if ! exec {SUPERVISOR_HANDLE_WRITE}<>"$supervisor_handle_input"; then
   printf '%s\n' 'FAIL: could not open supervisor handle input' >&2

@@ -145,7 +145,8 @@ run_fixture() {
   local force_root_failure=${8:-0} force_supervisor_failure=${9:-}
   local supervisor_pid_file=${10:-} root_pid_file=${11:-}
   local drop_launch_response=${12:-} block_fifo=${13:-} broker_pid_file=${14:-}
-  local guard_pid_file=${15:-} break_control=${16:-0} fixture_output
+  local guard_pid_file=${15:-} break_control=${16:-0} delay_control_open=${17:-}
+  local fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -166,6 +167,7 @@ run_fixture() {
       FM_TEST_SUPERVISOR_BROKER_PID_FILE="$broker_pid_file" \
       FM_TEST_SUPERVISOR_GUARD_PID_FILE="$guard_pid_file" \
       FM_TEST_SUPERVISOR_BREAK_CONTROL="$break_control" \
+      FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN="$delay_control_open" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -353,10 +355,18 @@ test_bounded_runner_uses_stable_containment() {
     "supervisor broker must fail closed when hidden cleanup cannot be proven"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PERL' \
     "behavior runner must retain a broker pidfd guard"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PARENT_PERL' \
+    "behavior runner must retain a parent-owned guard controller"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_WORKER_PERL' \
     "behavior runner must isolate the guard worker"
+  assert_contains "$source" 'my $outer_fd = syscall($sys_pidfd_open, $pid, 0)' \
+    "guard controller must retain the outer guard pidfd"
   assert_contains "$source" 'my $guard_fd = syscall($sys_pidfd_open, $pid, 0)' \
     "broker guard must retain the outer guard pidfd"
+  assert_contains "$source" 'use Fcntl qw(F_SETFD O_NONBLOCK O_RDONLY);' \
+    "broker guard must open its control FIFO without blocking"
+  assert_contains "$source" 'sysopen my $control, $control_path, O_RDONLY | O_NONBLOCK' \
+    "broker guard must acquire its control channel before releasing its worker"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PID_FILE' \
     "broker guard regression must record its identity"
   assert_contains "$source" 'supervisor_handle_close_channels' \
@@ -519,6 +529,39 @@ test_blocked_broker_fifo_teardown_is_bounded() {
   pass "blocked broker FIFO teardown is bounded and reaped"
 }
 
+test_pre_control_open_teardown_is_bounded() {
+  local fixture output fixture_output rc guard_pid_file supervisor_pid_file open_gate
+  local sentinel_marker sentinel_pid start_seconds elapsed
+  fixture=$(make_fixture_root pre-control-open-race)
+  output="$TMP_ROOT/pre-control-open-race.out"
+  supervisor_pid_file="$TMP_ROOT/pre-control-open-race-supervisor.identity"
+  guard_pid_file="$TMP_ROOT/pre-control-open-race-guard.identity"
+  open_gate="$TMP_ROOT/pre-control-open-race.open"
+  sentinel_marker="$TMP_ROOT/pre-control-open-race-sentinel-term"
+  (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
+  sentinel_pid=$!
+  start_seconds=$SECONDS
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 \
+    "$supervisor_pid_file" '' '' 1 '' "$guard_pid_file" 0 "$open_gate")
+  rc=$?
+  set -u
+  elapsed=$((SECONDS - start_seconds))
+  expect_code 125 "$rc" "pre-control-open teardown must fail closed"
+  [ "$elapsed" -lt 10 ] || fail "pre-control-open teardown exceeded its hard bound"
+  [ -s "$supervisor_pid_file" ] || fail "pre-control-open teardown did not record its supervisor"
+  assert_identity_gone "$(cat "$supervisor_pid_file")"
+  [ -s "$guard_pid_file" ] || fail "pre-control-open teardown did not record its guard"
+  assert_identity_gone "$(cat "$guard_pid_file")"
+  [ ! -e "$fixture_output/pass-a.started" ] \
+    || fail "pre-control-open teardown released a behavior test"
+  [ ! -e "$sentinel_marker" ] \
+    || fail "pre-control-open teardown signaled an unrelated process"
+  kill -TERM "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+  pass "pre-control-open teardown is bounded and reaped"
+}
+
 test_pidfd_handles_do_not_follow_stale_pids() {
   if [ "$(uname -s)" != Linux ]; then
     pass "skip stale PID handle regression outside Linux"
@@ -655,6 +698,7 @@ test_fast_escape_after_test_exit_is_rejected
 test_failure_injection_refuses_before_launch
 test_launch_response_loss_aborts_hidden_supervisor
 test_blocked_broker_fifo_teardown_is_bounded
+test_pre_control_open_teardown_is_bounded
 test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
