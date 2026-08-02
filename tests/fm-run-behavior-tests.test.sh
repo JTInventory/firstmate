@@ -138,7 +138,7 @@ SH
 
 run_fixture() {
   local fixture=$1 jobs=$2 output=$3 allow_ambient=${4:-0}
-  local parallel_allowlist=${5:-} timeout_seconds=${6:-} fixture_output
+  local parallel_allowlist=${5:-} timeout_seconds=${6:-} path_override=${7:-} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -146,7 +146,7 @@ run_fixture() {
     cd "$fixture" || exit 1
     # Simulate launching the suite from inside a live Herdr pane: ambient
     # HERDR_* and a shared FM_HOME must not reach hermetic child tests.
-      PATH="$fixture/bin:$PATH" \
+      PATH="${path_override:-$fixture/bin:$PATH}" \
       FM_TEST_JOBS="$jobs" \
       FM_TEST_PARALLEL_ALLOWLIST="$parallel_allowlist" \
       FM_TEST_TIMEOUT_SECONDS="$timeout_seconds" \
@@ -243,22 +243,61 @@ test_default_mode_is_serial() {
 }
 
 test_each_behavior_test_has_a_hard_timeout() {
-  local fixture output rc
+  local fixture output fixture_output fallback_bin tool target rc
   fixture=$(make_fixture_root timeout)
   cat > "$fixture/tests/hang.test.sh" <<'SH'
 #!/usr/bin/env bash
+set -eu
+(sleep 2; printf 'survived\n' > "$FM_FIXTURE_OUTPUT_DIR/descendant-survived") &
 sleep 10
 SH
   chmod +x "$fixture/tests/hang.test.sh"
+  fallback_bin="$fixture/fallback-bin"
+  mkdir -p "$fallback_bin"
+  for tool in awk bash basename cat cp cut date dirname diff env git grep head \
+    mkdir mktemp od perl ps python3 readlink realpath rm rmdir sed sleep sort \
+    tail tmux tr wc; do
+    target=$(command -v "$tool" || true)
+    [ -n "$target" ] || fail "fallback timeout fixture could not find $tool"
+    ln -s "$target" "$fallback_bin/$tool"
+  done
   output="$TMP_ROOT/timeout.out"
   set +e
-  run_fixture "$fixture" 1 "$output" 0 '' 1 >/dev/null
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 "$fallback_bin")
   rc=$?
   set -u
   expect_code 1 "$rc" "a timed-out behavior test must fail the runner"
   assert_grep 'FAIL: tests/hang.test.sh (exit 124)' "$output" \
     "the behavior runner did not report its hard per-test timeout"
+  sleep 2
+  [ ! -e "$fixture_output/descendant-survived" ] \
+    || fail "a timed-out behavior descendant survived process-group cleanup"
   pass "behavior tests have a hard per-test timeout"
+}
+
+test_gate_refusal_has_a_hard_timeout() {
+  local fixture output started finished elapsed rc
+  fixture=$(make_fixture_root gate-timeout)
+  cat > "$fixture/tests/fm-gate-refuse.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'gate-started\n' > "$FM_FIXTURE_OUTPUT_DIR/gate-started"
+sleep 10
+SH
+  chmod +x "$fixture/tests/fm-gate-refuse.test.sh"
+  output="$TMP_ROOT/gate-timeout.out"
+  started=$(date +%s)
+  set +e
+  run_fixture "$fixture" 1 "$output" 0 '' 1 >/dev/null
+  rc=$?
+  set -u
+  finished=$(date +%s)
+  elapsed=$((finished - started))
+  expect_code 1 "$rc" "a timed-out gate-refusal test must fail the runner"
+  assert_grep 'FAIL: gate-refusal test failed; tests were not started' "$output" \
+    "the runner did not report the bounded gate-refusal failure"
+  [ "$elapsed" -lt 5 ] || fail "the gate-refusal test exceeded its hard timeout: ${elapsed}s"
+  pass "the gate-refusal test has a hard timeout"
 }
 
 test_serial_mode_remains_serial() {
@@ -324,6 +363,7 @@ test_parallel_isolation_and_failure_aggregation
 test_parallel_mode_requires_an_explicit_allowlist
 test_default_mode_is_serial
 test_each_behavior_test_has_a_hard_timeout
+test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
 test_delta_overlay_contract_is_checked_and_portable
 test_lib_scrubs_ambient_herdr_for_hermetic_sources

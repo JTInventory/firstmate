@@ -2852,16 +2852,22 @@ test_sweep_binds_unreadable_candidates_to_the_recorded_endpoint() {
     "$SWEEP")
   out=$(FUNCTION_SOURCE="$function_source" bash -c '
     eval "$FUNCTION_SOURCE"
-    fm_backend_foreground_process_pid() { printf "%s" 4242; }
-    fm_isolation_unreadable_candidate_matches_endpoint "4242,9191" recorded-target
+    fm_backend_foreground_process_pid() {
+      [ "${1:-}" = herdr ] && [ "${2:-}" = recorded-target ] || return 1
+      printf "%s" 4242
+    }
+    fm_isolation_unreadable_candidate_matches_endpoint "4242,9191" herdr recorded-target
   ' 2>&1) || status=$?
   expect_code 0 "$status" "an endpoint-bound unreadable candidate was not recognized"
   [ -z "$out" ] || fail "endpoint-bound candidate matcher emitted unexpected output: $out"
   status=0
   out=$(FUNCTION_SOURCE="$function_source" bash -c '
     eval "$FUNCTION_SOURCE"
-    fm_backend_foreground_process_pid() { printf "%s" 4242; }
-    if fm_isolation_unreadable_candidate_matches_endpoint "9191" recorded-target; then
+    fm_backend_foreground_process_pid() {
+      [ "${1:-}" = herdr ] && [ "${2:-}" = recorded-target ] || return 1
+      printf "%s" 4242
+    }
+    if fm_isolation_unreadable_candidate_matches_endpoint "9191" herdr recorded-target; then
       exit 1
     fi
   ' 2>&1) || status=$?

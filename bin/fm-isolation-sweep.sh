@@ -62,8 +62,8 @@ UNREADABLE_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
 ISOLATION_FAILED=0
 
 fm_isolation_unreadable_candidate_matches_endpoint() {
-  local candidates=$1 target=$2 endpoint_pid
-  endpoint_pid=$(fm_backend_foreground_process_pid "$target" 2>/dev/null || true)
+  local candidates=$1 backend=$2 target=$3 endpoint_pid
+  endpoint_pid=$(fm_backend_foreground_process_pid "$backend" "$target" 2>/dev/null || true)
   case "$endpoint_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -93,10 +93,11 @@ for meta in "$STATE"/*.meta; do
     ISOLATION_FAILED=1
     continue
   fi
+  backend=$(fm_backend_of_meta "$meta")
   if [ -n "$UNREADABLE_CANDIDATES" ] \
     && fm_isolation_unreadable_candidate_matches_endpoint \
-      "$UNREADABLE_CANDIDATES" "$target"; then
-    endpoint_pid=$(fm_backend_foreground_process_pid "$target" 2>/dev/null || true)
+      "$UNREADABLE_CANDIDATES" "$backend" "$target"; then
+    endpoint_pid=$(fm_backend_foreground_process_pid "$backend" "$target" 2>/dev/null || true)
     echo "ISOLATION: task $id is unproven for recorded endpoint $target: candidate agent process environment is unreadable for pid $endpoint_pid; stop or make that endpoint process authoritative before any mutation"
     ISOLATION_FAILED=1
   fi

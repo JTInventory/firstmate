@@ -47,6 +47,101 @@ if [ "$test_timeout" -lt 1 ] || [ "$test_timeout" -gt 900 ]; then
   exit 1
 fi
 
+FM_TEST_BOUNDED_GROUP_PERL='
+use Errno qw(ECHILD ESRCH);
+use POSIX qw(:signal_h setpgid);
+my $seconds = shift;
+my $blocked = POSIX::SigSet->new(SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGCONT);
+my $old = POSIX::SigSet->new();
+defined(sigprocmask(SIG_BLOCK, $blocked, $old)) or exit 125;
+pipe(my $ready_r, my $ready_w) or exit 125;
+my $pid = fork;
+defined($pid) or exit 125;
+if (!$pid) {
+  close $ready_r;
+  setpgid(0, 0) == 0 or exit 125;
+  syswrite($ready_w, "1") == 1 or exit 125;
+  close $ready_w;
+  defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
+  exec @ARGV;
+  exit 127;
+}
+close $ready_w;
+my $ready = "";
+my $ready_count = sysread($ready_r, $ready, 1);
+close $ready_r;
+if (!$ready_count) {
+  my $waited = waitpid $pid, 0;
+  my $status = $?;
+  defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
+  exit 125 if $waited < 0;
+  exit(128 + ($status & 127)) if $status & 127;
+  exit($status >> 8);
+}
+my $group_gone = sub {
+  for (1 .. 20) {
+    my $probe = kill 0, -$pid;
+    return 1 if !$probe && $!{ESRCH};
+    return 0 if !$probe;
+    select undef, undef, undef, 0.1;
+  }
+  return 0;
+};
+my $stop = sub {
+  my ($signal, $code) = @_;
+  $SIG{ALRM} = $SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = $SIG{TSTP} = $SIG{CONT} = "IGNORE";
+  sigprocmask(SIG_BLOCK, $blocked);
+  kill $signal, -$pid;
+  select undef, undef, undef, 0.2;
+  kill "KILL", -$pid;
+  my $waited = waitpid $pid, 0;
+  my $wait_ok = $waited == $pid || ($waited < 0 && $!{ECHILD});
+  exit 125 unless $wait_ok && $group_gone->();
+  exit $code;
+};
+$SIG{ALRM} = sub { $stop->("TERM", 124) };
+$SIG{HUP} = sub { $stop->("HUP", 129) };
+$SIG{INT} = sub { $stop->("INT", 130) };
+$SIG{QUIT} = sub { $stop->("QUIT", 131) };
+$SIG{TERM} = sub { $stop->("TERM", 143) };
+my $suspend;
+$suspend = sub {
+  kill "TSTP", -$pid;
+  $SIG{TSTP} = "DEFAULT";
+  kill "TSTP", $$;
+  $SIG{TSTP} = $suspend;
+};
+$SIG{TSTP} = $suspend;
+$SIG{CONT} = sub { kill "CONT", -$pid };
+alarm $seconds;
+defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
+my $waited = waitpid $pid, 0;
+my $status = $?;
+alarm 0;
+exit 125 if $waited < 0;
+if (!$group_gone->()) {
+  $stop->("TERM", 125);
+}
+exit(128 + ($status & 127)) if $status & 127;
+exit($status >> 8);
+'
+run_bounded() {
+  local seconds=$1
+  shift
+  local outer_seconds=$((seconds + 5))
+  if ! command -v perl >/dev/null 2>&1; then
+    printf '%s\n' 'FAIL: perl is required for process-group timeout enforcement' >&2
+    return 125
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 5 "$outer_seconds" perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 5 "$outer_seconds" perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$seconds" "$@"
+  else
+    perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$seconds" "$@"
+  fi
+}
+
 mapfile -t tests < <(compgen -G 'tests/*.test.sh' | sort)
 if [ "${#tests[@]}" -eq 0 ]; then
   printf '%s\n' 'FAIL: no tests/*.test.sh files found' >&2
@@ -54,7 +149,7 @@ if [ "${#tests[@]}" -eq 0 ]; then
 fi
 
 gate_test="$ROOT/tests/fm-gate-refuse.test.sh"
-if [ -f "$gate_test" ] && ! bash "$gate_test"; then
+if [ -f "$gate_test" ] && ! run_bounded "$test_timeout" bash "$gate_test"; then
   printf '%s\n' 'FAIL: gate-refusal test failed; tests were not started' >&2
   exit 1
 fi
@@ -157,28 +252,6 @@ parallel_test_allowed() {
   return 1
 }
 printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_jobs"
-
-run_bounded() {
-  local seconds=$1
-  shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k 5 "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 5 "$seconds" "$@"
-  else
-    perl -e '
-      my $seconds = shift;
-      my $pid = fork;
-      die "fork failed" unless defined $pid;
-      if (!$pid) { exec @ARGV or exit 127; }
-      $SIG{ALRM} = sub { kill "TERM", $pid; select undef, undef, undef, 5; kill "KILL", $pid; exit 124; };
-      alarm $seconds;
-      waitpid $pid, 0;
-      alarm 0;
-      exit($? >> 8);
-    ' "$seconds" "$@"
-  fi
-}
 
 run_one() {
   local test_path=$1 job_root=$2 log_path=$3
