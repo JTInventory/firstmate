@@ -195,17 +195,46 @@ if (!$pid) {
 }
 close $ready_w;
 close $release_r;
+my $pre_fd = syscall($sys_pidfd_open, $pid, 0);
+my $pre_reap = sub {
+  for (1 .. 100) {
+    my $waited = waitpid $pid, WNOHANG;
+    return 1 if $waited == $pid;
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  return 0;
+};
+my $pre_terminate = sub {
+  my ($fd) = @_;
+  my $sent = syscall($sys_pidfd_send_signal, $fd, 15, 0, 0);
+  my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
+  return 0 unless $term_ok;
+  return 1 if $pre_reap->();
+  my $killed = syscall($sys_pidfd_send_signal, $fd, 9, 0, 0);
+  my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
+  return 0 unless $kill_ok;
+  return $pre_reap->();
+};
+my $abort_before_bind = sub {
+  close $release_w;
+  if (defined $pre_fd && $pre_fd >= 0) {
+    $pre_terminate->($pre_fd);
+    POSIX::close($pre_fd);
+  } else {
+    $pre_reap->();
+  }
+  exit 125;
+};
+if (!defined $pre_fd || $pre_fd < 0) {
+  $abort_before_bind->();
+}
 my $ready = "";
 my $ready_count = sysread($ready_r, $ready, 1);
 close $ready_r;
 if (!$ready_count) {
-  close $release_w;
-  my $waited = waitpid $pid, 0;
-  my $status = $?;
-  defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
-  exit 125 if $waited < 0;
-  exit(128 + ($status & 127)) if $status & 127;
-  exit($status >> 8);
+  $abort_before_bind->();
 }
 if (defined $ENV{FM_TEST_ROOT_PID_FILE} && length $ENV{FM_TEST_ROOT_PID_FILE}) {
   my $record_ok = 1;
@@ -221,10 +250,7 @@ if (defined $ENV{FM_TEST_ROOT_PID_FILE} && length $ENV{FM_TEST_ROOT_PID_FILE}) {
     }
   }
   if (!$record_ok) {
-    syswrite($release_w, "0");
-    close $release_w;
-    waitpid $pid, 0;
-    exit 125;
+    $abort_before_bind->();
   }
 }
 my $bind_process = sub {
@@ -257,14 +283,12 @@ my $bind_process = sub {
 };
 my $root = $ENV{FM_TEST_FORCE_ROOT_HANDLE_FAILURE} ? { error => 1 } : $bind_process->($pid, $$);
 if ($root->{gone} || $root->{error}) {
-  syswrite($release_w, "0");
-  close $release_w;
-  my $waited = waitpid $pid, 0;
-  exit 125 if $waited < 0;
-  exit 125;
+  $abort_before_bind->();
 }
-syswrite($release_w, "1") == 1 or exit 125;
+syswrite($release_w, "1") == 1 or $abort_before_bind->();
 close $release_w;
+POSIX::close($pre_fd);
+$pre_fd = undef;
 my %tracked = ($pid => $root);
 my $tracking_ok = 1;
 my @signal_numbers = (HUP => 1, INT => 2, QUIT => 3, TERM => 15, KILL => 9, TSTP => 20, CONT => 18);
@@ -483,7 +507,13 @@ $SIG{CONT} = sub { kill "CONT", -$pid };
 $refresh_tracked->();
 alarm $seconds;
 defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
-my $waited = waitpid $pid, 0;
+my $waited;
+while (1) {
+  $waited = waitpid $pid, WNOHANG;
+  last if $waited == $pid;
+  exit 125 if $waited < 0 && !$!{EINTR};
+  select undef, undef, undef, 0.02;
+}
 my $status = $?;
 alarm 0;
 exit 125 if $waited < 0;
@@ -603,41 +633,48 @@ while (my $line = <$input>) {
       exec "/usr/bin/bash", $runner, $test_path, $job_root, $log_path, $start_gate, $abort_gate, $test_root, $timeout, $bounded_script;
       exit 127;
     }
+    my $fd = syscall($sys_pidfd_open, $pid, 0);
+    if (!defined $fd || $fd < 0) {
+      if (open my $abort, ">", $abort_gate) {
+        close $abort;
+      }
+      $reap_entry->({ pid => $pid });
+      print "$key|error-open\n";
+      next;
+    }
+    my $entry = { fd => $fd, pid => $pid };
     my $abort_child = sub {
       if (open my $abort, ">", $abort_gate) {
         close $abort;
       }
+      return $terminate_entry->($entry);
+    };
+    my $abort_launch = sub {
+      my ($error) = @_;
+      if ($abort_child->()) {
+        $close_handle->($entry);
+        print "$key|$error\n";
+        return 1;
+      }
+      $handles{"__abort-$pid"} = $entry;
+      print "$key|$error\n";
+      return 0;
     };
     if ($ENV{FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE}) {
-      $abort_child->();
-      waitpid $pid, 0;
-      print "$key|error-identity\n";
-      next;
-    }
-    my $fd = syscall($sys_pidfd_open, $pid, 0);
-    if (!defined $fd || $fd < 0) {
-      $abort_child->();
-      waitpid $pid, 0;
-      print "$key|error-open\n";
+      $abort_launch->("error-identity");
       next;
     }
     my $current = $identity->($pid);
     if (!defined $current) {
-      POSIX::close($fd);
-      $abort_child->();
-      waitpid $pid, 0;
-      print "$key|error-identity\n";
+      $abort_launch->("error-identity");
       next;
     }
     my $alive = $probe->($fd);
     if (!defined $alive || !$alive) {
-      POSIX::close($fd);
-      $abort_child->();
-      waitpid $pid, 0;
-      print "$key|error-probe\n";
+      $abort_launch->("error-probe");
       next;
     }
-    $handles{$key} = { fd => $fd, pid => $pid };
+    $handles{$key} = $entry;
     next if $ENV{FM_TEST_SUPERVISOR_DROP_LAUNCH_RESPONSE};
     print "$key|registered|$pid|$current\n";
     next;
@@ -830,9 +867,13 @@ my $terminate = sub {
 };
 my $abort_before_release = sub {
   close $gate_w;
-  $terminate->();
-  POSIX::close($fd);
-  exit 125;
+  while (1) {
+    if ($terminate->()) {
+      POSIX::close($fd);
+      exit 125;
+    }
+    select undef, undef, undef, 0.05;
+  }
 };
 my $probe = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
 if (!defined $probe || $probe != 0) {
@@ -956,10 +997,29 @@ my $terminate = sub {
 };
 my $abort_before_release = sub {
   close $gate_w;
-  $terminate->();
-  POSIX::close($guard_fd);
-  exit 125;
+  while (1) {
+    if ($terminate->()) {
+      POSIX::close($guard_fd);
+      exit 125;
+    }
+    select undef, undef, undef, 0.05;
+  }
 };
+if (defined $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE} &&
+    length $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE}) {
+  open my $record, ">", $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE} or $abort_before_release->();
+  print $record "$pid:";
+  open my $stat, "<", "/proc/$pid/stat" or $abort_before_release->();
+  my $line = <$stat>;
+  close $stat;
+  my $comm_end = defined $line ? rindex($line, ")") : -1;
+  $abort_before_release->() if $comm_end < 0;
+  my @fields = split /\s+/, substr($line, $comm_end + 2);
+  my $start = $fields[19];
+  $abort_before_release->() unless defined $start && $start =~ /^\d+\z/;
+  print $record "$start\n";
+  close $record or $abort_before_release->();
+}
 my $guard_probe = syscall($sys_pidfd_send_signal, $guard_fd, 0, 0, 0);
 if (!defined $guard_probe || $guard_probe != 0) {
   $abort_before_release->();
@@ -1066,31 +1126,18 @@ my $finish = sub {
 my $stop = 0;
 $SIG{INT} = sub { $stop = 1; };
 $SIG{TERM} = sub { $stop = 1; };
-my $outer_probe = syscall($sys_pidfd_send_signal, $outer_fd, 0, 0, 0);
-if (!defined $outer_probe || $outer_probe != 0) {
-  close $release_w;
-  $terminate->();
-  $finish->(125);
-}
 my $abort_before_release = sub {
   close $release_w;
-  $terminate->();
-  $finish->(125);
+  while (1) {
+    if ($terminate->()) {
+      $finish->(125);
+    }
+    select undef, undef, undef, 0.05;
+  }
 };
-if (defined $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE} &&
-    length $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE}) {
-  open my $record, ">", $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE} or $abort_before_release->();
-  print $record "$pid:";
-  open my $stat, "<", "/proc/$pid/stat" or $abort_before_release->();
-  my $line = <$stat>;
-  close $stat;
-  my $comm_end = defined $line ? rindex($line, ")") : -1;
-  $abort_before_release->() if $comm_end < 0;
-  my @fields = split /\s+/, substr($line, $comm_end + 2);
-  my $start = $fields[19];
-  $abort_before_release->() unless defined $start && $start =~ /^\d+\z/;
-  print $record "$start\n";
-  close $record or $abort_before_release->();
+my $outer_probe = syscall($sys_pidfd_send_signal, $outer_fd, 0, 0, 0);
+if (!defined $outer_probe || $outer_probe != 0) {
+  $abort_before_release->();
 }
 if (defined $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE} &&
     length $ENV{FM_TEST_SUPERVISOR_GUARD_PID_FILE}) {

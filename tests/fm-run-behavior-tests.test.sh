@@ -315,8 +315,8 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must hold the root before executing the test"
   assert_contains "$source" 'syswrite($release_w, "1") == 1' \
     "bounded runner must release a verified root handle"
-  assert_contains "$source" 'syswrite($release_w, "0")' \
-    "bounded runner must close the root gate after binding failure"
+  assert_contains "$source" 'my $abort_before_bind = sub' \
+    "bounded runner must close and reap the root after binding failure"
   assert_contains "$source" '[ -z "$SUPERVISOR_HANDLE_LAUNCHED_IDENTITY" ]' \
     "behavior runner must reject unknown supervisor identity"
   assert_contains "$source" 'my %tracked = ($pid => $root)' \
@@ -359,6 +359,9 @@ test_bounded_runner_uses_stable_containment() {
     "supervisor broker must not block while waiting for a job"
   assert_not_contains "$source" 'waitpid($pid, 0)' \
     "nested supervisors must not use unbounded pre-release waits"
+  if printf '%s' "$source" | grep -Eq 'waitpid[[:space:]]+\$[^,]+,[[:space:]]*0'; then
+    fail "behavior runner contains an unbounded waitpid form"
+  fi
   assert_contains "$source" 'shutdown|error' \
     "supervisor broker must fail closed when hidden cleanup cannot be proven"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PERL' \
@@ -531,6 +534,8 @@ test_blocked_broker_fifo_teardown_is_bounded() {
   assert_identity_gone "$(cat "$guard_pid_file")"
   [ -s "$worker_pid_file" ] || fail "blocked broker teardown did not record its worker"
   assert_identity_gone "$(cat "$worker_pid_file")"
+  [ "$(cat "$guard_pid_file")" != "$(cat "$worker_pid_file")" ] \
+    || fail "blocked broker teardown recorded the guard as its worker"
   [ -s "$broker_pid_file" ] || fail "blocked broker teardown did not record its broker"
   assert_identity_gone "$(cat "$broker_pid_file")"
   [ ! -e "$fixture_output/pass-a.started" ] \
@@ -570,6 +575,8 @@ test_pre_control_open_teardown_is_bounded() {
   assert_identity_gone "$(cat "$guard_pid_file")"
   [ -s "$worker_pid_file" ] || fail "pre-control-open teardown did not record its worker"
   assert_identity_gone "$(cat "$worker_pid_file")"
+  [ "$(cat "$guard_pid_file")" != "$(cat "$worker_pid_file")" ] \
+    || fail "pre-control-open teardown recorded the guard as its worker"
   [ -s "$broker_pid_file" ] || fail "pre-control-open teardown did not record its broker"
   assert_identity_gone "$(cat "$broker_pid_file")"
   [ ! -e "$fixture_output/pass-a.started" ] \
