@@ -574,8 +574,20 @@ fm_worker_primary_authority_matches_unlocked() {
   [ "$cwd" = "$root_real" ]
 }
 
+fm_worker_isolation_sweep_current() {
+  local script root home state
+  script="$_FM_WORKER_ISOLATION_LIB_DIR/fm-isolation-sweep.sh"
+  [ -x "$script" ] || return 1
+  root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$root}}
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$script"
+}
+
 fm_worker_primary_authority_matches() {
   local operation=${1:-} status=0
+  fm_worker_isolation_sweep_current || return 2
   if [ "${FM_TEST_PROCESS:-0}" != 1 ]; then
     fm_worker_primary_authority_matches_unlocked "$operation"
     return
@@ -597,10 +609,15 @@ fm_worker_primary_authority_matches() {
 # operation only a home's primary may perform. Silent and successful for every
 # other process, so a call site can guard unconditionally.
 fm_worker_refuse_primary_operation() {
-  local operation=$1
+  local operation=$1 status=0
   case "${FM_AGENT_ROLE:-}" in
     primary|"")
       fm_worker_primary_authority_matches "$operation" && return 0
+      status=$?
+      if [ "$status" -eq 2 ]; then
+        echo "error: $operation refused: worker isolation sweep is unproven" >&2
+        return 1
+      fi
       echo "error: $operation refused: primary identity is not bound to this process and checkout" >&2
       return 1
       ;;
@@ -609,9 +626,15 @@ fm_worker_refuse_primary_operation() {
       return 1
       ;;
     secondmate)
-      fm_worker_secondmate_effective_scope_matches && return 0
-      echo "error: $operation refused: secondmate '${FM_AGENT_TASK:-unnamed}' is not operating in its declared home ${FM_AGENT_OWNER_HOME:-<missing>}" >&2
-      return 1
+      if ! fm_worker_secondmate_effective_scope_matches; then
+        echo "error: $operation refused: secondmate '${FM_AGENT_TASK:-unnamed}' is not operating in its declared home ${FM_AGENT_OWNER_HOME:-<missing>}" >&2
+        return 1
+      fi
+      if ! fm_worker_isolation_sweep_current; then
+        echo "error: $operation refused: worker isolation sweep is unproven" >&2
+        return 1
+      fi
+      return 0
       ;;
     *)
       echo "error: $operation refused: unknown worker role '${FM_AGENT_ROLE}'" >&2

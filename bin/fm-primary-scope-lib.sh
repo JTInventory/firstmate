@@ -33,7 +33,10 @@ fm_primary_scope_matches() {
   case "${FM_AGENT_ROLE:-}" in
     primary|"") fm_worker_primary_authority_matches || return 1 ;;
     crewmate) return 1 ;;
-    secondmate) fm_worker_secondmate_scope_matches "$root" "$state" || return 1 ;;
+    secondmate)
+      fm_worker_secondmate_scope_matches "$root" "$state" || return 1
+      fm_worker_isolation_sweep_current || return 1
+      ;;
     *) return 1 ;;
   esac
   git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1

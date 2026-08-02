@@ -61,14 +61,18 @@ UNREADABLE_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
   '$1 == "__FM_UNPROVEN__" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')
 ISOLATION_FAILED=0
 
+fm_isolation_unreadable_candidate_matches_endpoint() {
+  local candidates=$1 target=$2 endpoint_pid
+  endpoint_pid=$(fm_backend_foreground_process_pid "$target" 2>/dev/null || true)
+  case "$endpoint_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$candidates" | tr ',' '\n' | grep -qxF "$endpoint_pid"
+}
+
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   id=$(basename "$meta" .meta)
-  if [ -n "$UNREADABLE_CANDIDATES" ]; then
-    echo "ISOLATION: task $id is unproven: candidate agent process environment is unreadable for pid(s) $UNREADABLE_CANDIDATES; stop or make those candidates authoritative before any mutation"
-    ISOLATION_FAILED=1
-    continue
-  fi
   recorded_count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
   recorded=$(fm_meta_get "$meta" worktree)
   case "$recorded" in
@@ -88,6 +92,13 @@ for meta in "$STATE"/*.meta; do
     echo "ISOLATION: task $id is unproven: recorded endpoint metadata could not be read; preserve its state and reconcile $meta before any mutation"
     ISOLATION_FAILED=1
     continue
+  fi
+  if [ -n "$UNREADABLE_CANDIDATES" ] \
+    && fm_isolation_unreadable_candidate_matches_endpoint \
+      "$UNREADABLE_CANDIDATES" "$target"; then
+    endpoint_pid=$(fm_backend_foreground_process_pid "$target" 2>/dev/null || true)
+    echo "ISOLATION: task $id is unproven for recorded endpoint $target: candidate agent process environment is unreadable for pid $endpoint_pid; stop or make that endpoint process authoritative before any mutation"
+    ISOLATION_FAILED=1
   fi
 
   kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)

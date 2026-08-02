@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Run every firstmate behavior test with bounded optional parallelism.
+# Run every firstmate behavior test with bounded serial-by-default execution.
 #
-# FM_TEST_JOBS controls the number of test processes in flight. It defaults to
-# min(4, nproc) and FM_TEST_JOBS=1 preserves the legacy serial loop. Every test
-# receives a private TMPDIR and GOTMPDIR so temporary state cannot collide.
+# FM_TEST_JOBS controls the number of test processes in flight. Values above one
+# require FM_TEST_PARALLEL_ALLOWLIST to name isolated tests explicitly.
 
 set -u
 
@@ -24,23 +23,7 @@ if ! tmux -V; then
   exit 1
 fi
 
-default_jobs=1
-cpu_count=
-if command -v nproc >/dev/null 2>&1; then
-  cpu_count=$(nproc 2>/dev/null || true)
-elif command -v getconf >/dev/null 2>&1; then
-  cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)
-fi
-case "$cpu_count" in
-  ''|*[!0-9]*) ;;
-  0) ;;
-  *)
-    default_jobs=$cpu_count
-    [ "$default_jobs" -le 4 ] || default_jobs=4
-    ;;
-esac
-
-jobs=${FM_TEST_JOBS:-$default_jobs}
+jobs=${FM_TEST_JOBS:-1}
 case "$jobs" in
   ''|*[!0-9]*)
     printf 'FAIL: FM_TEST_JOBS must be a positive integer (got %s)\n' "$jobs" >&2
@@ -49,6 +32,18 @@ case "$jobs" in
 esac
 if [ "$jobs" -lt 1 ]; then
   printf 'FAIL: FM_TEST_JOBS must be at least 1 (got %s)\n' "$jobs" >&2
+  exit 1
+fi
+
+test_timeout=${FM_TEST_TIMEOUT_SECONDS:-300}
+case "$test_timeout" in
+  ''|*[!0-9]*)
+    printf 'FAIL: FM_TEST_TIMEOUT_SECONDS must be a positive integer (got %s)\n' "$test_timeout" >&2
+    exit 1
+    ;;
+esac
+if [ "$test_timeout" -lt 1 ] || [ "$test_timeout" -gt 900 ]; then
+  printf 'FAIL: FM_TEST_TIMEOUT_SECONDS must be between 1 and 900 seconds (got %s)\n' "$test_timeout" >&2
   exit 1
 fi
 
@@ -125,7 +120,65 @@ mapfile -t tests < <(
 total=${#tests[@]}
 active_jobs=$jobs
 [ "$active_jobs" -le "$total" ] || active_jobs=$total
+parallel_allowlist_entries=()
+parallel_allowlist=${FM_TEST_PARALLEL_ALLOWLIST:-}
+if [ "$active_jobs" -gt 1 ]; then
+  if [ -z "$parallel_allowlist" ]; then
+    printf '%s\n' 'FAIL: FM_TEST_JOBS above 1 requires FM_TEST_PARALLEL_ALLOWLIST' >&2
+    exit 1
+  fi
+  IFS=',' read -r -a parallel_allowlist_entries <<< "$parallel_allowlist"
+  for allowlist_index in "${!parallel_allowlist_entries[@]}"; do
+    entry=${parallel_allowlist_entries[$allowlist_index]}
+    case "$entry" in
+      tests/*.test.sh) entry=${entry#tests/} ;;
+      *.test.sh) ;;
+      *)
+        printf 'FAIL: FM_TEST_PARALLEL_ALLOWLIST has an invalid test name: %s\n' "$entry" >&2
+        exit 1
+        ;;
+    esac
+    parallel_allowlist_entries[$allowlist_index]=$entry
+    found=0
+    for test_path in "${tests[@]}"; do
+      [ "$test_path" = "tests/$entry" ] && found=1 && break
+    done
+    if [ "$found" -ne 1 ]; then
+      printf 'FAIL: FM_TEST_PARALLEL_ALLOWLIST names a missing test: %s\n' "$entry" >&2
+      exit 1
+    fi
+  done
+fi
+parallel_test_allowed() {
+  local test_path=$1 entry
+  for entry in "${parallel_allowlist_entries[@]}"; do
+    [ "$test_path" = "tests/$entry" ] && return 0
+  done
+  return 1
+}
 printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_jobs"
+
+run_bounded() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 5 "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 5 "$seconds" "$@"
+  else
+    perl -e '
+      my $seconds = shift;
+      my $pid = fork;
+      die "fork failed" unless defined $pid;
+      if (!$pid) { exec @ARGV or exit 127; }
+      $SIG{ALRM} = sub { kill "TERM", $pid; select undef, undef, undef, 5; kill "KILL", $pid; exit 124; };
+      alarm $seconds;
+      waitpid $pid, 0;
+      alarm 0;
+      exit($? >> 8);
+    ' "$seconds" "$@"
+  fi
+}
 
 run_one() {
   local test_path=$1 job_root=$2 log_path=$3
@@ -145,7 +198,7 @@ run_one() {
     fi
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
-    python3 - "$test_path" \
+    run_bounded "$test_timeout" python3 - "$test_path" \
       "$test_root/bin/fm-session-authority-exec.sh" <<'PY'
 import os
 import socket
@@ -207,8 +260,15 @@ while [ "$index" -lt "$total" ]; do
   batch_roots=()
   batch_count=0
 
-  while [ "$index" -lt "$total" ] && [ "$batch_count" -lt "$active_jobs" ]; do
+  batch_limit=$active_jobs
+  if [ "$active_jobs" -gt 1 ] && ! parallel_test_allowed "${tests[$index]}"; then
+    batch_limit=1
+  fi
+  while [ "$index" -lt "$total" ] && [ "$batch_count" -lt "$batch_limit" ]; do
     test_path=${tests[$index]}
+    if [ "$batch_limit" -gt 1 ] && ! parallel_test_allowed "$test_path"; then
+      break
+    fi
     test_name=${test_path##*/}
     test_id=${test_name%.test.sh}
     job_root="$suite_tmp/$test_id"

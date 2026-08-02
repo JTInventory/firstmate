@@ -2581,6 +2581,26 @@ ROWS
   pass "declared workers cannot run direct primary mutators"
 }
 
+test_direct_primary_mutator_reproves_isolation_before_authorizing() {
+  local home out status=0 id
+  home=$(make_primary_home "$TMP_ROOT/direct-mutator-sweep")
+  id="direct-mutator-sweep-$RUN_TAG"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$home/wt" "project=$home/project" \
+    "harness=codex" "kind=ship" "mode=no-mistakes" "yolo=off"
+  mkdir -p "$home/wt" "$home/project"
+  out=$(cd "$home" && FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    bash -c '# shellcheck source=/dev/null
+. "${!FM_TEST_ROOT_VAR}/bin/fm-worker-isolation-lib.sh"; fm_worker_refuse_primary_operation spawn' \
+    _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "a direct primary mutator bypassed an unproven isolation sweep"
+  assert_contains "$out" "ISOLATION: task $id is unproven" \
+    "the direct mutator did not rerun the current isolation sweep"
+  assert_contains "$out" "worker isolation sweep is unproven" \
+    "the direct mutator refusal did not identify the isolation gate"
+  pass "direct primary mutation re-proves the current isolation sweep"
+}
+
 test_secondmate_primary_operations_require_its_declared_home() {
   local home foreign alias out status foreign_before
   home=$(make_primary_home "$TMP_ROOT/secondmate-owner-home")
@@ -2824,6 +2844,29 @@ test_unreadable_agent_candidate_is_indexed_as_unproven() {
   assert_contains "$out" $'__FM_UNPROVEN__\t__FM_UNPROVEN__\tunreadable' \
     "an unreadable candidate agent disappeared from the process census"
   pass "unreadable candidate agents remain visible as unproven"
+}
+
+test_sweep_binds_unreadable_candidates_to_the_recorded_endpoint() {
+  local function_source out status=0
+  function_source=$(sed -n '/^fm_isolation_unreadable_candidate_matches_endpoint()/,/^}/p' \
+    "$SWEEP")
+  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_backend_foreground_process_pid() { printf "%s" 4242; }
+    fm_isolation_unreadable_candidate_matches_endpoint "4242,9191" recorded-target
+  ' 2>&1) || status=$?
+  expect_code 0 "$status" "an endpoint-bound unreadable candidate was not recognized"
+  [ -z "$out" ] || fail "endpoint-bound candidate matcher emitted unexpected output: $out"
+  status=0
+  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_backend_foreground_process_pid() { printf "%s" 4242; }
+    if fm_isolation_unreadable_candidate_matches_endpoint "9191" recorded-target; then
+      exit 1
+    fi
+  ' 2>&1) || status=$?
+  expect_code 0 "$status" "an unrelated unreadable candidate matched the recorded endpoint"
+  pass "unreadable sweep evidence is bound to the recorded endpoint process"
 }
 
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
@@ -4574,6 +4617,8 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-hardening ]; then
 fi
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = review-fixes ]; then
+  test_direct_primary_mutator_reproves_isolation_before_authorizing
+  test_sweep_binds_unreadable_candidates_to_the_recorded_endpoint
   test_secondmate_child_receives_only_its_own_home
   test_final_submission_failure_does_not_publish
   test_backend_owned_launch_proof_covers_tmux_and_herdr
@@ -4633,6 +4678,7 @@ test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
 test_worker_cannot_run_direct_primary_mutators
+test_direct_primary_mutator_reproves_isolation_before_authorizing
 test_secondmate_primary_operations_require_its_declared_home
 test_proc_cwd_is_read_from_the_live_process
 test_declared_agent_lookup_returns_the_root_most_process
@@ -4641,6 +4687,7 @@ test_tmux_pane_pid_comes_from_the_stable_window_id
 test_a_lost_window_name_never_answers_with_firstmates_own_pane
 test_one_proc_walk_answers_every_task_in_a_sweep
 test_unreadable_agent_candidate_is_indexed_as_unproven
+test_sweep_binds_unreadable_candidates_to_the_recorded_endpoint
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 FM_TEST_AGENT_PIDS=$$
 export FM_TEST_AGENT_PIDS

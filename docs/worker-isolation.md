@@ -127,7 +127,7 @@ Before an unpublished lease return, spawn stages an exact task, home, and lease-
 An unpublished return whose `worktree=` path is missing, or whose return claim is malformed or incomplete, is retained because pooled-slot ownership is unproven; absence of the directory is never treated as permission to dispose.
 When an unknown return outcome is recorded, it lives at `state/<id>.treehouse-lease-unknown` and the next spawn for that id refuses until the exact lease is manually reconciled.
 
-The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode and refuses every later mutation until the sweep is clean.
+The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode, and every primary or secondmate mutator re-runs the current sweep against its state and metadata before it can proceed.
 
 #### Reclaiming an already-leaked slot
 
@@ -149,7 +149,7 @@ It is read-only, exits nonzero when it prints a finding, and prints `ISOLATION:`
 `bin/fm-bootstrap.sh` runs it in the same place as the worktree-tangle check and surfaces those lines in the session-start digest; the `bootstrap-diagnostics` skill owns what the agent does about each shape.
 
 It reports only from an authoritative process reading.
-A task with no authoritative reading produces an actionable `ISOLATION:` finding in every mode because missing process capability is ownership ambiguity. `FM_ISOLATION_VERBOSE=1` adds successful `BOOTSTRAP_INFO` proof facts; it never suppresses a finding.
+A task with no authoritative reading produces an actionable `ISOLATION:` finding in every mode because missing process capability is ownership ambiguity. An unreadable harness process is considered only when its PID is the foreground process of that task's recorded endpoint. `FM_ISOLATION_VERBOSE=1` adds successful `BOOTSTRAP_INFO` proof facts; it never suppresses a finding.
 Pane paths remain hints and never satisfy or suppress that finding.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.

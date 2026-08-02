@@ -137,6 +137,11 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
   echo "error: secondmate scope does not match its declared owner home" >&2
   exit 1
 fi
+if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+  && ! fm_worker_isolation_sweep_current; then
+  echo "error: secondmate isolation sweep is unproven" >&2
+  exit 1
+fi
 unset FM_SESSION_ENROLLMENT_TRACE_FILE
 if [ "${FM_SESSION_ENROLLMENT_STAGE_TRACE:-0}" = 1 ] \
   && [ "${FM_AGENT_ROLE:-}" = secondmate ]; then

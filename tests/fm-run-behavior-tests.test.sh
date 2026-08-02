@@ -137,7 +137,8 @@ SH
 }
 
 run_fixture() {
-  local fixture=$1 jobs=$2 output=$3 allow_ambient=${4:-0} fixture_output
+  local fixture=$1 jobs=$2 output=$3 allow_ambient=${4:-0}
+  local parallel_allowlist=${5:-} timeout_seconds=${6:-} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -145,8 +146,10 @@ run_fixture() {
     cd "$fixture" || exit 1
     # Simulate launching the suite from inside a live Herdr pane: ambient
     # HERDR_* and a shared FM_HOME must not reach hermetic child tests.
-    PATH="$fixture/bin:$PATH" \
+      PATH="$fixture/bin:$PATH" \
       FM_TEST_JOBS="$jobs" \
+      FM_TEST_PARALLEL_ALLOWLIST="$parallel_allowlist" \
+      FM_TEST_TIMEOUT_SECONDS="$timeout_seconds" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -191,7 +194,8 @@ test_parallel_isolation_and_failure_aggregation() {
   fixture=$(make_fixture_root parallel)
   output="$TMP_ROOT/parallel.out"
   set +e
-  fixture_output=$(run_fixture "$fixture" 2 "$output")
+  fixture_output=$(run_fixture "$fixture" 2 "$output" 0 \
+    'pass-a.test.sh,fail-b.test.sh,working-tree.test.sh')
   rc=$?
   set -u
   expect_code 1 "$rc" "parallel fixture run aggregates a failed test"
@@ -208,6 +212,53 @@ test_parallel_isolation_and_failure_aggregation() {
   [ "$tmp_a" != "$tmp_b" ] || fail "parallel fixtures shared TMPDIR"
   [ "$gotmp_a" != "$gotmp_b" ] || fail "parallel fixtures shared GOTMPDIR"
   pass "behavior runner isolates parallel tests and aggregates failures"
+}
+
+test_parallel_mode_requires_an_explicit_allowlist() {
+  local fixture output rc
+  fixture=$(make_fixture_root parallel-requires-allowlist)
+  output="$TMP_ROOT/parallel-requires-allowlist.out"
+  set +e
+  run_fixture "$fixture" 2 "$output" >/dev/null
+  rc=$?
+  set -u
+  expect_code 1 "$rc" "parallel mode without an allowlist must refuse to start"
+  assert_grep 'FM_TEST_JOBS above 1 requires FM_TEST_PARALLEL_ALLOWLIST' "$output" \
+    "parallel mode did not require its isolation allowlist"
+  pass "parallel behavior tests require an explicit isolation allowlist"
+}
+
+test_default_mode_is_serial() {
+  local fixture output fixture_output rc
+  fixture=$(make_fixture_root default-serial)
+  output="$TMP_ROOT/default-serial.out"
+  set +e
+  fixture_output=$(run_fixture "$fixture" '' "$output")
+  rc=$?
+  set -u
+  expect_code 1 "$rc" "default serial mode still reports a failed test"
+  assert_not_contains "$(cat "$fixture_output"/parallel-overlap 2>/dev/null || true)" overlap \
+    "the default behavior runner overlapped fixture jobs"
+  pass "behavior tests default to serial execution"
+}
+
+test_each_behavior_test_has_a_hard_timeout() {
+  local fixture output rc
+  fixture=$(make_fixture_root timeout)
+  cat > "$fixture/tests/hang.test.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 10
+SH
+  chmod +x "$fixture/tests/hang.test.sh"
+  output="$TMP_ROOT/timeout.out"
+  set +e
+  run_fixture "$fixture" 1 "$output" 0 '' 1 >/dev/null
+  rc=$?
+  set -u
+  expect_code 1 "$rc" "a timed-out behavior test must fail the runner"
+  assert_grep 'FAIL: tests/hang.test.sh (exit 124)' "$output" \
+    "the behavior runner did not report its hard per-test timeout"
+  pass "behavior tests have a hard per-test timeout"
 }
 
 test_serial_mode_remains_serial() {
@@ -270,6 +321,9 @@ test_lib_scrubs_ambient_herdr_for_hermetic_sources() {
 }
 
 test_parallel_isolation_and_failure_aggregation
+test_parallel_mode_requires_an_explicit_allowlist
+test_default_mode_is_serial
+test_each_behavior_test_has_a_hard_timeout
 test_serial_mode_remains_serial
 test_delta_overlay_contract_is_checked_and_portable
 test_lib_scrubs_ambient_herdr_for_hermetic_sources
