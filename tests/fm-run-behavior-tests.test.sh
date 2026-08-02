@@ -245,11 +245,17 @@ test_default_mode_is_serial() {
 test_each_behavior_test_has_a_hard_timeout() {
   local fixture output fixture_output fallback_bin tool target rc
   fixture=$(make_fixture_root timeout)
+  cat > "$fixture/tests/double-fork-escape.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+setsid bash -c "setsid bash -c 'sleep 2; printf \"escaped\\n\" > \"\$FM_FIXTURE_OUTPUT_DIR/escaped-descendant-survived\"' & exit 0" &
+SH
+  chmod +x "$fixture/tests/double-fork-escape.sh"
   cat > "$fixture/tests/hang.test.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
 (sleep 2; printf 'survived\n' > "$FM_FIXTURE_OUTPUT_DIR/descendant-survived") &
-setsid bash -c 'sleep 2; printf "escaped\n" > "$FM_FIXTURE_OUTPUT_DIR/escaped-descendant-survived"' &
+"$(cd "$(dirname "$0")" && pwd -P)/double-fork-escape.sh"
 sleep 10
 SH
   chmod +x "$fixture/tests/hang.test.sh"
@@ -276,6 +282,22 @@ SH
   [ ! -e "$fixture_output/escaped-descendant-survived" ] \
     || fail "a timed-out escaped descendant survived process-tree cleanup"
   pass "behavior tests have a hard per-test timeout"
+}
+
+test_bounded_runner_uses_stable_containment() {
+  local source
+  source=$(cat "$HELPER")
+  assert_contains "$source" 'syscall($sys_prctl, 36, 1' \
+    "bounded runner must establish child-subreaper containment"
+  assert_contains "$source" '/proc/$parent/task/$parent/children' \
+    "bounded runner must read kernel-owned child containment"
+  assert_contains "$source" 'my %tracked = ($pid => $root_identity)' \
+    "bounded runner must bind the root PID to its start identity"
+  assert_contains "$source" 'if ($identity ne $tracked{$tracked_pid})' \
+    "bounded runner must reject PID identity reuse"
+  assert_contains "$source" 'waitpid(-1, WNOHANG)' \
+    "bounded runner must reap adopted descendants"
+  pass "bounded behavior tests use stable process containment"
 }
 
 test_gate_refusal_has_a_hard_timeout() {
@@ -366,6 +388,7 @@ test_parallel_isolation_and_failure_aggregation
 test_parallel_mode_requires_an_explicit_allowlist
 test_default_mode_is_serial
 test_each_behavior_test_has_a_hard_timeout
+test_bounded_runner_uses_stable_containment
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
 test_delta_overlay_contract_is_checked_and_portable

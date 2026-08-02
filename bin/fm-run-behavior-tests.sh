@@ -48,8 +48,89 @@ if [ "$test_timeout" -lt 1 ] || [ "$test_timeout" -gt 900 ]; then
 fi
 
 FM_TEST_BOUNDED_GROUP_PERL='
+use Config;
 use Errno qw(ECHILD ESRCH);
 use POSIX qw(:signal_h :sys_wait_h setpgid);
+my $arch = $Config{archname} // "";
+my $sys_prctl;
+if ($^O eq "linux") {
+  if ($arch =~ /(?:x86_64|amd64)/) {
+    $sys_prctl = 157;
+  } elsif ($arch =~ /aarch64/) {
+    $sys_prctl = 167;
+  } elsif ($arch =~ /(?:i[3-6]86|arm)/) {
+    $sys_prctl = 172;
+  } elsif ($arch =~ /ppc64/) {
+    $sys_prctl = 171;
+  }
+}
+my $containment_ready = sub {
+  return 0 unless $^O eq "linux" && defined $sys_prctl;
+  return syscall($sys_prctl, 36, 1, 0, 0, 0) == 0;
+};
+$containment_ready->() or do {
+  print STDERR "FAIL: bounded behavior tests require Linux child-subreaper containment\n";
+  exit 125;
+};
+my $process_identity = sub {
+  my $pid = shift;
+  if ($^O eq "linux") {
+    open my $stat, "<", "/proc/$pid/stat" or return;
+    my $line = <$stat>;
+    close $stat;
+    return unless defined $line;
+    my $comm_end = rindex($line, ")");
+    return if $comm_end < 0;
+    my @fields = split /\s+/, substr($line, $comm_end + 2);
+    my $start = $fields[19];
+    return unless defined $start && $start =~ /^\d+\z/;
+    return "$pid:$start";
+  }
+  if ($^O eq "darwin") {
+    open my $ps, "-|", "ps", "-p", "$pid", "-o", "lstart=" or return;
+    my $start = <$ps>;
+    my $ok = close $ps;
+    return unless $ok && defined $start;
+    $start =~ s/^\s+//;
+    $start =~ s/\s+\z//;
+    return "$pid:$start" if length $start;
+  }
+  return;
+};
+my $snapshot_children = sub {
+  my %children;
+  open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return;
+  while (my $line = <$ps>) {
+    next if $line =~ /^\s*$/;
+    $line =~ /^\s*(\d+)\s+(\d+)\s*\z/ or return;
+    push @{$children{$2}}, $1;
+  }
+  close $ps or return;
+  return \%children;
+};
+my $read_children = sub {
+  my $parent = shift;
+  if ($^O eq "linux") {
+    open my $children, "<", "/proc/$parent/task/$parent/children" or return;
+    local $/;
+    my $data = <$children>;
+    close $children;
+    return unless defined $data && $data =~ /^\s*(?:\d+\s*)*\z/;
+    my @pids = ($data =~ /(\d+)/g);
+    return \@pids;
+  }
+  if ($^O eq "darwin") {
+    my $snapshot = $snapshot_children->();
+    return unless defined $snapshot;
+    return [@{$snapshot->{$parent} || []}];
+  }
+  return;
+};
+my $process_gone = sub {
+  my $pid = shift;
+  my $probe = kill 0, $pid;
+  return !$probe && $!{ESRCH};
+};
 my $seconds = shift;
 my $blocked = POSIX::SigSet->new(SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGCONT);
 my $old = POSIX::SigSet->new();
@@ -78,33 +159,38 @@ if (!$ready_count) {
   exit(128 + ($status & 127)) if $status & 127;
   exit($status >> 8);
 }
-my %tracked = ($pid => 1);
+my $root_identity = $process_identity->($pid);
+defined $root_identity or exit 125;
+my %tracked = ($pid => $root_identity);
 my $tracking_ok = 1;
-my $process_children = sub {
-  my %children;
-  open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return;
-  while (my $line = <$ps>) {
-    next if $line =~ /^\s*$/;
-    $line =~ /^\s*(\d+)\s+(\d+)\s*$/ or return;
-    push @{$children{$2}}, $1;
-  }
-  close $ps or return;
-  return \%children;
-};
 my $refresh_tracked = sub {
-  my $children = $process_children->();
-  if (!$children) {
-    $tracking_ok = 0;
-    return;
-  }
-  my %seen = %tracked;
-  my @queue = keys %tracked;
+  my %seen;
+  my @queue = ($$, $pid, keys %tracked);
   while (@queue) {
     my $parent = shift @queue;
-    for my $child (@{$children->{$parent} || []}) {
-      next if exists $seen{$child};
-      $seen{$child} = 1;
-      $tracked{$child} = 1;
+    next if $seen{$parent}++;
+    my $children = $read_children->($parent);
+    if (!defined $children) {
+      next if $parent != $$ && $process_gone->($parent);
+      $tracking_ok = 0;
+      return;
+    }
+    for my $child (@$children) {
+      next if $child == $$;
+      my $identity = $process_identity->($child);
+      if (!defined $identity) {
+        next if $process_gone->($child);
+        $tracking_ok = 0;
+        return;
+      }
+      if (exists $tracked{$child}) {
+        if ($tracked{$child} ne $identity) {
+          $tracking_ok = 0;
+          return;
+        }
+      } else {
+        $tracked{$child} = $identity;
+      }
       push @queue, $child;
     }
   }
@@ -113,7 +199,26 @@ my $signal_tracked = sub {
   my $signal = shift;
   for my $tracked_pid (keys %tracked) {
     next if $tracked_pid == $$;
+    my $identity = $process_identity->($tracked_pid);
+    if (!defined $identity) {
+      next if $process_gone->($tracked_pid);
+      $tracking_ok = 0;
+      next;
+    }
+    if ($identity ne $tracked{$tracked_pid}) {
+      $tracking_ok = 0;
+      next;
+    }
     kill $signal, $tracked_pid;
+  }
+};
+my $signal_group = sub {
+  my $signal = shift;
+  my $probe = kill 0, -$pid;
+  if ($probe) {
+    kill $signal, -$pid;
+  } elsif (!$probe && !$!{ESRCH}) {
+    $tracking_ok = 0;
   }
 };
 my $group_gone = sub {
@@ -127,25 +232,57 @@ my $group_gone = sub {
 };
 my $tracked_gone = sub {
   for my $tracked_pid (keys %tracked) {
-    my $probe = kill 0, $tracked_pid;
-    return 0 if $probe;
-    return 0 if !$probe && !$!{ESRCH};
+    my $identity = $process_identity->($tracked_pid);
+    if (!defined $identity) {
+      next if $process_gone->($tracked_pid);
+      $tracking_ok = 0;
+      return 0;
+    }
+    if ($identity ne $tracked{$tracked_pid}) {
+      $tracking_ok = 0;
+      return 0;
+    }
+    return 0;
   }
   return 1;
+};
+my $reap_nonblocking = sub {
+  my $reaped;
+  while (($reaped = waitpid(-1, WNOHANG)) > 0) {
+  }
+  return 1 if $reaped < 0 && $!{ECHILD};
+  return 0 if $reaped == 0;
+  $tracking_ok = 0;
+  return 0;
+};
+my $reap_until_empty = sub {
+  for (1 .. 40) {
+    my $reaped;
+    while (($reaped = waitpid(-1, WNOHANG)) > 0) {
+    }
+    return 1 if $reaped < 0 && $!{ECHILD};
+    if ($reaped < 0 && !$!{ECHILD}) {
+      $tracking_ok = 0;
+      return 0;
+    }
+    select undef, undef, undef, 0.05;
+  }
+  return 0;
 };
 my $stop = sub {
   my ($signal, $code) = @_;
   $refresh_tracked->();
   $SIG{ALRM} = $SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = $SIG{TSTP} = $SIG{CONT} = "IGNORE";
   sigprocmask(SIG_BLOCK, $blocked);
-  kill $signal, -$pid;
+  $signal_group->($signal);
   $signal_tracked->($signal);
   select undef, undef, undef, 0.2;
-  kill "KILL", -$pid;
+  $refresh_tracked->();
+  $signal_group->("KILL");
   $signal_tracked->("KILL");
-  my $waited = waitpid $pid, 0;
-  my $wait_ok = $waited == $pid || ($waited < 0 && $!{ECHILD});
-  exit 125 unless $wait_ok && $tracking_ok && $group_gone->() && $tracked_gone->();
+  my $reaped = $reap_until_empty->();
+  $refresh_tracked->();
+  exit 125 unless $reaped && $tracking_ok && $group_gone->() && $tracked_gone->();
   exit $code;
 };
 $SIG{ALRM} = sub { $stop->("TERM", 124) };
@@ -165,21 +302,12 @@ $SIG{CONT} = sub { kill "CONT", -$pid };
 $refresh_tracked->();
 alarm $seconds;
 defined(sigprocmask(SIG_SETMASK, $old)) or exit 125;
-my $waited = 0;
-my $status = 0;
-while (1) {
-  $waited = waitpid $pid, WNOHANG;
-  last if $waited == $pid || $waited < 0;
-  $refresh_tracked->();
-  select undef, undef, undef, 0.05;
-}
-if ($waited == $pid) {
-  $status = $?;
-}
+my $waited = waitpid $pid, 0;
+my $status = $?;
 alarm 0;
 exit 125 if $waited < 0;
- $refresh_tracked->();
-if (!$tracking_ok || !$group_gone->() || !$tracked_gone->()) {
+$refresh_tracked->();
+if (!$tracking_ok || !$reap_nonblocking->() || !$group_gone->() || !$tracked_gone->()) {
   $stop->("TERM", 125);
 }
 exit(128 + ($status & 127)) if $status & 127;
@@ -188,18 +316,11 @@ exit($status >> 8);
 run_bounded() {
   local seconds=$1
   shift
-  local outer_seconds=$((seconds + 5))
   if ! command -v perl >/dev/null 2>&1; then
-    printf '%s\n' 'FAIL: perl is required for process-group timeout enforcement' >&2
+    printf '%s\n' 'FAIL: perl is required for child-subreaper timeout enforcement' >&2
     return 125
   fi
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k 5 "$outer_seconds" perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 5 "$outer_seconds" perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$seconds" "$@"
-  else
-    perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$seconds" "$@"
-  fi
+  perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$seconds" "$@"
 }
 
 mapfile -t tests < <(compgen -G 'tests/*.test.sh' | sort)
@@ -260,8 +381,43 @@ FM_GATE_REFUSE_EXIT=3
 fm_refuse_if_gate_agent() { return 0; }
 SH
 fi
+RUNNING_TEST_PIDS=()
+remove_running_pid() {
+  local target=$1 pid
+  local remaining=()
+  for pid in "${RUNNING_TEST_PIDS[@]}"; do
+    [ "$pid" = "$target" ] || remaining+=("$pid")
+  done
+  RUNNING_TEST_PIDS=("${remaining[@]}")
+}
 cleanup() {
+  local cleanup_ok=1 pid still_alive
+  for pid in "${RUNNING_TEST_PIDS[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for ((cleanup_tick = 0; cleanup_tick < 100; cleanup_tick++)); do
+    still_alive=0
+    for pid in "${RUNNING_TEST_PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        still_alive=1
+        break
+      fi
+    done
+    [ "$still_alive" -eq 0 ] && break
+    sleep 0.05
+  done
+  for pid in "${RUNNING_TEST_PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      cleanup_ok=0
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf -- "$suite_tmp"
+  if [ "$cleanup_ok" -ne 1 ]; then
+    printf '%s\n' 'FAIL: could not prove cleanup of active behavior tests' >&2
+    trap - EXIT
+    exit 125
+  fi
 }
 trap cleanup EXIT
 
@@ -331,7 +487,11 @@ run_one() {
     fi
     export TMPDIR="$job_root/tmp"
     export GOTMPDIR="$job_root/gotmp"
-    run_bounded "$test_timeout" python3 - "$test_path" \
+    if ! command -v perl >/dev/null 2>&1; then
+      printf '%s\n' 'FAIL: perl is required for child-subreaper timeout enforcement' >&2
+      exit 125
+    fi
+    exec perl -e "$FM_TEST_BOUNDED_GROUP_PERL" "$test_timeout" python3 - "$test_path" \
       "$test_root/bin/fm-session-authority-exec.sh" <<'PY'
 import os
 import socket
@@ -420,8 +580,12 @@ while [ "$index" -lt "$total" ]; do
   for batch_index in "${!pids[@]}"; do
     test_rc=0
     wait "${pids[$batch_index]}" || test_rc=$?
+    remove_running_pid "${pids[$batch_index]}"
     if [ "$test_rc" -eq 0 ]; then
       printf 'PASS: %s\n' "${batch_tests[$batch_index]}"
+    elif [ "$test_rc" -eq 125 ]; then
+      printf 'FAIL: %s (fail-closed exit 125)\n' "${batch_tests[$batch_index]}" >&2
+      exit 125
     else
       printf 'FAIL: %s (exit %s)\n' "${batch_tests[$batch_index]}" "$test_rc" >&2
       failed_count=$((failed_count + 1))
