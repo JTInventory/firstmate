@@ -567,6 +567,15 @@ my $terminate_entry = sub {
   return 0 unless $kill_ok;
   return $reap_entry->($entry);
 };
+if ($ENV{FM_TEST_SUPERVISOR_BLOCK_FIFO}) {
+  while (1) {
+    my $blocked = "";
+    my $count = sysread($input, $blocked, 1);
+    next if !defined $count && $!{EINTR};
+    select undef, undef, undef, 0.02 if defined $count && $count == 0;
+    exit 125 if !defined $count && !$!{EINTR};
+  }
+}
 while (my $line = <$input>) {
   chomp $line;
   my @parts;
@@ -728,10 +737,139 @@ while (my $line = <$input>) {
   }
   print "error|malformed\n";
 }
+my $cleanup_ok = 1;
+for my $key (keys %handles) {
+  my $entry = $handles{$key};
+  if ($terminate_entry->($entry)) {
+    $close_handle->($entry);
+    delete $handles{$key};
+  } else {
+    $cleanup_ok = 0;
+  }
+}
 for my $entry (values %handles) {
   $close_handle->($entry);
 }
-exit 0;
+exit($cleanup_ok ? 0 : 125);
+'
+FM_TEST_SUPERVISOR_GUARD_PERL='
+use Config;
+use Errno qw(EAGAIN ECHILD EINTR ESRCH);
+use Fcntl qw(F_GETFL F_SETFL F_SETFD FD_CLOEXEC O_NONBLOCK);
+use POSIX qw(:sys_wait_h);
+my ($worker_path, $input_path, $output_path, $control_path) = @ARGV;
+my $arch = $Config{archname} // "";
+my ($sys_pidfd_open, $sys_pidfd_send_signal);
+if ($arch =~ /(?:x86_64|amd64)/) {
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+} elsif ($arch =~ /(?:aarch64|riscv64|s390x|ppc64|i[3-6]86|arm)/) {
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+}
+defined $sys_pidfd_open && defined $sys_pidfd_send_signal or exit 125;
+pipe(my $gate_r, my $gate_w) or exit 125;
+defined fcntl($gate_r, F_SETFD, 0) or exit 125;
+my $pid = fork;
+defined $pid or exit 125;
+if (!$pid) {
+  close $gate_w;
+  my $release = "";
+  my $release_count = sysread($gate_r, $release, 1);
+  close $gate_r;
+  exit 125 unless $release_count == 1 && $release eq "1";
+  exec $^X, $worker_path, $input_path, $output_path;
+  exit 127;
+}
+close $gate_r;
+my $fd = syscall($sys_pidfd_open, $pid, 0);
+if (!defined $fd || $fd < 0) {
+  close $gate_w;
+  waitpid($pid, 0);
+  exit 125;
+}
+my $probe = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
+if (!defined $probe || $probe != 0) {
+  POSIX::close($fd);
+  close $gate_w;
+  waitpid($pid, 0);
+  exit 125;
+}
+if (defined $ENV{FM_TEST_SUPERVISOR_BROKER_PID_FILE} &&
+    length $ENV{FM_TEST_SUPERVISOR_BROKER_PID_FILE}) {
+  open my $record, ">", $ENV{FM_TEST_SUPERVISOR_BROKER_PID_FILE} or exit 125;
+  print $record "$pid:";
+  open my $stat, "<", "/proc/$pid/stat" or exit 125;
+  my $line = <$stat>;
+  close $stat;
+  my $comm_end = defined $line ? rindex($line, ")") : -1;
+  exit 125 if $comm_end < 0;
+  my @fields = split /\s+/, substr($line, $comm_end + 2);
+  my $start = $fields[19];
+  exit 125 unless defined $start && $start =~ /^\d+\z/;
+  print $record "$start\n";
+  close $record or exit 125;
+}
+syswrite($gate_w, "1") == 1 or exit 125;
+close $gate_w;
+open my $control, "<", $control_path or exit 125;
+my $flags = fcntl($control, F_GETFL, 0);
+defined $flags && defined fcntl($control, F_SETFL, $flags | O_NONBLOCK) or exit 125;
+my $terminate = sub {
+  my $sent = syscall($sys_pidfd_send_signal, $fd, 15, 0, 0);
+  my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
+  return 0 unless $term_ok;
+  for (1 .. 100) {
+    my $waited = waitpid($pid, WNOHANG);
+    return 1 if $waited == $pid;
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  my $killed = syscall($sys_pidfd_send_signal, $fd, 9, 0, 0);
+  my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
+  return 0 unless $kill_ok;
+  for (1 .. 100) {
+    my $waited = waitpid($pid, WNOHANG);
+    return 1 if $waited == $pid;
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  return 0;
+};
+my $finish = sub {
+  my ($status) = @_;
+  POSIX::close($fd);
+  exit $status;
+};
+my $terminate_command = sub {
+  my $waited = waitpid($pid, WNOHANG);
+  $finish->($?) if $waited == $pid;
+  $finish->(125) if $waited < 0 && !$!{EINTR};
+  $finish->($terminate->() ? 125 : 125);
+};
+while (1) {
+  my $waited = waitpid($pid, WNOHANG);
+  $finish->($?) if $waited == $pid;
+  $finish->(125) if $waited < 0 && !$!{EINTR};
+  my $readable = "";
+  vec($readable, fileno($control), 1) = 1;
+  my $selected = select($readable, undef, undef, 0.05);
+  next unless defined $selected && $selected > 0 && vec($readable, fileno($control), 1);
+  my $command = "";
+  my $count = sysread($control, $command, 4096);
+  if (!defined $count) {
+    next if $!{EAGAIN} || $!{EINTR};
+    $terminate_command->();
+  }
+  if ($count == 0) {
+    $terminate_command->();
+  }
+  if ($command =~ /(?:^|\n)terminate(?:\n|$)/) {
+    $terminate_command->();
+  }
+}
 '
 run_bounded() {
   local seconds=$1
@@ -803,10 +941,74 @@ SH
 fi
 RUNNING_TEST_PIDS=()
 SUPERVISOR_HANDLE_BROKER_PID=
+SUPERVISOR_HANDLE_BROKER_IDENTITY=
 SUPERVISOR_HANDLE_READY=0
 SUPERVISOR_HANDLE_WRITE=
 SUPERVISOR_HANDLE_READ=
+SUPERVISOR_HANDLE_CONTROL=
 SUPERVISOR_HANDLE_RESPONSE=
+supervisor_handle_process_identity() {
+  local pid=$1 stat fields start
+  IFS= read -r stat <"/proc/$pid/stat" || return 1
+  fields=${stat##*) }
+  set -- $fields
+  [ "$#" -ge 20 ] || return 1
+  start=${20}
+  [[ "$start" =~ ^[0-9]+$ ]] || return 1
+  printf '%s:%s\n' "$pid" "$start"
+}
+supervisor_handle_broker_state() {
+  local stat fields process_state current
+  if [ ! -e "/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat" ]; then
+    return 0
+  fi
+  IFS= read -r stat <"/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat" || return 2
+  fields=${stat##*) }
+  set -- $fields
+  [ "$#" -ge 20 ] || return 2
+  process_state=$1
+  current=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID") || return 2
+  [ "$current" = "$SUPERVISOR_HANDLE_BROKER_IDENTITY" ] || return 2
+  [ "$process_state" = Z ] && return 3
+  return 1
+}
+supervisor_handle_close_channels() {
+  if [ -n "$SUPERVISOR_HANDLE_WRITE" ]; then
+    eval "exec $SUPERVISOR_HANDLE_WRITE>&-"
+    SUPERVISOR_HANDLE_WRITE=
+  fi
+  if [ -n "$SUPERVISOR_HANDLE_READ" ]; then
+    eval "exec $SUPERVISOR_HANDLE_READ<&-"
+    SUPERVISOR_HANDLE_READ=
+  fi
+  if [ -n "$SUPERVISOR_HANDLE_CONTROL" ]; then
+    eval "exec $SUPERVISOR_HANDLE_CONTROL>&-"
+    SUPERVISOR_HANDLE_CONTROL=
+  fi
+}
+supervisor_handle_force_broker_teardown() {
+  if [ -n "$SUPERVISOR_HANDLE_CONTROL" ]; then
+    printf '%s\n' terminate >&"$SUPERVISOR_HANDLE_CONTROL" || true
+  fi
+}
+supervisor_handle_broker_join() {
+  local broker_state broker_status
+  for ((broker_tick = 0; broker_tick < 200; broker_tick++)); do
+    broker_state=0
+    supervisor_handle_broker_state || broker_state=$?
+    case "$broker_state" in
+      0|3)
+        wait "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null
+        broker_status=$?
+        [ "$broker_status" -eq 0 ] || return 1
+        return 0
+        ;;
+      1) sleep 0.05 ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
 supervisor_handle_request() {
   [ "$SUPERVISOR_HANDLE_READY" -eq 1 ] || return 1
   SUPERVISOR_HANDLE_RESPONSE=
@@ -930,7 +1132,7 @@ supervisor_is_gone() {
   supervisor_handle_state "$key"
 }
 cleanup() {
-  local cleanup_ok=1 entry key state still_alive
+  local cleanup_ok=1 broker_shutdown_ok=1 entry key state still_alive
   for entry in "${RUNNING_TEST_PIDS[@]}"; do
     signal_running_supervisor "$entry" || cleanup_ok=0
   done
@@ -959,25 +1161,32 @@ cleanup() {
     fi
   done
   if [ "$SUPERVISOR_HANDLE_READY" -eq 1 ]; then
-    supervisor_handle_shutdown || cleanup_ok=0
+    supervisor_handle_shutdown || {
+      cleanup_ok=0
+      broker_shutdown_ok=0
+    }
     SUPERVISOR_HANDLE_READY=0
   fi
+  [ "$broker_shutdown_ok" -eq 1 ] || supervisor_handle_force_broker_teardown
+  supervisor_handle_close_channels
   if [ -n "$SUPERVISOR_HANDLE_BROKER_PID" ]; then
-    wait "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null || cleanup_ok=0
+    supervisor_handle_broker_join || cleanup_ok=0
     SUPERVISOR_HANDLE_BROKER_PID=
   fi
-  rm -rf -- "$suite_tmp"
   if [ "$cleanup_ok" -ne 1 ]; then
     printf '%s\n' 'FAIL: could not prove cleanup of active behavior tests' >&2
     trap - EXIT
     exit 125
   fi
+  rm -rf -- "$suite_tmp"
 }
 trap cleanup EXIT
 
 supervisor_handle_input="$suite_tmp/supervisor-handles.in"
 supervisor_handle_output="$suite_tmp/supervisor-handles.out"
-if ! mkfifo "$supervisor_handle_input" "$supervisor_handle_output"; then
+supervisor_handle_control="$suite_tmp/supervisor-handles.control"
+supervisor_handle_worker="$suite_tmp/supervisor-handles-worker.pl"
+if ! mkfifo "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control"; then
   printf '%s\n' 'FAIL: could not create supervisor handle channels' >&2
   exit 125
 fi
@@ -985,8 +1194,21 @@ if ! command -v perl >/dev/null 2>&1; then
   printf '%s\n' 'FAIL: perl is required for retained supervisor handles' >&2
   exit 125
 fi
-perl -e "$FM_TEST_SUPERVISOR_HANDLE_PERL" "$supervisor_handle_input" "$supervisor_handle_output" &
+if ! exec {SUPERVISOR_HANDLE_CONTROL}<>"$supervisor_handle_control"; then
+  printf '%s\n' 'FAIL: could not open supervisor broker control channel' >&2
+  exit 125
+fi
+if ! printf '%s' "$FM_TEST_SUPERVISOR_HANDLE_PERL" >"$supervisor_handle_worker"; then
+  printf '%s\n' 'FAIL: could not write supervisor handle worker' >&2
+  exit 125
+fi
+perl -e "$FM_TEST_SUPERVISOR_GUARD_PERL" "$supervisor_handle_worker" \
+  "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control" &
 SUPERVISOR_HANDLE_BROKER_PID=$!
+if ! SUPERVISOR_HANDLE_BROKER_IDENTITY=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID"); then
+  printf '%s\n' 'FAIL: could not bind supervisor broker handle' >&2
+  exit 125
+fi
 if ! exec {SUPERVISOR_HANDLE_WRITE}<>"$supervisor_handle_input"; then
   printf '%s\n' 'FAIL: could not open supervisor handle input' >&2
   exit 125

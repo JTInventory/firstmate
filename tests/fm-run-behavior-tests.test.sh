@@ -144,7 +144,7 @@ run_fixture() {
   local parallel_allowlist=${5:-} timeout_seconds=${6:-} path_override=${7:-}
   local force_root_failure=${8:-0} force_supervisor_failure=${9:-}
   local supervisor_pid_file=${10:-} root_pid_file=${11:-}
-  local drop_launch_response=${12:-} fixture_output
+  local drop_launch_response=${12:-} block_fifo=${13:-} broker_pid_file=${14:-} fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
   set +e
@@ -161,6 +161,8 @@ run_fixture() {
       FM_TEST_SUPERVISOR_PID_FILE="$supervisor_pid_file" \
       FM_TEST_ROOT_PID_FILE="$root_pid_file" \
       FM_TEST_SUPERVISOR_DROP_LAUNCH_RESPONSE="$drop_launch_response" \
+      FM_TEST_SUPERVISOR_BLOCK_FIFO="$block_fifo" \
+      FM_TEST_SUPERVISOR_BROKER_PID_FILE="$broker_pid_file" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -346,6 +348,16 @@ test_bounded_runner_uses_stable_containment() {
     "supervisor broker must not block while waiting for a job"
   assert_contains "$source" 'shutdown|error' \
     "supervisor broker must fail closed when hidden cleanup cannot be proven"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_GUARD_PERL' \
+    "behavior runner must retain a broker pidfd guard"
+  assert_contains "$source" 'supervisor_handle_close_channels' \
+    "behavior runner must close broker channels on teardown failure"
+  assert_contains "$source" 'supervisor_handle_force_broker_teardown' \
+    "behavior runner must terminate the broker through its retained handle"
+  assert_contains "$source" 'supervisor_handle_broker_join' \
+    "behavior runner must use bounded broker teardown"
+  assert_contains "$source" 'for ((broker_tick = 0; broker_tick < 200; broker_tick++))' \
+    "behavior runner must bound broker exit proof"
   assert_contains "$source" ': >"$start_gate"' \
     "behavior runner must release the start gate only after handle acquisition"
   assert_not_contains "$source" 'run_one "$test_path"' \
@@ -461,6 +473,26 @@ test_launch_response_loss_aborts_hidden_supervisor() {
   assert_identity_gone "$(cat "$supervisor_pid_file")"
   [ ! -e "$root_pid_file" ] || fail "lost launch response launched its root"
   pass "lost behavior-test launch responses abort hidden supervisors"
+}
+
+test_blocked_broker_fifo_teardown_is_bounded() {
+  local fixture output fixture_output rc broker_pid_file start_seconds elapsed
+  fixture=$(make_fixture_root blocked-broker-fifo)
+  output="$TMP_ROOT/blocked-broker-fifo.out"
+  broker_pid_file="$TMP_ROOT/blocked-broker-fifo-broker.identity"
+  start_seconds=$SECONDS
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output" 0 '' 1 '' 0 0 '' '' '' 1 "$broker_pid_file")
+  rc=$?
+  set -u
+  elapsed=$((SECONDS - start_seconds))
+  expect_code 125 "$rc" "a broker blocked on its FIFO must fail closed"
+  [ "$elapsed" -lt 10 ] || fail "blocked broker teardown exceeded its hard bound"
+  [ -s "$broker_pid_file" ] || fail "blocked broker teardown did not record its broker"
+  assert_identity_gone "$(cat "$broker_pid_file")"
+  [ ! -e "$fixture_output/pass-a.started" ] \
+    || fail "a blocked broker released a behavior test"
+  pass "blocked broker FIFO teardown is bounded and reaped"
 }
 
 test_pidfd_handles_do_not_follow_stale_pids() {
@@ -598,6 +630,7 @@ test_bounded_runner_uses_stable_containment
 test_fast_escape_after_test_exit_is_rejected
 test_failure_injection_refuses_before_launch
 test_launch_response_loss_aborts_hidden_supervisor
+test_blocked_broker_fifo_teardown_is_bounded
 test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
