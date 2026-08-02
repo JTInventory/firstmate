@@ -46,7 +46,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Shell entrypoints in `bin/` are Bash; runtime-specific helpers declare their runtime and purpose in a header comment.
   Keep those headers accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `bin/fm-lint.sh` must pass; it is the single owner of the ShellCheck pin and file set used by CI and no-mistakes.
+  `bin/fm-lint.sh` must pass; it is the single owner of the ShellCheck pin and file set used by CI and no-mistakes. Its default run checks one file per ShellCheck process to bound memory while retaining `-x` and the complete `bin/*.sh` plus `tests/*.sh` coverage.
 - Changes to harness adapters (detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, busy signatures in `bin/fm-watch.sh` and `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 

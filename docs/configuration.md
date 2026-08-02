@@ -359,6 +359,11 @@ It leaves numeric legacy locks and malformed, unreadable, differently owned,
 or concurrently busy locks untouched. Numeric lock files remain supported for
 other harnesses and older homes. `GROK_AGENT=1` takes precedence over an
 inherited `CODEX_THREAD_ID`, so a Grok primary is never treated as Codex.
+Enrollment artifact cleanup is fail-closed: if a ticket, signer, or receipt
+artifact cannot be removed, the enrollment leaves a
+`.cleanup-uncertain` marker (with a fallback marker if needed) and refuses a
+new ticket until that exact artifact set is reconciled; successful cleanup
+removes the marker.
 
 ## Environment variables
 

@@ -85,6 +85,9 @@ Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
 Herdr can move focus when closing the last pane of a non-focused projected workspace, so projected cleanup runs under the same session lock, captures the exact active tab, refuses to delete the active tab, closes the exact task pane, and restores only the exact prior tab when needed.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
+Launch-abort cleanup is fail-closed too.
+If Herdr does not return a trustworthy pane, endpoint topology or generation proof fails, or exact endpoint retirement cannot be confirmed, Firstmate records `state/<task>.herdr-cleanup-uncertain` under the resolved home (or `FM_STATE_OVERRIDE`; with a fallback marker when the primary marker cannot be written), retains the endpoint and pooled ownership evidence, and refuses a new spawn for that task until the uncertainty is reconciled.
+Only a confirmed exact cleanup clears the uncertainty marker; a warning alone never authorizes lease return or reuse.
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
