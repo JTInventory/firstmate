@@ -198,11 +198,12 @@ def read_launch_evidence(
     except (binascii.Error, ValueError, UnicodeError):
         raise ValueError("malformed launch evidence")
     lines = receipt.splitlines(keepends=True)
-    if len(lines) != 7 or not receipt.endswith(b"\n"):
+    if len(lines) != 8 or not receipt.endswith(b"\n"):
         raise ValueError("malformed launch receipt")
     fields: dict[str, str] = {}
     ordered = (
-        "version", "task", "home", "pid", "start", "identity", "authority-hmac"
+        "version", "task", "home", "pid", "start", "identity", "nonce",
+        "authority-hmac"
     )
     for expected, line in zip(ordered, lines):
         prefix = f"{expected}=".encode()
@@ -221,11 +222,18 @@ def read_launch_evidence(
         launch_pid = int(fields["pid"])
     except ValueError as error:
         raise ValueError("malformed launch pid") from error
-    if launch_pid <= 1 or len(fields["authority-hmac"]) != 64:
+    if (
+        launch_pid <= 1
+        or len(fields["nonce"]) != 64
+        or len(fields["authority-hmac"]) != 64
+    ):
         raise ValueError("malformed launch receipt")
-    if any(value not in "0123456789abcdef" for value in fields["authority-hmac"]):
+    if any(
+        value not in "0123456789abcdef"
+        for value in fields["nonce"] + fields["authority-hmac"]
+    ):
         raise ValueError("malformed launch receipt")
-    body = b"".join(lines[:6])
+    body = b"".join(lines[:7])
     expected_hmac = hmac.new(key, body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(fields["authority-hmac"], expected_hmac):
         raise ValueError("invalid launch receipt")
@@ -234,8 +242,36 @@ def read_launch_evidence(
     if canonical(os.readlink(f"/proc/{launch_pid}/cwd")) != home:
         raise ValueError("wrong launch cwd")
     command = process_command(launch_pid)
-    if len(command) < 2 or canonical(command[1]) != launch_script:
+    launch_path = Path(launch_script)
+    if (
+        not launch_path.is_file()
+        or launch_path.is_symlink()
+        or len(command) < 2
+        or canonical(command[1]) != launch_script
+    ):
         raise ValueError("wrong launch process")
+    launch_identity = fields["identity"]
+    if not launch_identity.startswith("exe:"):
+        raise ValueError("untrusted launch executable")
+    launch_executable = Path(launch_identity[4:])
+    executable_stat = launch_executable.stat()
+    if (
+        launch_executable.name not in {"bash", "sh"}
+        or executable_stat.st_uid != 0
+        or executable_stat.st_mode & 0o022
+    ):
+        raise ValueError("untrusted launch executable")
+    launch_environment = process_environment(launch_pid)
+    owner_home = launch_environment.get("FM_AGENT_OWNER_HOME", "")
+    if (
+        launch_environment.get("FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED") != "1"
+        or launch_environment.get("FM_AGENT_ROLE") != "secondmate"
+        or launch_environment.get("FM_AGENT_TASK") != task
+        or not os.path.isabs(owner_home)
+        or canonical(owner_home) != home
+        or launch_environment.get("FM_SESSION_ENROLLMENT_NONCE") != fields["nonce"]
+    ):
+        raise ValueError("untrusted launch provenance")
     return key, launch_pid, fields["start"], fields["identity"]
 
 
@@ -248,6 +284,8 @@ def derive_broker_durable_key(
             b"firstmate/session-authority-broker/durable/v2",
             task.encode("utf-8"),
             home.encode("utf-8"),
+            launch_start.encode("utf-8"),
+            launch_identity.encode("utf-8"),
             launch_script.encode("utf-8"),
         )
     )
@@ -388,6 +426,42 @@ def close_record_lock(
     os.close(descriptor)
 
 
+def authority_admission_path(
+    state: Path, launch_evidence: tuple[bytes, int, str, str]
+) -> Path:
+    root_key = launch_evidence[0]
+    digest = hmac.new(
+        root_key,
+        b"firstmate/session-authority-broker/admission/v1\0"
+        + canonical(str(state)).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return state / f".session-authority-admission-{digest}.lock"
+
+
+def open_authority_admission_lock(
+    state: Path, launch_evidence: tuple[bytes, int, str, str]
+) -> tuple[int, Path] | None:
+    path = authority_admission_path(state, launch_evidence)
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        descriptor_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_stat.st_mode)
+            or descriptor_stat.st_uid != os.geteuid()
+            or descriptor_stat.st_mode & 0o077
+        ):
+            os.close(descriptor)
+            return None
+        return descriptor, path
+    except OSError:
+        return None
+
+
 def open_authority_record_lock(
     *, blocking: bool, state: Path | None = None, home: str | None = None,
     task: str | None = None,
@@ -405,20 +479,46 @@ def open_authority_record_lock(
         f"{home}/bin/fm-session-authority-exec.sh"
     ):
         return None
-    return acquire_authority_record_lock(
-        AUTHORITY_SERIALIZATION_FD, blocking=blocking
-    )
+    opened = open_authority_admission_lock(state, launch_evidence)
+    if opened is None:
+        return None
+    descriptor, path = opened
+    try:
+        if descriptor != AUTHORITY_SERIALIZATION_FD:
+            os.dup2(descriptor, AUTHORITY_SERIALIZATION_FD)
+            os.close(descriptor)
+            descriptor = AUTHORITY_SERIALIZATION_FD
+        lock = acquire_authority_record_lock(
+            descriptor, blocking=blocking, expected_path=path
+        )
+        if lock is None:
+            os.close(descriptor)
+        return lock
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        return None
 
 
 def acquire_authority_record_lock(
-    fd: int, *, blocking: bool
+    fd: int, *, blocking: bool, expected_path: Path | None = None
 ) -> AuthorityRecordLock | None:
     if fd != AUTHORITY_SERIALIZATION_FD:
         return None
     try:
         descriptor_stat = os.fstat(fd)
-        if not stat.S_ISFIFO(descriptor_stat.st_mode):
+        if (
+            not stat.S_ISREG(descriptor_stat.st_mode)
+            or descriptor_stat.st_uid != os.geteuid()
+            or descriptor_stat.st_mode & 0o077
+        ):
             return None
+        if expected_path is not None:
+            fd_path = os.path.realpath(f"/proc/self/fd/{fd}")
+            if fd_path != canonical(str(expected_path)):
+                return None
     except OSError:
         return None
     deadline = time.monotonic() + AUTHORITY_LOCK_TIMEOUT_SECONDS
@@ -443,7 +543,13 @@ def inherited_authority_record_lock(
         launch_script
     ) != canonical(f"{home}/bin/fm-session-authority-exec.sh"):
         return None
-    return acquire_authority_record_lock(fd, blocking=False)
+    return acquire_authority_record_lock(
+        fd,
+        blocking=False,
+        expected_path=authority_admission_path(
+            Path(canonical(home)) / "state", launch_evidence
+        ),
+    )
 
 
 def serve(args: argparse.Namespace) -> int:

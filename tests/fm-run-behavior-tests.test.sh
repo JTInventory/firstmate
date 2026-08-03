@@ -876,6 +876,31 @@ SH
   pass "supported Linux behavior tests launch, report, and reap normally"
 }
 
+test_unsupported_platform_exits_125_before_tool_checks() {
+  local fixture fakebin output rc
+  fixture=$(make_fixture_root unsupported-platform)
+  fakebin="$fixture/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Darwin\n' ;;
+  -m) printf 'x86_64\n' ;;
+  *) printf 'Darwin\n' ;;
+esac
+SH
+  chmod +x "$fakebin/uname"
+  output="$TMP_ROOT/unsupported-platform.out"
+  set +e
+  PATH="$fakebin:$PATH" bash "$fixture/bin/fm-run-behavior-tests.sh" >"$output" 2>&1
+  rc=$?
+  set -u
+  expect_code 125 "$rc" "unsupported behavior-test platforms fail closed with exit 125"
+  assert_not_contains "$(cat "$output")" 'PR target guard rejected' \
+    "unsupported platform checked tools before returning 125"
+  pass "unsupported behavior-test platforms exit 125 before tool checks"
+}
+
 test_delta_overlay_contract_is_checked_and_portable() {
   local source
   source=$(cat "$HELPER" "$JOB_HELPER")
@@ -933,6 +958,7 @@ test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
 test_supported_linux_test_reports_completion_and_reaps_cleanly
+test_unsupported_platform_exits_125_before_tool_checks
 test_delta_overlay_contract_is_checked_and_portable
 test_lib_scrubs_ambient_herdr_for_hermetic_sources
 test_runner_honors_ambient_opt_in

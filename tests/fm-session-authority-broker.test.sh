@@ -280,8 +280,8 @@ if any(
 cleanup = source[source.index("def cleanup_recovery_quarantines("):source.index("def unlink_owned_record(")]
 if "AUTHORITY_SERIALIZATION_FD = 18" not in source:
     raise SystemExit("authority serialization did not use the inherited FD 18 capability")
-if "fcntl.flock" not in source or "stat.S_ISFIFO" not in source:
-    raise SystemExit("authority serialization is not a non-reopenable kernel lock")
+if "fcntl.flock" not in source or "stat.S_ISREG" not in source:
+    raise SystemExit("authority serialization is not a shared kernel lock")
 if ".glob(" in cleanup:
     raise SystemExit("quarantine cleanup still scans an attacker-controlled namespace")
 handoff = source[source.index("def supervise("):source.index("def serve_locked(")]
@@ -527,11 +527,14 @@ PY
     fail "stale record deletion did not use atomic quarantine"
   fi
   pass "stale record deletion uses atomic quarantine"
-  if ! python3 - "$BROKER" <<'PY'
+if ! python3 - "$BROKER" <<'PY'
 import importlib.util
 import os
 import sys
+import time
+from multiprocessing import Process
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 broker_path = Path(sys.argv[1]).resolve()
 spec = importlib.util.spec_from_file_location("session_authority_broker_lock", broker_path)
@@ -539,43 +542,84 @@ broker = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(broker)
 
-saved_fd = None
-try:
-    try:
-        saved_fd = os.dup(18)
-    except OSError:
-        pass
+with TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    state = home / "state"
+    (home / "bin").mkdir(parents=True)
+    state.mkdir()
+    script = home / "bin" / "fm-session-authority-exec.sh"
+    script.write_text("", encoding="utf-8")
+    ready = state / "ready"
+    release = state / "release"
+    result = state / "result"
+
+    def hold_lock():
+        lock = broker.open_authority_record_lock(
+            blocking=False, state=state, home=str(home), task="alpha",
+            launch_script=str(script), launch_evidence=(b"k", 2, "s", "i")
+        )
+        if lock is None:
+            raise SystemExit("wrapper-created admission lock did not acquire")
+        ready.write_text("ready", encoding="utf-8")
+        while not release.exists():
+            time.sleep(0.01)
+        broker.close_record_lock(lock)
+
+    holder = Process(target=hold_lock)
+    holder.start()
+    deadline = time.monotonic() + 2
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not ready.exists():
+        holder.terminate()
+        holder.join()
+        raise SystemExit("independent admission holder did not start")
+
+    def contend():
+        lock = broker.open_authority_record_lock(
+            blocking=False, state=state, home=str(home), task="alpha",
+            launch_script=str(script), launch_evidence=(b"k", 3, "s", "i")
+        )
+        result.write_text("busy" if lock is None else "forged", encoding="utf-8")
+        if lock is not None:
+            broker.close_record_lock(lock)
+
+    contender = Process(target=contend)
+    contender.start()
+    contender.join(2)
+    release.write_text("release", encoding="utf-8")
+    holder.join(2)
+    if contender.exitcode != 0 or holder.exitcode != 0 or result.read_text() != "busy":
+        raise SystemExit("independent supervisors did not share the admission lock")
+
     read_fd, write_fd = os.pipe()
-    os.dup2(read_fd, broker.AUTHORITY_SERIALIZATION_FD)
-    os.close(read_fd)
-    lock = broker.acquire_authority_record_lock(
-        broker.AUTHORITY_SERIALIZATION_FD, blocking=False
-    )
-    if lock is None:
-        raise SystemExit("authority serialization did not acquire the inherited pipe lock")
-    broker.close_record_lock(lock)
-    os.close(write_fd)
-finally:
-    if saved_fd is None:
+    try:
+        if read_fd != broker.AUTHORITY_SERIALIZATION_FD:
+            os.dup2(read_fd, broker.AUTHORITY_SERIALIZATION_FD)
+            os.close(read_fd)
+        if broker.acquire_authority_record_lock(
+            broker.AUTHORITY_SERIALIZATION_FD, blocking=False
+        ) is not None:
+            raise SystemExit("forged pipe descriptor was accepted as admission authority")
+    finally:
+        os.close(write_fd)
         try:
-            os.close(18)
+            os.close(broker.AUTHORITY_SERIALIZATION_FD)
         except OSError:
             pass
-    else:
-        os.dup2(saved_fd, 18)
-        os.close(saved_fd)
 PY
-  then
-    fail "per-home serialization did not use the inherited capability"
+then
+    fail "per-home serialization did not use a shared protected capability"
   fi
-  pass "per-home serialization uses the inherited non-reopenable capability"
+  pass "per-home serialization uses a shared protected capability and rejects forged pipes"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi
 
 prepare_launch() {
   local home=$1 launch_script
-  local launch_start launch_identity receipt_body receipt_hmac
+  local launch_start launch_identity receipt_body receipt_hmac nonce
+  nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   launch_script="$home/bin/fm-session-authority-exec.sh"
   [ -z "$LAUNCH_PID" ] || kill "$LAUNCH_PID" 2>/dev/null || true
   [ -z "$LAUNCH_PID" ] || wait "$LAUNCH_PID" 2>/dev/null || true
@@ -625,15 +669,16 @@ SH
   (
     cd "$home" || exit 1
     exec env FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
-      FM_AGENT_OWNER_HOME="$home" "$launch_script"
+      FM_AGENT_OWNER_HOME="$home" FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1 \
+      FM_SESSION_ENROLLMENT_NONCE="$nonce" "$launch_script"
   ) >/dev/null 2>&1 &
   LAUNCH_PID=$!
   launch_start=$(test_process_start "$LAUNCH_PID") \
     || fail "authenticated launch fixture did not start"
   launch_identity=$(test_process_identity "$LAUNCH_PID") \
     || fail "authenticated launch fixture has no executable identity"
-  receipt_body=$(printf 'version=1\ntask=alpha\nhome=%s\npid=%s\nstart=%s\nidentity=%s' \
-    "$home" "$LAUNCH_PID" "$launch_start" "$launch_identity")
+  receipt_body=$(printf 'version=1\ntask=alpha\nhome=%s\npid=%s\nstart=%s\nidentity=%s\nnonce=%s' \
+    "$home" "$LAUNCH_PID" "$launch_start" "$launch_identity" "$nonce")
   receipt_body="${receipt_body}"$'\n'
   receipt_hmac=$(BROKER_KEY="$BROKER_KEY" RECEIPT_BODY="$receipt_body" \
     python3 -c 'import hashlib, hmac, os; print(hmac.new(bytes.fromhex(os.environ["BROKER_KEY"]), os.environ["RECEIPT_BODY"].encode(), hashlib.sha256).hexdigest())')

@@ -6,6 +6,8 @@ This record contains reusable evidence for the guarantees in [`docs/worker-isola
 The command/output blocks are maintained contract examples, not fresh captures
 of the current branch. The original host captures used Linux 6.18 (WSL2) and
 tmux 3.6 on 2026-07-26.
+
+FM-027 is intentionally Linux-only. Unsupported systems and architectures exit 125 before authority tools are checked. Darwin has no secondmate authority path.
 Exact task chronology, branch names, temporary homes, and delivery transcripts remain in private reports or PR evidence.
 
 ## Launched-agent home declaration
@@ -51,7 +53,7 @@ filesystem pathname, environment export, or terminal command text. On Linux,
 the broker, signer, and wrapper each use a real same-credential child open
 attempt to prove that procfs cannot expose any authority-bearing descriptor
 before creating its secret; readable or unrecognized isolation refuses
-startup. Darwin has no corresponding procfs descriptor path. The wrapper then
+startup. Darwin authority descriptors are unsupported. The wrapper then
 keeps live-broker HMAC and durable-receipt HMAC on distinct protected
 descriptors. Only the production authority wrapper may authorize a detached
 custodian, after proving its own broker PID, start, executable identity, and

@@ -168,8 +168,10 @@ for meta in "$STATE"/*.meta; do
     endpoint_pid=$FM_ISOLATION_ENDPOINT_PID
     echo "ISOLATION: task $id is unproven for recorded endpoint $target: candidate agent process environment is unreadable for pid $endpoint_pid; stop or make that endpoint process authoritative before any mutation"
     ISOLATION_FAILED=1
-  elif [ "$recoverable_endpoint" -eq 0 ]; then
-    endpoint_match_status=$?
+  elif [ "$recoverable_endpoint" -eq 0 ] && [ -n "$UNREADABLE_CANDIDATES" ]; then
+    fm_isolation_unreadable_candidate_matches_endpoint \
+      "$UNREADABLE_CANDIDATES" "$backend" "$target" \
+      || endpoint_match_status=$?
     if [ "$endpoint_match_status" -eq 2 ]; then
       echo "ISOLATION: task $id is unproven for recorded endpoint $target: the endpoint process could not be read while unreadable candidate evidence exists; preserve its state and reconcile $meta before any mutation"
       ISOLATION_FAILED=1
@@ -212,6 +214,24 @@ for meta in "$STATE"/*.meta; do
     fi
     expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
   fi
+  if [ "$recoverable_endpoint" -eq 0 ]; then
+    endpoint_pid=$(fm_backend_foreground_process_pid "$backend" "$target" 2>/dev/null || true)
+    case "$endpoint_pid" in
+      ''|*[!0-9]*)
+        echo "ISOLATION: task $id is unproven for recorded endpoint $target: its authoritative foreground process could not be identified; preserve its state and reconcile $meta before any mutation"
+        ISOLATION_FAILED=1
+        continue
+        ;;
+    esac
+    pids=$(fm_agent_endpoint_identity_pid "$id" "$expected_home" "$role" "$endpoint_pid" 2>/dev/null || true)
+    if [ -z "$pids" ]; then
+      echo "ISOLATION: task $id is unproven for recorded endpoint $target: the endpoint process does not carry the exact task, home, and role declaration; preserve its state and reconcile $meta before any mutation"
+      ISOLATION_FAILED=1
+      continue
+    fi
+  else
+    pids=
+  fi
   recorded_real=$(fm_agent_canonical_dir "$recorded") || recorded_real=$recorded
   conflict_identities=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
     -v t="$id" -v h="$expected_home" -v r="$role" \
@@ -241,7 +261,6 @@ EOF
   done <<EOF
 $conflict_identities
 EOF
-  pids=$(fm_agent_root_pids_for_identity "$id" "$expected_home" "$role" "$PID_INDEX" 2>/dev/null || true)
   if [ -z "$pids" ]; then
     if [ "$recoverable_endpoint" -eq 1 ]; then
       continue

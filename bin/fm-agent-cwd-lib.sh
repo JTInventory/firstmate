@@ -105,15 +105,30 @@ fm_agent_proc_cwd() {
 # applied left to right, so a trailing `2>/dev/null` on the same command is set
 # up only AFTER the input redirect has already failed and printed to stderr.
 fm_agent_environ() {
-  local pid=$1 dump
+  local pid=$1
   fm_agent_pid_is_numeric "$pid" || return 1
-  if [ -r "/proc/$pid/environ" ]; then
-    dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-    [ -n "$dump" ] || return 1
-    printf '%s' "$dump"
+  fm_process_environment "$pid"
+}
+
+fm_agent_endpoint_identity_pid() {
+  local task=$1 home=$2 role=$3 endpoint_pid=$4 candidate env candidate_home
+  fm_agent_pid_is_numeric "$endpoint_pid" || return 2
+  [ -n "$task" ] && [ -n "$home" ] && [ -n "$role" ] || return 2
+  home=$(fm_agent_canonical_dir "$home" 2>/dev/null) || return 2
+  for candidate in "$endpoint_pid" \
+    "$(fm_agent_harness_pid_below "$endpoint_pid" 2>/dev/null || true)"; do
+    [ -n "$candidate" ] || continue
+    fm_agent_pid_is_numeric "$candidate" || continue
+    env=$(fm_agent_environ "$candidate" 2>/dev/null) || continue
+    [ "$(fm_agent_marker_value "$env" FM_AGENT_TASK 2>/dev/null || true)" = "$task" ] || continue
+    candidate_home=$(fm_agent_marker_value "$env" FM_AGENT_OWNER_HOME 2>/dev/null || true)
+    candidate_home=$(fm_agent_canonical_dir "$candidate_home" 2>/dev/null || true)
+    [ "$candidate_home" = "$home" ] || continue
+    [ "$(fm_agent_marker_value "$env" FM_AGENT_ROLE 2>/dev/null || true)" = "$role" ] || continue
+    printf '%s\n' "$candidate"
     return 0
-  fi
-  fm_procargs2_environ "$pid"
+  done
+  return 2
 }
 
 # fm_agent_proc_env <pid> <var>: one environment value of a live process, or 1

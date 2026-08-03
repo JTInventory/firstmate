@@ -198,15 +198,7 @@ fm_session_process_runs_behavior_test_broker() {
 }
 
 fm_session_process_environment() {
-  local pid=$1 value
-  if [ -r "/proc/$pid/environ" ]; then
-    value=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-    [ -n "$value" ] || return 1
-    printf '%s' "$value"
-    return
-  fi
-  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
-  fm_procargs2_environ "$pid"
+  fm_process_environment "$1"
 }
 
 fm_session_process_environment_value() {
@@ -400,7 +392,7 @@ fm_session_authority_broker_bootstrap() {
 fm_session_authority_socket_broker_start_locked() {
   local state=$1 home=$2 checkout=$3 task=$4 script pid attempts=0
   local launch_script launch_receipt launch_start launch_identity durable_fd
-  local launch_key receipt_b64
+  local launch_key receipt_b64 enrollment_nonce
   script="$checkout/bin/fm-session-authority-broker.py"
   launch_script="$home/bin/fm-session-authority-exec.sh"
   launch_receipt="$state/.session-authority-launch"
@@ -414,10 +406,12 @@ fm_session_authority_socket_broker_start_locked() {
   fi
   launch_start=$(fm_session_process_start "$$") || return 1
   launch_identity=$(fm_session_process_identity "$$") || return 1
+  enrollment_nonce=${FM_SESSION_ENROLLMENT_NONCE:-}
+  [ "${#enrollment_nonce}" -eq 64 ] || return 1
   fm_session_launch_receipt_write "$launch_receipt" "$task" "$home" \
-    "$$" "$launch_start" "$launch_identity" || return 1
+    "$$" "$launch_start" "$launch_identity" "$enrollment_nonce" || return 1
   fm_session_launch_receipt_validate "$launch_receipt" "$task" "$home" \
-    "$$" "$launch_start" "$launch_identity" || return 1
+    "$$" "$launch_start" "$launch_identity" "$enrollment_nonce" || return 1
   durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_durable_capability_present || return 1
   IFS= read -r launch_key <&"$durable_fd" || return 1
@@ -492,6 +486,9 @@ fm_session_authority_socket_broker_start() {
 fm_session_authority_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_FD:-}
   fm_session_authority_socket_broker_present && return 0
+  if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
+    fm_session_test_authority_broker_present || return 1
+  fi
   if ! fm_session_descriptor_channel_isolated "$fd"; then
     fm_session_test_authority_broker_present || return 1
     FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
@@ -590,7 +587,7 @@ fm_session_descriptor_channel_isolated() {
   system=$(uname -s 2>/dev/null) || return 1
   case "$system" in
     Darwin)
-      return 0
+      return 1
       ;;
     Linux)
       if [ ! -e "/proc/$parent/fd/$fd" ]; then
@@ -655,7 +652,7 @@ fm_session_exec_descriptor_isolation_durable() {
   system=$(uname -s 2>/dev/null) || return 1
   case "$system" in
     Darwin)
-      return 0
+      return 1
       ;;
     Linux)
       [ -r /proc/sys/kernel/yama/ptrace_scope ] || return 1
@@ -2141,6 +2138,10 @@ fm_session_authority_hmac() {
 fm_session_authority_durable_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_socket_broker_present && return 0
+  if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+    && [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" != 1 ]; then
+    fm_session_test_authority_broker_present || return 1
+  fi
   if [ -z "$fd" ] && fm_session_test_authority_broker_present; then
     fd=$FM_TEST_DURABLE_AUTHORITY_FD
     FM_SESSION_AUTHORITY_DURABLE_FD=$fd
@@ -2194,22 +2195,30 @@ fm_session_authority_record_validate() {
 }
 
 fm_session_launch_receipt_write() {
-  local file=$1 task=$2 home=$3 pid=$4 start=$5 identity=$6 body
-  case "$task:$home:$pid:$start:$identity" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  local file=$1 task=$2 home=$3 pid=$4 start=$5 identity=$6 nonce=${7:-} body
+  case "$task:$home:$pid:$start:$identity:$nonce" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  if [ -n "$nonce" ]; then
+    [ "${#nonce}" -eq 64 ] || return 1
+    case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
+  fi
   body=$(printf 'version=1\ntask=%s\nhome=%s\npid=%s\nstart=%s\nidentity=%s\n' \
     "$task" "$home" "$pid" "$start" "$identity") || return 1
+  [ -z "$nonce" ] || body+=$(printf 'nonce=%s\n' "$nonce")
   fm_session_authority_record_write "$file" "${body}"$'\n'
 }
 
 fm_session_launch_receipt_validate() {
-  local file=$1 task=$2 home=$3 pid=$4 start=$5 identity=$6
-  fm_session_authority_record_validate "$file" 7 \
+  local file=$1 task=$2 home=$3 pid=$4 start=$5 identity=$6 nonce=${7:-} lines=7
+  [ -z "$nonce" ] || lines=8
+  fm_session_authority_record_validate "$file" "$lines" \
     && [ "$(sed -n '1p' "$file")" = version=1 ] \
     && [ "$(sed -n '2s/^task=//p' "$file")" = "$task" ] \
     && [ "$(sed -n '3s/^home=//p' "$file")" = "$home" ] \
     && [ "$(sed -n '4s/^pid=//p' "$file")" = "$pid" ] \
     && [ "$(sed -n '5s/^start=//p' "$file")" = "$start" ] \
-    && [ "$(sed -n '6s/^identity=//p' "$file")" = "$identity" ]
+    && [ "$(sed -n '6s/^identity=//p' "$file")" = "$identity" ] \
+    && { [ -z "$nonce" ] || { [ "$(sed -n '7s/^nonce=//p' "$file")" = "$nonce" ] \
+      && [ "${#nonce}" -eq 64 ]; }; }
 }
 
 fm_session_authority_token() {

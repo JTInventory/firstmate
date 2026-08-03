@@ -1664,16 +1664,15 @@ test_authority_fds_require_sibling_proc_isolation() {
       ;;
     Darwin)
       for fd in 7 8 9 10 17 18 "$FM_SESSION_AUTHORITY_FD"; do
-        fm_session_descriptor_channel_isolated "$fd" \
-          || fail "authority descriptor $fd rejected the procfs-free Darwin boundary"
+        ! fm_session_descriptor_channel_isolated "$fd" \
+          || fail "authority descriptor $fd accepted unsupported Darwin authority"
       done
       (
         exec 9<&-
         exec 18<&-
         unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
-        fm_session_authority_descriptor_create \
-          && fm_session_authority_capability_present
-      ) || fail "primary authority creation rejected Darwin descriptors"
+        ! fm_session_authority_descriptor_create
+      ) || fail "primary authority creation accepted unsupported Darwin authority"
       ;;
     *)
       for fd in 7 8 9 10 17 18 "$FM_SESSION_AUTHORITY_FD"; do

@@ -212,15 +212,7 @@ fm_worker_secondmate_effective_scope_matches() {
 }
 
 fm_worker_process_environment() {
-  local pid=$1 value
-  if [ -r "/proc/$pid/environ" ]; then
-    value=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-    [ -n "$value" ] || return 1
-    printf '%s' "$value"
-    return
-  fi
-  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
-  fm_procargs2_environ "$pid"
+  fm_process_environment "$1"
 }
 
 fm_worker_linked_primary_topology_matches() {
@@ -633,6 +625,12 @@ fm_worker_refuse_primary_operation() {
       fi
       if ! fm_worker_isolation_sweep_current; then
         echo "error: $operation refused: worker isolation sweep is unproven" >&2
+        return 1
+      fi
+      . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+      if ! fm_session_authority_broker_present \
+        "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-authority-exec.sh"; then
+        echo "error: $operation refused: authenticated secondmate authority broker is missing or invalid" >&2
         return 1
       fi
       return 0

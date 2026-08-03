@@ -76,3 +76,15 @@ fm_procargs2_environ() {
     printf '%s\n' "$item"
   done
 }
+
+fm_process_environment() {
+  local pid=$1 value
+  if [ -r "/proc/$pid/environ" ]; then
+    value=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+    return 0
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+  fm_procargs2_environ "$pid"
+}

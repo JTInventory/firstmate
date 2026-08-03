@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -eu
 
+authority_platform=$(uname -s 2>/dev/null || true)
+authority_arch=$(uname -m 2>/dev/null || true)
+case "$authority_platform:$authority_arch" in
+  Linux:x86_64|Linux:amd64|Linux:aarch64|Linux:riscv64|Linux:s390x|Linux:i[3-6]86|Linux:arm*|Linux:ppc64*) ;;
+  *) exit 125 ;;
+esac
+
 if [ "${1:-}" = --behavior-test-authority-broker ]; then
   [ "$#" -eq 2 ] && [ "${FM_TEST_PROCESS:-0}" = 1 ] \
     && [ "${FM_TEST_AUTHORITY_FD:-}" = 19 ] \
@@ -407,6 +414,7 @@ fi
 }
 unset FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
 FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1
+export FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
 mkdir -p "$STATE" && [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
   echo "error: trusted session state directory is unavailable" >&2
   exit 1

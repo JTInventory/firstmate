@@ -104,6 +104,19 @@
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
 set -eu
 
+fm_spawn_secondmate=0
+for fm_spawn_arg in "$@"; do
+  [ "$fm_spawn_arg" = --secondmate ] && fm_spawn_secondmate=1
+done
+if [ "$fm_spawn_secondmate" -eq 1 ]; then
+  fm_spawn_platform=$(uname -s 2>/dev/null || true)
+  fm_spawn_arch=$(uname -m 2>/dev/null || true)
+  case "$fm_spawn_platform:$fm_spawn_arch" in
+    Linux:x86_64|Linux:amd64|Linux:aarch64|Linux:riscv64|Linux:s390x|Linux:i[3-6]86|Linux:arm*|Linux:ppc64*) ;;
+    *) exit 125 ;;
+  esac
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
