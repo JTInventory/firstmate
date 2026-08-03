@@ -443,6 +443,12 @@ fm_session_authority_socket_broker_start_locked() {
       return 1
     }
   fi
+  exec 19<&-
+  exec 19< <(printf '%s\n%s\n' "$launch_key" "$receipt_b64") || return 1
+  fm_session_descriptor_channel_isolated 19 || {
+    exec 19<&-
+    return 1
+  }
   if command -v setsid >/dev/null 2>&1; then
     setsid python3 "$script" serve --state "$state" --home "$home" \
       --checkout "$checkout" --task "$task" \

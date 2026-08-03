@@ -623,13 +623,95 @@ export FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY
 export FM_SESSION_AUTHORITY_BROKER_SCRIPT
 fm_session_enrollment_trace consumer-launch-ready pass 2>/dev/null || true
 child_pid=
-forward_signal() {
-  [ -z "$child_pid" ] || kill -TERM "$child_pid" 2>/dev/null || true
+child_pgid=
+wrapper_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]' || true)
+child_group_is_alive() {
+  case "$child_pgid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$child_pgid" != "$wrapper_pgid" ] || return 1
+  kill -0 -- "-$child_pgid" 2>/dev/null
 }
-trap forward_signal HUP INT TERM
+child_is_alive() {
+  [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null
+}
+child_is_running() {
+  local state
+  child_is_alive || return 1
+  state=$(ps -o stat= -p "$child_pid" 2>/dev/null | tr -d '[:space:]' || true)
+  case "$state" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+signal_child() {
+  local signal=$1
+  [ -n "$child_pid" ] || return 0
+  if child_group_is_alive; then
+    kill -"$signal" -- "-$child_pgid" 2>/dev/null || true
+  else
+    kill -"$signal" "$child_pid" 2>/dev/null || true
+  fi
+}
+cleanup_child() {
+  local attempts=0
+  signal_child TERM
+  while child_is_running && [ "$attempts" -lt 50 ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  if child_is_running; then
+    signal_child KILL
+    attempts=0
+    while child_is_running && [ "$attempts" -lt 50 ]; do
+      sleep 0.02
+      attempts=$((attempts + 1))
+    done
+  fi
+  child_is_running && return 1
+  wait "$child_pid" 2>/dev/null || true
+  if child_group_is_alive; then
+    signal_child KILL
+    attempts=0
+    while child_group_is_alive && [ "$attempts" -lt 50 ]; do
+      sleep 0.02
+      attempts=$((attempts + 1))
+    done
+  fi
+  child_group_is_alive && return 1
+  return 0
+}
+forward_hup() {
+  trap '' HUP INT TERM
+  cleanup_child || exit 1
+  exit 129
+}
+forward_int() {
+  trap '' HUP INT TERM
+  cleanup_child || exit 1
+  exit 130
+}
+forward_term() {
+  trap '' HUP INT TERM
+  cleanup_child || exit 1
+  exit 143
+}
+trap forward_hup HUP
+trap forward_int INT
+trap forward_term TERM
+start_child() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" &
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' "$@" &
+  else
+    "$@" &
+  fi
+  child_pid=$!
+  child_pgid=$(ps -o pgid= -p "$child_pid" 2>/dev/null | tr -d '[:space:]' || true)
+}
 set +e
-"$@" &
-child_pid=$!
+start_child "$@"
 wait "$child_pid"
 status=$?
 trap - HUP INT TERM

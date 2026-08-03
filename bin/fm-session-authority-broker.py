@@ -344,7 +344,14 @@ def serve(args: argparse.Namespace) -> int:
             try:
                 connection, _ = server.accept()
             except socket.timeout:
-                if not record.is_file() or not Path(home).is_dir():
+                if (
+                    not record.is_file()
+                    or record.is_symlink()
+                    or not Path(home).is_dir()
+                    or not launch_process_is_current(
+                        launch_pid, launch_start, launch_identity, launch_script
+                    )
+                ):
                     break
                 continue
             except OSError:
@@ -413,9 +420,11 @@ def read_record_shape(path: Path) -> dict[str, str]:
     pid = int(metadata["pid"])
     if pid <= 1:
         raise ValueError("malformed broker record")
-    for key in ("uid", "gid", "launch-pid"):
+    for key in ("uid", "gid"):
         if int(metadata[key]) < 0:
             raise ValueError("malformed broker record")
+    if int(metadata["launch-pid"]) <= 1:
+        raise ValueError("malformed broker record")
     if canonical(metadata["launch-script"]) != metadata["launch-script"]:
         raise ValueError("malformed launch script")
     socket_value = metadata["socket"]
@@ -472,6 +481,49 @@ def process_generation_for_recovery(pid: int) -> tuple[str, str] | None:
     raise ValueError("unreadable process generation")
 
 
+def launch_process_is_current(
+    pid: int, start: str, identity: str, launch_script: str
+) -> bool:
+    try:
+        if process_generation(pid) != (start, identity):
+            return False
+        command = process_command(pid)
+        return len(command) >= 2 and canonical(command[1]) == launch_script
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def stop_recorded_broker(
+    pid: int, generation: tuple[str, str], script: str
+) -> bool:
+    current = process_generation_for_recovery(pid)
+    if current is None or current != generation:
+        return current is None
+    command = process_command(pid)
+    if (
+        len(command) < 3
+        or canonical(command[1]) != script
+        or command[2] != "serve"
+    ):
+        return False
+    for number in (signal.SIGTERM, signal.SIGKILL):
+        current = process_generation_for_recovery(pid)
+        if current is None:
+            return True
+        if current != generation:
+            return False
+        os.kill(pid, number)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            current = process_generation_for_recovery(pid)
+            if current is None:
+                return True
+            if current != generation:
+                return False
+            time.sleep(0.02)
+    return False
+
+
 def recover_stale(args: argparse.Namespace) -> int:
     if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
         return 1
@@ -487,6 +539,9 @@ def recover_stale(args: argparse.Namespace) -> int:
             or metadata["checkout"] != expected_checkout
             or metadata["script"] != expected_script
             or metadata["launch-script"] != expected_launch_script
+            or expected_script != canonical(
+                f"{expected_checkout}/bin/fm-session-authority-broker.py"
+            )
             or expected_launch_script != canonical(
                 f"{expected_home}/bin/fm-session-authority-exec.sh"
             )
@@ -501,9 +556,18 @@ def recover_stale(args: argparse.Namespace) -> int:
         )
         if launch_pid != os.getppid():
             return 1
+        launch_generation = process_generation_for_recovery(
+            int(metadata["launch-pid"])
+        )
+        if launch_generation == (
+            metadata["launch-start"], metadata["launch-identity"]
+        ):
+            return 1
         pid = int(metadata["pid"])
         generation = process_generation_for_recovery(pid)
-        if generation is not None:
+        if generation is not None and not stop_recorded_broker(
+            pid, (metadata["start"], metadata["identity"]), expected_script
+        ):
             return 1
         record.unlink()
         return 0
