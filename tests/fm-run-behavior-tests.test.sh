@@ -150,7 +150,7 @@ run_fixture() {
   local force_signal_failure=${19:-0} force_reap_failure=${20:-0}
   local force_root_open_failure=${21:-0} force_nested_open_failure=${22:-0}
   local force_job_open_failure=${23:-0} force_job_signal_failure=${24:-0}
-  local force_terminate_control=${25:-0}
+  local force_terminate_control=${25:-0} force_job_abort_after_start=${26:-0}
   local fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
@@ -181,6 +181,7 @@ run_fixture() {
       FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_OPEN_FAILURE="$force_job_open_failure" \
       FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE="$force_job_signal_failure" \
       FM_TEST_SUPERVISOR_FORCE_TERMINATE_CONTROL="$force_terminate_control" \
+      FM_TEST_SUPERVISOR_FORCE_JOB_ABORT_AFTER_START="$force_job_abort_after_start" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -342,6 +343,12 @@ test_bounded_runner_uses_stable_containment() {
     "bounded runner must signal through process handles"
   assert_contains "$source" 'CLOCK_MONOTONIC' \
     "nested cleanup must use a monotonic deadline"
+  assert_contains "$source" 'my $killed = syscall($sys_pidfd_send_signal' \
+    "nested cleanup must reach SIGKILL after TERM grace"
+  assert_contains "$source" 'return $reap_until->($deadline);' \
+    "nested cleanup must bound its final reap proof"
+  time_imports=$(printf '%s' "$source" | grep -c 'use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);')
+  [ "$time_imports" -ge 3 ] || fail "every nested cleanup layer must import its monotonic clock"
   assert_contains "$source" 'exit 125 unless $cleanup_ok' \
     "cleanup failures must propagate as fail-closed exits"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE' \
@@ -409,6 +416,12 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must bound broker exit proof"
   assert_contains "$source" ': >"$start_gate"' \
     "behavior runner must release the start gate only after handle acquisition"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_FORCE_JOB_ABORT_AFTER_START' \
+    "cleanup regressions must exercise released jobs"
+  assert_not_contains "$source" 'kill -0 "$SUPERVISOR_HANDLE_BROKER_PID"' \
+    "broker disappearance must not rely on ambiguous kill probes"
+  assert_not_contains "$source" 'for my $entry (values %handles)' \
+    "failed broker job handles must remain retained"
   assert_not_contains "$source" 'run_one "$test_path"' \
     "behavior runner must not launch jobs through an unbound shell child"
   pass "bounded behavior tests use stable process containment"
@@ -439,16 +452,20 @@ SH
 }
 
 assert_identity_gone() {
-  local identity=$1 pid stat_line stat_fields current
+  local identity=$1 pid stat_line stat_fields current identity_tick
   pid=${identity%%:*}
-  if [ -r "/proc/$pid/stat" ]; then
+  for ((identity_tick = 0; identity_tick < 100; identity_tick++)); do
+    [ -e "/proc/$pid" ] || return 0
+    [ -r "/proc/$pid/stat" ] || fail "could not read recorded process identity"
     IFS= read -r stat_line <"/proc/$pid/stat" || fail "could not read recorded process identity"
     stat_fields=${stat_line##*) }
     set -- $stat_fields
     [ "$#" -ge 20 ] || fail "recorded process identity was malformed"
     current="$pid:${20}"
-    [ "$current" != "$identity" ] || fail "recorded process identity survived cleanup"
-  fi
+    [ "$current" != "$identity" ] && return 0
+    sleep 0.01
+  done
+  fail "recorded process identity survived cleanup"
 }
 
 test_failure_injection_refuses_before_launch() {
@@ -508,6 +525,7 @@ run_cleanup_failure_case() {
   local case_name=$1 force_signal=$2 force_reap=$3 force_root_open=$4
   local force_nested_open=$5 force_job_open=$6 force_job_signal=$7
   local drop_launch=$8 break_control=$9 force_terminate_control=${10:-0}
+  local force_job_abort_after_start=${11:-0} require_job_chain=${12:-0}
   local fixture output fixture_output rc start_seconds elapsed sentinel_marker sentinel_pid
   local supervisor_pid_file root_pid_file guard_pid_file worker_pid_file broker_pid_file pid_file
   fixture=$(make_fixture_root "$case_name")
@@ -527,7 +545,7 @@ run_cleanup_failure_case() {
     "$broker_pid_file" "$guard_pid_file" "$break_control" '' \
     "$worker_pid_file" "$force_signal" "$force_reap" "$force_root_open" \
     "$force_nested_open" "$force_job_open" "$force_job_signal" \
-    "$force_terminate_control")
+    "$force_terminate_control" "$force_job_abort_after_start")
   rc=$?
   set -u
   elapsed=$((SECONDS - start_seconds))
@@ -539,7 +557,15 @@ run_cleanup_failure_case() {
       assert_identity_gone "$(cat "$pid_file")"
     fi
   done
-  [ ! -e "$fixture_output/pass-a.started" ] || fail "$case_name released a behavior test"
+  if [ "$require_job_chain" -eq 1 ]; then
+    for pid_file in "$supervisor_pid_file" "$root_pid_file" "$guard_pid_file" \
+      "$worker_pid_file" "$broker_pid_file"; do
+      [ -s "$pid_file" ] || fail "$case_name did not record every released supervisor layer"
+    done
+    [ -e "$fixture_output/fail-b.started" ] || fail "$case_name did not release the behavior test"
+  else
+    [ ! -e "$fixture_output/pass-a.started" ] || fail "$case_name released a behavior test"
+  fi
   [ ! -e "$sentinel_marker" ] || fail "$case_name signaled an unrelated process"
   kill -TERM "$sentinel_pid" 2>/dev/null || true
   wait "$sentinel_pid" 2>/dev/null || true
@@ -549,8 +575,8 @@ test_cleanup_failure_injections_are_bounded() {
   run_cleanup_failure_case root-pidfd-open-failure 0 0 1 0 0 0 0 0
   run_cleanup_failure_case nested-pidfd-open-failure 0 0 0 1 0 0 0 0
   run_cleanup_failure_case job-pidfd-open-failure 0 0 0 0 1 0 0 0
-  run_cleanup_failure_case job-pidfd-signal-failure 0 0 0 0 0 1 1 0
-  run_cleanup_failure_case job-pidfd-reap-failure 0 1 0 0 0 0 1 0
+  run_cleanup_failure_case job-pidfd-signal-failure 0 0 0 0 0 1 0 0 0 1 1
+  run_cleanup_failure_case job-pidfd-reap-failure 0 1 0 0 0 0 0 0 0 1 1
   run_cleanup_failure_case nested-pidfd-signal-failure 1 0 0 0 0 0 0 0 1
   pass "pidfd cleanup failures are bounded and fail closed"
 }

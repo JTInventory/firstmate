@@ -799,9 +799,6 @@ for my $key (keys %handles) {
     $cleanup_ok = 0;
   }
 }
-for my $entry (values %handles) {
-  $close_handle->($entry);
-}
 exit($cleanup_ok ? 0 : 125);
 '
 FM_TEST_SUPERVISOR_GUARD_WORKER_PERL='
@@ -874,29 +871,27 @@ my $terminate = sub {
   my $sent = syscall($sys_pidfd_send_signal, $fd, 15, 0, 0);
   my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
   return 0 unless $term_ok;
-  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
-    my $waited = waitpid($pid, WNOHANG);
-    return 1 if $waited == $pid;
-    return 1 if $waited < 0 && $!{ECHILD};
-    return 0 if $waited < 0 && !$!{EINTR};
-    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
-    last if $remaining <= 0;
-    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
-  }
+  my $reap_until = sub {
+    my ($until) = @_;
+    while (clock_gettime(CLOCK_MONOTONIC) < $until) {
+      my $waited = waitpid($pid, WNOHANG);
+      return 1 if $waited == $pid;
+      return 1 if $waited < 0 && $!{ECHILD};
+      return 0 if $waited < 0 && !$!{EINTR};
+      my $remaining = $until - clock_gettime(CLOCK_MONOTONIC);
+      last if $remaining <= 0;
+      select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
+    }
+    return 0;
+  };
+  my $term_deadline = clock_gettime(CLOCK_MONOTONIC) + 2;
+  $term_deadline = $deadline if $term_deadline > $deadline;
+  return 1 if $reap_until->($term_deadline);
   return 0 if clock_gettime(CLOCK_MONOTONIC) >= $deadline;
   my $killed = syscall($sys_pidfd_send_signal, $fd, 9, 0, 0);
   my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
   return 0 unless $kill_ok;
-  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
-    my $waited = waitpid($pid, WNOHANG);
-    return 1 if $waited == $pid;
-    return 1 if $waited < 0 && $!{ECHILD};
-    return 0 if $waited < 0 && !$!{EINTR};
-    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
-    last if $remaining <= 0;
-    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
-  }
-  return 0;
+  return $reap_until->($deadline);
 };
 my $abort_before_release = sub {
   close $gate_w;
@@ -954,6 +949,7 @@ FM_TEST_SUPERVISOR_GUARD_PERL='
 use Config;
 use Errno qw(ECHILD EINTR EIO EPERM ESRCH);
 use POSIX qw(:sys_wait_h);
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 my ($guard_worker_path, $worker_path, $input_path, $output_path, $release_fd) = @ARGV;
 my $arch = $Config{archname} // "";
 my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
@@ -1022,29 +1018,27 @@ my $terminate = sub {
   my $sent = syscall($sys_pidfd_send_signal, $guard_fd, 15, 0, 0);
   my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
   return 0 unless $term_ok;
-  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
-    my $waited = waitpid($pid, WNOHANG);
-    return 1 if $waited == $pid;
-    return 1 if $waited < 0 && $!{ECHILD};
-    return 0 if $waited < 0 && !$!{EINTR};
-    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
-    last if $remaining <= 0;
-    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
-  }
+  my $reap_until = sub {
+    my ($until) = @_;
+    while (clock_gettime(CLOCK_MONOTONIC) < $until) {
+      my $waited = waitpid($pid, WNOHANG);
+      return 1 if $waited == $pid;
+      return 1 if $waited < 0 && $!{ECHILD};
+      return 0 if $waited < 0 && !$!{EINTR};
+      my $remaining = $until - clock_gettime(CLOCK_MONOTONIC);
+      last if $remaining <= 0;
+      select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
+    }
+    return 0;
+  };
+  my $term_deadline = clock_gettime(CLOCK_MONOTONIC) + 2;
+  $term_deadline = $deadline if $term_deadline > $deadline;
+  return 1 if $reap_until->($term_deadline);
   return 0 if clock_gettime(CLOCK_MONOTONIC) >= $deadline;
   my $killed = syscall($sys_pidfd_send_signal, $guard_fd, 9, 0, 0);
   my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
   return 0 unless $kill_ok;
-  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
-    my $waited = waitpid($pid, WNOHANG);
-    return 1 if $waited == $pid;
-    return 1 if $waited < 0 && $!{ECHILD};
-    return 0 if $waited < 0 && !$!{EINTR};
-    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
-    last if $remaining <= 0;
-    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
-  }
-  return 0;
+  return $reap_until->($deadline);
 };
 my $abort_before_release = sub {
   close $gate_w;
@@ -1164,29 +1158,27 @@ my $terminate = sub {
   my $sent = syscall($sys_pidfd_send_signal, $outer_fd, 15, 0, 0);
   my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
   return 0 unless $term_ok;
-  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
-    my $waited = waitpid($pid, WNOHANG);
-    return 1 if $waited == $pid;
-    return 1 if $waited < 0 && $!{ECHILD};
-    return 0 if $waited < 0 && !$!{EINTR};
-    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
-    last if $remaining <= 0;
-    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
-  }
+  my $reap_until = sub {
+    my ($until) = @_;
+    while (clock_gettime(CLOCK_MONOTONIC) < $until) {
+      my $waited = waitpid($pid, WNOHANG);
+      return 1 if $waited == $pid;
+      return 1 if $waited < 0 && $!{ECHILD};
+      return 0 if $waited < 0 && !$!{EINTR};
+      my $remaining = $until - clock_gettime(CLOCK_MONOTONIC);
+      last if $remaining <= 0;
+      select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
+    }
+    return 0;
+  };
+  my $term_deadline = clock_gettime(CLOCK_MONOTONIC) + 2;
+  $term_deadline = $deadline if $term_deadline > $deadline;
+  return 1 if $reap_until->($term_deadline);
   return 0 if clock_gettime(CLOCK_MONOTONIC) >= $deadline;
   my $killed = syscall($sys_pidfd_send_signal, $outer_fd, 9, 0, 0);
   my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
   return 0 unless $kill_ok;
-  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
-    my $waited = waitpid($pid, WNOHANG);
-    return 1 if $waited == $pid;
-    return 1 if $waited < 0 && $!{ECHILD};
-    return 0 if $waited < 0 && !$!{EINTR};
-    my $remaining = $deadline - clock_gettime(CLOCK_MONOTONIC);
-    last if $remaining <= 0;
-    select undef, undef, undef, $remaining < 0.02 ? $remaining : 0.02;
-  }
-  return 0;
+  return $reap_until->($deadline);
 };
 my $finish = sub {
   my ($status) = @_;
@@ -1351,16 +1343,14 @@ supervisor_handle_broker_state() {
     return 0
   fi
   if ! IFS= read -r stat <"/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat"; then
-    kill -0 "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null && return 2
-    return 0
+    return 2
   fi
   fields=${stat##*) }
   set -- $fields
   [ "$#" -ge 20 ] || return 2
   process_state=$1
   if ! current=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID"); then
-    kill -0 "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null && return 2
-    return 0
+    return 2
   fi
   [ "$current" = "$SUPERVISOR_HANDLE_BROKER_IDENTITY" ] || return 2
   [ "$process_state" = Z ] && return 3
@@ -1737,6 +1727,11 @@ while [ "$index" -lt "$total" ]; do
       printf '%s\n' 'FAIL: could not release a bound behavior-test supervisor' >&2
       exit 125
     }
+    if [ "${FM_TEST_SUPERVISOR_FORCE_JOB_ABORT_AFTER_START:-0}" -eq 1 ]; then
+      sleep 0.2
+      supervisor_handle_abort "$test_id" || true
+      exit 125
+    fi
     pids+=("$SUPERVISOR_HANDLE_LAUNCHED_PID")
     batch_tests+=("$test_path")
     batch_logs+=("$log_path")
