@@ -517,27 +517,78 @@ def launch_process_state(
     return "unknown"
 
 
-def unlink_owned_record(path: Path, expected: dict[str, str]) -> None:
+def unlink_owned_record(
+    path: Path, expected: dict[str, str], expected_stat: os.stat_result | None = None
+) -> bool:
     try:
+        initial_stat = path.lstat()
+        if expected_stat is not None and (
+            initial_stat.st_dev != expected_stat.st_dev
+            or initial_stat.st_ino != expected_stat.st_ino
+        ):
+            return False
         metadata = read_record_shape(path)
         if any(metadata.get(key) != value for key, value in expected.items()):
-            return
+            return False
+        final_stat = path.lstat()
+        if (
+            initial_stat.st_dev != final_stat.st_dev
+            or initial_stat.st_ino != final_stat.st_ino
+        ):
+            return False
+        if expected_stat is not None and (
+            final_stat.st_dev != expected_stat.st_dev
+            or final_stat.st_ino != expected_stat.st_ino
+        ):
+            return False
         path.unlink()
+        return True
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return
+        return False
+
+
+def broker_command_matches(
+    command: list[str], *, script: str, state: str, home: str,
+    checkout: str, task: str, launch_script: str
+) -> bool:
+    return (
+        len(command) == 15
+        and canonical(command[1]) == script
+        and command[2] == "serve"
+        and command[3] == "--state"
+        and canonical(command[4]) == state
+        and command[5] == "--home"
+        and canonical(command[6]) == home
+        and command[7] == "--checkout"
+        and canonical(command[8]) == checkout
+        and command[9] == "--task"
+        and command[10] == task
+        and command[11] == "--launch-evidence-fd"
+        and command[12] == str(RECOVERY_LAUNCH_EVIDENCE_FD)
+        and command[13] == "--launch-script"
+        and canonical(command[14]) == launch_script
+    )
 
 
 def stop_recorded_broker(
-    pid: int, generation: tuple[str, str], script: str
+    pid: int, generation: tuple[str, str], *, script: str, state: str,
+    home: str, checkout: str, task: str, launch_script: str
 ) -> bool:
     current = process_generation_for_recovery(pid)
     if current is None or current != generation:
         return current is None
     command = process_command(pid)
     if (
-        len(command) < 3
-        or canonical(command[1]) != script
-        or command[2] != "serve"
+        len(command) < 2
+        or not broker_command_matches(
+            command,
+            script=script,
+            state=state,
+            home=home,
+            checkout=checkout,
+            task=task,
+            launch_script=launch_script,
+        )
     ):
         return False
     for number in (signal.SIGTERM, signal.SIGKILL):
@@ -545,6 +596,20 @@ def stop_recorded_broker(
         if current is None:
             return True
         if current != generation:
+            return False
+        try:
+            command = process_command(pid)
+        except (OSError, UnicodeError, ValueError):
+            return False
+        if not broker_command_matches(
+            command,
+            script=script,
+            state=state,
+            home=home,
+            checkout=checkout,
+            task=task,
+            launch_script=launch_script,
+        ):
             return False
         os.kill(pid, number)
         deadline = time.monotonic() + 1.0
@@ -563,11 +628,13 @@ def recover_stale(args: argparse.Namespace) -> int:
         return 1
     record = Path(args.record)
     try:
+        record_stat = record.lstat()
         metadata = read_record_shape(record)
         expected_home = canonical(metadata["home"])
         expected_script = canonical(__file__)
         expected_checkout = canonical(str(Path(expected_script).parent.parent))
         expected_launch_script = canonical(metadata["launch-script"])
+        expected_state = canonical(str(record.parent))
         if (
             metadata["home"] != expected_home
             or metadata["checkout"] != expected_checkout
@@ -597,11 +664,23 @@ def recover_stale(args: argparse.Namespace) -> int:
         pid = int(metadata["pid"])
         generation = process_generation_for_recovery(pid)
         if generation is not None and not stop_recorded_broker(
-            pid, (metadata["start"], metadata["identity"]), expected_script
+            pid,
+            (metadata["start"], metadata["identity"]),
+            script=expected_script,
+            state=expected_state,
+            home=expected_home,
+            checkout=expected_checkout,
+            task=metadata["task"],
+            launch_script=expected_launch_script,
         ):
             return 1
-        record.unlink()
-        return 0
+        return int(
+            not unlink_owned_record(
+                record,
+                metadata,
+                expected_stat=record_stat,
+            )
+        )
     except FileNotFoundError:
         return 0 if not record.exists() and not record.is_symlink() else 1
     except (OSError, UnicodeError, ValueError):

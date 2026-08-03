@@ -176,6 +176,84 @@ PY
     fail "stale recovery did not bind termination to the current broker script"
   fi
   pass "stale recovery rejects forged broker checkout metadata"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_termination", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+generation = ("proc:broker", "exe:python")
+broker.process_generation_for_recovery = lambda _pid: generation
+broker.process_command = lambda _pid: [
+    "python3",
+    str(broker_path),
+    "serve",
+    "--state",
+    "/other/state",
+    "--home",
+    "/other/home",
+    "--checkout",
+    str(broker_path.parent.parent),
+    "--task",
+    "other",
+    "--launch-evidence-fd",
+    "19",
+    "--launch-script",
+    "/other/home/bin/fm-session-authority-exec.sh",
+]
+if broker.stop_recorded_broker(
+    42,
+    generation,
+    script=str(broker_path),
+    state="/home/state",
+    home="/home",
+    checkout=str(broker_path.parent.parent),
+    task="alpha",
+    launch_script="/home/bin/fm-session-authority-exec.sh",
+):
+    raise SystemExit("termination accepted another home's broker argv")
+PY
+  then
+    fail "broker termination did not validate the complete canonical argv"
+  fi
+  pass "stale recovery rejects another home's broker argv"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_unlink", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    record = Path(temporary) / "record"
+    record.write_text("replacement\n", encoding="utf-8")
+    original_stat = os.stat_result((0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    current_stat = record.lstat()
+    if broker.unlink_owned_record(
+        record,
+        {},
+        expected_stat=original_stat,
+    ):
+        raise SystemExit("inode mismatch removed a replacement record")
+    if not record.exists() or current_stat.st_ino == original_stat.st_ino:
+        raise SystemExit("inode replacement fixture was not distinct")
+PY
+  then
+    fail "stale record deletion did not reject an inode replacement"
+  fi
+  pass "stale record deletion rejects inode replacement"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi
