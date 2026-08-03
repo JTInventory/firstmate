@@ -47,6 +47,14 @@ esac
 
 [ -d "$STATE" ] || exit 0
 
+has_task_metadata=0
+for meta in "$STATE"/*.meta; do
+  [ -f "$meta" ] || continue
+  has_task_metadata=1
+  break
+done
+[ "$has_task_metadata" -eq 1 ] || exit 0
+
 HOME_REAL=$(fm_agent_canonical_dir "$FM_HOME") || HOME_REAL=$FM_HOME
 ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 

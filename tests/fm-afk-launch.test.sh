@@ -14,10 +14,23 @@ fm_test_primary_authority_setup "$TMP_ROOT" \
   || fail "could not provision the AFK primary authority fixture"
 
 cleanup_afk_tests() {
-  local pid
+  local pid group
+  local groups=()
+  for pid in "${AFK_TEST_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
+    group=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    if [ "$group" = "$pid" ]; then
+      groups+=("$pid")
+      kill -TERM -- "-$pid" 2>/dev/null || true
+    fi
+  done
   for pid in "${AFK_TEST_PIDS[@]:-}"; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  for group in "${groups[@]:-}"; do
+    kill -KILL -- "-$group" 2>/dev/null || true
   done
   fm_test_cleanup
 }
@@ -31,6 +44,9 @@ set -u
 state=${FM_STATE_OVERRIDE:?FM_STATE_OVERRIDE unset}
 mkdir -p "$state"
 . "${FM_AFK_TEST_WAKE_LIB:?FM_AFK_TEST_WAKE_LIB unset}"
+wait_fifo="$state/.supervise-daemon.wait"
+mkfifo "$wait_fifo"
+exec 29<>"$wait_fifo"
 printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
 fm_pid_start "$$" > "$state/.supervise-daemon.pid-start"
 fm_pid_identity "$$" > "$state/.supervise-daemon.pid-identity"
@@ -38,9 +54,10 @@ printf '%s\n' "${FM_SUPERVISOR_TARGET:-}" > "$state/fake-daemon.supervisor-targe
 printf '%s\n' "${FM_SUPERVISOR_BACKEND:-}" > "$state/fake-daemon.supervisor-backend"
 printf '%s\n' started > "$state/fake-daemon.started"
 cleanup() {
+  exec 29>&- 29<&- || true
   printf '%s\n' returned > "$state/fake-daemon.returned"
   rm -f "$state/.supervise-daemon.pid" "$state/.supervise-daemon.pid-start" \
-    "$state/.supervise-daemon.pid-identity"
+    "$state/.supervise-daemon.pid-identity" "$wait_fifo"
   exit 0
 }
 if [ "${FM_AFK_TEST_IGNORE_TERM:-0}" = 1 ]; then
@@ -104,12 +121,16 @@ test_afk_launch_detaches_from_harness_group() {
   # The outer setsid shell is the harness-owned process group. It starts the
   # launcher and then waits, so killing that group simulates harness reap.
   # shellcheck disable=SC2016 # the inner shell must expand its own positional args
+  mkfifo "$dir/harness.wait"
   FM_STATE_OVERRIDE="$state" FM_AFK_DAEMON_PATH="$daemon" \
     FM_AFK_TEST_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" setsid bash -c '
     "$1" start
     printf "%s\n" "$$" > "$2/harness.pid"
-    while :; do sleep 0.1; done
+    trap "exit 0" TERM INT
+    exec 29<>"$3"
+    while :; do read -r -t 1 _ <&29 || :; done
   ' _ "$LAUNCH" "$state" \
+    "$dir/harness.wait" \
     >"$dir/harness.out" 2>"$dir/harness.err" &
   harness=$!
   AFK_TEST_PIDS+=("$harness")

@@ -842,6 +842,40 @@ test_serial_mode_remains_serial() {
   pass "FM_TEST_JOBS=1 preserves serial fixture execution"
 }
 
+test_supported_linux_test_reports_completion_and_reaps_cleanly() {
+  if [ "$(uname -s)" != Linux ]; then
+    pass "skip supported Linux behavior-test lifecycle regression outside Linux"
+    return
+  fi
+  local fixture output fixture_output rc
+  fixture=$(make_fixture_root supported-linux-lifecycle)
+  rm -f "$fixture/tests/fail-b.test.sh"
+  cat > "$fixture/tests/normal-child.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+(
+  printf 'child-complete\n' > "$FM_FIXTURE_OUTPUT_DIR/normal-child.complete"
+) &
+child=$!
+wait "$child"
+printf 'normal fixture pass\n'
+SH
+  chmod +x "$fixture/tests/normal-child.test.sh"
+  output="$TMP_ROOT/supported-linux-lifecycle.out"
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output")
+  rc=$?
+  set -u
+  expect_code 0 "$rc" "a normal supported Linux behavior test completes successfully"
+  assert_grep 'PASS: tests/normal-child.test.sh' "$output" \
+    "the normal supported Linux behavior test did not report completion"
+  [ -e "$fixture_output/normal-child.complete" ] \
+    || fail "the normal supported Linux behavior test did not reap its child"
+  assert_not_contains "$output" 'fail-closed exit 125' \
+    "the normal supported Linux behavior test failed closed"
+  pass "supported Linux behavior tests launch, report, and reap normally"
+}
+
 test_delta_overlay_contract_is_checked_and_portable() {
   local source
   source=$(cat "$HELPER" "$JOB_HELPER")
@@ -898,6 +932,7 @@ test_pre_control_open_teardown_is_bounded
 test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
+test_supported_linux_test_reports_completion_and_reaps_cleanly
 test_delta_overlay_contract_is_checked_and_portable
 test_lib_scrubs_ambient_herdr_for_hermetic_sources
 test_runner_honors_ambient_opt_in

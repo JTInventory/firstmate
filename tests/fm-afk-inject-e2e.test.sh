@@ -46,14 +46,56 @@ LOOP_SCRIPT=
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+cleanup_owned_sweeps() {
+  local proc pid cmdline
+  [ -d /proc ] || return 0
+  for proc in /proc/[0-9]*; do
+    pid=${proc##*/}
+    [ "$pid" != "$$" ] || continue
+    [ -r "$proc/cmdline" ] || continue
+    cmdline=$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)
+    case "$cmdline" in
+      *"$ROOT/bin/fm-isolation-sweep.sh"*)
+        kill -TERM "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
+cleanup_private_tmux() {
+  local pane_pids pane_pid pane_tick
+  pane_pids=$(
+    "$REAL_TMUX" -L "$SOCKET" list-panes -a -F '#{pane_pid}' 2>/dev/null || true
+  )
+  "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
+  for pane_pid in $pane_pids; do
+    kill -TERM "$pane_pid" 2>/dev/null || true
+  done
+  for ((pane_tick = 0; pane_tick < 100; pane_tick++)); do
+    local pane_alive=0
+    for pane_pid in $pane_pids; do
+      if kill -0 "$pane_pid" 2>/dev/null; then
+        pane_alive=1
+        break
+      fi
+    done
+    [ "$pane_alive" -eq 0 ] && break
+    sleep 0.01
+  done
+  for pane_pid in $pane_pids; do
+    kill -KILL "$pane_pid" 2>/dev/null || true
+  done
+}
+
 cleanup_all() {
   if [ -n "${DAEMON_PID:-}" ]; then
     afk_exit "${STATE_DIR:-}" 2>/dev/null || true
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
+  cleanup_owned_sweeps
   if [ -n "${SOCKET:-}" ] && [ -n "${REAL_TMUX:-}" ]; then
-    "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
+    cleanup_private_tmux
   fi
   rm -rf "${TMUX_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
@@ -195,6 +237,7 @@ stop_daemon() {
   afk_exit "$STATE_DIR" 2>/dev/null || true
   kill "$DAEMON_PID" 2>/dev/null || true
   wait "$DAEMON_PID" 2>/dev/null || true
+  cleanup_owned_sweeps
   DAEMON_PID=""
   sleep 1
 }
