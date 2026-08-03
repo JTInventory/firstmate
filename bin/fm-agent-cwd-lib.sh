@@ -110,6 +110,31 @@ fm_agent_environ() {
   fm_process_environment "$pid"
 }
 
+fm_agent_launch_receipt_matches_pid() {
+  local task=$1 home=$2 role=$3 pid=$4 receipt state start identity parent attempts=0
+  fm_agent_pid_is_numeric "$pid" || return 1
+  state="$home/state"
+  case "$role" in
+    crewmate) receipt="$state/.worker-launch-receipts/$task" ;;
+    secondmate) receipt="$state/.secondmate-launch-receipts/$task" ;;
+    *) return 1 ;;
+  esac
+  while [ "$attempts" -lt "$FM_AGENT_CWD_MAX_DESCEND" ] && [ "$pid" -gt 1 ]; do
+    start=$(fm_session_process_start "$pid" 2>/dev/null || true)
+    identity=$(fm_session_process_identity "$pid" 2>/dev/null || true)
+    if [ -n "$start" ] && [ -n "$identity" ] \
+      && fm_session_launch_receipt_validate \
+        "$receipt" "$task" "$home" "$pid" "$start" "$identity"; then
+      return 0
+    fi
+    parent=$(fm_agent_ppid "$pid" 2>/dev/null || true)
+    [ -n "$parent" ] && [ "$parent" != "$pid" ] || return 1
+    pid=$parent
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
 fm_agent_endpoint_identity_pid() {
   local task=$1 home=$2 role=$3 endpoint_pid=$4 candidate env candidate_home
   fm_agent_pid_is_numeric "$endpoint_pid" || return 2
@@ -120,6 +145,14 @@ fm_agent_endpoint_identity_pid() {
     [ -n "$candidate" ] || continue
     fm_agent_pid_is_numeric "$candidate" || continue
     env=$(fm_agent_environ "$candidate" 2>/dev/null) || continue
+    if [ -n "${FM_TEST_AGENT_PIDS:-}" ] \
+      && [ "${FM_TEST_PROCESS:-0}" = 1 ] \
+      && fm_session_test_authority_broker_present; then
+      :
+    else
+      fm_agent_launch_receipt_matches_pid "$task" "$home" "$role" \
+        "$candidate" || continue
+    fi
     [ "$(fm_agent_marker_value "$env" FM_AGENT_TASK 2>/dev/null || true)" = "$task" ] || continue
     candidate_home=$(fm_agent_marker_value "$env" FM_AGENT_OWNER_HOME 2>/dev/null || true)
     candidate_home=$(fm_agent_canonical_dir "$candidate_home" 2>/dev/null || true)
@@ -223,6 +256,12 @@ fm_agent_task_pid_index() {
       found=0
       continue
     }
+    if [ -z "${FM_TEST_AGENT_PIDS:-}" ] \
+      && ! fm_agent_launch_receipt_matches_pid "$task" "$home" "$role" "$pid"; then
+      printf '__FM_UNPROVEN__\t__FM_UNPROVEN__\tmalformed\t%s\n' "$pid"
+      found=0
+      continue
+    fi
     printf '%s\t%s\t%s\t%s\n' "$task" "$home" "$role" "$pid"
     found=0
   done

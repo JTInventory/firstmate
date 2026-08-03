@@ -2293,6 +2293,29 @@ else
     echo "error: final launch submission failed for $ID" >&2
     exit 1
   }
+  SPAWN_AUTHORITY_ENDPOINT_PID=$(fm_backend_foreground_process_pid \
+    "$BACKEND" "$SPAWN_ENDPOINT_TARGET" 2>/dev/null || true)
+  case "$SPAWN_AUTHORITY_ENDPOINT_PID" in
+    ''|*[!0-9]*)
+      echo "error: could not verify the exact launch process for $ID" >&2
+      exit 1
+      ;;
+  esac
+  SPAWN_AUTHORITY_ENDPOINT_START=$(fm_session_process_start \
+    "$SPAWN_AUTHORITY_ENDPOINT_PID") || exit 1
+  SPAWN_AUTHORITY_ENDPOINT_IDENTITY=$(fm_session_process_identity \
+    "$SPAWN_AUTHORITY_ENDPOINT_PID") || exit 1
+  SPAWN_AUTHORITY_LAUNCH_RECEIPT="$STATE/.worker-launch-receipts/$ID"
+  mkdir -p "${SPAWN_AUTHORITY_LAUNCH_RECEIPT%/*}" \
+    && [ -d "${SPAWN_AUTHORITY_LAUNCH_RECEIPT%/*}" ] \
+    && [ ! -L "${SPAWN_AUTHORITY_LAUNCH_RECEIPT%/*}" ] \
+    && fm_session_launch_receipt_write \
+      "$SPAWN_AUTHORITY_LAUNCH_RECEIPT" "$ID" "$WORKER_HOME" \
+      "$SPAWN_AUTHORITY_ENDPOINT_PID" "$SPAWN_AUTHORITY_ENDPOINT_START" \
+      "$SPAWN_AUTHORITY_ENDPOINT_IDENTITY" || {
+        echo "error: could not publish trusted launch receipt for $ID" >&2
+        exit 1
+      }
 fi
 SPAWN_SLOT_CLAIM_PUBLISHED=1
 HERDR_FLAT_ABORT_CLEANUP=0

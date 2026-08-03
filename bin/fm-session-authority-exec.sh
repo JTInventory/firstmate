@@ -53,6 +53,9 @@ enrollment_confirmed=
 enrollment_final_pending=0
 enrollment_ticket_data=
 enrollment_acceptance_data=
+enrollment_trusted_ticket_data=
+enrollment_trusted_acceptance_data=
+enrollment_trusted_consumer_key=
 enrollment_ticket=
 durable_recovery=
 durable_consumer_key=
@@ -139,6 +142,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+unset FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
+FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1
+export FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
 if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
   && ! fm_worker_secondmate_effective_scope_matches; then
   echo "error: secondmate scope does not match its declared owner home" >&2
@@ -277,11 +283,23 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
           "$confirmed_acceptance")" \
       && [ "$(sed -n '4s/^consumer-pid=//p' \
         "$confirmed_acceptance")" = "$$" ]; then
-      if fm_session_enrollment_final_write \
-        "${enrollment}.accepted.final" "$confirmed_acceptance" \
-        "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
-        "$(sed -n '6s/^consumer-public-key-sha256=//p' \
-          "$confirmed_acceptance")"; then
+      if [ -f "${enrollment}.accepted.final" ] \
+        && [ ! -L "${enrollment}.accepted.final" ] \
+        && fm_session_enrollment_final_validate \
+          "${enrollment}.accepted.final" \
+          "$(fm_session_sha256_file "$confirmed_acceptance")" \
+          "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
+          "$$" "$(fm_session_process_start "$$")" \
+          "${FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY:-}" \
+          "${FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256:-}" \
+        || fm_session_enrollment_final_write \
+          "${enrollment}.accepted.final" "$confirmed_acceptance" \
+          "$FM_SESSION_ENROLLMENT_SIGNER_PID" "$FM_SESSION_ENROLLMENT_NONCE" \
+          "$(sed -n '6s/^consumer-public-key-sha256=//p' \
+            "$confirmed_acceptance")"; then
+        enrollment_trusted_ticket_data=$enrollment_ticket_data
+        enrollment_trusted_acceptance_data=$enrollment_acceptance_data
+        enrollment_trusted_consumer_key=${FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY:-}
         authorized=1
       fi
     fi
@@ -368,6 +386,11 @@ elif [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
               && [ "$(sed -n '4s/^consumer-pid=//p' \
                   "${enrollment}.accepted")" = "$$" ]; then
               fm_session_enrollment_trace consumer-acceptance-revalidation pass 2>/dev/null || true
+              enrollment_trusted_ticket_data=$(openssl base64 -A < "$enrollment_ticket") \
+                || exit 1
+              enrollment_trusted_acceptance_data=$(openssl base64 -A < \
+                "${enrollment}.accepted") || exit 1
+              enrollment_trusted_consumer_key=${FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY:-}
               rm -f -- "$enrollment_ticket" || exit 1
               enrollment_ticket=
               authorized=1
@@ -412,13 +435,31 @@ fi
   echo "error: trusted session enrollment capability is missing or invalid" >&2
   exit 1
 }
-unset FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
-FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1
-export FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
 mkdir -p "$STATE" && [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
   echo "error: trusted session state directory is unavailable" >&2
   exit 1
 }
+if [ "$enrollment_final_pending" -eq 1 ]; then
+  fm_session_enrollment_acceptance_validate \
+      "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+      "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
+      "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
+      "$(sed -n '6s/^consumer-public-key-sha256=//p' \
+        "${enrollment}.accepted")" \
+    && [ "$(sed -n '4s/^consumer-pid=//p' \
+        "${enrollment}.accepted")" = "$$" ] \
+    && fm_session_enrollment_final_write \
+      "${enrollment}.accepted.final" "${enrollment}.accepted" \
+      "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
+      "$FM_SESSION_ENROLLMENT_NONCE" \
+      "$(sed -n '6s/^consumer-public-key-sha256=//p' \
+        "${enrollment}.accepted")" || {
+        fm_session_enrollment_trace consumer-final-written fail 2>/dev/null || true
+        echo "error: protected session authority launch finalization failed" >&2
+        exit 1
+      }
+  fm_session_enrollment_trace consumer-final-written pass 2>/dev/null || true
+fi
 enrollment_fd=${FM_SESSION_AUTHORITY_FD:-}
 durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
 if [ "$enrollment_fd" != 9 ] && ( : <&9 ) 2>/dev/null; then
@@ -595,6 +636,39 @@ FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
+if [ "${FM_AGENT_ROLE:-}" != secondmate ] \
+  && [ ! -e "$STATE/.primary-checkout" ] \
+  && [ ! -L "$STATE/.primary-checkout" ] \
+  && [ ! -e "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] \
+  && [ ! -e "$authority" ] && [ ! -L "$authority" ]; then
+  bootstrap_root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
+  bootstrap_owner=$(fm_session_lock_owner) || exit 1
+  bootstrap_checkout_tmp=$(mktemp "$STATE/.primary-checkout.XXXXXX") || exit 1
+  bootstrap_lock_tmp=$(mktemp "$STATE/.lock.XXXXXX") || {
+    rm -f "$bootstrap_checkout_tmp"
+    exit 1
+  }
+  bootstrap_authority_tmp=$(mktemp "$STATE/.session-authority.XXXXXX") || {
+    rm -f "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp"
+    exit 1
+  }
+  if chmod 600 "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp" \
+      "$bootstrap_authority_tmp" \
+    && printf '%s\n' "$bootstrap_root" > "$bootstrap_checkout_tmp" \
+    && printf '%s\n' "$bootstrap_owner" > "$bootstrap_lock_tmp" \
+    && fm_session_authority_write_file \
+      "$bootstrap_authority_tmp" "$$" "$bootstrap_owner" \
+      "$home_real" "$bootstrap_root" \
+    && mv "$bootstrap_checkout_tmp" "$STATE/.primary-checkout" \
+    && mv "$bootstrap_lock_tmp" "$STATE/.lock" \
+    && mv "$bootstrap_authority_tmp" "$authority"; then
+    :
+  else
+    rm -f "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp" \
+      "$bootstrap_authority_tmp"
+    exit 1
+  fi
+fi
 if fm_session_authority_socket_broker_present; then
   fm_session_enrollment_trace consumer-authority-broker pass 2>/dev/null || true
 else
@@ -604,24 +678,6 @@ else
     exit 1
   }
   fm_session_enrollment_trace consumer-durable-custodian pass 2>/dev/null || true
-fi
-if [ "$enrollment_final_pending" -eq 1 ]; then
-  fm_session_enrollment_acceptance_validate \
-      "${enrollment}.accepted" "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
-      "$FM_SESSION_ENROLLMENT_NONCE" "$FM_SESSION_ENROLLMENT_PUBLIC_KEY" \
-      "$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \
-      "$enrollment_consumer_digest" \
-    && [ "$(sed -n '4s/^consumer-pid=//p' \
-        "${enrollment}.accepted")" = "$$" ] \
-    && fm_session_enrollment_final_write \
-      "${enrollment}.accepted.final" "${enrollment}.accepted" \
-      "$FM_SESSION_ENROLLMENT_SIGNER_PID" \
-      "$FM_SESSION_ENROLLMENT_NONCE" "$enrollment_consumer_digest" || {
-        fm_session_enrollment_trace consumer-final-written fail 2>/dev/null || true
-        echo "error: protected session authority launch finalization failed" >&2
-        exit 1
-      }
-  fm_session_enrollment_trace consumer-final-written pass 2>/dev/null || true
 fi
 [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] || export FM_SESSION_AUTHORITY_FD
 [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \
@@ -719,6 +775,11 @@ start_child() {
   child_pgid=$(ps -o pgid= -p "$child_pid" 2>/dev/null | tr -d '[:space:]' || true)
 }
 set +e
+export -n FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED 2>/dev/null || true
+unset FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED FM_SESSION_ENROLLMENT_NONCE \
+  FM_SESSION_ENROLLMENT_PUBLIC_KEY FM_SESSION_ENROLLMENT_PUBLIC_SHA256 \
+  FM_SESSION_ENROLLMENT_SIGNER_PID FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY \
+  FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256
 start_child "$@"
 wait "$child_pid"
 status=$?

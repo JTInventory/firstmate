@@ -19,6 +19,7 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -181,14 +182,62 @@ def connected_peer_matches_record(
     )
 
 
+def verify_embedded_signature(
+    public_key: str, signature: str, body: bytes
+) -> bool:
+    try:
+        public_bytes = base64.b64decode(public_key, validate=True)
+        signature_bytes = base64.b64decode(signature, validate=True)
+    except (binascii.Error, UnicodeError):
+        return False
+    with tempfile.TemporaryDirectory(prefix="fm-authority-proof-") as directory:
+        root = Path(directory)
+        public_file = root / "public"
+        signature_file = root / "signature"
+        body_file = root / "body"
+        public_file.write_bytes(public_bytes)
+        signature_file.write_bytes(signature_bytes)
+        body_file.write_bytes(body)
+        result = subprocess.run(
+            [
+                "openssl", "dgst", "-sha256", "-verify", str(public_file),
+                "-signature", str(signature_file), str(body_file),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+
+
+def embedded_fields(
+    data: bytes, ordered: tuple[str, ...]
+) -> tuple[dict[str, str], list[bytes]]:
+    lines = data.splitlines(keepends=True)
+    if len(lines) != len(ordered) or not data.endswith(b"\n"):
+        raise ValueError("malformed enrollment proof")
+    fields: dict[str, str] = {}
+    for expected, line in zip(ordered, lines):
+        prefix = f"{expected}=".encode()
+        if not line.startswith(prefix) or expected in fields:
+            raise ValueError("malformed enrollment proof")
+        value = line[len(prefix):-1].decode("utf-8")
+        if not value or "\x00" in value or "\r" in value:
+            raise ValueError("malformed enrollment proof")
+        fields[expected] = value
+    return fields, lines
+
+
 def read_launch_evidence(
     fd: int, *, home: str, task: str, launch_script: str
 ) -> tuple[bytes, int, str, str]:
     with os.fdopen(os.dup(fd), "rb") as evidence:
-        key_line = evidence.readline()
-        receipt_line = evidence.readline()
-        if not key_line or not receipt_line or evidence.readline():
+        proof_lines = [evidence.readline() for _ in range(6)]
+        if any(not line for line in proof_lines) or evidence.readline():
             raise ValueError("malformed launch evidence")
+    key_line, receipt_line, ticket_line, accepted_line, final_line, consumer_line = (
+        proof_lines
+    )
     key_text = key_line.decode("ascii").strip()
     if len(key_text) < 64 or len(key_text) % 2:
         raise ValueError("malformed launch key")
@@ -239,6 +288,8 @@ def read_launch_evidence(
         raise ValueError("invalid launch receipt")
     if process_generation(launch_pid) != (fields["start"], fields["identity"]):
         raise ValueError("stale launch receipt")
+    if parent_pid(os.getpid()) != launch_pid:
+        raise ValueError("untrusted broker parent")
     if canonical(os.readlink(f"/proc/{launch_pid}/cwd")) != home:
         raise ValueError("wrong launch cwd")
     command = process_command(launch_pid)
@@ -272,6 +323,104 @@ def read_launch_evidence(
         or launch_environment.get("FM_SESSION_ENROLLMENT_NONCE") != fields["nonce"]
     ):
         raise ValueError("untrusted launch provenance")
+    try:
+        ticket = base64.b64decode(ticket_line.strip(), validate=True)
+        accepted = base64.b64decode(accepted_line.strip(), validate=True)
+        final = base64.b64decode(final_line.strip(), validate=True)
+        consumer_public_key = consumer_line.strip().decode("ascii")
+    except (binascii.Error, UnicodeError):
+        raise ValueError("malformed enrollment proof")
+    ticket_fields, ticket_lines = embedded_fields(
+        ticket,
+        (
+            "version", "role", "task", "home", "issuer-home",
+            "issuer-authority", "nonce", "broker-pid", "broker-start",
+            "broker-identity", "broker-script", "authority-fd",
+            "authority-descriptor", "signer-pid", "signer-start",
+            "signer-identity", "public-key", "public-key-sha256",
+            "endpoint-pid", "endpoint-start", "endpoint-identity", "signature",
+        ),
+    )
+    if (
+        ticket_fields["version"] != "5"
+        or ticket_fields["role"] != "secondmate"
+        or ticket_fields["task"] != task
+        or canonical(ticket_fields["home"]) != home
+        or canonical(ticket_fields["issuer-home"]) == home
+        or len(ticket_fields["nonce"]) != 64
+        or any(c not in "0123456789abcdef" for c in ticket_fields["nonce"])
+        or ticket_fields["endpoint-pid"] != str(launch_pid)
+        or ticket_fields["endpoint-start"] != fields["start"]
+        or ticket_fields["endpoint-identity"] != fields["identity"]
+        or ticket_fields["public-key-sha256"]
+        != hashlib.sha256(
+            base64.b64decode(ticket_fields["public-key"], validate=True)
+        ).hexdigest()
+        or not verify_embedded_signature(
+            ticket_fields["public-key"], ticket_fields["signature"],
+            b"".join(ticket_lines[:21]),
+        )
+    ):
+        raise ValueError("untrusted enrollment ticket")
+    issuer_authority = Path(canonical(ticket_fields["issuer-home"])) / "state" / ".session-authority"
+    if (
+        issuer_authority.is_symlink()
+        or not issuer_authority.is_file()
+        or ticket_fields["issuer-authority"]
+        != hashlib.sha256(issuer_authority.read_bytes()).hexdigest()
+    ):
+        raise ValueError("untrusted enrollment authority")
+    accepted_fields, accepted_lines = embedded_fields(
+        accepted,
+        (
+            "version", "signer-pid", "nonce", "consumer-pid", "consumer-start",
+            "consumer-public-key-sha256", "signature",
+        ),
+    )
+    if (
+        accepted_fields["version"] != "2"
+        or accepted_fields["signer-pid"] != ticket_fields["signer-pid"]
+        or accepted_fields["nonce"] != ticket_fields["nonce"]
+        or accepted_fields["consumer-pid"] != str(launch_pid)
+        or accepted_fields["consumer-start"] != fields["start"]
+        or not verify_embedded_signature(
+            ticket_fields["public-key"], accepted_fields["signature"],
+            b"".join(accepted_lines[:6]),
+        )
+    ):
+        raise ValueError("untrusted enrollment acceptance")
+    try:
+        consumer_key_bytes = base64.b64decode(consumer_public_key, validate=True)
+    except (binascii.Error, UnicodeError):
+        raise ValueError("malformed enrollment consumer key")
+    if hashlib.sha256(consumer_key_bytes).hexdigest() != \
+        accepted_fields["consumer-public-key-sha256"]:
+        raise ValueError("untrusted enrollment consumer key")
+    final_fields, final_lines = embedded_fields(
+        final,
+        (
+            "version", "stage", "signer-pid", "nonce", "consumer-pid",
+            "consumer-start", "acceptance-sha256", "consumer-public-key-sha256",
+            "signature",
+        ),
+    )
+    if (
+        final_fields["version"] != "2"
+        or final_fields["stage"] != "final"
+        or final_fields["signer-pid"] != accepted_fields["signer-pid"]
+        or final_fields["nonce"] != fields["nonce"]
+        or final_fields["consumer-pid"] != str(launch_pid)
+        or final_fields["consumer-start"] != fields["start"]
+        or final_fields["acceptance-sha256"]
+        != hashlib.sha256(accepted).hexdigest()
+        or final_fields["consumer-public-key-sha256"]
+        != accepted_fields["consumer-public-key-sha256"]
+        or not verify_embedded_signature(
+            consumer_public_key, final_fields["signature"],
+            b"".join(final_lines[:8]),
+        )
+    ):
+        raise ValueError("untrusted enrollment final receipt")
     return key, launch_pid, fields["start"], fields["identity"]
 
 

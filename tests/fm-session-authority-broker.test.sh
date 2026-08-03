@@ -39,6 +39,14 @@ test_process_identity() {
   printf 'exe:%s' "$(readlink "/proc/$1/exe")"
 }
 
+test_sha256_file() {
+  local output digest
+  output=$(openssl dgst -sha256 "$1" 2>/dev/null) || return 1
+  digest=${output##*= }
+  [ "${#digest}" -eq 64 ] || return 1
+  printf '%s\n' "$digest"
+}
+
 test_broker_client_deadline_covers_connect_and_send() {
   local source first_timeout connect second_timeout send
   source=$(sed -n '/^def client(/,/^def parse_args/p' "$BROKER")
@@ -140,6 +148,39 @@ PY
     fail "broker watchdog did not retain an unknown launch state"
   fi
   pass "broker watchdog retains authority on launch inspection failure"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_proof", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+read_fd, write_fd = os.pipe()
+try:
+    os.write(write_fd, b"00" * 32 + b"\nZmFrZS1zaWduZWQtcmVjZWlwdA==\n")
+finally:
+    os.close(write_fd)
+try:
+    broker.read_launch_evidence(
+        read_fd, home="/tmp/home", task="alpha",
+        launch_script="/tmp/home/bin/fm-session-authority-exec.sh",
+    )
+except ValueError:
+    pass
+else:
+    raise SystemExit("caller-supplied launch evidence bypassed enrollment proof")
+finally:
+    os.close(read_fd)
+PY
+  then
+    fail "broker accepted self-signed launch evidence without enrollment proof"
+  fi
+  pass "broker rejects self-signed launch evidence without enrollment proof"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
 import sys
@@ -619,6 +660,9 @@ fi
 prepare_launch() {
   local home=$1 launch_script
   local launch_start launch_identity receipt_body receipt_hmac nonce
+  local issuer signer_key signer_public signer_public_b64 signer_digest
+  local consumer_key consumer_public consumer_public_b64 consumer_digest
+  local issuer_digest ticket_body accepted_body accepted_digest final_body final_signature
   nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   launch_script="$home/bin/fm-session-authority-exec.sh"
   [ -z "$LAUNCH_PID" ] || kill "$LAUNCH_PID" 2>/dev/null || true
@@ -636,30 +680,47 @@ while :; do
   while IFS='|' read -r kind role request_home output <&7; do
     [ -n "\$output" ] || continue
     status=0
-    (
-      cd "\$request_home" || exit 1
-      case "\$kind" in
-        live|durable)
-          printf 'fixed-public-test-body' | env \\
-            FM_AGENT_ROLE="\$role" FM_AGENT_TASK=alpha \\
-            FM_AGENT_OWNER_HOME="\$request_home" \\
-            python3 "$BROKER" client --record "$RECORD" --kind "\$kind" >"\$output"
-          ;;
-        library)
-          printf 'library-public-test-body' | env \\
-            FM_HOME="\$request_home" FM_ROOT_OVERRIDE="$ROOT" \\
-            FM_AGENT_ROLE="\$role" FM_AGENT_TASK=alpha \\
-            FM_AGENT_OWNER_HOME="\$request_home" bash -c '
-              . "\$1/bin/fm-session-lock-lib.sh"
-              fm_session_authority_capability_present || exit 1
-              fm_session_authority_hmac
-            ' broker-library "$ROOT" >"\$output"
-          ;;
-        *)
-          status=1
-          ;;
-      esac
-    ) || status=1
+    case "\$kind" in
+      broker)
+        cd "\$request_home" || status=1
+        if [ "\$status" -eq 0 ]; then
+          exec 19< "\$request_home/state/.test-launch-evidence"
+          python3 "$BROKER" supervise --state "\$request_home/state" \\
+            --home "\$request_home" --checkout "$ROOT" --task alpha \\
+            --launch-evidence-fd 19 \\
+            --launch-script "$launch_script" >/dev/null 2>&1 &
+          broker_pid=\$!
+          exec 19<&-
+          printf '%s\n' "\$broker_pid" >"\$output"
+        fi
+        ;;
+      *)
+        (
+          cd "\$request_home" || exit 1
+          case "\$kind" in
+            live|durable)
+              printf 'fixed-public-test-body' | env \\
+                FM_AGENT_ROLE="\$role" FM_AGENT_TASK=alpha \\
+                FM_AGENT_OWNER_HOME="\$request_home" \\
+                python3 "$BROKER" client --record "$RECORD" --kind "\$kind" >"\$output"
+              ;;
+            library)
+              printf 'library-public-test-body' | env \\
+                FM_HOME="\$request_home" FM_ROOT_OVERRIDE="$ROOT" \\
+                FM_AGENT_ROLE="\$role" FM_AGENT_TASK=alpha \\
+                FM_AGENT_OWNER_HOME="\$request_home" bash -c '
+                  . "\$1/bin/fm-session-lock-lib.sh"
+                  fm_session_authority_capability_present || exit 1
+                  fm_session_authority_hmac
+                ' broker-library "$ROOT" >"\$output"
+              ;;
+            *)
+              status=1
+              ;;
+          esac
+        ) || status=1
+        ;;
+    esac
     printf '%s\n' "\$status" > "\$output.status"
   done
   exec 7<&-
@@ -677,6 +738,64 @@ SH
     || fail "authenticated launch fixture did not start"
   launch_identity=$(test_process_identity "$LAUNCH_PID") \
     || fail "authenticated launch fixture has no executable identity"
+  issuer="$TMP_ROOT/issuer"
+  mkdir -p "$issuer/state"
+  printf 'trusted-primary-authority\n' > "$issuer/state/.session-authority"
+  issuer_digest=$(test_sha256_file "$issuer/state/.session-authority") \
+    || fail "trusted fixture authority digest could not be computed"
+  signer_key="$issuer/state/.signer-key"
+  signer_public="$issuer/state/.signer-public"
+  consumer_key="$issuer/state/.consumer-key"
+  consumer_public="$issuer/state/.consumer-public"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$signer_key" \
+    2>/dev/null || fail "trusted fixture signer key could not be created"
+  openssl ec -in "$signer_key" -pubout -outform DER -out "$signer_public" \
+    2>/dev/null || fail "trusted fixture signer public key could not be created"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$consumer_key" \
+    2>/dev/null || fail "trusted fixture consumer key could not be created"
+  openssl ec -in "$consumer_key" -pubout -outform DER -out "$consumer_public" \
+    2>/dev/null || fail "trusted fixture consumer public key could not be created"
+  signer_public_b64=$(openssl base64 -A < "$signer_public")
+  signer_digest=$(test_sha256_file "$signer_public")
+  consumer_public_b64=$(openssl base64 -A < "$consumer_public")
+  consumer_digest=$(test_sha256_file "$consumer_public")
+  ticket_body=$(mktemp "$TMP_ROOT/ticket.XXXXXX")
+  ticket_signature=$(mktemp "$TMP_ROOT/ticket-signature.XXXXXX")
+  printf 'version=5\nrole=secondmate\ntask=alpha\nhome=%s\nissuer-home=%s\nissuer-authority=%s\nnonce=%s\nbroker-pid=2\nbroker-start=proc:broker\nbroker-identity=exe:broker\nbroker-script=%s\nauthority-fd=18\nauthority-descriptor=fixture\nsigner-pid=%s\nsigner-start=proc:signer\nsigner-identity=exe:signer\npublic-key=%s\npublic-key-sha256=%s\nendpoint-pid=%s\nendpoint-start=%s\nendpoint-identity=%s\n' \
+    "$home" "$issuer" "$issuer_digest" "$nonce" \
+    "$ROOT/bin/fm-session-authority-exec.sh" "$LAUNCH_PID" \
+    "$signer_public_b64" "$signer_digest" "$LAUNCH_PID" \
+    "$launch_start" "$launch_identity" > "$ticket_body"
+  openssl dgst -sha256 -sign "$signer_key" -out "$ticket_signature" \
+    "$ticket_body" 2>/dev/null || fail "trusted fixture ticket could not be signed"
+  printf '%s\nsignature=%s\n' "$(cat "$ticket_body")" \
+    "$(openssl base64 -A < "$ticket_signature")" \
+    > "$HOME_DIR/state/.test-enrollment-ticket"
+  accepted_body=$(mktemp "$TMP_ROOT/accepted.XXXXXX")
+  accepted_signature=$(mktemp "$TMP_ROOT/accepted-signature.XXXXXX")
+  printf 'version=2\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nconsumer-public-key-sha256=%s\n' \
+    "$LAUNCH_PID" "$nonce" "$LAUNCH_PID" "$launch_start" \
+    "$consumer_digest" > "$accepted_body"
+  openssl dgst -sha256 -sign "$signer_key" -out "$accepted_signature" \
+    "$accepted_body" 2>/dev/null || fail "trusted fixture acceptance could not be signed"
+  printf '%s\nsignature=%s\n' "$(cat "$accepted_body")" \
+    "$(openssl base64 -A < "$accepted_signature")" \
+    > "$HOME_DIR/state/.test-enrollment-accepted"
+  accepted_digest=$(test_sha256_file "$HOME_DIR/state/.test-enrollment-accepted")
+  final_body=$(mktemp "$TMP_ROOT/final.XXXXXX")
+  final_signature=$(mktemp "$TMP_ROOT/final-signature.XXXXXX")
+  printf 'version=2\nstage=final\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
+    "$LAUNCH_PID" "$nonce" "$LAUNCH_PID" "$launch_start" \
+    "$accepted_digest" "$consumer_digest" > "$final_body"
+  openssl dgst -sha256 -sign "$consumer_key" -out "$final_signature" \
+    "$final_body" 2>/dev/null || fail "trusted fixture final receipt could not be signed"
+  printf '%s\nsignature=%s\n' "$(cat "$final_body")" \
+    "$(openssl base64 -A < "$final_signature")" \
+    > "$HOME_DIR/state/.session-authority-enrollment.accepted.final"
+  TRUSTED_TICKET_B64=$(openssl base64 -A < "$HOME_DIR/state/.test-enrollment-ticket")
+  TRUSTED_ACCEPTANCE_B64=$(openssl base64 -A < "$HOME_DIR/state/.test-enrollment-accepted")
+  TRUSTED_FINAL_B64=$(openssl base64 -A < "$HOME_DIR/state/.session-authority-enrollment.accepted.final")
+  TRUSTED_CONSUMER_KEY_B64=$consumer_public_b64
   receipt_body=$(printf 'version=1\ntask=alpha\nhome=%s\npid=%s\nstart=%s\nidentity=%s\nnonce=%s' \
     "$home" "$LAUNCH_PID" "$launch_start" "$launch_identity" "$nonce")
   receipt_body="${receipt_body}"$'\n'
@@ -688,18 +807,24 @@ SH
 }
 
 start_broker() {
-  local evidence_fd receipt_b64 attempts=0
+  local evidence_fd receipt_b64 attempts=0 broker_output
   receipt_b64=$(openssl base64 -A < "$HOME_DIR/state/.session-authority-launch") \
     || fail "could not encode authenticated launch evidence"
-  exec {evidence_fd}< <(printf '%s\n%s\n' "$BROKER_KEY" "$receipt_b64")
-  python3 "$BROKER" supervise --state "$STATE" --home "$HOME_DIR" \
-    --checkout "$ROOT" --task alpha --launch-evidence-fd "$evidence_fd" \
-    --launch-script "$LAUNCH_SCRIPT" >/dev/null 2>&1 &
-  BROKER_PID=$!
-  eval "exec ${evidence_fd}<&-"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$BROKER_KEY" "$receipt_b64" "$TRUSTED_TICKET_B64" \
+    "$TRUSTED_ACCEPTANCE_B64" "$TRUSTED_FINAL_B64" \
+    "$TRUSTED_CONSUMER_KEY_B64" > "$HOME_DIR/state/.test-launch-evidence"
+  broker_output="$TMP_ROOT/broker-pid-$REQUEST_SEQUENCE"
+  REQUEST_SEQUENCE=$((REQUEST_SEQUENCE + 1))
+  printf 'broker|secondmate|%s|%s\n' "$HOME_DIR" "$broker_output" > "$REQUEST_FIFO"
   while [ "$attempts" -lt 100 ] && [ ! -f "$RECORD" ]; do
-    kill -0 "$BROKER_PID" 2>/dev/null \
-      || fail "authority broker exited before publishing its record"
+    if [ -f "$broker_output" ] && [ -z "$BROKER_PID" ]; then
+      BROKER_PID=$(cat "$broker_output")
+    fi
+    if [ -n "$BROKER_PID" ]; then
+      kill -0 "$BROKER_PID" 2>/dev/null \
+        || fail "authority broker exited before publishing its record"
+    fi
     sleep 0.02
     attempts=$((attempts + 1))
   done
@@ -1039,12 +1164,12 @@ if scoped_key == broker.derive_broker_durable_key(
     launch_script="/test/home/bin/fm-session-authority-exec.sh"
 ):
     raise SystemExit("broker durable capability was not home-bound")
-if scoped_key != broker.derive_broker_durable_key(
+if scoped_key == broker.derive_broker_durable_key(
     root_key, task="alpha", home="/test/home", launch_pid=99,
     launch_start="proc:y", launch_identity="exe:other",
     launch_script="/test/home/bin/fm-session-authority-exec.sh"
 ):
-    raise SystemExit("broker durable capability rotated with launch generation")
+    raise SystemExit("broker durable capability did not rotate with launch generation")
 PY
 then
   fail "the broker durable capability was not scoped to validated launch identity"

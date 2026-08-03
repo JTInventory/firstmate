@@ -389,10 +389,66 @@ fm_session_authority_broker_bootstrap() {
   export FM_SESSION_AUTHORITY_DURABLE_FD
 }
 
+fm_session_authority_wrapper_provenance_present() {
+  local source wrapper
+  [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" = 1 ] || return 1
+  wrapper="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
+  for source in "${BASH_SOURCE[@]}"; do
+    [ "$(cd "$(dirname "$source")" 2>/dev/null && pwd -P)/$(basename "$source")" = "$wrapper" ] || continue
+    return 0
+  done
+  return 1
+}
+
+fm_session_authority_record_capability_present() {
+  local home state authority fd key expected checkout broker broker_start broker_identity
+  fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  case "$fd" in ''|*[!0-9]*) return 1 ;; esac
+  fm_session_descriptor_channel_isolated "$fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  authority="$state/.session-authority"
+  checkout=$(cd "${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}" \
+    2>/dev/null && pwd -P) || return 1
+  fm_session_authority_read_shape "$authority" || return 1
+  [ "$FM_SESSION_AUTHORITY_PID" != "$$" ] || return 1
+  [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] || return 1
+  [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$checkout" ] || return 1
+  fm_session_authority_process_state "$authority" || return 1
+  fm_session_pid_is_current_ancestor "$FM_SESSION_AUTHORITY_PID" || return 1
+  broker=${FM_SESSION_AUTHORITY_BROKER_PID:-}
+  broker_start=${FM_SESSION_AUTHORITY_BROKER_START:-}
+  broker_identity=${FM_SESSION_AUTHORITY_BROKER_IDENTITY:-}
+  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$broker" != "$$" ] || return 1
+  fm_session_pid_is_current_ancestor "$broker" || return 1
+  [ "$(fm_session_process_start "$broker" 2>/dev/null || true)" = \
+    "$broker_start" ] || return 1
+  [ "$(fm_session_process_identity "$broker" 2>/dev/null || true)" = \
+    "$broker_identity" ] || return 1
+  fm_session_process_runs_script "$broker" \
+    "$checkout/bin/fm-session-authority-exec.sh" || return 1
+  IFS= read -r key <&"$fd" || return 1
+  expected=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$FM_SESSION_AUTHORITY_PID" "$FM_SESSION_AUTHORITY_START" \
+    "$FM_SESSION_AUTHORITY_IDENTITY" "$FM_SESSION_AUTHORITY_OWNER" \
+    "$FM_SESSION_AUTHORITY_HOME" "$FM_SESSION_AUTHORITY_CHECKOUT" \
+    | fm_session_hmac_sha256_key "$key") || return 1
+  [ "$FM_SESSION_AUTHORITY_TOKEN" = "$expected" ]
+}
+
+fm_session_authority_production_capability_present() {
+  fm_session_authority_wrapper_provenance_present && return 0
+  fm_session_authority_record_capability_present
+}
+
 fm_session_authority_socket_broker_start_locked() {
   local state=$1 home=$2 checkout=$3 task=$4 script pid attempts=0
   local launch_script launch_receipt launch_start launch_identity durable_fd
-  local launch_key receipt_b64 enrollment_nonce
+  local launch_key receipt_b64 enrollment_nonce enrollment_final_b64
+  local trusted_ticket trusted_acceptance trusted_consumer_key
   script="$checkout/bin/fm-session-authority-broker.py"
   launch_script="$home/bin/fm-session-authority-exec.sh"
   launch_receipt="$state/.session-authority-launch"
@@ -408,6 +464,16 @@ fm_session_authority_socket_broker_start_locked() {
   launch_identity=$(fm_session_process_identity "$$") || return 1
   enrollment_nonce=${FM_SESSION_ENROLLMENT_NONCE:-}
   [ "${#enrollment_nonce}" -eq 64 ] || return 1
+  trusted_ticket=${enrollment_trusted_ticket_data:-}
+  trusted_acceptance=${enrollment_trusted_acceptance_data:-}
+  trusted_consumer_key=${enrollment_trusted_consumer_key:-}
+  [ -n "$trusted_ticket" ] && [ -n "$trusted_acceptance" ] \
+    && [ -n "$trusted_consumer_key" ] || return 1
+  [ -f "$state/.session-authority-enrollment.accepted.final" ] \
+    && [ ! -L "$state/.session-authority-enrollment.accepted.final" ] || return 1
+  enrollment_final_b64=$(openssl base64 -A < \
+    "$state/.session-authority-enrollment.accepted.final" 2>/dev/null) || return 1
+  [ -n "$enrollment_final_b64" ] || return 1
   fm_session_launch_receipt_write "$launch_receipt" "$task" "$home" \
     "$$" "$launch_start" "$launch_identity" "$enrollment_nonce" || return 1
   fm_session_launch_receipt_validate "$launch_receipt" "$task" "$home" \
@@ -421,7 +487,9 @@ fm_session_authority_socket_broker_start_locked() {
   if ( : <&19 ) 2>/dev/null || ( : >&19 ) 2>/dev/null; then
     return 1
   fi
-  exec 19< <(printf '%s\n%s\n' "$launch_key" "$receipt_b64") || return 1
+  exec 19< <(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$launch_key" "$receipt_b64" "$trusted_ticket" "$trusted_acceptance" \
+    "$enrollment_final_b64" "$trusted_consumer_key") || return 1
   fm_session_descriptor_channel_isolated 19 || {
     exec 19<&-
     return 1
@@ -486,14 +554,16 @@ fm_session_authority_socket_broker_start() {
 fm_session_authority_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_FD:-}
   fm_session_authority_socket_broker_present && return 0
-  if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
-    fm_session_test_authority_broker_present || return 1
+  if fm_session_test_authority_broker_present; then
+    if ! fm_session_descriptor_channel_isolated "$fd"; then
+      FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
+      export FM_SESSION_AUTHORITY_FD
+    fi
+    fm_session_descriptor_channel_isolated \
+      "${FM_SESSION_AUTHORITY_FD:-}" || return 1
+    return 0
   fi
-  if ! fm_session_descriptor_channel_isolated "$fd"; then
-    fm_session_test_authority_broker_present || return 1
-    FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
-    export FM_SESSION_AUTHORITY_FD
-  fi
+  fm_session_authority_production_capability_present || return 1
   fm_session_descriptor_channel_isolated \
     "${FM_SESSION_AUTHORITY_FD:-}" \
     && fm_session_exec_descriptor_isolation_durable || return 1
@@ -2138,14 +2208,16 @@ fm_session_authority_hmac() {
 fm_session_authority_durable_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_socket_broker_present && return 0
-  if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
-    && [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" != 1 ]; then
-    fm_session_test_authority_broker_present || return 1
-  fi
-  if [ -z "$fd" ] && fm_session_test_authority_broker_present; then
-    fd=$FM_TEST_DURABLE_AUTHORITY_FD
+  if fm_session_test_authority_broker_present; then
+    [ -n "$fd" ] || fd=$FM_TEST_DURABLE_AUTHORITY_FD
     FM_SESSION_AUTHORITY_DURABLE_FD=$fd
     export FM_SESSION_AUTHORITY_DURABLE_FD
+    fm_session_descriptor_channel_isolated "$fd" || return 1
+    return 0
+  fi
+  fm_session_authority_production_capability_present || return 1
+  if [ -z "$fd" ]; then
+    return 1
   fi
   fm_session_descriptor_channel_isolated "$fd" \
     && fm_session_exec_descriptor_isolation_durable || return 1

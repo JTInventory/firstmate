@@ -405,9 +405,9 @@ test_secondmate_child_receives_only_its_own_home() {
     "$AUTHORITY_EXEC" | tail -1 | cut -d: -f1)
   ready_line=$(grep -n 'consumer-launch-ready pass' \
     "$AUTHORITY_EXEC" | tail -1 | cut -d: -f1)
-  [ "$descriptor_line" -lt "$final_line" ] \
-    && [ "$final_line" -lt "$ready_line" ] \
-    || fail "secondmate final enrollment receipt was published before authority setup completed"
+  [ "$final_line" -lt "$descriptor_line" ] \
+    && [ "$descriptor_line" -lt "$ready_line" ] \
+    || fail "secondmate final enrollment receipt was not published before broker setup"
   scope_line=$(grep -n 'fm_worker_secondmate_effective_scope_matches' \
     "$AUTHORITY_EXEC" | head -1 | cut -d: -f1)
   trace_line=$(grep -n 'mkdir -p "$STATE"' "$AUTHORITY_EXEC" \
@@ -1657,6 +1657,7 @@ test_authority_fds_require_sibling_proc_isolation() {
           exec 9<&-
           exec 18<&-
           unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+          fm_session_authority_production_capability_present() { return 0; }
           fm_session_authority_descriptor_create \
             && fm_session_authority_capability_present
         ) || fail "primary authority creation rejected isolated descriptors"
