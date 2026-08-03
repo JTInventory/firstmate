@@ -371,55 +371,47 @@ fm_session_authority_socket_broker_present() {
       </dev/null >/dev/null 2>&1
 }
 
-fm_session_authority_broker_recovery_capability_present() {
-  local fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
-  if [ -z "$fd" ] && fm_session_test_authority_broker_present; then
-    fd=$FM_TEST_DURABLE_AUTHORITY_FD
+fm_session_authority_broker_bootstrap() {
+  local key source wrapper
+  [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" = 1 ] || return 1
+  [ "${FM_AGENT_ROLE:-}" = secondmate ] || return 1
+  [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] || return 1
+  wrapper="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
+  for source in "${BASH_SOURCE[@]}"; do
+    [ "$(cd "$(dirname "$source")" 2>/dev/null && pwd -P)/$(basename "$source")" = "$wrapper" ] || continue
+    break
+  done
+  [ "${source:-}" = "$wrapper" ] || return 1
+  if ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
+    return 1
   fi
-  if [ -n "$fd" ]; then
-    FM_SESSION_AUTHORITY_DURABLE_FD=$fd
-    export FM_SESSION_AUTHORITY_DURABLE_FD
-  fi
-  fm_session_descriptor_channel_isolated "$fd" \
-    && fm_session_exec_descriptor_isolation_durable
+  fm_session_exec_descriptor_isolation_durable || return 1
+  key=$(fm_session_random_hex 48) || return 1
+  exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
+  unset key
+  fm_session_descriptor_channel_isolated 18 || {
+    exec 18<&-
+    return 1
+  }
+  FM_SESSION_AUTHORITY_DURABLE_FD=18
+  export FM_SESSION_AUTHORITY_DURABLE_FD
 }
 
-fm_session_authority_socket_broker_start() {
+fm_session_authority_socket_broker_start_locked() {
   local state=$1 home=$2 checkout=$3 task=$4 script record pid attempts=0
   local launch_script launch_receipt launch_start launch_identity durable_fd
-  local launch_key receipt_b64 evidence_fd recovery_lock recovery_status
+  local launch_key receipt_b64
   script="$checkout/bin/fm-session-authority-broker.py"
   record="$state/.session-authority-broker"
   launch_script="$home/bin/fm-session-authority-exec.sh"
   launch_receipt="$state/.session-authority-launch"
-  [ "${FM_AGENT_ROLE:-}" = secondmate ] \
-    && [ "${FM_AGENT_TASK:-}" = "$task" ] \
-    && [ "${FM_AGENT_OWNER_HOME:-}" = "$home" ] \
-    && command -v python3 >/dev/null 2>&1 \
-    && [ -f "$script" ] && [ ! -L "$script" ] \
-    && [ -f "$launch_script" ] && [ ! -L "$launch_script" ] \
-    && [ -f "$home/.fm-secondmate-home" ] \
-    && [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] \
-    || return 1
-  if [ -e "$record" ] || [ -L "$record" ]; then
-    if fm_session_authority_socket_broker_present; then
-      return 0
-    fi
-    fm_session_authority_broker_recovery_capability_present || return 1
-    if ! type fm_lock_try_acquire >/dev/null 2>&1; then
-      FM_WAKE_LIB_READ_ONLY=1
-      # shellcheck source=/dev/null
-      . "$_FM_SESSION_LOCK_LIB_DIR/fm-wake-lib.sh"
-    fi
-    recovery_lock="$state/.session-authority-broker-recovery.lock"
-    fm_lock_try_acquire "$recovery_lock" '' "$home" "$launch_script" || return 1
-    recovery_status=0
-    python3 "$script" recover-stale --record "$record" --home "$home" \
-      --checkout "$checkout" --task "$task" --script "$script" \
-      --launch-script "$launch_script" --lock "$recovery_lock" \
-      --authority-script "$launch_script" || recovery_status=$?
-    fm_lock_release "$recovery_lock" || recovery_status=1
-    [ "$recovery_status" -eq 0 ] || return "$recovery_status"
+  fm_session_authority_socket_broker_present && return 0
+  durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if ! fm_session_authority_durable_capability_present; then
+    [ -z "$durable_fd" ] || return 1
+    fm_session_authority_broker_bootstrap || return 1
+    durable_fd=$FM_SESSION_AUTHORITY_DURABLE_FD
+    fm_session_authority_durable_capability_present || return 1
   fi
   launch_start=$(fm_session_process_start "$$") || return 1
   launch_identity=$(fm_session_process_identity "$$") || return 1
@@ -433,23 +425,40 @@ fm_session_authority_socket_broker_start() {
   [ "${#launch_key}" -ge 64 ] || return 1
   case "$launch_key" in *[!0-9a-f]*) return 1 ;; esac
   receipt_b64=$(openssl base64 -A < "$launch_receipt" 2>/dev/null) || return 1
-  exec {evidence_fd}< <(printf '%s\n%s\n' "$launch_key" "$receipt_b64") || return 1
+  if ( : <&19 ) 2>/dev/null || ( : >&19 ) 2>/dev/null; then
+    return 1
+  fi
+  exec 19< <(printf '%s\n%s\n' "$launch_key" "$receipt_b64") || return 1
+  fm_session_descriptor_channel_isolated 19 || {
+    exec 19<&-
+    return 1
+  }
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    python3 "$script" recover-stale --record "$record" || {
+      exec 19<&-
+      return 1
+    }
+    [ ! -e "$record" ] && [ ! -L "$record" ] || {
+      exec 19<&-
+      return 1
+    }
+  fi
   if command -v setsid >/dev/null 2>&1; then
     setsid python3 "$script" serve --state "$state" --home "$home" \
       --checkout "$checkout" --task "$task" \
-      --launch-evidence-fd "$evidence_fd" --launch-script "$launch_script" \
+      --launch-evidence-fd 19 --launch-script "$launch_script" \
       </dev/null >/dev/null 2>&1 &
   elif command -v perl >/dev/null 2>&1; then
     perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
       python3 "$script" serve --state "$state" --home "$home" \
       --checkout "$checkout" --task "$task" \
-      --launch-evidence-fd "$evidence_fd" --launch-script "$launch_script" \
+      --launch-evidence-fd 19 --launch-script "$launch_script" \
       </dev/null >/dev/null 2>&1 &
   else
-    eval "exec ${evidence_fd}<&-"
+    exec 19<&-
     return 1
   fi
-  eval "exec ${evidence_fd}<&-"
+  exec 19<&-
   pid=$!
   while [ "$attempts" -lt 100 ]; do
     fm_session_authority_socket_broker_present && return 0
@@ -460,6 +469,35 @@ fm_session_authority_socket_broker_start() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   return 1
+}
+
+fm_session_authority_socket_broker_start() {
+  local state=$1 home=$2 checkout=$3 task=$4 script record launch_script
+  local recovery_lock status
+  script="$checkout/bin/fm-session-authority-broker.py"
+  record="$state/.session-authority-broker"
+  launch_script="$home/bin/fm-session-authority-exec.sh"
+  [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+    && [ "${FM_AGENT_TASK:-}" = "$task" ] \
+    && [ "${FM_AGENT_OWNER_HOME:-}" = "$home" ] \
+    && command -v python3 >/dev/null 2>&1 \
+    && [ -f "$script" ] && [ ! -L "$script" ] \
+    && [ -f "$launch_script" ] && [ ! -L "$launch_script" ] \
+    && [ -f "$home/.fm-secondmate-home" ] \
+    && [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] \
+    || return 1
+  if ! type fm_lock_try_acquire >/dev/null 2>&1; then
+    FM_WAKE_LIB_READ_ONLY=1
+    # shellcheck source=/dev/null
+    . "$_FM_SESSION_LOCK_LIB_DIR/fm-wake-lib.sh"
+  fi
+  recovery_lock="$state/.session-authority-broker-recovery.lock"
+  fm_lock_try_acquire "$recovery_lock" '' "$home" "$launch_script" || return 1
+  status=0
+  fm_session_authority_socket_broker_start_locked \
+    "$state" "$home" "$checkout" "$task" || status=$?
+  fm_lock_release "$recovery_lock" || status=1
+  return "$status"
 }
 
 fm_session_authority_capability_present() {

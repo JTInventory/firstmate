@@ -405,6 +405,8 @@ fi
   echo "error: trusted session enrollment capability is missing or invalid" >&2
   exit 1
 }
+unset FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
+FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1
 mkdir -p "$STATE" && [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
   echo "error: trusted session state directory is unavailable" >&2
   exit 1
