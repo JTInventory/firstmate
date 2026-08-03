@@ -294,6 +294,9 @@ def serve(args: argparse.Namespace) -> int:
     home = canonical(args.home)
     checkout = canonical(args.checkout)
     script = canonical(__file__)
+    implementation_checkout = canonical(str(Path(script).parent.parent))
+    if checkout != implementation_checkout:
+        return 1
     launch_script = canonical(args.launch_script)
     if canonical(str(state.parent)) != home or state.name != "state":
         return 1
@@ -320,6 +323,9 @@ def serve(args: argparse.Namespace) -> int:
     live_key = secrets.token_bytes(48)
     broker_uid = os.geteuid()
     broker_gid = os.getegid()
+    broker_pid = os.getpid()
+    broker_start = process_start(broker_pid)
+    broker_identity = process_identity(broker_pid)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stopping = False
 
@@ -334,7 +340,7 @@ def serve(args: argparse.Namespace) -> int:
     server.listen(16)
     server.settimeout(1.0)
     write_record(
-        record, pid=os.getpid(), socket_address=socket_address, home=home,
+        record, pid=broker_pid, socket_address=socket_address, home=home,
         checkout=checkout, task=args.task, script=script, launch_pid=launch_pid,
         launch_start=launch_start, launch_identity=launch_identity,
         launch_script=launch_script, uid=broker_uid, gid=broker_gid
@@ -344,14 +350,11 @@ def serve(args: argparse.Namespace) -> int:
             try:
                 connection, _ = server.accept()
             except socket.timeout:
-                if (
-                    not record.is_file()
-                    or record.is_symlink()
-                    or not Path(home).is_dir()
-                    or not launch_process_is_current(
-                        launch_pid, launch_start, launch_identity, launch_script
-                    )
-                ):
+                if not record.is_file() or record.is_symlink() or not Path(home).is_dir():
+                    break
+                if launch_process_state(
+                    launch_pid, launch_start, launch_identity, launch_script
+                ) == "dead":
                     break
                 continue
             except OSError:
@@ -391,10 +394,25 @@ def serve(args: argparse.Namespace) -> int:
             server.close()
         except OSError:
             pass
-        try:
-            record.unlink()
-        except OSError:
-            pass
+        unlink_owned_record(
+            record,
+            {
+                "pid": str(broker_pid),
+                "start": broker_start,
+                "identity": broker_identity,
+                "socket": socket_address,
+                "home": home,
+                "checkout": checkout,
+                "task": args.task,
+                "script": script,
+                "launch-pid": str(launch_pid),
+                "launch-start": launch_start,
+                "launch-identity": launch_identity,
+                "launch-script": launch_script,
+                "uid": str(broker_uid),
+                "gid": str(broker_gid),
+            },
+        )
     return 0
 
 
@@ -481,16 +499,32 @@ def process_generation_for_recovery(pid: int) -> tuple[str, str] | None:
     raise ValueError("unreadable process generation")
 
 
-def launch_process_is_current(
+def launch_process_state(
     pid: int, start: str, identity: str, launch_script: str
-) -> bool:
+) -> str:
     try:
-        if process_generation(pid) != (start, identity):
-            return False
-        command = process_command(pid)
-        return len(command) >= 2 and canonical(command[1]) == launch_script
+        generation = process_generation_for_recovery(pid)
     except (OSError, UnicodeError, ValueError):
-        return False
+        return "unknown"
+    if generation is None or generation != (start, identity):
+        return "dead"
+    try:
+        command = process_command(pid)
+    except (OSError, UnicodeError, ValueError):
+        return "unknown"
+    if len(command) >= 2 and canonical(command[1]) == launch_script:
+        return "current"
+    return "unknown"
+
+
+def unlink_owned_record(path: Path, expected: dict[str, str]) -> None:
+    try:
+        metadata = read_record_shape(path)
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            return
+        path.unlink()
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return
 
 
 def stop_recorded_broker(
@@ -531,17 +565,14 @@ def recover_stale(args: argparse.Namespace) -> int:
     try:
         metadata = read_record_shape(record)
         expected_home = canonical(metadata["home"])
-        expected_checkout = canonical(metadata["checkout"])
-        expected_script = canonical(metadata["script"])
+        expected_script = canonical(__file__)
+        expected_checkout = canonical(str(Path(expected_script).parent.parent))
         expected_launch_script = canonical(metadata["launch-script"])
         if (
             metadata["home"] != expected_home
             or metadata["checkout"] != expected_checkout
             or metadata["script"] != expected_script
             or metadata["launch-script"] != expected_launch_script
-            or expected_script != canonical(
-                f"{expected_checkout}/bin/fm-session-authority-broker.py"
-            )
             or expected_launch_script != canonical(
                 f"{expected_home}/bin/fm-session-authority-exec.sh"
             )

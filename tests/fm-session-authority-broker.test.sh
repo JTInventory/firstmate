@@ -118,6 +118,64 @@ PY
 
 if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
   test_broker_client_deadline_is_behavioral
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_watchdog", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+def unavailable(_pid):
+    raise OSError("unreadable process identity")
+
+broker.process_generation_for_recovery = unavailable
+if broker.launch_process_state(42, "proc:start", "exe:identity", "/authority-exec.sh") != "unknown":
+    raise SystemExit("watchdog treated inspection failure as process death")
+PY
+  then
+    fail "broker watchdog did not retain an unknown launch state"
+  fi
+  pass "broker watchdog retains authority on launch inspection failure"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_recovery", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    record = home / "state" / ".session-authority-broker"
+    record.parent.mkdir()
+    record.write_text("forged\n", encoding="utf-8")
+    metadata = {
+        "home": str(home),
+        "checkout": "/forged/checkout",
+        "script": "/forged/checkout/bin/fm-session-authority-broker.py",
+        "launch-script": str(home / "bin" / "fm-session-authority-exec.sh"),
+    }
+    broker.read_record_shape = lambda _path: metadata
+    broker.stop_recorded_broker = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("forged broker path reached termination")
+    )
+    status = broker.recover_stale(SimpleNamespace(record=str(record)))
+    if status != 1 or not record.exists():
+        raise SystemExit("recovery accepted mutable broker script metadata")
+PY
+  then
+    fail "stale recovery did not bind termination to the current broker script"
+  fi
+  pass "stale recovery rejects forged broker checkout metadata"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi
