@@ -37,7 +37,10 @@ QUARANTINE_PROOF_SUFFIX = ".proof"
 QUARANTINE_RECEIPT_TEMP_PREFIX = ".session-authority-broker.receipt-"
 QUARANTINE_IDENTITY_PREFIX = ".session-authority-broker.identity-"
 LOCK_MANAGER_TIMEOUT_SECONDS = 0.25
+LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS = 1.0
 MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS = 128
+MAX_LOCK_MANAGER_RESERVED_PENDING = 8
+MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING = 32
 MAX_LOCK_MANAGER_WAITERS = 128
 
 
@@ -416,9 +419,10 @@ def lock_manager_client(
 ) -> socket.socket | bool | None:
     root_key, launch_pid, launch_start, launch_identity = launch_evidence
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    deadline = time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
     try:
+        connection.settimeout(LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS)
         connection.connect(lock_manager_address(home, task, root_key))
+        deadline = time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
         nonce_line = recv_line(connection, deadline)
         if not nonce_line.startswith(b"nonce="):
             raise ValueError("malformed lock manager challenge")
@@ -445,13 +449,73 @@ def lock_manager_client(
         return None
 
 
+def process_has_ancestor(pid: int, ancestor: int) -> bool:
+    current = pid
+    visited: set[int] = set()
+    for _ in range(MAX_ANCESTRY_DEPTH):
+        if current == ancestor:
+            return True
+        if current <= 1 or current in visited:
+            return False
+        visited.add(current)
+        try:
+            current = parent_pid(current)
+        except (OSError, UnicodeError, ValueError):
+            return False
+    return False
+
+
+def lock_manager_peer_is_reserved(
+    connection: socket.socket, *, home: str, task: str,
+    launch_pid: int, launch_script: str
+) -> bool:
+    try:
+        credentials = connection.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+        )
+        pid, uid, gid = struct.unpack("3i", credentials)
+        if uid != os.geteuid() or gid != os.getegid():
+            return False
+        command = process_command(pid)
+        if (
+            len(command) < 3
+            or canonical(command[1]) != canonical(__file__)
+            or command[2] not in {"serve", "supervise", "recover-stale"}
+            or not process_has_ancestor(pid, launch_pid)
+        ):
+            return False
+        options: dict[str, str] = {}
+        index = 3
+        while index + 1 < len(command):
+            name = command[index]
+            if not name.startswith("--"):
+                return False
+            options[name] = command[index + 1]
+            index += 2
+        if command[2] == "recover-stale":
+            return canonical(options.get("--record", "")) == canonical(
+                f"{home}/state/.session-authority-broker"
+            )
+        return (
+            canonical(options.get("--state", "")) == canonical(f"{home}/state")
+            and canonical(options.get("--home", "")) == home
+            and canonical(options.get("--checkout", ""))
+            == canonical(str(Path(__file__).parent.parent))
+            and options.get("--task") == task
+            and canonical(options.get("--launch-script", ""))
+            == canonical(launch_script)
+        )
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
 def lock_manager_serve(
     *, home: str, task: str, launch_script: str,
     launch_evidence: tuple[bytes, int, str, str]
 ) -> None:
     root_key, launch_pid, launch_start, launch_identity = launch_evidence
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    pending: dict[socket.socket, tuple[float, bytes, bytearray]] = {}
+    pending: dict[socket.socket, tuple[float, bytes, bytearray, bool]] = {}
     waiters: list[socket.socket] = []
     owner: socket.socket | None = None
 
@@ -479,7 +543,10 @@ def lock_manager_serve(
 
     try:
         server.bind(lock_manager_address(home, task, root_key))
-        server.listen(MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS)
+        server.listen(
+            MAX_LOCK_MANAGER_RESERVED_PENDING
+            + MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING
+        )
         server.setblocking(False)
         context = lock_manager_context(
             home, task, launch_pid, launch_start, launch_identity, launch_script
@@ -491,7 +558,7 @@ def lock_manager_serve(
             ) == "dead":
                 return
             now = time.monotonic()
-            for connection, (deadline, _, _) in list(pending.items()):
+            for connection, (deadline, _, _, _) in list(pending.items()):
                 if deadline <= now:
                     pending.pop(connection, None)
                     close_connection(connection)
@@ -501,27 +568,42 @@ def lock_manager_serve(
             readers.extend(waiters)
             readable, _, _ = select.select(readers, [], [], 0.05)
             if server in readable:
-                try:
-                    connection, _ = server.accept()
+                for _ in range(MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS):
+                    try:
+                        connection, _ = server.accept()
+                    except (BlockingIOError, OSError):
+                        break
                     connection.setblocking(False)
-                    if len(pending) >= MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS:
-                        oldest = next(iter(pending))
-                        pending.pop(oldest, None)
-                        close_connection(oldest)
+                    reserved = lock_manager_peer_is_reserved(
+                        connection, home=home, task=task,
+                        launch_pid=launch_pid, launch_script=launch_script
+                    )
+                    reserved_count = sum(
+                        value[3] for value in pending.values()
+                    )
+                    unauthenticated_count = len(pending) - reserved_count
+                    if (
+                        reserved and reserved_count >= MAX_LOCK_MANAGER_RESERVED_PENDING
+                    ) or (
+                        not reserved
+                        and unauthenticated_count
+                        >= MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING
+                    ):
+                        close_connection(connection)
+                        continue
                     nonce = secrets.token_bytes(32).hex().encode("ascii")
                     if not send_response(connection, b"nonce=" + nonce + b"\n"):
                         continue
                     pending[connection] = (
-                        now + LOCK_MANAGER_TIMEOUT_SECONDS,
+                        time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS,
                         nonce,
                         bytearray(),
+                        reserved,
                     )
-                except (BlockingIOError, OSError):
-                    pass
             for connection in list(pending):
                 if connection not in readable or connection not in pending:
                     continue
-                deadline, nonce, buffer = pending[connection]
+                deadline, nonce, buffer, _ = pending[connection]
                 if time.monotonic() >= deadline:
                     pending.pop(connection, None)
                     close_connection(connection)
@@ -1135,37 +1217,60 @@ def write_quarantine_receipt(
         raise
 
 
-def quarantine_receipt_matches(
-    quarantine: Path, metadata: dict[str, str] | None, key: bytes
-) -> bool:
+def quarantine_receipt_fields(
+    quarantine: Path, key: bytes
+) -> dict[str, str] | None:
     receipt_path = quarantine.with_name(
         quarantine.name + QUARANTINE_RECEIPT_SUFFIX
     )
     try:
-        lines = receipt_path.read_text(encoding="ascii").splitlines(keepends=True)
-        if len(lines) != 7 or any(not line.endswith("\n") for line in lines):
-            return False
+        lines = receipt_path.read_bytes().splitlines(keepends=True)
+        if len(lines) != 7 or any(not line.endswith(b"\n") for line in lines):
+            return None
         fields: dict[str, str] = {}
         for line in lines:
-            if "=" not in line:
-                return False
-            name, value = line[:-1].split("=", 1)
+            name, separator, value = line[:-1].partition(b"=")
+            if not separator:
+                return None
+            name = name.decode("ascii")
+            value = value.decode("ascii")
             if not name or name in fields:
-                return False
+                return None
             fields[name] = value
         if set(fields) != {
             "version", "name", "proof", "dev", "ino", "metadata", "hmac"
         }:
-            return False
+            return None
         if fields["version"] != "1" or fields["name"] != quarantine.name:
-            return False
+            return None
         proof = quarantine.with_name(quarantine.name + QUARANTINE_PROOF_SUFFIX)
         if fields["proof"] != proof.name:
-            return False
-        body = "".join(line for line in lines[:6]).encode("utf-8")
+            return None
+        body = b"".join(lines[:6])
         expected_hmac = hmac.new(key, body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(fields["hmac"], expected_hmac):
-            return False
+            return None
+        if int(fields["dev"]) < 0 or int(fields["ino"]) < 0:
+            return None
+        if len(fields["metadata"]) != 64 or any(
+            value not in "0123456789abcdef" for value in fields["metadata"]
+        ):
+            return None
+        return fields
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def quarantine_receipt_matches(
+    quarantine: Path, metadata: dict[str, str] | None, key: bytes
+) -> bool:
+    fields = quarantine_receipt_fields(quarantine, key)
+    if fields is None:
+        return False
+    try:
+        proof = quarantine.with_name(
+            quarantine.name + QUARANTINE_PROOF_SUFFIX
+        )
         if metadata is not None and fields["metadata"] != record_metadata_digest(metadata):
             return False
         try:
@@ -1202,31 +1307,28 @@ def cleanup_one_recovery_quarantine(
     proof = path.with_name(path.name + QUARANTINE_PROOF_SUFFIX)
     receipt = path.with_name(path.name + QUARANTINE_RECEIPT_SUFFIX)
     try:
+        fields = quarantine_receipt_fields(path, key)
+        authenticated = fields is not None
         if not path.exists() and not path.is_symlink():
-            if record.exists() and not record.is_symlink() and proof.exists():
-                record_stat = record.lstat()
-                proof_stat = proof.lstat()
-                if (
-                    proof_stat.st_dev == record_stat.st_dev
-                    and proof_stat.st_ino == record_stat.st_ino
-                ) and (
-                    not receipt.exists()
-                    or quarantine_receipt_matches(path, None, key)
-                ):
-                    proof.unlink()
-                    try:
-                        receipt.unlink()
-                    except FileNotFoundError:
-                        pass
-                    return True
-            if receipt.exists() and quarantine_receipt_matches(path, None, key):
+            if authenticated:
+                if not quarantine_receipt_matches(path, None, key):
+                    return False
                 try:
                     proof.unlink()
                 except FileNotFoundError:
                     pass
-                receipt.unlink()
+                try:
+                    receipt.unlink()
+                except FileNotFoundError:
+                    pass
                 return True
-            return not proof.exists() and not receipt.exists()
+            if proof.exists():
+                proof.unlink()
+            return True
+        if path.is_symlink():
+            return not authenticated
+        if not authenticated and not proof.exists():
+            return True
         os.link(path, identity, follow_symlinks=False)
         identity_stat = identity.lstat()
         current_stat = path.lstat()
@@ -1236,34 +1338,25 @@ def cleanup_one_recovery_quarantine(
             or identity_stat.st_ino != current_stat.st_ino
             or any(metadata.get(name) != value for name, value in expected.items())
         ):
-            return False
-        complete = quarantine_receipt_matches(path, metadata, key)
-        record_matches = False
-        if record.exists() and not record.is_symlink():
-            record_stat = record.lstat()
-            record_matches = (
-                record_stat.st_dev == current_stat.st_dev
-                and record_stat.st_ino == current_stat.st_ino
-            )
-        if not complete and not receipt.exists() and proof.exists():
-            proof_stat = proof.lstat()
-            if (
-                proof_stat.st_dev == current_stat.st_dev
-                and proof_stat.st_ino == current_stat.st_ino
-            ):
-                write_quarantine_receipt(
-                    path, metadata, proof, key, quarantine_stat=current_stat
-                )
-                complete = True
-        if not complete and (receipt.exists() or not record_matches):
-            return False
-        if proof.exists() and not complete:
+            return not authenticated
+        if authenticated:
+            if not proof.exists():
+                os.link(path, proof, follow_symlinks=False)
+            if not quarantine_receipt_matches(path, metadata, key):
+                return False
+        else:
             proof_stat = proof.lstat()
             if (
                 proof_stat.st_dev != current_stat.st_dev
                 or proof_stat.st_ino != current_stat.st_ino
             ):
-                return False
+                return True
+            try:
+                write_quarantine_receipt(
+                    path, metadata, proof, key, quarantine_stat=current_stat
+                )
+            except (OSError, UnicodeError, ValueError):
+                return True
         path.unlink()
         try:
             proof.unlink()
@@ -1275,7 +1368,11 @@ def cleanup_one_recovery_quarantine(
             pass
         return True
     except FileNotFoundError:
-        if not path.exists() and receipt.exists() and quarantine_receipt_matches(path, None, key):
+        if (
+            not path.exists()
+            and quarantine_receipt_fields(path, key) is not None
+            and quarantine_receipt_matches(path, None, key)
+        ):
             try:
                 proof.unlink()
             except FileNotFoundError:
@@ -1321,22 +1418,18 @@ def cleanup_recovery_quarantines(
             except OSError:
                 pass
     remaining = sorted(path.parent.glob(f".{path.name}.recovery-*"))
-    quarantine_count = sum(
-        not candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
-        and not candidate.name.endswith(QUARANTINE_PROOF_SUFFIX)
+    authenticated = {
+        candidate.name.removesuffix(QUARANTINE_RECEIPT_SUFFIX)
         for candidate in remaining
-    )
-    return (
-        not any(
-            candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
-            for candidate in remaining
-        )
-        and not any(
-            candidate.name.endswith(QUARANTINE_PROOF_SUFFIX)
-            for candidate in remaining
-        )
-        and quarantine_count <= MAX_RECOVERY_QUARANTINES
-    )
+        if candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
+        and quarantine_receipt_fields(
+            candidate.with_name(
+                candidate.name.removesuffix(QUARANTINE_RECEIPT_SUFFIX)
+            ),
+            key,
+        ) is not None
+    }
+    return len(authenticated) <= MAX_RECOVERY_QUARANTINES and not authenticated
 
 
 def unlink_owned_record(
@@ -1379,19 +1472,51 @@ def unlink_owned_record(
             receipt = quarantine.with_name(
                 quarantine.name + QUARANTINE_RECEIPT_SUFFIX
             )
+            proof_created = False
+            receipt_created = False
             try:
                 os.link(path, proof, follow_symlinks=False)
-                write_quarantine_receipt(
-                    quarantine,
-                    metadata,
-                    proof,
-                    quarantine_key,
-                    quarantine_stat=initial_stat,
-                )
+                proof_created = True
+                try:
+                    write_quarantine_receipt(
+                        quarantine,
+                        metadata,
+                        proof,
+                        quarantine_key,
+                        quarantine_stat=initial_stat,
+                    )
+                    receipt_created = True
+                except BaseException:
+                    if proof_created:
+                        try:
+                            proof.unlink()
+                        except OSError:
+                            pass
+                    raise
                 rename_noreplace(path, quarantine)
             except FileExistsError:
+                if receipt_created:
+                    try:
+                        receipt.unlink()
+                    except OSError:
+                        pass
+                if proof_created:
+                    try:
+                        proof.unlink()
+                    except OSError:
+                        pass
                 continue
             except FileNotFoundError:
+                if receipt_created:
+                    try:
+                        receipt.unlink()
+                    except OSError:
+                        pass
+                if proof_created:
+                    try:
+                        proof.unlink()
+                    except OSError:
+                        pass
                 return False
             try:
                 quarantined_stat = quarantine.lstat()

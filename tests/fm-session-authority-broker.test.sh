@@ -268,6 +268,13 @@ if any(
     for marker in ("connection_slots", "BoundedSemaphore", "threading.Thread")
 ):
     raise SystemExit("lock manager still creates unbounded pre-auth admission work")
+client = source[source.index("def lock_manager_client("):source.index("def process_has_ancestor(")]
+if "connection.settimeout(LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS)" not in client:
+    raise SystemExit("lock manager connect is not bounded")
+if client.index("settimeout(LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS)") > client.index("connection.connect("):
+    raise SystemExit("lock manager connect timeout is applied too late")
+if "MAX_LOCK_MANAGER_RESERVED_PENDING" not in source:
+    raise SystemExit("lock manager has no reserved authenticated admission")
 handoff = source[source.index("def supervise("):source.index("def serve_locked(")]
 transfer = handoff.index("if record_lock_fd.fileno()")
 if "record_lock_fd = None" in handoff[transfer:]:
@@ -472,6 +479,33 @@ with TemporaryDirectory() as temporary:
     ) or not forged.exists():
         raise SystemExit("unproven quarantine was removed")
     forged.unlink()
+    proof_only = record.parent / f".{record.name}.recovery-proof-only"
+    proof_only.write_text("old\n", encoding="utf-8")
+    proof_only_marker = proof_only.with_name(
+        proof_only.name + broker.QUARANTINE_PROOF_SUFFIX
+    )
+    os.link(proof_only, proof_only_marker)
+    proof_only.unlink()
+    record.write_text("replacement\n", encoding="utf-8")
+    if not broker.cleanup_recovery_quarantines(
+        record,
+        {"home": "/home"},
+        b"review-quarantine-key",
+    ) or proof_only_marker.exists() or not record.exists():
+        raise SystemExit("proof-only quarantine was not recovered safely")
+    for index in range(broker.MAX_RECOVERY_QUARANTINES + 1):
+        forged_marker = record.parent / f".{record.name}.recovery-forged-{index}"
+        forged_marker.write_text("forged\n", encoding="utf-8")
+        if index == 0:
+            forged_marker.with_name(
+                forged_marker.name + broker.QUARANTINE_RECEIPT_SUFFIX
+            ).write_text("forged\n", encoding="utf-8")
+    if not broker.cleanup_recovery_quarantines(
+        record,
+        {"home": "/home"},
+        b"review-quarantine-key",
+    ):
+        raise SystemExit("untrusted quarantine names exhausted recovery")
 PY
   then
     fail "stale record deletion did not use atomic quarantine"
