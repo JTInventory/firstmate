@@ -22,7 +22,6 @@ import stat
 import struct
 import sys
 import tempfile
-import threading
 import time
 
 
@@ -38,6 +37,8 @@ QUARANTINE_PROOF_SUFFIX = ".proof"
 QUARANTINE_RECEIPT_TEMP_PREFIX = ".session-authority-broker.receipt-"
 QUARANTINE_IDENTITY_PREFIX = ".session-authority-broker.identity-"
 LOCK_MANAGER_TIMEOUT_SECONDS = 0.25
+MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS = 128
+MAX_LOCK_MANAGER_WAITERS = 128
 
 
 def canonical(value: str) -> str:
@@ -444,101 +445,169 @@ def lock_manager_client(
         return None
 
 
-def lock_manager_handle_connection(
-    connection: socket.socket, *, root_key: bytes, context: bytes,
-    launch_pid: int, launch_start: str, launch_identity: str,
-    launch_script: str, lease_lock: threading.Lock
-) -> None:
-    with connection:
-        try:
-            connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
-            nonce = secrets.token_bytes(32).hex().encode("ascii")
-            connection.sendall(b"nonce=" + nonce + b"\n")
-            deadline = time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
-            auth_line = recv_line(connection, deadline)
-            mode_line = recv_line(connection, deadline)
-            if not auth_line.startswith(b"auth=") or not mode_line.startswith(b"mode="):
-                raise ValueError("malformed lock manager authentication")
-            tag = auth_line[len(b"auth="):-1]
-            mode = mode_line[len(b"mode="):-1].decode("ascii")
-            expected_tag = hmac.new(
-                root_key, b"lock\0" + context + b"\0" + nonce,
-                hashlib.sha256,
-            ).hexdigest().encode("ascii")
-            if not hmac.compare_digest(tag, expected_tag):
-                connection.sendall(b"DENIED\n")
-                return
-            if mode == "probe":
-                connection.sendall(b"READY\n")
-                return
-            if mode not in {"try", "wait"}:
-                raise ValueError("invalid lock manager mode")
-            acquired = lease_lock.acquire(mode == "wait")
-            if not acquired:
-                connection.sendall(b"BUSY\n")
-                return
-            try:
-                if launch_process_state(
-                    launch_pid, launch_start, launch_identity, launch_script
-                ) == "dead":
-                    return
-                connection.sendall(b"READY\n")
-                while True:
-                    if launch_process_state(
-                        launch_pid, launch_start, launch_identity, launch_script
-                    ) == "dead":
-                        return
-                    readable, _, _ = select.select([connection], [], [], 0.25)
-                    if not readable:
-                        continue
-                    release = connection.recv(256)
-                    if not release or release == b"RELEASE\n":
-                        break
-                    raise ValueError("invalid lock manager release")
-            finally:
-                lease_lock.release()
-        except (OSError, UnicodeError, ValueError, TimeoutError):
-            return
-
-
 def lock_manager_serve(
     *, home: str, task: str, launch_script: str,
     launch_evidence: tuple[bytes, int, str, str]
 ) -> None:
     root_key, launch_pid, launch_start, launch_identity = launch_evidence
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    lease_lock = threading.Lock()
+    pending: dict[socket.socket, tuple[float, bytes, bytearray]] = {}
+    waiters: list[socket.socket] = []
+    owner: socket.socket | None = None
+
+    def close_connection(connection: socket.socket) -> None:
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+    def send_response(connection: socket.socket, response: bytes) -> bool:
+        try:
+            connection.sendall(response)
+            return True
+        except OSError:
+            close_connection(connection)
+            return False
+
+    def grant_waiter() -> socket.socket | None:
+        while waiters:
+            candidate = waiters.pop(0)
+            if send_response(candidate, b"READY\n"):
+                return candidate
+            close_connection(candidate)
+        return None
+
     try:
         server.bind(lock_manager_address(home, task, root_key))
-        server.listen(16)
-        server.settimeout(0.25)
+        server.listen(MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS)
+        server.setblocking(False)
         context = lock_manager_context(
             home, task, launch_pid, launch_start, launch_identity, launch_script
         )
         while True:
+            new_owner: socket.socket | None = None
             if launch_process_state(
                 launch_pid, launch_start, launch_identity, launch_script
             ) == "dead":
                 return
-            try:
-                connection, _ = server.accept()
-            except socket.timeout:
-                continue
-            threading.Thread(
-                target=lock_manager_handle_connection,
-                args=(connection,),
-                kwargs={
-                    "root_key": root_key,
-                    "context": context,
-                    "launch_pid": launch_pid,
-                    "launch_start": launch_start,
-                    "launch_identity": launch_identity,
-                    "launch_script": launch_script,
-                    "lease_lock": lease_lock,
-                },
-                daemon=True,
-            ).start()
+            now = time.monotonic()
+            for connection, (deadline, _, _) in list(pending.items()):
+                if deadline <= now:
+                    pending.pop(connection, None)
+                    close_connection(connection)
+            readers = [server, *pending]
+            if owner is not None:
+                readers.append(owner)
+            readers.extend(waiters)
+            readable, _, _ = select.select(readers, [], [], 0.05)
+            if server in readable:
+                try:
+                    connection, _ = server.accept()
+                    connection.setblocking(False)
+                    if len(pending) >= MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS:
+                        oldest = next(iter(pending))
+                        pending.pop(oldest, None)
+                        close_connection(oldest)
+                    nonce = secrets.token_bytes(32).hex().encode("ascii")
+                    if not send_response(connection, b"nonce=" + nonce + b"\n"):
+                        continue
+                    pending[connection] = (
+                        now + LOCK_MANAGER_TIMEOUT_SECONDS,
+                        nonce,
+                        bytearray(),
+                    )
+                except (BlockingIOError, OSError):
+                    pass
+            for connection in list(pending):
+                if connection not in readable or connection not in pending:
+                    continue
+                deadline, nonce, buffer = pending[connection]
+                if time.monotonic() >= deadline:
+                    pending.pop(connection, None)
+                    close_connection(connection)
+                    continue
+                try:
+                    chunk = connection.recv(512)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    pending.pop(connection, None)
+                    close_connection(connection)
+                    continue
+                if not chunk:
+                    pending.pop(connection, None)
+                    close_connection(connection)
+                    continue
+                buffer.extend(chunk)
+                if len(buffer) > 512 or buffer.count(b"\n") < 2:
+                    continue
+                lines = buffer.split(b"\n", 2)
+                auth_line = lines[0] + b"\n"
+                mode_line = lines[1] + b"\n"
+                pending.pop(connection, None)
+                if not auth_line.startswith(b"auth=") or not mode_line.startswith(b"mode="):
+                    send_response(connection, b"DENIED\n")
+                    close_connection(connection)
+                    continue
+                tag = auth_line[len(b"auth="):-1]
+                try:
+                    mode = mode_line[len(b"mode="):-1].decode("ascii")
+                except UnicodeError:
+                    mode = ""
+                expected_tag = hmac.new(
+                    root_key, b"lock\0" + context + b"\0" + nonce,
+                    hashlib.sha256,
+                ).hexdigest().encode("ascii")
+                if not hmac.compare_digest(tag, expected_tag):
+                    send_response(connection, b"DENIED\n")
+                    close_connection(connection)
+                    continue
+                if mode == "probe":
+                    send_response(connection, b"READY\n")
+                    close_connection(connection)
+                    continue
+                if mode not in {"try", "wait"}:
+                    close_connection(connection)
+                    continue
+                if owner is None:
+                    if send_response(connection, b"READY\n"):
+                        owner = connection
+                        new_owner = connection
+                    else:
+                        close_connection(connection)
+                elif mode == "try" or len(waiters) >= MAX_LOCK_MANAGER_WAITERS:
+                    send_response(connection, b"BUSY\n")
+                    close_connection(connection)
+                else:
+                    waiters.append(connection)
+            if owner is not None and owner in readable and owner is not new_owner:
+                try:
+                    owner.recv(256)
+                except (BlockingIOError, OSError):
+                    pass
+                close_connection(owner)
+                owner = grant_waiter()
+                new_owner = owner
+            for connection in list(waiters):
+                if connection not in readable or connection is owner:
+                    continue
+                try:
+                    if connection.recv(256):
+                        close_connection(connection)
+                        waiters.remove(connection)
+                    else:
+                        close_connection(connection)
+                        waiters.remove(connection)
+                except (BlockingIOError, OSError):
+                    close_connection(connection)
+                    waiters.remove(connection)
     finally:
+        for connection in pending:
+            close_connection(connection)
+        for connection in waiters:
+            close_connection(connection)
+        if owner is not None:
+            close_connection(owner)
         server.close()
 
 
@@ -1586,9 +1655,9 @@ def recover_stale_locked(
         with record_lock(
             record,
             blocking=False,
-            authority_home=expected_home,
-            authority_task=metadata["task"],
-            launch_script=expected_launch_script,
+            authority_home=requested_home,
+            authority_task=requested_task,
+            launch_script=requested_launch_script,
             launch_evidence=launch_evidence,
         ) as lock:
             return recover_under_lease(lock)

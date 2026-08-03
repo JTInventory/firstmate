@@ -187,13 +187,87 @@ PY
   pass "stale recovery binds the requested task identity"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
+import os
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_direct_recovery", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    state = home / "state"
+    state.mkdir()
+    record = state / ".session-authority-broker"
+    record.write_text("record\n", encoding="utf-8")
+    record.chmod(0o600)
+    launch_script = home / "bin" / "fm-session-authority-exec.sh"
+    metadata = {
+        "version": "1",
+        "pid": "2",
+        "start": "proc:broker",
+        "identity": "exe:broker",
+        "socket": "abstract:broker",
+        "home": str(home),
+        "checkout": str(broker_path.parent.parent),
+        "task": "task",
+        "script": str(broker_path),
+        "uid": str(os.geteuid()),
+        "gid": str(os.getegid()),
+        "launch-pid": str(os.getppid()),
+        "launch-start": "proc:launch",
+        "launch-identity": "exe:launch",
+        "launch-script": str(launch_script),
+    }
+    broker.read_record_shape = lambda _path: metadata
+    broker.process_generation_for_recovery = lambda _pid: None
+    broker.unlink_owned_record = lambda *_args, **_kwargs: False
+    seen = {}
+
+    @contextmanager
+    def fake_record_lock(_path, **kwargs):
+        seen.update(kwargs)
+        yield object()
+
+    broker.record_lock = fake_record_lock
+    status = broker.recover_stale_locked(
+        SimpleNamespace(
+            record=str(record),
+            state=str(state),
+            home=str(home),
+            checkout=str(broker_path.parent.parent),
+            task="task",
+            launch_script=str(launch_script),
+        ),
+        launch_evidence=(b"key", os.getppid(), "proc:launch", "exe:launch"),
+    )
+    if status != 1:
+        raise SystemExit("direct stale recovery returned an unexpected status")
+    if seen.get("authority_task") != "task" or seen.get("authority_home") != str(home):
+        raise SystemExit("direct stale recovery lost its requested lock identity")
+PY
+  then
+    fail "direct stale recovery fallback was not identity-bound"
+  fi
+  pass "direct stale recovery fallback remains identity-bound"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
 import sys
 from pathlib import Path
 
 broker_path = Path(sys.argv[1]).resolve()
 source = broker_path.read_text(encoding="utf-8")
-if "connection_slots" in source or "BoundedSemaphore" in source:
-    raise SystemExit("lock manager still admits connections through a global slot pool")
+if any(
+    marker in source
+    for marker in ("connection_slots", "BoundedSemaphore", "threading.Thread")
+):
+    raise SystemExit("lock manager still creates unbounded pre-auth admission work")
 handoff = source[source.index("def supervise("):source.index("def serve_locked(")]
 transfer = handoff.index("if record_lock_fd.fileno()")
 if "record_lock_fd = None" in handoff[transfer:]:
