@@ -87,6 +87,9 @@ else
   [ "${FM_BACKEND:-}" = tmux ] || exit 26
 fi
 printf 'start\n' > "$FM_FIXTURE_OUTPUT_DIR/$name.started"
+if [ -n "${FM_TEST_SUPERVISOR_READY_FILE:-}" ]; then
+  printf 'ready\n' > "$FM_TEST_SUPERVISOR_READY_FILE"
+fi
 owns_active=0
 if mkdir "$FM_FIXTURE_OUTPUT_DIR/active" 2>/dev/null; then
   owns_active=1
@@ -151,6 +154,7 @@ run_fixture() {
   local force_root_open_failure=${21:-0} force_nested_open_failure=${22:-0}
   local force_job_open_failure=${23:-0} force_job_signal_failure=${24:-0}
   local force_terminate_control=${25:-0} force_job_abort_after_start=${26:-0}
+  local ready_file=${27:-} reaper_pid_file=${28:-} job_pid_file=${29:-} job_reaper_pid_file=${30:-}
   local fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
@@ -166,6 +170,9 @@ run_fixture() {
       FM_TEST_FORCE_ROOT_HANDLE_FAILURE="$force_root_failure" \
       FM_TEST_FORCE_SUPERVISOR_IDENTITY_FAILURE="$force_supervisor_failure" \
       FM_TEST_SUPERVISOR_PID_FILE="$supervisor_pid_file" \
+      FM_TEST_SUPERVISOR_REAPER_PID_FILE="$reaper_pid_file" \
+      FM_TEST_SUPERVISOR_JOB_PID_FILE="$job_pid_file" \
+      FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE="$job_reaper_pid_file" \
       FM_TEST_ROOT_PID_FILE="$root_pid_file" \
       FM_TEST_SUPERVISOR_DROP_LAUNCH_RESPONSE="$drop_launch_response" \
       FM_TEST_SUPERVISOR_BLOCK_FIFO="$block_fifo" \
@@ -182,6 +189,7 @@ run_fixture() {
       FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE="$force_job_signal_failure" \
       FM_TEST_SUPERVISOR_FORCE_TERMINATE_CONTROL="$force_terminate_control" \
       FM_TEST_SUPERVISOR_FORCE_JOB_ABORT_AFTER_START="$force_job_abort_after_start" \
+      FM_TEST_SUPERVISOR_READY_FILE="$ready_file" \
       FM_HOME="$TMP_ROOT/shared-firstmate-home" \
       FM_BACKEND="" \
       HERDR_ENV=1 \
@@ -349,8 +357,8 @@ test_bounded_runner_uses_stable_containment() {
     "nested cleanup must bound its final reap proof"
   time_imports=$(printf '%s' "$source" | grep -c 'use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);')
   [ "$time_imports" -ge 3 ] || fail "every nested cleanup layer must import its monotonic clock"
-  assert_contains "$source" 'exit 125 unless $cleanup_ok' \
-    "cleanup failures must propagate as fail-closed exits"
+  assert_contains "$source" 'my $terminate_until_proven = sub' \
+    "nested cleanup must retain its owner until termination is proven"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE' \
     "pidfd signal failure injection must remain covered"
   assert_not_contains "$source" 'kill $signal, $tracked_pid' \
@@ -363,6 +371,12 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must verify supervisors before signaling"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_HANDLE_PERL' \
     "behavior runner must start a retained handle broker"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_REAPER_PERL' \
+    "behavior runner must retain a top-level reaper owner"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_JOB_PID_FILE' \
+    "behavior runner must record the released job identity"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE' \
+    "behavior runner must record the released-job reaper identity"
   assert_contains "$source" 'supervisor_handle_launch "$test_id" "$test_root/bin/fm-run-behavior-job.sh"' \
     "behavior runner must retain each supervisor pidfd before launch"
   assert_contains "$source" 'supervisor_handle_request "signal|$key"' \
@@ -377,8 +391,8 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must reap supervisors through the retained handle broker"
   assert_contains "$source" 'supervisor_handle_abort "$key"' \
     "behavior runner must abort an unregistered launch"
-  assert_contains "$source" 'waitpid($entry->{pid}, WNOHANG)' \
-    "supervisor broker waits without blocking its control loop"
+  assert_contains "$source" 'my $reap_pid = sub' \
+    "supervisor job owners must reap without blocking their control loop"
   assert_not_contains "$source" 'waitpid($entry->{pid}, 0)' \
     "supervisor broker must not block while waiting for a job"
   assert_not_contains "$source" 'waitpid($pid, 0)' \
@@ -418,6 +432,12 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must release the start gate only after handle acquisition"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_FORCE_JOB_ABORT_AFTER_START' \
     "cleanup regressions must exercise released jobs"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_READY_FILE' \
+    "released-job regressions must wait for readiness"
+  assert_contains "$source" 'SUPERVISOR_HANDLE_REAPER_CONTROL' \
+    "top-level reaper must have a private control channel"
+  assert_contains "$source" 'return 2' \
+    "ambiguous broker disappearance must remain unknown"
   assert_not_contains "$source" 'kill -0 "$SUPERVISOR_HANDLE_BROKER_PID"' \
     "broker disappearance must not rely on ambiguous kill probes"
   assert_not_contains "$source" 'for my $entry (values %handles)' \
@@ -527,7 +547,7 @@ run_cleanup_failure_case() {
   local drop_launch=$8 break_control=$9 force_terminate_control=${10:-0}
   local force_job_abort_after_start=${11:-0} require_job_chain=${12:-0}
   local fixture output fixture_output rc start_seconds elapsed sentinel_marker sentinel_pid
-  local supervisor_pid_file root_pid_file guard_pid_file worker_pid_file broker_pid_file pid_file
+  local supervisor_pid_file root_pid_file guard_pid_file worker_pid_file broker_pid_file reaper_pid_file job_pid_file job_reaper_pid_file ready_file pid_file
   fixture=$(make_fixture_root "$case_name")
   output="$TMP_ROOT/$case_name.out"
   supervisor_pid_file="$TMP_ROOT/$case_name-supervisor.identity"
@@ -535,6 +555,10 @@ run_cleanup_failure_case() {
   guard_pid_file="$TMP_ROOT/$case_name-guard.identity"
   worker_pid_file="$TMP_ROOT/$case_name-worker.identity"
   broker_pid_file="$TMP_ROOT/$case_name-broker.identity"
+  reaper_pid_file="$TMP_ROOT/$case_name-reaper.identity"
+  job_pid_file="$TMP_ROOT/$case_name-job.identity"
+  job_reaper_pid_file="$TMP_ROOT/$case_name-job-reaper.identity"
+  ready_file="$TMP_ROOT/$case_name-ready"
   sentinel_marker="$TMP_ROOT/$case_name-sentinel-term"
   (trap 'printf term > "$sentinel_marker"; exit 0' TERM; while :; do sleep 0.1; done) &
   sentinel_pid=$!
@@ -545,24 +569,26 @@ run_cleanup_failure_case() {
     "$broker_pid_file" "$guard_pid_file" "$break_control" '' \
     "$worker_pid_file" "$force_signal" "$force_reap" "$force_root_open" \
     "$force_nested_open" "$force_job_open" "$force_job_signal" \
-    "$force_terminate_control" "$force_job_abort_after_start")
+    "$force_terminate_control" "$force_job_abort_after_start" "$ready_file" "$reaper_pid_file" "$job_pid_file" "$job_reaper_pid_file")
   rc=$?
   set -u
   elapsed=$((SECONDS - start_seconds))
   expect_code 125 "$rc" "$case_name must fail closed"
   [ "$elapsed" -lt 10 ] || fail "$case_name exceeded its hard bound"
-  for pid_file in "$supervisor_pid_file" "$root_pid_file" "$guard_pid_file" \
-    "$worker_pid_file" "$broker_pid_file"; do
+  for pid_file in "$supervisor_pid_file" "$reaper_pid_file" "$root_pid_file" "$guard_pid_file" \
+    "$worker_pid_file" "$broker_pid_file" "$job_pid_file" "$job_reaper_pid_file"; do
     if [ -s "$pid_file" ]; then
       assert_identity_gone "$(cat "$pid_file")"
     fi
   done
   if [ "$require_job_chain" -eq 1 ]; then
-    for pid_file in "$supervisor_pid_file" "$root_pid_file" "$guard_pid_file" \
-      "$worker_pid_file" "$broker_pid_file"; do
+    for pid_file in "$supervisor_pid_file" "$reaper_pid_file" "$root_pid_file" "$guard_pid_file" \
+      "$worker_pid_file" "$broker_pid_file" "$job_pid_file" "$job_reaper_pid_file"; do
       [ -s "$pid_file" ] || fail "$case_name did not record every released supervisor layer"
     done
     [ -e "$fixture_output/fail-b.started" ] || fail "$case_name did not release the behavior test"
+    [ -s "$job_pid_file" ] || fail "$case_name did not record the released job"
+    [ -e "$ready_file" ] || fail "$case_name did not observe the released-job readiness marker"
   else
     [ ! -e "$fixture_output/pass-a.started" ] || fail "$case_name released a behavior test"
   fi

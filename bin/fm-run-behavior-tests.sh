@@ -221,13 +221,16 @@ my $pre_terminate = sub {
 };
 my $abort_before_bind = sub {
   close $release_w;
-  my $cleanup_ok;
-  if (defined $pre_fd && $pre_fd >= 0) {
-    $cleanup_ok = $pre_terminate->($pre_fd);
-  } else {
-    $cleanup_ok = $pre_reap->();
+  while (1) {
+    my $cleanup_ok;
+    if (defined $pre_fd && $pre_fd >= 0) {
+      $cleanup_ok = $pre_terminate->($pre_fd);
+    } else {
+      $cleanup_ok = $pre_reap->();
+    }
+    last if $cleanup_ok;
+    select undef, undef, undef, 0.05;
   }
-  exit 125 unless $cleanup_ok;
   POSIX::close($pre_fd) if defined $pre_fd && $pre_fd >= 0;
   exit 125;
 };
@@ -532,6 +535,7 @@ FM_TEST_SUPERVISOR_HANDLE_PERL='
 use Config;
 use Errno qw(ECHILD EINTR EIO EPERM ESRCH);
 use POSIX qw(:sys_wait_h);
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 my ($input_path, $output_path) = @ARGV;
 my $arch = $Config{archname} // "";
 my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
@@ -554,11 +558,6 @@ open my $input, "<", $input_path or exit 125;
 open my $output, ">", $output_path or exit 125;
 select $output;
 $| = 1;
-my %handles;
-my $close_handle = sub {
-  my ($entry) = @_;
-  POSIX::close($entry->{fd});
-};
 my $identity = sub {
   my ($pid) = @_;
   open my $stat, "<", "/proc/$pid/stat" or return;
@@ -572,42 +571,68 @@ my $identity = sub {
   return unless defined $start && $start =~ /^\d+\z/;
   return "$pid:$start";
 };
-my $probe = sub {
+my $probe_fd = sub {
   my ($fd) = @_;
   my $result = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
   return 1 if defined $result && $result == 0;
   return 0 if defined $result && $result < 0 && $!{ESRCH};
   return;
 };
-my $reap_entry = sub {
-  my ($entry) = @_;
-  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
-    $! = EIO;
-    return 0;
-  }
-  for (1 .. 50) {
-    my $waited = waitpid($entry->{pid}, WNOHANG);
-    return 1 if $waited == $entry->{pid};
+my $reap_pid = sub {
+  my ($pid, $deadline) = @_;
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
+    my $waited = waitpid($pid, WNOHANG);
+    return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
     select undef, undef, undef, 0.02;
   }
   return 0;
 };
-my $terminate_entry = sub {
+my %handles;
+my $close_handle = sub {
+  my ($entry) = @_;
+  my $command_fh = $entry->{command};
+  my $response_fh = $entry->{response};
+  close $command_fh if defined $command_fh;
+  close $response_fh if defined $response_fh;
+  POSIX::close($entry->{fd}) if defined $entry->{fd} && $entry->{fd} >= 0;
+  $entry->{command} = undef;
+  $entry->{response} = undef;
+  $entry->{fd} = undef;
+};
+my $owner_request = sub {
+  my ($entry, $command) = @_;
+  my $wire = "$command\n";
+  my $written = syswrite($entry->{command}, $wire);
+  return unless defined $written && $written == length($wire);
+  my $response_fh = $entry->{response};
+  my $response = <$response_fh>;
+  return unless defined $response;
+  chomp $response;
+  return $response;
+};
+my $owner_reap = sub {
+  my ($entry) = @_;
+  if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
+    $! = EIO;
+    return 0;
+  }
+  my $response = $owner_request->($entry, "wait");
+  return 0 unless defined $response;
+  return 0 if $response =~ /\|running\z/;
+  return 0 unless $response =~ /\|exit\|/;
+  return $reap_pid->($entry->{pid}, clock_gettime(CLOCK_MONOTONIC) + 2);
+};
+my $owner_terminate = sub {
   my ($entry) = @_;
   if ($ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE}) {
     $! = EPERM;
     return 0;
   }
-  my $term = syscall($sys_pidfd_send_signal, $entry->{fd}, 15, 0, 0);
-  my $term_ok = defined $term && ($term == 0 || ($term < 0 && $!{ESRCH}));
-  return 0 unless $term_ok;
-  return 1 if $reap_entry->($entry);
-  my $kill = syscall($sys_pidfd_send_signal, $entry->{fd}, 9, 0, 0);
-  my $kill_ok = defined $kill && ($kill == 0 || ($kill < 0 && $!{ESRCH}));
-  return 0 unless $kill_ok;
-  return $reap_entry->($entry);
+  my $response = $owner_request->($entry, "terminate");
+  return 0 unless defined $response && $response =~ /\|(terminated|gone)\z/;
+  return $reap_pid->($entry->{pid}, clock_gettime(CLOCK_MONOTONIC) + 2);
 };
 if ($ENV{FM_TEST_SUPERVISOR_BLOCK_FIFO}) {
   while (1) {
@@ -620,12 +645,7 @@ if ($ENV{FM_TEST_SUPERVISOR_BLOCK_FIFO}) {
 }
 while (my $line = <$input>) {
   chomp $line;
-  my @parts;
-  if (index($line, "\t") >= 0) {
-    @parts = split /\t/, $line;
-  } else {
-    @parts = split /\|/, $line, 4;
-  }
+  my @parts = index($line, "\t") >= 0 ? split(/\t/, $line) : split(/\|/, $line, 4);
   my $command = shift @parts // "";
   if ($command eq "ping") {
     print "ping|ready\n";
@@ -633,45 +653,206 @@ while (my $line = <$input>) {
   }
   if ($command eq "launch" && @parts == 10) {
     my ($key, $runner, $test_path, $job_root, $log_path, $start_gate, $abort_gate, $test_root, $timeout, $bounded_script) = @parts;
-    my $pid = fork;
-    if (!defined $pid) {
+    my ($command_r, $command_w, $response_r, $response_w);
+    if (!pipe($command_r, $command_w)) {
+      print "$key|error-pipe\n";
+      next;
+    }
+    if (!pipe($response_r, $response_w)) {
+      close $command_r;
+      close $command_w;
+      print "$key|error-pipe\n";
+      next;
+    }
+    my $owner_pid = fork;
+    if (!defined $owner_pid) {
       print "$key|error-fork\n";
       next;
     }
-    if (!$pid) {
-      my $child_parent = getppid();
+    if (!$owner_pid) {
+      close $command_w;
+      close $response_r;
+      my $owner_parent = getppid();
       syscall($sys_prctl, 1, 15, 0, 0, 0) == 0 or exit 125;
-      exit 125 if getppid() != $child_parent;
-      exec "/usr/bin/bash", $runner, $test_path, $job_root, $log_path, $start_gate, $abort_gate, $test_root, $timeout, $bounded_script;
-      exit 127;
-    }
-    my $fd = $ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_OPEN_FAILURE}
-      ? -1
-      : syscall($sys_pidfd_open, $pid, 0);
-    if (!defined $fd || $fd < 0) {
-      if (open my $abort, ">", $abort_gate) {
-        close $abort;
+      exit 125 if getppid() != $owner_parent;
+      if (defined $ENV{FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE} && length $ENV{FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE}) {
+        my $owner_identity = $identity->($$);
+        defined $owner_identity or exit 125;
+        open my $record, ">", $ENV{FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE} or exit 125;
+        print $record "$owner_identity\n";
+        close $record or exit 125;
       }
-      my $cleanup_ok = $reap_entry->({ pid => $pid });
+      select $response_w;
+      $| = 1;
+      my $job_pid = fork;
+      defined $job_pid or exit 125;
+      if (!$job_pid) {
+        my $job_parent = getppid();
+        syscall($sys_prctl, 1, 15, 0, 0, 0) == 0 or exit 125;
+        exit 125 if getppid() != $job_parent;
+        exec "/usr/bin/bash", $runner, $test_path, $job_root, $log_path, $start_gate, $abort_gate, $test_root, $timeout, $bounded_script;
+        exit 127;
+      }
+      my $job_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_OPEN_FAILURE}
+        ? -1
+        : syscall($sys_pidfd_open, $job_pid, 0);
+      if (!defined $job_fd || $job_fd < 0) {
+        if (open my $abort, ">", $abort_gate) {
+          close $abort;
+        }
+        $reap_pid->($job_pid, clock_gettime(CLOCK_MONOTONIC) + 4) or exit 125;
+        print $response_w "error-open\n";
+        exit 125;
+      }
+      my $job_identity = $identity->($job_pid);
+      if (!defined $job_identity) {
+        if (open my $abort, ">", $abort_gate) {
+          close $abort;
+        }
+        syscall($sys_pidfd_send_signal, $job_fd, 15, 0, 0, 0);
+        $reap_pid->($job_pid, clock_gettime(CLOCK_MONOTONIC) + 4) or exit 125;
+        POSIX::close($job_fd);
+        print $response_w "error-identity\n";
+        exit 125;
+      }
+      if (defined $ENV{FM_TEST_SUPERVISOR_JOB_PID_FILE} && length $ENV{FM_TEST_SUPERVISOR_JOB_PID_FILE}) {
+        open my $record, ">", $ENV{FM_TEST_SUPERVISOR_JOB_PID_FILE} or exit 125;
+        print $record "$job_identity\n";
+        close $record or exit 125;
+      }
+      my $ready_wire = "ready|$job_pid|$job_identity\n";
+      syswrite($response_w, $ready_wire) == length($ready_wire) or exit 125;
+      delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
+      my $job_status;
+      my $stop = 0;
+      $SIG{INT} = sub { $stop = 1 };
+      $SIG{TERM} = sub { $stop = 1 };
+      my $reap_job = sub {
+        return 1 if defined $job_status;
+        my $waited = waitpid($job_pid, WNOHANG);
+        if ($waited == $job_pid) {
+          $job_status = $?;
+          return 1;
+        }
+        return 0 if $waited == 0 || ($waited < 0 && $!{EINTR});
+        $job_status = 125 << 8 if $waited < 0 && $!{ECHILD};
+        return defined $job_status;
+      };
+      my $terminate_job = sub {
+        my $deadline = clock_gettime(CLOCK_MONOTONIC) + 4;
+        my $sent = syscall($sys_pidfd_send_signal, $job_fd, 15, 0, 0, 0);
+        my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
+        return 0 unless $term_ok;
+        while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
+          return 1 if $reap_job->();
+          select undef, undef, undef, 0.02;
+        }
+        return 1 if $reap_job->();
+        my $killed = syscall($sys_pidfd_send_signal, $job_fd, 9, 0, 0, 0);
+        my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
+        return 0 unless $kill_ok;
+        while (clock_gettime(CLOCK_MONOTONIC) < $deadline + 2) {
+          return 1 if $reap_job->();
+          select undef, undef, undef, 0.02;
+        }
+        return $reap_job->();
+      };
+      my $terminate_forever = sub {
+        delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
+        while (!$terminate_job->()) {
+          select undef, undef, undef, 0.05;
+        }
+        POSIX::close($job_fd);
+        exit 125;
+      };
+      my $buffer = "";
+      while (1) {
+        $reap_job->();
+        if ($stop) {
+          $terminate_forever->() unless defined $job_status;
+          POSIX::close($job_fd);
+          exit 125;
+        }
+        my $readable = "";
+        vec($readable, fileno($command_r), 1) = 1;
+        my $selected = select($readable, undef, undef, 0.05);
+        next unless defined $selected && $selected > 0 && vec($readable, fileno($command_r), 1);
+        my $chunk = "";
+        my $count = sysread($command_r, $chunk, 4096);
+        if (!defined $count) {
+          next if $!{EAGAIN} || $!{EINTR};
+          $stop = 1;
+          next;
+        }
+        if ($count == 0) {
+          $stop = 1;
+          next;
+        }
+        $buffer .= $chunk;
+        while ($buffer =~ s/^([^\n]*)\n//) {
+          my $request = $1;
+          if ($request eq "terminate") {
+            if ($terminate_job->()) {
+              print $response_w "terminated\n";
+              POSIX::close($job_fd);
+              exit 125;
+            }
+            print $response_w "unproven\n";
+          } elsif ($request eq "signal") {
+            my $sent = syscall($sys_pidfd_send_signal, $job_fd, 15, 0, 0, 0);
+            print $response_w (defined $sent && $sent == 0 ? "signaled\n" : (defined $sent && $sent < 0 && $!{ESRCH} ? "gone\n" : "error\n"));
+          } elsif ($request eq "state") {
+            my $alive = $probe_fd->($job_fd);
+            print $response_w (!defined $alive ? "error\n" : $alive ? "alive\n" : "gone\n");
+          } elsif ($request eq "wait") {
+            $reap_job->();
+            print $response_w (defined $job_status ? "exit|$job_status\n" : "running\n");
+          } elsif ($request eq "close") {
+            $reap_job->();
+            if (defined $job_status) {
+              POSIX::close($job_fd);
+              print $response_w "closed\n";
+              exit 0;
+            }
+            print $response_w "error\n";
+          } else {
+            print $response_w "error\n";
+          }
+        }
+      }
+    }
+    close $command_r;
+    close $response_w;
+    my $owner_command = $command_w;
+    my $owner_response = $response_r;
+    my $ready = <$owner_response>;
+    chomp $ready if defined $ready;
+    if (!defined $ready || $ready !~ /^ready\|(\d+)\|([^\n]+)$/) {
+      close $owner_command;
+      close $owner_response;
+      $reap_pid->($owner_pid, clock_gettime(CLOCK_MONOTONIC) + 4) or exit 125;
       print "$key|error-open\n";
-      exit 125 unless $cleanup_ok;
       next;
     }
-    my $entry = { fd => $fd, pid => $pid };
-    my $abort_child = sub {
-      if (open my $abort, ">", $abort_gate) {
-        close $abort;
-      }
-      return $terminate_entry->($entry);
-    };
+    my ($job_pid, $job_identity) = ($1, $2);
+    my $owner_fd = syscall($sys_pidfd_open, $owner_pid, 0);
+    if (!defined $owner_fd || $owner_fd < 0) {
+      print $owner_command "terminate\n";
+      close $owner_command;
+      close $owner_response;
+      $reap_pid->($owner_pid, clock_gettime(CLOCK_MONOTONIC) + 4) or exit 125;
+      print "$key|error-open\n";
+      next;
+    }
+    my $entry = { fd => $owner_fd, pid => $owner_pid, command => $owner_command, response => $owner_response, job_pid => $job_pid, job_identity => $job_identity };
     my $abort_launch = sub {
       my ($error) = @_;
-      if ($abort_child->()) {
+      if ($owner_terminate->($entry)) {
         $close_handle->($entry);
         print "$key|$error\n";
         return 1;
       }
-      $handles{"__abort-$pid"} = $entry;
+      $handles{"__abort-$owner_pid"} = $entry;
       print "$key|$error\n";
       return 0;
     };
@@ -679,127 +860,95 @@ while (my $line = <$input>) {
       $abort_launch->("error-identity");
       next;
     }
-    my $current = $identity->($pid);
-    if (!defined $current) {
-      $abort_launch->("error-identity");
-      next;
-    }
-    my $alive = $probe->($fd);
+    my $alive = $probe_fd->($owner_fd);
     if (!defined $alive || !$alive) {
       $abort_launch->("error-probe");
       next;
     }
     $handles{$key} = $entry;
     next if $ENV{FM_TEST_SUPERVISOR_DROP_LAUNCH_RESPONSE};
-    print "$key|registered|$pid|$current\n";
+    print "$key|registered|$job_pid|$job_identity\n";
     next;
   }
-  if ($command eq "abort" && @parts == 1) {
-    my $key = $parts[0];
-    my $entry = $handles{$key};
-    if (!defined $entry) {
-      print "$key|gone\n";
-      next;
+  if (($command eq "abort" || $command eq "shutdown") && (($command eq "abort" && @parts == 1) || ($command eq "shutdown" && !@parts))) {
+    my @keys = $command eq "abort" ? ($parts[0]) : keys %handles;
+    my $ok = 1;
+    for my $key (@keys) {
+      my $entry = $handles{$key};
+      next unless defined $entry;
+      if ($owner_terminate->($entry)) {
+        $close_handle->($entry);
+        delete $handles{$key};
+      } else {
+        $ok = 0;
+      }
     }
-    if ($terminate_entry->($entry)) {
-      $close_handle->($entry);
-      delete $handles{$key};
-      print "$key|aborted\n";
+    if ($command eq "abort") {
+      print "$parts[0]|" . ($ok ? "aborted" : "error") . "\n";
     } else {
-      print "$key|error\n";
+      print $ok ? "shutdown|done\n" : "shutdown|error\n";
+      last;
     }
     next;
   }
   if ($command eq "wait" && @parts == 1) {
     my $key = $parts[0];
     my $entry = $handles{$key};
-    if (!defined $entry) {
+    if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
+      $! = EIO;
       print "$key|error\n";
       next;
     }
-    if (!defined $entry->{status}) {
-      my $waited = waitpid($entry->{pid}, WNOHANG);
-      if ($waited == 0) {
-        print "$key|running\n";
-        next;
-      }
-      if ($waited < 0) {
-        print "$key|error\n";
-        next;
-      }
-      $entry->{status} = $?;
+    my $response = defined $entry ? $owner_request->($entry, "wait") : undef;
+    if (!defined $response) {
+      print "$key|error\n";
+    } elsif ($response eq "running") {
+      print "$key|running\n";
+    } elsif ($response =~ /^exit\|(\d+)$/) {
+      print "$key|exit|$1\n";
+    } else {
+      print "$key|error\n";
     }
-    print "$key|exit|$entry->{status}\n";
     next;
   }
   if ($command eq "signal" && @parts == 1) {
     my $key = $parts[0];
     my $entry = $handles{$key};
-    if (!defined $entry) {
-      print "$key|error\n";
-      next;
-    }
-    my $sent = syscall($sys_pidfd_send_signal, $entry->{fd}, 15, 0, 0);
-    if (defined $sent && $sent == 0) {
-      print "$key|signaled\n";
-    } elsif (defined $sent && $sent < 0 && $!{ESRCH}) {
-      print "$key|gone\n";
-    } else {
-      print "$key|error\n";
-    }
+    my $response = defined $entry ? $owner_request->($entry, "signal") : undef;
+    print "$key|" . (!defined $response ? "error" : $response) . "\n";
     next;
   }
   if ($command eq "state" && @parts == 1) {
     my $key = $parts[0];
     my $entry = $handles{$key};
-    if (!defined $entry) {
-      print "$key|error\n";
-      next;
-    }
-    my $alive = $probe->($entry->{fd});
-    if (!defined $alive) {
-      print "$key|error\n";
-    } elsif ($alive) {
-      print "$key|alive\n";
-    } else {
-      print "$key|gone\n";
-    }
+    my $response = defined $entry ? $owner_request->($entry, "state") : undef;
+    print "$key|" . (!defined $response ? "error" : $response) . "\n";
     next;
   }
   if ($command eq "close" && @parts == 1) {
     my $key = $parts[0];
-    my $entry = delete $handles{$key};
-    $close_handle->($entry) if defined $entry;
-    print "$key|closed\n";
-    next;
-  }
-  if ($command eq "shutdown" && !@parts) {
-    my $shutdown_ok = 1;
-    for my $key (keys %handles) {
-      my $entry = $handles{$key};
-      if ($terminate_entry->($entry)) {
-        $close_handle->($entry);
-        delete $handles{$key};
-      } else {
-        $shutdown_ok = 0;
-      }
+    my $entry = $handles{$key};
+    my $response = defined $entry ? $owner_request->($entry, "close") : undef;
+    if (defined $response && $response eq "closed") {
+      $close_handle->($entry);
+      delete $handles{$key};
+      print "$key|closed\n";
+    } else {
+      print "$key|error\n";
     }
-    print $shutdown_ok ? "shutdown|done\n" : "shutdown|error\n";
-    last;
+    next;
   }
   print "error|malformed\n";
 }
-my $cleanup_ok = 1;
 for my $key (keys %handles) {
   my $entry = $handles{$key};
-  if ($terminate_entry->($entry)) {
+  if ($owner_terminate->($entry)) {
     $close_handle->($entry);
     delete $handles{$key};
-  } else {
-    $cleanup_ok = 0;
   }
 }
-exit($cleanup_ok ? 0 : 125);
+exit 125 if keys %handles;
+exit 0;
 '
 FM_TEST_SUPERVISOR_GUARD_WORKER_PERL='
 use Config;
@@ -858,8 +1007,10 @@ my $reap_bounded = sub {
 };
 if (!defined $fd || $fd < 0) {
   close $gate_w;
-  my $cleanup_ok = $reap_bounded->();
-  exit 125 unless $cleanup_ok;
+  delete $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE};
+  while (!$reap_bounded->()) {
+    select undef, undef, undef, 0.05;
+  }
   exit 125;
 }
 my $terminate = sub {
@@ -893,13 +1044,17 @@ my $terminate = sub {
   return 0 unless $kill_ok;
   return $reap_until->($deadline);
 };
+my $terminate_until_proven = sub {
+  delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
+  while (!$terminate->(clock_gettime(CLOCK_MONOTONIC) + 4)) {
+    select undef, undef, undef, 0.05;
+  }
+  return 1;
+};
 my $abort_before_release = sub {
   close $gate_w;
-  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
-  if ($cleanup_ok) {
-    POSIX::close($fd);
-    exit 125;
-  }
+  $terminate_until_proven->();
+  POSIX::close($fd);
   exit 125;
 };
 my $probe = syscall($sys_pidfd_send_signal, $fd, 0, 0, 0);
@@ -930,8 +1085,8 @@ my $terminate_command = sub {
   my $waited = waitpid($pid, WNOHANG);
   $finish->($?) if $waited == $pid;
   $finish->(125) if $waited < 0 && !$!{EINTR};
-  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
-  $finish->(125) if $cleanup_ok;
+  $terminate_until_proven->();
+  POSIX::close($fd);
   exit 125;
 };
 $SIG{INT} = $terminate_command;
@@ -1005,8 +1160,10 @@ my $reap_bounded = sub {
 };
 if (!defined $guard_fd || $guard_fd < 0) {
   close $gate_w;
-  my $cleanup_ok = $reap_bounded->();
-  exit 125 unless $cleanup_ok;
+  delete $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE};
+  while (!$reap_bounded->()) {
+    select undef, undef, undef, 0.05;
+  }
   exit 125;
 }
 my $terminate = sub {
@@ -1040,13 +1197,17 @@ my $terminate = sub {
   return 0 unless $kill_ok;
   return $reap_until->($deadline);
 };
+my $terminate_until_proven = sub {
+  delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
+  while (!$terminate->(clock_gettime(CLOCK_MONOTONIC) + 4)) {
+    select undef, undef, undef, 0.05;
+  }
+  return 1;
+};
 my $abort_before_release = sub {
   close $gate_w;
-  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
-  if ($cleanup_ok) {
-    POSIX::close($guard_fd);
-    exit 125;
-  }
+  $terminate_until_proven->();
+  POSIX::close($guard_fd);
   exit 125;
 };
 if (defined $ENV{FM_TEST_SUPERVISOR_WORKER_PID_FILE} &&
@@ -1077,8 +1238,8 @@ my $terminate_command = sub {
   my $waited = waitpid($pid, WNOHANG);
   $finish->($?) if $waited == $pid;
   $finish->(125) if $waited < 0 && !$!{EINTR};
-  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
-  $finish->(125) if $cleanup_ok;
+  $terminate_until_proven->();
+  POSIX::close($guard_fd);
   exit 125;
 };
 $SIG{INT} = $terminate_command;
@@ -1145,8 +1306,10 @@ my $outer_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}
   : syscall($sys_pidfd_open, $pid, 0);
 if (!defined $outer_fd || $outer_fd < 0) {
   close $release_w;
-  my $cleanup_ok = $reap_bounded->();
-  exit 125 unless $cleanup_ok;
+  delete $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE};
+  while (!$reap_bounded->()) {
+    select undef, undef, undef, 0.05;
+  }
   exit 125;
 }
 my $terminate = sub {
@@ -1180,6 +1343,13 @@ my $terminate = sub {
   return 0 unless $kill_ok;
   return $reap_until->($deadline);
 };
+my $terminate_until_proven = sub {
+  delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
+  while (!$terminate->(clock_gettime(CLOCK_MONOTONIC) + 4)) {
+    select undef, undef, undef, 0.05;
+  }
+  return 1;
+};
 my $finish = sub {
   my ($status) = @_;
   POSIX::close($outer_fd);
@@ -1190,9 +1360,8 @@ $SIG{INT} = sub { $stop = 1; };
 $SIG{TERM} = sub { $stop = 1; };
 my $abort_before_release = sub {
   close $release_w;
-  my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
-  $finish->(125) if $cleanup_ok;
-  exit 125;
+  $terminate_until_proven->();
+  $finish->(125);
 };
 my $outer_probe = syscall($sys_pidfd_send_signal, $outer_fd, 0, 0, 0);
 if (!defined $outer_probe || $outer_probe != 0) {
@@ -1233,9 +1402,8 @@ while (1) {
   $finish->($?) if $waited == $pid;
   $stop = 1 if $waited < 0 && !$!{EINTR};
   if ($stop) {
-    my $cleanup_ok = $terminate->(clock_gettime(CLOCK_MONOTONIC) + 4);
-    $finish->(0) if $cleanup_ok;
-    exit 125;
+    $terminate_until_proven->();
+    $finish->(0);
   }
   my $readable = "";
   vec($readable, fileno($control), 1) = 1;
@@ -1249,6 +1417,134 @@ while (1) {
     next;
   }
   $stop = 1 if $count == 0 || $command =~ /(?:^|\n)terminate(?:\n|$)/;
+}
+'
+FM_TEST_SUPERVISOR_REAPER_PERL='
+use Config;
+use Errno qw(ECHILD EINTR EIO ESRCH);
+use Fcntl qw(O_NONBLOCK O_RDONLY);
+use POSIX qw(:sys_wait_h);
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
+my ($guard_parent_perl, $guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, $control_path, $reaper_control_path, $exit_path) = @ARGV;
+my $arch = $Config{archname} // "";
+my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
+if ($arch =~ /(?:x86_64|amd64)/) {
+  $sys_prctl = 157;
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+} elsif ($arch =~ /(?:aarch64|riscv64|s390x|ppc64|i[3-6]86|arm)/) {
+  $sys_prctl = 167 if $arch =~ /(?:aarch64|riscv64|s390x)/;
+  $sys_prctl = 171 if $arch =~ /ppc64/;
+  $sys_prctl = 172 if $arch =~ /(?:i[3-6]86|arm)/;
+  $sys_pidfd_open = 434;
+  $sys_pidfd_send_signal = 424;
+}
+defined $sys_prctl && defined $sys_pidfd_open && defined $sys_pidfd_send_signal or exit 125;
+my $pid = fork;
+defined $pid or exit 125;
+if (!$pid) {
+  exec $^X, "-e", $guard_parent_perl, $guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, $control_path;
+  exit 127;
+}
+my $fd = syscall($sys_pidfd_open, $pid, 0);
+defined $fd && $fd >= 0 or exit 125;
+my $identity = sub {
+  open my $stat, "<", "/proc/$pid/stat" or return;
+  my $line = <$stat>;
+  close $stat;
+  return unless defined $line;
+  my $comm_end = rindex($line, ")");
+  return if $comm_end < 0;
+  my @fields = split /\s+/, substr($line, $comm_end + 2);
+  my $start = $fields[19];
+  return unless defined $start && $start =~ /^\d+\z/;
+  return "$pid:$start";
+};
+my $current = $identity->();
+defined $current or exit 125;
+my $self_identity = sub {
+  open my $stat, "<", "/proc/$$/stat" or return;
+  my $line = <$stat>;
+  close $stat;
+  return unless defined $line;
+  my $comm_end = rindex($line, ")");
+  return if $comm_end < 0;
+  my @fields = split /\s+/, substr($line, $comm_end + 2);
+  my $start = $fields[19];
+  return unless defined $start && $start =~ /^\d+\z/;
+  return "$$:$start";
+};
+my $reaper_identity = $self_identity->();
+defined $reaper_identity or exit 125;
+if (defined $ENV{FM_TEST_SUPERVISOR_PID_FILE} && length $ENV{FM_TEST_SUPERVISOR_PID_FILE}) {
+  open my $record, ">", $ENV{FM_TEST_SUPERVISOR_PID_FILE} or exit 125;
+  print $record "$current\n";
+  close $record or exit 125;
+}
+sysopen my $control, $reaper_control_path, O_NONBLOCK | O_RDONLY or exit 125;
+my $terminate = sub {
+  delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
+  my $deadline = clock_gettime(CLOCK_MONOTONIC) + 6;
+  my $sent = syscall($sys_pidfd_send_signal, $fd, 15, 0, 0, 0);
+  my $term_ok = defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}));
+  return 0 unless $term_ok;
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
+    my $waited = waitpid($pid, WNOHANG);
+    return 1 if $waited == $pid;
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  my $killed = syscall($sys_pidfd_send_signal, $fd, 9, 0, 0, 0);
+  my $kill_ok = defined $killed && ($killed == 0 || ($killed < 0 && $!{ESRCH}));
+  return 0 unless $kill_ok;
+  while (clock_gettime(CLOCK_MONOTONIC) < $deadline + 4) {
+    my $waited = waitpid($pid, WNOHANG);
+    return 1 if $waited == $pid;
+    return 1 if $waited < 0 && $!{ECHILD};
+    return 0 if $waited < 0 && !$!{EINTR};
+    select undef, undef, undef, 0.02;
+  }
+  return 0;
+};
+my $stop = 0;
+$SIG{INT} = sub { $stop = 1 };
+$SIG{TERM} = sub { $stop = 1 };
+my $record_exit = sub {
+  open my $record, ">", $exit_path or return 0;
+  my $written = print $record "$reaper_identity|done\n";
+  my $closed = close $record;
+  return $written && $closed;
+};
+while (1) {
+  my $waited = waitpid($pid, WNOHANG);
+  if ($waited == $pid) {
+    my $status = $?;
+    $record_exit->() or exit 125;
+    POSIX::close($fd);
+    exit($status >> 8) if ($status & 127) == 0;
+    exit(125);
+  }
+  $stop = 1 if $waited < 0 && !$!{EINTR};
+  if (!$stop) {
+    my $readable = "";
+    vec($readable, fileno($control), 1) = 1;
+    my $selected = select($readable, undef, undef, 0.05);
+    if (defined $selected && $selected > 0 && vec($readable, fileno($control), 1)) {
+      my $command = "";
+      my $count = sysread($control, $command, 4096);
+      $stop = 1 if !defined $count || $count == 0 || $command =~ /(?:^|\n)terminate(?:\n|$)/;
+    }
+  }
+  if ($stop) {
+    if ($terminate->()) {
+      $record_exit->() or next;
+      POSIX::close($fd);
+      exit 0;
+    }
+    $stop = 1;
+    select undef, undef, undef, 0.05;
+  }
 }
 '
 run_bounded() {
@@ -1322,10 +1618,12 @@ fi
 RUNNING_TEST_PIDS=()
 SUPERVISOR_HANDLE_BROKER_PID=
 SUPERVISOR_HANDLE_BROKER_IDENTITY=
+SUPERVISOR_HANDLE_BROKER_EXIT_FILE=
 SUPERVISOR_HANDLE_READY=0
 SUPERVISOR_HANDLE_WRITE=
 SUPERVISOR_HANDLE_READ=
 SUPERVISOR_HANDLE_CONTROL=
+SUPERVISOR_HANDLE_REAPER_CONTROL=
 SUPERVISOR_HANDLE_RESPONSE=
 supervisor_handle_process_identity() {
   local pid=$1 stat fields start
@@ -1338,9 +1636,15 @@ supervisor_handle_process_identity() {
   printf '%s:%s\n' "$pid" "$start"
 }
 supervisor_handle_broker_state() {
-  local stat fields process_state current
+  local stat fields process_state current exit_identity exit_state
+  if [ -s "$SUPERVISOR_HANDLE_BROKER_EXIT_FILE" ]; then
+    IFS='|' read -r exit_identity exit_state <"$SUPERVISOR_HANDLE_BROKER_EXIT_FILE" || return 2
+    [ "$exit_identity" = "$SUPERVISOR_HANDLE_BROKER_IDENTITY" ] || return 2
+    [ "$exit_state" = done ] || return 2
+    return 3
+  fi
   if [ ! -e "/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat" ]; then
-    return 0
+    return 2
   fi
   if ! IFS= read -r stat <"/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat"; then
     return 2
@@ -1369,10 +1673,17 @@ supervisor_handle_close_channels() {
     eval "exec $SUPERVISOR_HANDLE_CONTROL>&-"
     SUPERVISOR_HANDLE_CONTROL=
   fi
+  if [ -n "$SUPERVISOR_HANDLE_REAPER_CONTROL" ]; then
+    eval "exec $SUPERVISOR_HANDLE_REAPER_CONTROL>&-"
+    SUPERVISOR_HANDLE_REAPER_CONTROL=
+  fi
 }
 supervisor_handle_force_broker_teardown() {
   if [ -n "$SUPERVISOR_HANDLE_CONTROL" ]; then
     printf '%s\n' terminate >&"$SUPERVISOR_HANDLE_CONTROL" || true
+  fi
+  if [ -n "$SUPERVISOR_HANDLE_REAPER_CONTROL" ]; then
+    printf '%s\n' terminate >&"$SUPERVISOR_HANDLE_REAPER_CONTROL" || true
   fi
 }
 supervisor_handle_broker_join() {
@@ -1381,7 +1692,7 @@ supervisor_handle_broker_join() {
     broker_state=0
     supervisor_handle_broker_state || broker_state=$?
     case "$broker_state" in
-      0|3)
+      3)
         wait "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null
         broker_status=$?
         [ "$broker_status" -eq 0 ] || return 1
@@ -1467,8 +1778,11 @@ supervisor_handle_launch() {
 }
 SUPERVISOR_HANDLE_EXIT_STATUS=
 supervisor_handle_wait() {
-  local key=$1 response_key response_state raw_status
+  local key=$1 response_key response_state raw_status broker_state
   while :; do
+    broker_state=0
+    supervisor_handle_broker_state || broker_state=$?
+    [ "$broker_state" -eq 1 ] || return 1
     supervisor_handle_request "wait|$key" || return 1
     IFS='|' read -r response_key response_state raw_status <<<"$SUPERVISOR_HANDLE_RESPONSE"
     [ "$response_key" = "$key" ] || return 1
@@ -1516,34 +1830,48 @@ supervisor_is_gone() {
   supervisor_handle_state "$key"
 }
 cleanup() {
-  local cleanup_ok=1 broker_shutdown_ok=1 entry key state still_alive
-  for entry in "${RUNNING_TEST_PIDS[@]}"; do
-    signal_running_supervisor "$entry" || cleanup_ok=0
-  done
-  for ((cleanup_tick = 0; cleanup_tick < 100; cleanup_tick++)); do
-    still_alive=0
+  local cleanup_ok=1 broker_shutdown_ok=1 entry key state still_alive broker_state=0
+  if [ "$SUPERVISOR_HANDLE_READY" -eq 1 ]; then
+    supervisor_handle_broker_state || broker_state=$?
+  fi
+  if [ "$broker_state" -ne 1 ]; then
+    cleanup_ok=0
+  else
     for entry in "${RUNNING_TEST_PIDS[@]}"; do
-      state=0
-      supervisor_is_gone "$entry" || state=$?
-      case "$state" in
-        0) ;;
-        1|2) still_alive=1; [ "$state" -eq 2 ] && cleanup_ok=0; break ;;
-      esac
+      signal_running_supervisor "$entry" || cleanup_ok=0
     done
-    [ "$still_alive" -eq 0 ] && break
-    sleep 0.05
-  done
-  for entry in "${RUNNING_TEST_PIDS[@]}"; do
-    key=${entry%%|*}
-    state=0
-    supervisor_is_gone "$entry" || state=$?
-    if [ "$state" -eq 0 ]; then
-      supervisor_handle_wait "$key" || cleanup_ok=0
-      supervisor_handle_close "$key" || cleanup_ok=0
+    for ((cleanup_tick = 0; cleanup_tick < 100; cleanup_tick++)); do
+      broker_state=0
+      supervisor_handle_broker_state || broker_state=$?
+      [ "$broker_state" -eq 1 ] || break
+      still_alive=0
+      for entry in "${RUNNING_TEST_PIDS[@]}"; do
+        state=0
+        supervisor_is_gone "$entry" || state=$?
+        case "$state" in
+          0) ;;
+          1|2) still_alive=1; [ "$state" -eq 2 ] && cleanup_ok=0; break ;;
+        esac
+      done
+      [ "$still_alive" -eq 0 ] && break
+      sleep 0.05
+    done
+    if [ "$broker_state" -eq 1 ]; then
+      for entry in "${RUNNING_TEST_PIDS[@]}"; do
+        key=${entry%%|*}
+        state=0
+        supervisor_is_gone "$entry" || state=$?
+        if [ "$state" -eq 0 ]; then
+          supervisor_handle_wait "$key" || cleanup_ok=0
+          supervisor_handle_close "$key" || cleanup_ok=0
+        else
+          cleanup_ok=0
+        fi
+      done
     else
       cleanup_ok=0
     fi
-  done
+  fi
   if [ "$SUPERVISOR_HANDLE_READY" -eq 1 ]; then
     supervisor_handle_shutdown || {
       cleanup_ok=0
@@ -1569,9 +1897,12 @@ trap cleanup EXIT
 supervisor_handle_input="$suite_tmp/supervisor-handles.in"
 supervisor_handle_output="$suite_tmp/supervisor-handles.out"
 supervisor_handle_control="$suite_tmp/supervisor-handles.control"
+supervisor_handle_reaper_control="$suite_tmp/supervisor-handles.reaper.control"
+supervisor_handle_reaper_exit="$suite_tmp/supervisor-handles.reaper.exit"
+SUPERVISOR_HANDLE_BROKER_EXIT_FILE="$supervisor_handle_reaper_exit"
 supervisor_handle_worker="$suite_tmp/supervisor-handles-worker.pl"
 supervisor_handle_guard_worker="$suite_tmp/supervisor-handles-guard-worker.pl"
-if ! mkfifo "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control"; then
+if ! mkfifo "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control" "$supervisor_handle_reaper_control"; then
   printf '%s\n' 'FAIL: could not create supervisor handle channels' >&2
   exit 125
 fi
@@ -1583,6 +1914,10 @@ if ! exec {SUPERVISOR_HANDLE_CONTROL}<>"$supervisor_handle_control"; then
   printf '%s\n' 'FAIL: could not open supervisor broker control channel' >&2
   exit 125
 fi
+if ! exec {SUPERVISOR_HANDLE_REAPER_CONTROL}<>"$supervisor_handle_reaper_control"; then
+  printf '%s\n' 'FAIL: could not open supervisor reaper control channel' >&2
+  exit 125
+fi
 if ! printf '%s' "$FM_TEST_SUPERVISOR_HANDLE_PERL" >"$supervisor_handle_worker"; then
   printf '%s\n' 'FAIL: could not write supervisor handle worker' >&2
   exit 125
@@ -1591,17 +1926,18 @@ if ! printf '%s' "$FM_TEST_SUPERVISOR_GUARD_WORKER_PERL" >"$supervisor_handle_gu
   printf '%s\n' 'FAIL: could not write supervisor guard worker' >&2
   exit 125
 fi
-perl -e "$FM_TEST_SUPERVISOR_GUARD_PARENT_PERL" "$FM_TEST_SUPERVISOR_GUARD_PERL" \
+perl -e "$FM_TEST_SUPERVISOR_REAPER_PERL" "$FM_TEST_SUPERVISOR_GUARD_PARENT_PERL" "$FM_TEST_SUPERVISOR_GUARD_PERL" \
   "$supervisor_handle_guard_worker" \
   "$supervisor_handle_worker" \
-  "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control" &
+  "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control" \
+  "$supervisor_handle_reaper_control" "$supervisor_handle_reaper_exit" &
 SUPERVISOR_HANDLE_BROKER_PID=$!
 if ! SUPERVISOR_HANDLE_BROKER_IDENTITY=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID"); then
   printf '%s\n' 'FAIL: could not bind supervisor broker handle' >&2
   exit 125
 fi
-if [ -n "${FM_TEST_SUPERVISOR_PID_FILE:-}" ]; then
-  printf '%s\n' "$SUPERVISOR_HANDLE_BROKER_IDENTITY" >"$FM_TEST_SUPERVISOR_PID_FILE" || exit 125
+if [ -n "${FM_TEST_SUPERVISOR_REAPER_PID_FILE:-}" ]; then
+  printf '%s\n' "$SUPERVISOR_HANDLE_BROKER_IDENTITY" >"$FM_TEST_SUPERVISOR_REAPER_PID_FILE" || exit 125
 fi
 if [ -n "${FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN:-}" ]; then
   : >"$FM_TEST_SUPERVISOR_DELAY_CONTROL_OPEN" || exit 125
@@ -1728,7 +2064,17 @@ while [ "$index" -lt "$total" ]; do
       exit 125
     }
     if [ "${FM_TEST_SUPERVISOR_FORCE_JOB_ABORT_AFTER_START:-0}" -eq 1 ]; then
-      sleep 0.2
+      if [ -n "${FM_TEST_SUPERVISOR_READY_FILE:-}" ]; then
+        ready_seen=0
+        for ((ready_tick = 0; ready_tick < 200; ready_tick++)); do
+          if [ -e "$FM_TEST_SUPERVISOR_READY_FILE" ]; then
+            ready_seen=1
+            break
+          fi
+          sleep 0.01
+        done
+        [ "$ready_seen" -eq 1 ] || exit 125
+      fi
       supervisor_handle_abort "$test_id" || true
       exit 125
     fi
