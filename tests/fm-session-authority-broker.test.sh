@@ -296,6 +296,7 @@ with TemporaryDirectory() as temporary:
         record,
         metadata,
         expected_stat=original_stat,
+        quarantine_key=b"review-quarantine-key",
     ):
         raise SystemExit("owned record was not quarantined")
     if record.exists():
@@ -319,6 +320,7 @@ with TemporaryDirectory() as temporary:
             "uid": "0",
             "gid": "0",
         },
+        b"review-quarantine-key",
     ):
         raise SystemExit("owned record quarantine cleanup failed")
     if list(record.parent.glob(f".{record.name}.recovery-*")):
@@ -329,6 +331,7 @@ with TemporaryDirectory() as temporary:
     if not broker.cleanup_recovery_quarantines(
         record,
         {"home": "/home"},
+        b"review-quarantine-key",
     ) or not forged.exists():
         raise SystemExit("unproven quarantine was removed")
     forged.unlink()
@@ -784,6 +787,12 @@ if scoped_key == broker.derive_broker_durable_key(
     launch_script="/test/home/bin/fm-session-authority-exec.sh"
 ):
     raise SystemExit("broker durable capability was not home-bound")
+if scoped_key != broker.derive_broker_durable_key(
+    root_key, task="alpha", home="/test/home", launch_pid=99,
+    launch_start="proc:y", launch_identity="exe:other",
+    launch_script="/test/home/bin/fm-session-authority-exec.sh"
+):
+    raise SystemExit("broker durable capability rotated with launch generation")
 PY
 then
   fail "the broker durable capability was not scoped to validated launch identity"
