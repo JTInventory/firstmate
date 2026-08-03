@@ -30,6 +30,8 @@ MAX_ANCESTRY_DEPTH = 128
 BROKER_REQUEST_TIMEOUT_SECONDS = 2.0
 RECOVERY_LAUNCH_EVIDENCE_FD = 19
 RECORD_LOCK_FD = 20
+MAX_RECOVERY_QUARANTINES = 4
+QUARANTINE_RECEIPT_SUFFIX = ".receipt"
 
 
 def canonical(value: str) -> str:
@@ -303,7 +305,8 @@ def record_lock(
         )
     else:
         descriptor = open_authority_record_lock(
-            blocking=blocking
+            blocking=blocking,
+            state=Path(authority_home) / "state",
         )
     try:
         yield descriptor
@@ -342,19 +345,34 @@ def open_record_lock(
 def close_record_lock(descriptor: int | None) -> None:
     if descriptor is None:
         return
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
+    os.close(descriptor)
 
 
-def open_authority_record_lock(*, blocking: bool) -> int | None:
+def open_authority_record_lock(
+    *, blocking: bool, state: Path | None = None
+) -> int | None:
+    descriptor: int | None = None
     try:
         inherited_stat = os.fstat(RECORD_LOCK_FD)
         if (
-            not stat.S_ISSOCK(inherited_stat.st_mode)
+            not stat.S_ISDIR(inherited_stat.st_mode)
+            or inherited_stat.st_uid != os.geteuid()
         ):
             raise ValueError("invalid authority record lock")
+        if state is not None:
+            lock_path = state
+            lock_stat = lock_path.lstat()
+            if (
+                not stat.S_ISDIR(lock_stat.st_mode)
+                or lock_stat.st_uid != os.geteuid()
+                or lock_stat.st_dev != inherited_stat.st_dev
+                or lock_stat.st_ino != inherited_stat.st_ino
+            ):
+                raise ValueError("unbound authority record lock")
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        fcntl.flock(RECORD_LOCK_FD, flags)
         descriptor = os.dup(RECORD_LOCK_FD)
         os.set_inheritable(descriptor, False)
     except (OSError, ValueError):
@@ -367,17 +385,10 @@ def open_authority_record_lock(*, blocking: bool) -> int | None:
         ):
             os.close(descriptor)
             return None
-        flags = fcntl.LOCK_EX
-        if not blocking:
-            flags |= fcntl.LOCK_NB
-        try:
-            fcntl.flock(descriptor, flags)
-        except BlockingIOError:
-            os.close(descriptor)
-            return None
         return descriptor
     except BaseException:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
         raise
 
 
@@ -397,7 +408,7 @@ def serve(args: argparse.Namespace) -> int:
     if not state.is_dir() or state.is_symlink() or not Path(home).is_dir():
         return 1
     record = state / ".session-authority-broker"
-    record_lock_fd = open_authority_record_lock(blocking=False)
+    record_lock_fd = open_authority_record_lock(blocking=False, state=state)
     if record_lock_fd is None:
         return 1
     try:
@@ -442,18 +453,33 @@ def install_evidence_bytes(data: bytes) -> None:
         os.close(read_fd)
 
 
-def create_record_lock_capability() -> None:
-    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    left_fd = left.detach()
-    right.close()
+def create_record_lock_capability(state: Path) -> None:
+    if not state.is_dir() or state.is_symlink():
+        raise ValueError("invalid authority state")
+    descriptor = os.open(
+        state,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
     try:
-        if left_fd != RECORD_LOCK_FD:
-            os.dup2(left_fd, RECORD_LOCK_FD, inheritable=True)
+        lock_stat = os.fstat(descriptor)
+        path_stat = state.lstat()
+        if (
+            not stat.S_ISDIR(lock_stat.st_mode)
+            or lock_stat.st_uid != os.geteuid()
+            or lock_stat.st_dev != path_stat.st_dev
+            or lock_stat.st_ino != path_stat.st_ino
+        ):
+            raise ValueError("invalid authority record lock")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if descriptor != RECORD_LOCK_FD:
+            os.dup2(descriptor, RECORD_LOCK_FD, inheritable=True)
         else:
-            os.set_inheritable(left_fd, True)
-    finally:
-        if left_fd != RECORD_LOCK_FD:
-            os.close(left_fd)
+            os.set_inheritable(descriptor, True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    if descriptor != RECORD_LOCK_FD:
+        os.close(descriptor)
 
 
 def supervise(args: argparse.Namespace) -> int:
@@ -461,7 +487,6 @@ def supervise(args: argparse.Namespace) -> int:
         evidence = read_evidence_bytes(args.launch_evidence_fd)
         if args.launch_evidence_fd != RECOVERY_LAUNCH_EVIDENCE_FD:
             os.close(args.launch_evidence_fd)
-        create_record_lock_capability()
         install_evidence_bytes(evidence)
         read_launch_evidence(
             RECOVERY_LAUNCH_EVIDENCE_FD,
@@ -469,11 +494,13 @@ def supervise(args: argparse.Namespace) -> int:
             task=args.task,
             launch_script=canonical(args.launch_script),
         )
+        state = Path(canonical(args.state))
+        create_record_lock_capability(state)
         install_evidence_bytes(evidence)
         recovery_args = argparse.Namespace(
-            record=str(Path(canonical(args.state)) / ".session-authority-broker")
+            record=str(state / ".session-authority-broker")
         )
-        if recover_stale(recovery_args) != 0:
+        if recover_stale_locked(recovery_args) != 0:
             return 1
         install_evidence_bytes(evidence)
         os.execv(
@@ -560,6 +587,20 @@ def serve_locked(
             "gid": str(broker_gid),
         }
         if read_record_shape(record) != expected_record:
+            return 1
+        if not cleanup_recovery_quarantines(
+            record,
+            {
+                "home": home,
+                "checkout": checkout,
+                "task": args.task,
+                "script": script,
+                "launch-script": launch_script,
+                "uid": str(broker_uid),
+                "gid": str(broker_gid),
+            },
+            durable_key,
+        ):
             return 1
         while not stopping:
             try:
@@ -735,9 +776,177 @@ def rename_noreplace(source: Path, target: Path) -> None:
         raise OSError(error_number, os.strerror(error_number), str(source))
 
 
+def record_metadata_digest(metadata: dict[str, str]) -> str:
+    body = "".join(f"{key}={metadata[key]}\n" for key in sorted(metadata))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def write_quarantine_receipt(
+    quarantine: Path, metadata: dict[str, str], key: bytes
+) -> None:
+    quarantine_stat = quarantine.lstat()
+    body = (
+        "version=1\n"
+        f"name={quarantine.name}\n"
+        f"dev={quarantine_stat.st_dev}\n"
+        f"ino={quarantine_stat.st_ino}\n"
+        f"metadata={record_metadata_digest(metadata)}\n"
+    ).encode("utf-8")
+    receipt = body + (
+        "hmac=" + hmac.new(key, body, hashlib.sha256).hexdigest() + "\n"
+    ).encode("ascii")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{quarantine.name}.receipt-", dir=quarantine.parent
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(receipt)
+            output.flush()
+            os.fsync(output.fileno())
+        rename_noreplace(
+            Path(temporary),
+            quarantine.with_name(quarantine.name + QUARANTINE_RECEIPT_SUFFIX),
+        )
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def quarantine_receipt_matches(
+    quarantine: Path, metadata: dict[str, str], key: bytes
+) -> bool:
+    receipt_path = quarantine.with_name(
+        quarantine.name + QUARANTINE_RECEIPT_SUFFIX
+    )
+    try:
+        lines = receipt_path.read_text(encoding="ascii").splitlines(keepends=True)
+        if len(lines) != 6 or any(not line.endswith("\n") for line in lines):
+            return False
+        fields: dict[str, str] = {}
+        for line in lines:
+            if "=" not in line:
+                return False
+            name, value = line[:-1].split("=", 1)
+            if not name or name in fields:
+                return False
+            fields[name] = value
+        if set(fields) != {"version", "name", "dev", "ino", "metadata", "hmac"}:
+            return False
+        if fields["version"] != "1" or fields["name"] != quarantine.name:
+            return False
+        if fields["metadata"] != record_metadata_digest(metadata):
+            return False
+        quarantine_stat = quarantine.lstat()
+        if (
+            fields["dev"] != str(quarantine_stat.st_dev)
+            or fields["ino"] != str(quarantine_stat.st_ino)
+        ):
+            return False
+        tag = fields["hmac"]
+        if len(tag) != 64 or any(value not in "0123456789abcdef" for value in tag):
+            return False
+        body = "".join(line for line in lines if not line.startswith("hmac="))
+        return hmac.compare_digest(
+            tag, hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+        )
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def cleanup_one_recovery_quarantine(
+    path: Path, expected: dict[str, str], key: bytes
+) -> bool:
+    def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+        return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+    identity = path.with_name(
+        f".{path.parent.name}.session-authority-broker.identity-{secrets.token_hex(16)}"
+    )
+    for _ in range(8):
+        cleanup = path.with_name(
+            f".{path.parent.name}.session-authority-broker.cleanup-{secrets.token_hex(16)}"
+        )
+        try:
+            os.link(path, identity, follow_symlinks=False)
+            identity_stat = identity.lstat()
+            current_stat = path.lstat()
+            metadata = read_record_shape(path)
+            if not same_inode(identity_stat, current_stat) or any(
+                metadata.get(name) != value for name, value in expected.items()
+            ) or not quarantine_receipt_matches(path, metadata, key):
+                identity.unlink()
+                return False
+            rename_noreplace(path, cleanup)
+            moved_stat = cleanup.lstat()
+            moved_metadata = read_record_shape(cleanup)
+            if not same_inode(identity_stat, moved_stat) or any(
+                moved_metadata.get(name) != value
+                for name, value in expected.items()
+            ):
+                try:
+                    rename_noreplace(cleanup, path)
+                except OSError:
+                    pass
+                identity.unlink()
+                return False
+            final_stat = cleanup.lstat()
+            if not same_inode(identity_stat, final_stat):
+                identity.unlink()
+                return False
+            cleanup.unlink()
+            identity.unlink()
+            receipt = path.with_name(path.name + QUARANTINE_RECEIPT_SUFFIX)
+            receipt.unlink()
+            return True
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            try:
+                identity.unlink()
+            except FileNotFoundError:
+                pass
+            return True
+        except (OSError, UnicodeError, ValueError):
+            try:
+                identity.unlink()
+            except OSError:
+                pass
+            return False
+    return False
+
+
+def cleanup_recovery_quarantines(
+    path: Path, expected: dict[str, str], key: bytes
+) -> bool:
+    quarantines = sorted(
+        candidate
+        for candidate in path.parent.glob(f".{path.name}.recovery-*")
+        if not candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
+    )
+    for quarantine in quarantines:
+        if not cleanup_one_recovery_quarantine(quarantine, expected, key):
+            continue
+    remaining = sorted(path.parent.glob(f".{path.name}.recovery-*"))
+    return (
+        not any(
+            candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
+            for candidate in remaining
+        )
+        and len(remaining) <= MAX_RECOVERY_QUARANTINES
+    )
+
+
 def unlink_owned_record(
     path: Path, expected: dict[str, str], expected_stat: os.stat_result | None = None,
-    *, lock_held: bool = False
+    *, lock_held: bool = False, quarantine_key: bytes | None = None
 ) -> bool:
     def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
         return left.st_dev == right.st_dev and left.st_ino == right.st_ino
@@ -756,7 +965,11 @@ def unlink_owned_record(
                 if lock is None:
                     return False
                 return unlink_owned_record(
-                    path, expected, expected_stat=expected_stat, lock_held=True
+                    path,
+                    expected,
+                    expected_stat=expected_stat,
+                    lock_held=True,
+                    quarantine_key=quarantine_key,
                 )
         initial_stat = path.lstat()
         if expected_stat is not None and (
@@ -784,6 +997,10 @@ def unlink_owned_record(
                     quarantined_metadata.get(key) == value
                     for key, value in expected.items()
                 ):
+                    if quarantine_key is not None:
+                        write_quarantine_receipt(
+                            quarantine, quarantined_metadata, quarantine_key
+                        )
                     return True
             except (OSError, UnicodeError, ValueError):
                 pass
@@ -873,6 +1090,19 @@ def stop_recorded_broker(
 def recover_stale(args: argparse.Namespace) -> int:
     record = Path(args.record)
     try:
+        metadata = read_record_shape(record)
+        raw_home = metadata.get("home", "")
+        task = metadata.get("task", "")
+        launch_script = metadata.get("launch-script", "")
+        if not raw_home or not task or not launch_script:
+            return 1
+        expected_home = canonical(raw_home)
+        read_launch_evidence(
+            RECOVERY_LAUNCH_EVIDENCE_FD,
+            home=expected_home,
+            task=task,
+            launch_script=canonical(launch_script),
+        )
         lock_home = canonical(str(record.parent.parent))
         with record_lock(
             record, blocking=False, authority_home=lock_home
@@ -909,7 +1139,7 @@ def recover_stale_locked(args: argparse.Namespace) -> int:
             or record.parent != Path(expected_home) / "state"
         ):
             return 1
-        _, launch_pid, _, _ = read_launch_evidence(
+        durable_root_key, launch_pid, launch_start, launch_identity = read_launch_evidence(
             RECOVERY_LAUNCH_EVIDENCE_FD,
             home=expected_home,
             task=metadata["task"],
@@ -939,12 +1169,22 @@ def recover_stale_locked(args: argparse.Namespace) -> int:
             return 1
         if not record.exists() and not record.is_symlink():
             return 0
+        durable_key = derive_broker_durable_key(
+            durable_root_key,
+            task=metadata["task"],
+            home=expected_home,
+            launch_pid=launch_pid,
+            launch_start=launch_start,
+            launch_identity=launch_identity,
+            launch_script=expected_launch_script,
+        )
         return int(
             not unlink_owned_record(
                 record,
                 metadata,
                 expected_stat=record_stat,
                 lock_held=True,
+                quarantine_key=durable_key,
             )
         )
     except FileNotFoundError:

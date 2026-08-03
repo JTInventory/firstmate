@@ -293,14 +293,47 @@ with TemporaryDirectory() as temporary:
     record.chmod(0o600)
     original_stat = record.lstat()
     if not broker.unlink_owned_record(
-        record, metadata, expected_stat=original_stat
+        record,
+        metadata,
+        expected_stat=original_stat,
+        quarantine_key=b"review-fix-quarantine-key",
     ):
         raise SystemExit("owned record was not quarantined")
     if record.exists():
         raise SystemExit("owned record pathname remained after quarantine")
-    quarantines = list(record.parent.glob(f".{record.name}.recovery-*"))
+    quarantines = [
+        candidate
+        for candidate in record.parent.glob(f".{record.name}.recovery-*")
+        if not candidate.name.endswith(broker.QUARANTINE_RECEIPT_SUFFIX)
+    ]
     if len(quarantines) != 1 or quarantines[0].lstat().st_ino != original_stat.st_ino:
         raise SystemExit("owned record inode was not retained atomically")
+    if not broker.cleanup_recovery_quarantines(
+        record,
+        {
+            "home": "/home",
+            "checkout": "/checkout",
+            "task": "task",
+            "script": "/checkout/bin/fm-session-authority-broker.py",
+            "launch-script": "/home/bin/fm-session-authority-exec.sh",
+            "uid": "0",
+            "gid": "0",
+        },
+        b"review-fix-quarantine-key",
+    ):
+        raise SystemExit("owned record quarantine cleanup failed")
+    if list(record.parent.glob(f".{record.name}.recovery-*")):
+        raise SystemExit("owned record quarantine was not reclaimed")
+    forged = record.parent / f".{record.name}.recovery-forged"
+    forged.write_text("forged\n", encoding="utf-8")
+    forged.chmod(0o600)
+    if not broker.cleanup_recovery_quarantines(
+        record,
+        {"home": "/home"},
+        b"review-fix-quarantine-key",
+    ) or not forged.exists():
+        raise SystemExit("unproven quarantine was removed")
+    forged.unlink()
 PY
   then
     fail "stale record deletion did not use atomic quarantine"
@@ -308,6 +341,8 @@ PY
   pass "stale record deletion uses atomic quarantine"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
+import fcntl
+import os
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -319,21 +354,24 @@ assert spec.loader is not None
 spec.loader.exec_module(broker)
 
 with TemporaryDirectory() as temporary:
-    record = Path(temporary) / "record"
-    record.write_text("replacement\n", encoding="utf-8")
-    record.chmod(0o600)
-    with broker.record_lock(record, blocking=True):
-        if Path(f"{record}.lock").exists():
-            raise SystemExit("record locking created a replaceable lock path")
-        if broker.unlink_owned_record(record, {}, expected_stat=record.lstat()):
-            raise SystemExit("record cleanup ignored the active serialization lock")
-        if not record.exists():
-            raise SystemExit("record cleanup removed a locked record")
+    state = Path(temporary) / "state"
+    state.mkdir()
+    broker.create_record_lock_capability(state)
+    descriptor = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise SystemExit("a second supervisor acquired the shared lock")
+    finally:
+        os.close(descriptor)
 PY
   then
-    fail "record cleanup did not honor per-home serialization"
+    fail "supervisors did not share the authenticated per-home serialization"
   fi
-  pass "record cleanup honors per-home serialization"
+  pass "supervisors share the authenticated per-home serialization"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi
