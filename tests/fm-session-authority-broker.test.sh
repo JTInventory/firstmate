@@ -272,28 +272,23 @@ if any(
         "lock_manager_peer_is_reserved",
         "MAX_LOCK_MANAGER_RESERVED_PENDING",
         "MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING",
+        "lock_manager_serve",
+        "socket.SOCK_DGRAM",
     )
 ):
-    raise SystemExit("lock manager still creates unbounded pre-auth admission work")
-client = source[source.index("def lock_manager_client("):source.index("def lock_manager_serve(")]
-serve = source[source.index("def lock_manager_serve("):source.index("def ensure_lock_manager(")]
+    raise SystemExit("lock manager still exposes an unauthenticated queue")
 cleanup = source[source.index("def cleanup_recovery_quarantines("):source.index("def unlink_owned_record(")]
-if "connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)" not in client:
-    raise SystemExit("lock manager connect is not bounded")
-if client.index('connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)') > client.index("connection.sendto("):
-    raise SystemExit("lock manager datagram timeout is applied too late")
-if "connection.bind(\"\")" not in client or "socket.SCM_RIGHTS" not in client:
-    raise SystemExit("lock manager client lacks anonymous descriptor handoff")
-if "socket.SOCK_DGRAM" not in serve or "recvmsg(" not in serve:
-    raise SystemExit("lock manager does not authenticate datagrams first")
-if ".listen(" in serve or ".accept(" in serve:
-    raise SystemExit("lock manager still exposes a shared stream backlog")
+if "AUTHORITY_SERIALIZATION_FD = 18" not in source:
+    raise SystemExit("authority serialization did not use the inherited FD 18 capability")
+if "fcntl.flock" not in source or "stat.S_ISFIFO" not in source:
+    raise SystemExit("authority serialization is not a non-reopenable kernel lock")
 if ".glob(" in cleanup:
     raise SystemExit("quarantine cleanup still scans an attacker-controlled namespace")
 handoff = source[source.index("def supervise("):source.index("def serve_locked(")]
-transfer = handoff.index("if record_lock_fd.fileno()")
-if "record_lock_fd = None" in handoff[transfer:]:
-    raise SystemExit("supervisor dropped the transferred lease before exec")
+if '"--record-lock-fd", str(AUTHORITY_SERIALIZATION_FD)' not in handoff:
+    raise SystemExit("supervisor did not transfer the inherited serialization capability")
+if "os.dup2(record_lock_fd.fileno()" in handoff or "record_lock_fd.close()" in handoff:
+    raise SystemExit("supervisor replaced or closed the serialization capability before exec")
 PY
   then
     fail "broker admission or lease handoff regressed"
@@ -534,9 +529,9 @@ PY
   pass "stale record deletion uses atomic quarantine"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
+import os
 import sys
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 broker_path = Path(sys.argv[1]).resolve()
 spec = importlib.util.spec_from_file_location("session_authority_broker_lock", broker_path)
@@ -544,16 +539,36 @@ broker = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(broker)
 
-with TemporaryDirectory() as temporary:
-    home = str(Path(temporary))
-    address = broker.lock_manager_address(home, "task", b"review-lock-key")
-    if not address.startswith("\0firstmate-session-lock-"):
-        raise SystemExit("per-home lock manager did not use an abstract socket")
+saved_fd = None
+try:
+    try:
+        saved_fd = os.dup(18)
+    except OSError:
+        pass
+    read_fd, write_fd = os.pipe()
+    os.dup2(read_fd, broker.AUTHORITY_SERIALIZATION_FD)
+    os.close(read_fd)
+    lock = broker.acquire_authority_record_lock(
+        broker.AUTHORITY_SERIALIZATION_FD, blocking=False
+    )
+    if lock is None:
+        raise SystemExit("authority serialization did not acquire the inherited pipe lock")
+    broker.close_record_lock(lock)
+    os.close(write_fd)
+finally:
+    if saved_fd is None:
+        try:
+            os.close(18)
+        except OSError:
+            pass
+    else:
+        os.dup2(saved_fd, 18)
+        os.close(saved_fd)
 PY
   then
-    fail "per-home serialization did not use a non-reopenable endpoint"
+    fail "per-home serialization did not use the inherited capability"
   fi
-  pass "per-home serialization uses a non-reopenable endpoint"
+  pass "per-home serialization uses the inherited non-reopenable capability"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi

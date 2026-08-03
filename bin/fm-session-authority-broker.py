@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import array
 import base64
 import binascii
 import ctypes
@@ -16,7 +15,6 @@ import hmac
 import os
 from pathlib import Path
 import secrets
-import select
 import signal
 import socket
 import stat
@@ -31,16 +29,13 @@ PROTOCOL_VERSION = 1
 MAX_ANCESTRY_DEPTH = 128
 BROKER_REQUEST_TIMEOUT_SECONDS = 2.0
 RECOVERY_LAUNCH_EVIDENCE_FD = 19
-RECORD_LOCK_FD = 20
+AUTHORITY_SERIALIZATION_FD = 18
 MAX_RECOVERY_QUARANTINES = 4
 QUARANTINE_RECEIPT_SUFFIX = ".receipt"
 QUARANTINE_PROOF_SUFFIX = ".proof"
 QUARANTINE_RECEIPT_TEMP_SUFFIX = ".receipt-tmp"
 QUARANTINE_IDENTITY_SUFFIX = ".identity"
-LOCK_MANAGER_TIMEOUT_SECONDS = 0.25
-MAX_LOCK_MANAGER_REQUEST_BYTES = 1024
-MAX_LOCK_MANAGER_REQUESTS_PER_TICK = 128
-MAX_LOCK_MANAGER_WAITERS = 128
+AUTHORITY_LOCK_TIMEOUT_SECONDS = 0.25
 MAX_QUARANTINE_RECEIPT_BYTES = 4096
 
 
@@ -355,8 +350,33 @@ def open_record_lock(
         raise
 
 
-def close_record_lock(descriptor: int | socket.socket | None) -> None:
+class AuthorityRecordLock:
+    def __init__(self, fd: int):
+        self.fd = fd
+        self.closed = False
+
+    def fileno(self) -> int:
+        return self.fd
+
+
+def close_record_lock(
+    descriptor: int | AuthorityRecordLock | socket.socket | None
+) -> None:
     if descriptor is None:
+        return
+    if isinstance(descriptor, AuthorityRecordLock):
+        if descriptor.closed:
+            return
+        try:
+            fcntl.flock(descriptor.fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            descriptor.closed = True
+            try:
+                os.close(descriptor.fd)
+            except OSError:
+                pass
         return
     if isinstance(descriptor, socket.socket):
         try:
@@ -368,352 +388,12 @@ def close_record_lock(descriptor: int | socket.socket | None) -> None:
     os.close(descriptor)
 
 
-def lock_manager_address(home: str, task: str, root_key: bytes) -> str:
-    digest = hashlib.sha256(
-        b"firstmate/session-authority-lock/v1\0"
-        + home.encode("utf-8")
-        + b"\0"
-        + task.encode("utf-8")
-        + b"\0"
-        + root_key
-    ).hexdigest()
-    return "\0firstmate-session-lock-" + digest
-
-
-def lock_manager_context(
-    home: str, task: str, launch_pid: int, launch_start: str,
-    launch_identity: str, launch_script: str
-) -> bytes:
-    return b"\0".join(
-        (
-            b"firstmate/session-authority-lock/auth/v1",
-            home.encode("utf-8"),
-            task.encode("utf-8"),
-            str(launch_pid).encode("ascii"),
-            launch_start.encode("utf-8"),
-            launch_identity.encode("utf-8"),
-            launch_script.encode("utf-8"),
-        )
-    )
-
-
-def lock_manager_lease_token(
-    root_key: bytes, context: bytes
-) -> bytes:
-    return (
-        b"lease="
-        + hmac.new(
-            root_key,
-            b"firstmate/session-authority-lock/lease/v1\0" + context,
-            hashlib.sha256,
-        ).hexdigest().encode("ascii")
-        + b"\n"
-    )
-
-
-def lock_manager_request_fields(
-    request: bytes
-) -> tuple[bytes, bytes, str] | None:
-    if len(request) > MAX_LOCK_MANAGER_REQUEST_BYTES:
-        return None
-    lines = request.splitlines()
-    if len(lines) != 3 or any(b"=" not in line for line in lines):
-        return None
-    fields: dict[bytes, bytes] = {}
-    for line in lines:
-        name, value = line.split(b"=", 1)
-        if name in fields or name not in {b"nonce", b"auth", b"mode"}:
-            return None
-        fields[name] = value
-    nonce = fields.get(b"nonce", b"")
-    auth = fields.get(b"auth", b"")
-    try:
-        mode = fields.get(b"mode", b"").decode("ascii")
-    except UnicodeError:
-        return None
-    if (
-        len(nonce) != 64
-        or any(value not in b"0123456789abcdef" for value in nonce)
-        or len(auth) != 64
-        or any(value not in b"0123456789abcdef" for value in auth)
-        or mode not in {"probe", "try", "wait"}
-    ):
-        return None
-    return nonce, auth, mode
-
-
-def lock_manager_send_response(
-    server: socket.socket, address: str | bytes,
-    response: bytes, descriptor: socket.socket | None = None
-) -> bool:
-    try:
-        if descriptor is None:
-            server.sendto(response, address)
-            return True
-        fds = array.array("i", [descriptor.fileno()])
-        server.sendmsg(
-            [response],
-            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)],
-            0,
-            address,
-        )
-        return True
-    except OSError:
-        return False
-
-
-def lock_manager_socketpair() -> tuple[socket.socket, socket.socket]:
-    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    left.set_inheritable(False)
-    right.set_inheritable(False)
-    return left, right
-
-
-def lock_manager_lease_pair(
-    root_key: bytes, context: bytes
-) -> tuple[socket.socket, socket.socket]:
-    left, right = lock_manager_socketpair()
-    try:
-        left.sendall(lock_manager_lease_token(root_key, context))
-    except BaseException:
-        left.close()
-        right.close()
-        raise
-    return left, right
-
-
-def lock_manager_client(
-    *, home: str, task: str, launch_script: str,
-    launch_evidence: tuple[bytes, int, str, str], mode: str
-) -> socket.socket | bool | None:
-    root_key, launch_pid, launch_start, launch_identity = launch_evidence
-    if mode not in {"probe", "try", "wait"}:
-        return None
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    received: list[int] = []
-    try:
-        connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
-        connection.bind("")
-        nonce = secrets.token_bytes(32).hex().encode("ascii")
-        context = lock_manager_context(
-            home, task, launch_pid, launch_start, launch_identity, launch_script
-        )
-        tag = hmac.new(
-            root_key,
-            b"lock\0" + context + b"\0" + nonce + b"\0" + mode.encode("ascii"),
-            hashlib.sha256,
-        ).hexdigest().encode("ascii")
-        request = (
-            b"nonce=" + nonce + b"\n"
-            + b"auth=" + tag + b"\n"
-            + b"mode=" + mode.encode("ascii") + b"\n"
-        )
-        connection.sendto(
-            request, lock_manager_address(home, task, root_key)
-        )
-        response, ancdata, _, _ = connection.recvmsg(
-            128, socket.CMSG_SPACE(array.array("i").itemsize * 4)
-        )
-        for level, kind, data in ancdata:
-            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
-                received.extend(
-                    array.array("i", data[: len(data) - len(data) % array.array("i").itemsize])
-                )
-        if response == b"BUSY\n":
-            for fd in received:
-                os.close(fd)
-            return False
-        if response != b"READY\n" or len(received) != 1:
-            for fd in received:
-                os.close(fd)
-            return None
-        lock = socket.socket(fileno=received[0])
-        received = []
-        if mode == "probe":
-            expected_lease = lock_manager_lease_token(root_key, context)
-            try:
-                lock.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
-                if recv_exact(
-                    lock,
-                    len(expected_lease),
-                    time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS,
-                ) != expected_lease:
-                    lock.close()
-                    return None
-                lock.settimeout(None)
-            except (OSError, TimeoutError, ValueError):
-                lock.close()
-                return None
-            close_record_lock(lock)
-            return True
-        return lock
-    except (OSError, UnicodeError, ValueError):
-        for fd in received:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        return None
-    finally:
-        connection.close()
-
-
-def lock_manager_serve(
-    *, home: str, task: str, launch_script: str,
-    launch_evidence: tuple[bytes, int, str, str]
-) -> None:
-    root_key, launch_pid, launch_start, launch_identity = launch_evidence
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    owner: socket.socket | None = None
-    waiters: list[tuple[float, str | bytes]] = []
-    context = lock_manager_context(
-        home, task, launch_pid, launch_start, launch_identity, launch_script
-    )
-    address = lock_manager_address(home, task, root_key)
-
-    def grant_waiter(now: float) -> socket.socket | None:
-        while waiters:
-            deadline, waiter_address = waiters.pop(0)
-            if deadline <= now:
-                continue
-            left, right = lock_manager_lease_pair(root_key, context)
-            if lock_manager_send_response(server, waiter_address, b"READY\n", right):
-                right.close()
-                return left
-            left.close()
-            right.close()
-        return None
-
-    try:
-        server.bind(address)
-        server.setblocking(False)
-        while True:
-            if launch_process_state(
-                launch_pid, launch_start, launch_identity, launch_script
-            ) == "dead":
-                return
-            now = time.monotonic()
-            waiters[:] = [
-                (deadline, waiter_address)
-                for deadline, waiter_address in waiters
-                if deadline > now
-            ]
-            readers: list[socket.socket] = [server]
-            if owner is not None:
-                readers.append(owner)
-            readable, _, _ = select.select(readers, [], [], 0.05)
-            if server in readable:
-                for _ in range(MAX_LOCK_MANAGER_REQUESTS_PER_TICK):
-                    try:
-                        request, ancdata, flags, source = server.recvmsg(
-                            MAX_LOCK_MANAGER_REQUEST_BYTES,
-                            socket.CMSG_SPACE(array.array("i").itemsize * 4),
-                        )
-                    except BlockingIOError:
-                        break
-                    except OSError:
-                        break
-                    for level, kind, data in ancdata:
-                        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
-                            size = array.array("i").itemsize
-                            for fd in array.array("i", data[: len(data) - len(data) % size]):
-                                try:
-                                    os.close(fd)
-                                except OSError:
-                                    pass
-                    if flags & (
-                        getattr(socket, "MSG_TRUNC", 0)
-                        | getattr(socket, "MSG_CTRUNC", 0)
-                    ) or source is None:
-                        continue
-                    fields = lock_manager_request_fields(request)
-                    if fields is None:
-                        continue
-                    nonce, tag, mode = fields
-                    expected_tag = hmac.new(
-                        root_key,
-                        b"lock\0" + context + b"\0" + nonce + b"\0" + mode.encode("ascii"),
-                        hashlib.sha256,
-                    ).hexdigest().encode("ascii")
-                    if not hmac.compare_digest(tag, expected_tag):
-                        continue
-                    if mode == "probe":
-                        left, right = lock_manager_lease_pair(root_key, context)
-                        if lock_manager_send_response(
-                            server, source, b"READY\n", right
-                        ):
-                            right.close()
-                            close_record_lock(left)
-                        else:
-                            left.close()
-                            right.close()
-                        continue
-                    if owner is None:
-                        left, right = lock_manager_lease_pair(root_key, context)
-                        if lock_manager_send_response(
-                            server, source, b"READY\n", right
-                        ):
-                            right.close()
-                            owner = left
-                        else:
-                            left.close()
-                            right.close()
-                    elif mode == "try" or len(waiters) >= MAX_LOCK_MANAGER_WAITERS:
-                        lock_manager_send_response(server, source, b"BUSY\n")
-                    else:
-                        waiters.append((time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS, source))
-            if owner is not None and owner in readable:
-                try:
-                    owner.recv(256)
-                except (BlockingIOError, OSError):
-                    pass
-                owner.close()
-                owner = grant_waiter(time.monotonic())
-    finally:
-        if owner is not None:
-            owner.close()
-        server.close()
-
-
-def ensure_lock_manager(
-    *, home: str, task: str, launch_script: str,
-    launch_evidence: tuple[bytes, int, str, str]
-) -> bool:
-    for attempt in range(24):
-        probe = lock_manager_client(
-            home=home, task=task, launch_script=launch_script,
-            launch_evidence=launch_evidence, mode="probe"
-        )
-        if probe is True:
-            return True
-        if attempt % 4 == 0:
-            try:
-                child = os.fork()
-            except OSError:
-                return False
-            if child == 0:
-                try:
-                    for fd in (18, RECOVERY_LAUNCH_EVIDENCE_FD):
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
-                    lock_manager_serve(
-                        home=home, task=task, launch_script=launch_script,
-                        launch_evidence=launch_evidence,
-                    )
-                finally:
-                    os._exit(0)
-        time.sleep(0.025)
-    return False
-
-
 def open_authority_record_lock(
     *, blocking: bool, state: Path | None = None, home: str | None = None,
     task: str | None = None,
     launch_script: str | None = None,
     launch_evidence: tuple[bytes, int, str, str] | None = None
-) -> socket.socket | None:
+) -> AuthorityRecordLock | None:
     if (
         state is None or home is None or task is None or launch_script is None
         or launch_evidence is None
@@ -721,57 +401,49 @@ def open_authority_record_lock(
         return None
     if not state.is_dir() or state.is_symlink() or canonical(str(state.parent)) != home:
         return None
-    if not ensure_lock_manager(
-        home=home, task=task, launch_script=launch_script,
-        launch_evidence=launch_evidence
+    if not task or canonical(launch_script) != canonical(
+        f"{home}/bin/fm-session-authority-exec.sh"
     ):
         return None
-    mode = "wait" if blocking else "try"
-    result = lock_manager_client(
-        home=home, task=task, launch_script=launch_script,
-        launch_evidence=launch_evidence, mode=mode
+    return acquire_authority_record_lock(
+        AUTHORITY_SERIALIZATION_FD, blocking=blocking
     )
-    return result if isinstance(result, socket.socket) else None
+
+
+def acquire_authority_record_lock(
+    fd: int, *, blocking: bool
+) -> AuthorityRecordLock | None:
+    if fd != AUTHORITY_SERIALIZATION_FD:
+        return None
+    try:
+        descriptor_stat = os.fstat(fd)
+        if not stat.S_ISFIFO(descriptor_stat.st_mode):
+            return None
+    except OSError:
+        return None
+    deadline = time.monotonic() + AUTHORITY_LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return AuthorityRecordLock(fd)
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                return None
+            if not blocking or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
 
 
 def inherited_authority_record_lock(
     fd: int, *, home: str, task: str,
     launch_script: str,
     launch_evidence: tuple[bytes, int, str, str]
-) -> socket.socket | None:
-    try:
-        connection = socket.socket(
-            family=socket.AF_UNIX, type=socket.SOCK_STREAM, fileno=fd
-        )
-        if connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
-            connection.close()
-            return None
-        if hasattr(socket, "SO_DOMAIN") and connection.getsockopt(
-            socket.SOL_SOCKET, socket.SO_DOMAIN
-        ) != socket.AF_UNIX:
-            connection.close()
-            return None
-        root_key, launch_pid, launch_start, launch_identity = launch_evidence
-        context = lock_manager_context(
-            home, task, launch_pid, launch_start, launch_identity,
-            launch_script,
-        )
-        connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
-        if recv_exact(
-            connection,
-            len(lock_manager_lease_token(root_key, context)),
-            time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS,
-        ) != lock_manager_lease_token(root_key, context):
-            connection.close()
-            return None
-        connection.settimeout(None)
-        return connection
-    except (OSError, UnicodeError, ValueError):
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+) -> AuthorityRecordLock | None:
+    if fd != AUTHORITY_SERIALIZATION_FD or not task or canonical(
+        launch_script
+    ) != canonical(f"{home}/bin/fm-session-authority-exec.sh"):
         return None
+    return acquire_authority_record_lock(fd, blocking=False)
 
 
 def serve(args: argparse.Namespace) -> int:
@@ -799,7 +471,7 @@ def serve(args: argparse.Namespace) -> int:
         return 1
     record_lock_argument = getattr(args, "record_lock_fd", -1)
     if record_lock_argument >= 0:
-        if record_lock_argument != RECORD_LOCK_FD:
+        if record_lock_argument != AUTHORITY_SERIALIZATION_FD:
             return 1
         record_lock_fd = inherited_authority_record_lock(
             record_lock_argument, home=home, task=args.task,
@@ -857,7 +529,7 @@ def install_evidence_bytes(data: bytes) -> None:
 
 
 def supervise(args: argparse.Namespace) -> int:
-    record_lock_fd: socket.socket | None = None
+    record_lock_fd: AuthorityRecordLock | None = None
     try:
         evidence = read_evidence_bytes(args.launch_evidence_fd)
         if args.launch_evidence_fd != RECOVERY_LAUNCH_EVIDENCE_FD:
@@ -890,12 +562,7 @@ def supervise(args: argparse.Namespace) -> int:
             recovery_args, launch_evidence=launch_evidence, lease=record_lock_fd
         ) != 0:
             return 1
-        if record_lock_fd.fileno() != RECORD_LOCK_FD:
-            os.dup2(record_lock_fd.fileno(), RECORD_LOCK_FD, inheritable=True)
-            record_lock_fd.close()
-            record_lock_fd = socket.socket(fileno=RECORD_LOCK_FD)
-        else:
-            os.set_inheritable(RECORD_LOCK_FD, True)
+        os.set_inheritable(AUTHORITY_SERIALIZATION_FD, True)
         install_evidence_bytes(evidence)
         os.execv(
             sys.executable,
@@ -907,7 +574,7 @@ def supervise(args: argparse.Namespace) -> int:
                 "--home", args.home,
                 "--checkout", args.checkout,
                 "--task", args.task,
-                "--record-lock-fd", str(RECORD_LOCK_FD),
+                "--record-lock-fd", str(AUTHORITY_SERIALIZATION_FD),
                 "--launch-evidence-fd", str(RECOVERY_LAUNCH_EVIDENCE_FD),
                 "--launch-script", args.launch_script,
             ],
@@ -921,7 +588,8 @@ def supervise(args: argparse.Namespace) -> int:
 
 def serve_locked(
     args: argparse.Namespace, *, state: Path, home: str, checkout: str,
-    script: str, launch_script: str, record: Path, lock: socket.socket | None,
+    script: str, launch_script: str, record: Path,
+    lock: AuthorityRecordLock | None,
     launch_evidence: tuple[bytes, int, str, str]
 ) -> int:
     durable_root_key, launch_pid, launch_start, launch_identity = launch_evidence
@@ -1581,7 +1249,7 @@ def broker_command_matches(
     inherited = (
         len(command) == 17
         and command[11] == "--record-lock-fd"
-        and command[12] == str(RECORD_LOCK_FD)
+        and command[12] == str(AUTHORITY_SERIALIZATION_FD)
         and command[13] == "--launch-evidence-fd"
         and command[14] == str(RECOVERY_LAUNCH_EVIDENCE_FD)
         and command[15] == "--launch-script"
@@ -1710,7 +1378,7 @@ def recover_stale_locked(
                 task=requested_task,
                 launch_script=requested_launch_script,
             )
-        def recover_under_lease(lock: socket.socket | None) -> int:
+        def recover_under_lease(lock: AuthorityRecordLock | None) -> int:
             if lock is None:
                 return 1
             record_stat = record.lstat()
