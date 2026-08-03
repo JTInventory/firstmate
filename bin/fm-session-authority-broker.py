@@ -15,6 +15,7 @@ import hmac
 import os
 from pathlib import Path
 import secrets
+import select
 import signal
 import socket
 import stat
@@ -29,9 +30,10 @@ PROTOCOL_VERSION = 1
 MAX_ANCESTRY_DEPTH = 128
 BROKER_REQUEST_TIMEOUT_SECONDS = 2.0
 RECOVERY_LAUNCH_EVIDENCE_FD = 19
-RECORD_LOCK_FD = 20
 MAX_RECOVERY_QUARANTINES = 4
 QUARANTINE_RECEIPT_SUFFIX = ".receipt"
+QUARANTINE_PROOF_SUFFIX = ".proof"
+LOCK_MANAGER_TIMEOUT_SECONDS = 0.25
 
 
 def canonical(value: str) -> str:
@@ -297,7 +299,9 @@ def write_record(
 @contextmanager
 def record_lock(
     path: Path, *, blocking: bool, expected_stat: os.stat_result | None = None,
-    authority_home: str | None = None
+    authority_home: str | None = None, authority_task: str | None = None,
+    launch_script: str | None = None,
+    launch_evidence: tuple[bytes, int, str, str] | None = None,
 ):
     if authority_home is None:
         descriptor = open_record_lock(
@@ -307,6 +311,10 @@ def record_lock(
         descriptor = open_authority_record_lock(
             blocking=blocking,
             state=Path(authority_home) / "state",
+            home=authority_home,
+            task=authority_task,
+            launch_script=launch_script,
+            launch_evidence=launch_evidence,
         )
     try:
         yield descriptor
@@ -342,54 +350,228 @@ def open_record_lock(
         raise
 
 
-def close_record_lock(descriptor: int | None) -> None:
+def close_record_lock(descriptor: int | socket.socket | None) -> None:
     if descriptor is None:
+        return
+    if isinstance(descriptor, socket.socket):
+        try:
+            descriptor.sendall(b"RELEASE\n")
+        except OSError:
+            pass
+        descriptor.close()
         return
     os.close(descriptor)
 
 
-def open_authority_record_lock(
-    *, blocking: bool, state: Path | None = None
-) -> int | None:
-    descriptor: int | None = None
+def lock_manager_address(home: str, task: str, root_key: bytes) -> str:
+    digest = hashlib.sha256(
+        b"firstmate/session-authority-lock/v1\0"
+        + home.encode("utf-8")
+        + b"\0"
+        + task.encode("utf-8")
+        + b"\0"
+        + root_key
+    ).hexdigest()
+    return "\0firstmate-session-lock-" + digest
+
+
+def lock_manager_context(
+    home: str, task: str, launch_pid: int, launch_start: str,
+    launch_identity: str, launch_script: str
+) -> bytes:
+    return b"\0".join(
+        (
+            b"firstmate/session-authority-lock/auth/v1",
+            home.encode("utf-8"),
+            task.encode("utf-8"),
+            str(launch_pid).encode("ascii"),
+            launch_start.encode("utf-8"),
+            launch_identity.encode("utf-8"),
+            launch_script.encode("utf-8"),
+        )
+    )
+
+
+def recv_line(connection: socket.socket, deadline: float) -> bytes:
+    data = bytearray()
+    while len(data) <= 256:
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            raise TimeoutError("lock manager request deadline exceeded")
+        connection.settimeout(timeout)
+        chunk = connection.recv(1)
+        if not chunk:
+            raise ValueError("short lock manager request")
+        data.extend(chunk)
+        if chunk == b"\n":
+            return bytes(data)
+    raise ValueError("oversized lock manager request")
+
+
+def lock_manager_client(
+    *, home: str, task: str, launch_script: str,
+    launch_evidence: tuple[bytes, int, str, str], mode: str
+) -> socket.socket | bool | None:
+    root_key, launch_pid, launch_start, launch_identity = launch_evidence
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    deadline = time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
     try:
-        inherited_stat = os.fstat(RECORD_LOCK_FD)
-        if (
-            not stat.S_ISDIR(inherited_stat.st_mode)
-            or inherited_stat.st_uid != os.geteuid()
-        ):
-            raise ValueError("invalid authority record lock")
-        if state is not None:
-            lock_path = state
-            lock_stat = lock_path.lstat()
-            if (
-                not stat.S_ISDIR(lock_stat.st_mode)
-                or lock_stat.st_uid != os.geteuid()
-                or lock_stat.st_dev != inherited_stat.st_dev
-                or lock_stat.st_ino != inherited_stat.st_ino
-            ):
-                raise ValueError("unbound authority record lock")
-        flags = fcntl.LOCK_EX
-        if not blocking:
-            flags |= fcntl.LOCK_NB
-        fcntl.flock(RECORD_LOCK_FD, flags)
-        descriptor = os.dup(RECORD_LOCK_FD)
-        os.set_inheritable(descriptor, False)
-    except (OSError, ValueError):
+        connection.connect(lock_manager_address(home, task, root_key))
+        nonce_line = recv_line(connection, deadline)
+        if not nonce_line.startswith(b"nonce="):
+            raise ValueError("malformed lock manager challenge")
+        nonce = nonce_line[len(b"nonce="):-1]
+        if len(nonce) != 64 or any(value not in b"0123456789abcdef" for value in nonce):
+            raise ValueError("malformed lock manager challenge")
+        context = lock_manager_context(
+            home, task, launch_pid, launch_start, launch_identity, launch_script
+        )
+        tag = hmac.new(
+            root_key, b"lock\0" + context + b"\0" + nonce, hashlib.sha256
+        ).hexdigest().encode("ascii")
+        connection.sendall(b"auth=" + tag + b"\nmode=" + mode.encode("ascii") + b"\n")
+        response = recv_line(connection, deadline)
+        if response == b"READY\n":
+            if mode == "probe":
+                close_record_lock(connection)
+                return True
+            return connection
+        connection.close()
+        return False if response == b"BUSY\n" else None
+    except (OSError, UnicodeError, ValueError, TimeoutError):
+        connection.close()
         return None
+
+
+def lock_manager_serve(
+    *, home: str, task: str, launch_script: str,
+    launch_evidence: tuple[bytes, int, str, str]
+) -> None:
+    root_key, launch_pid, launch_start, launch_identity = launch_evidence
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        duplicated_stat = os.fstat(descriptor)
-        if (
-            duplicated_stat.st_dev != inherited_stat.st_dev
-            or duplicated_stat.st_ino != inherited_stat.st_ino
-        ):
-            os.close(descriptor)
-            return None
-        return descriptor
-    except BaseException:
-        if descriptor is not None:
-            os.close(descriptor)
-        raise
+        server.bind(lock_manager_address(home, task, root_key))
+        server.listen(16)
+        server.settimeout(0.25)
+        context = lock_manager_context(
+            home, task, launch_pid, launch_start, launch_identity, launch_script
+        )
+        while True:
+            if launch_process_state(
+                launch_pid, launch_start, launch_identity, launch_script
+            ) == "dead":
+                return
+            try:
+                connection, _ = server.accept()
+            except socket.timeout:
+                continue
+            with connection:
+                try:
+                    if launch_process_state(
+                        launch_pid, launch_start, launch_identity, launch_script
+                    ) == "dead":
+                        return
+                    connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
+                    nonce = secrets.token_bytes(32).hex().encode("ascii")
+                    connection.sendall(b"nonce=" + nonce + b"\n")
+                    auth_line = recv_line(
+                        connection, time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
+                    )
+                    mode_line = recv_line(
+                        connection, time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
+                    )
+                    if not auth_line.startswith(b"auth=") or not mode_line.startswith(b"mode="):
+                        raise ValueError("malformed lock manager authentication")
+                    tag = auth_line[len(b"auth="):-1]
+                    mode = mode_line[len(b"mode="):-1].decode("ascii")
+                    expected_tag = hmac.new(
+                        root_key, b"lock\0" + context + b"\0" + nonce,
+                        hashlib.sha256,
+                    ).hexdigest().encode("ascii")
+                    if not hmac.compare_digest(tag, expected_tag):
+                        connection.sendall(b"DENIED\n")
+                        continue
+                    if mode == "probe":
+                        connection.sendall(b"READY\n")
+                        continue
+                    if mode not in {"try", "wait"}:
+                        raise ValueError("invalid lock manager mode")
+                    connection.sendall(b"READY\n")
+                    while True:
+                        if launch_process_state(
+                            launch_pid, launch_start, launch_identity, launch_script
+                        ) == "dead":
+                            return
+                        readable, _, _ = select.select([connection], [], [], 0.25)
+                        if not readable:
+                            continue
+                        release = connection.recv(256)
+                        if not release or release == b"RELEASE\n":
+                            break
+                        raise ValueError("invalid lock manager release")
+                except (OSError, UnicodeError, ValueError, TimeoutError):
+                    continue
+    finally:
+        server.close()
+
+
+def ensure_lock_manager(
+    *, home: str, task: str, launch_script: str,
+    launch_evidence: tuple[bytes, int, str, str]
+) -> bool:
+    for attempt in range(24):
+        probe = lock_manager_client(
+            home=home, task=task, launch_script=launch_script,
+            launch_evidence=launch_evidence, mode="probe"
+        )
+        if probe is True:
+            return True
+        if attempt % 4 == 0:
+            try:
+                child = os.fork()
+            except OSError:
+                return False
+            if child == 0:
+                try:
+                    for fd in (18, RECOVERY_LAUNCH_EVIDENCE_FD):
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                    lock_manager_serve(
+                        home=home, task=task, launch_script=launch_script,
+                        launch_evidence=launch_evidence,
+                    )
+                finally:
+                    os._exit(0)
+        time.sleep(0.025)
+    return False
+
+
+def open_authority_record_lock(
+    *, blocking: bool, state: Path | None = None, home: str | None = None,
+    task: str | None = None,
+    launch_script: str | None = None,
+    launch_evidence: tuple[bytes, int, str, str] | None = None
+) -> socket.socket | None:
+    if (
+        state is None or home is None or task is None or launch_script is None
+        or launch_evidence is None
+    ):
+        return None
+    if not state.is_dir() or state.is_symlink() or canonical(str(state.parent)) != home:
+        return None
+    if not ensure_lock_manager(
+        home=home, task=task, launch_script=launch_script,
+        launch_evidence=launch_evidence
+    ):
+        return None
+    mode = "wait" if blocking else "try"
+    result = lock_manager_client(
+        home=home, task=task, launch_script=launch_script,
+        launch_evidence=launch_evidence, mode=mode
+    )
+    return result if isinstance(result, socket.socket) else None
 
 
 def serve(args: argparse.Namespace) -> int:
@@ -408,13 +590,24 @@ def serve(args: argparse.Namespace) -> int:
     if not state.is_dir() or state.is_symlink() or not Path(home).is_dir():
         return 1
     record = state / ".session-authority-broker"
-    record_lock_fd = open_authority_record_lock(blocking=False, state=state)
+    try:
+        launch_evidence = read_launch_evidence(
+            args.launch_evidence_fd, home=home, task=args.task,
+            launch_script=launch_script
+        )
+    except (OSError, UnicodeError, ValueError, struct.error):
+        return 1
+    record_lock_fd = open_authority_record_lock(
+        blocking=False, state=state, home=home, task=args.task,
+        launch_script=launch_script, launch_evidence=launch_evidence
+    )
     if record_lock_fd is None:
         return 1
     try:
         return serve_locked(
             args, state=state, home=home, checkout=checkout, script=script,
-            launch_script=launch_script, record=record
+            launch_script=launch_script, record=record, lock=record_lock_fd,
+            launch_evidence=launch_evidence
         )
     finally:
         close_record_lock(record_lock_fd)
@@ -453,54 +646,25 @@ def install_evidence_bytes(data: bytes) -> None:
         os.close(read_fd)
 
 
-def create_record_lock_capability(state: Path) -> None:
-    if not state.is_dir() or state.is_symlink():
-        raise ValueError("invalid authority state")
-    descriptor = os.open(
-        state,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-    )
-    try:
-        lock_stat = os.fstat(descriptor)
-        path_stat = state.lstat()
-        if (
-            not stat.S_ISDIR(lock_stat.st_mode)
-            or lock_stat.st_uid != os.geteuid()
-            or lock_stat.st_dev != path_stat.st_dev
-            or lock_stat.st_ino != path_stat.st_ino
-        ):
-            raise ValueError("invalid authority record lock")
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if descriptor != RECORD_LOCK_FD:
-            os.dup2(descriptor, RECORD_LOCK_FD, inheritable=True)
-        else:
-            os.set_inheritable(descriptor, True)
-    except BaseException:
-        os.close(descriptor)
-        raise
-    if descriptor != RECORD_LOCK_FD:
-        os.close(descriptor)
-
-
 def supervise(args: argparse.Namespace) -> int:
     try:
         evidence = read_evidence_bytes(args.launch_evidence_fd)
         if args.launch_evidence_fd != RECOVERY_LAUNCH_EVIDENCE_FD:
             os.close(args.launch_evidence_fd)
         install_evidence_bytes(evidence)
-        read_launch_evidence(
+        launch_evidence = read_launch_evidence(
             RECOVERY_LAUNCH_EVIDENCE_FD,
             home=canonical(args.home),
             task=args.task,
             launch_script=canonical(args.launch_script),
         )
         state = Path(canonical(args.state))
-        create_record_lock_capability(state)
-        install_evidence_bytes(evidence)
         recovery_args = argparse.Namespace(
             record=str(state / ".session-authority-broker")
         )
-        if recover_stale_locked(recovery_args) != 0:
+        if recover_stale_locked(
+            recovery_args, launch_evidence=launch_evidence
+        ) != 0:
             return 1
         install_evidence_bytes(evidence)
         os.execv(
@@ -524,15 +688,10 @@ def supervise(args: argparse.Namespace) -> int:
 
 def serve_locked(
     args: argparse.Namespace, *, state: Path, home: str, checkout: str,
-    script: str, launch_script: str, record: Path
+    script: str, launch_script: str, record: Path, lock: socket.socket | None,
+    launch_evidence: tuple[bytes, int, str, str]
 ) -> int:
-    try:
-        durable_root_key, launch_pid, launch_start, launch_identity = read_launch_evidence(
-            args.launch_evidence_fd, home=home, task=args.task,
-            launch_script=launch_script
-        )
-    except (OSError, UnicodeError, ValueError, struct.error):
-        return 1
+    durable_root_key, launch_pid, launch_start, launch_identity = launch_evidence
     if record.exists() or record.is_symlink():
         return 1
     durable_key = derive_broker_durable_key(
@@ -599,19 +758,20 @@ def serve_locked(
                 "uid": str(broker_uid),
                 "gid": str(broker_gid),
             },
-            durable_key,
         ):
             return 1
+        close_record_lock(lock)
+        lock = None
         while not stopping:
+            if not record.is_file() or record.is_symlink() or not Path(home).is_dir():
+                break
+            if launch_process_state(
+                launch_pid, launch_start, launch_identity, launch_script
+            ) == "dead":
+                break
             try:
                 connection, _ = server.accept()
             except socket.timeout:
-                if not record.is_file() or record.is_symlink() or not Path(home).is_dir():
-                    break
-                if launch_process_state(
-                    launch_pid, launch_start, launch_identity, launch_script
-                ) == "dead":
-                    break
                 continue
             except OSError:
                 if stopping:
@@ -782,26 +942,24 @@ def record_metadata_digest(metadata: dict[str, str]) -> str:
 
 
 def write_quarantine_receipt(
-    quarantine: Path, metadata: dict[str, str], key: bytes
+    quarantine: Path, metadata: dict[str, str], proof: Path
 ) -> None:
     quarantine_stat = quarantine.lstat()
     body = (
         "version=1\n"
         f"name={quarantine.name}\n"
+        f"proof={proof.name}\n"
         f"dev={quarantine_stat.st_dev}\n"
         f"ino={quarantine_stat.st_ino}\n"
         f"metadata={record_metadata_digest(metadata)}\n"
     ).encode("utf-8")
-    receipt = body + (
-        "hmac=" + hmac.new(key, body, hashlib.sha256).hexdigest() + "\n"
-    ).encode("ascii")
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{quarantine.name}.receipt-", dir=quarantine.parent
     )
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as output:
-            output.write(receipt)
+            output.write(body)
             output.flush()
             os.fsync(output.fileno())
         rename_noreplace(
@@ -821,7 +979,7 @@ def write_quarantine_receipt(
 
 
 def quarantine_receipt_matches(
-    quarantine: Path, metadata: dict[str, str], key: bytes
+    quarantine: Path, metadata: dict[str, str]
 ) -> bool:
     receipt_path = quarantine.with_name(
         quarantine.name + QUARANTINE_RECEIPT_SUFFIX
@@ -838,31 +996,31 @@ def quarantine_receipt_matches(
             if not name or name in fields:
                 return False
             fields[name] = value
-        if set(fields) != {"version", "name", "dev", "ino", "metadata", "hmac"}:
+        if set(fields) != {"version", "name", "proof", "dev", "ino", "metadata"}:
             return False
         if fields["version"] != "1" or fields["name"] != quarantine.name:
+            return False
+        proof = quarantine.with_name(quarantine.name + QUARANTINE_PROOF_SUFFIX)
+        if fields["proof"] != proof.name:
             return False
         if fields["metadata"] != record_metadata_digest(metadata):
             return False
         quarantine_stat = quarantine.lstat()
+        proof_stat = proof.lstat()
         if (
             fields["dev"] != str(quarantine_stat.st_dev)
             or fields["ino"] != str(quarantine_stat.st_ino)
+            or proof_stat.st_dev != quarantine_stat.st_dev
+            or proof_stat.st_ino != quarantine_stat.st_ino
         ):
             return False
-        tag = fields["hmac"]
-        if len(tag) != 64 or any(value not in "0123456789abcdef" for value in tag):
-            return False
-        body = "".join(line for line in lines if not line.startswith("hmac="))
-        return hmac.compare_digest(
-            tag, hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
-        )
+        return True
     except (OSError, UnicodeError, ValueError):
         return False
 
 
 def cleanup_one_recovery_quarantine(
-    path: Path, expected: dict[str, str], key: bytes
+    path: Path, expected: dict[str, str]
 ) -> bool:
     def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
         return left.st_dev == right.st_dev and left.st_ino == right.st_ino
@@ -881,7 +1039,7 @@ def cleanup_one_recovery_quarantine(
             metadata = read_record_shape(path)
             if not same_inode(identity_stat, current_stat) or any(
                 metadata.get(name) != value for name, value in expected.items()
-            ) or not quarantine_receipt_matches(path, metadata, key):
+            ) or not quarantine_receipt_matches(path, metadata):
                 identity.unlink()
                 return False
             rename_noreplace(path, cleanup)
@@ -903,6 +1061,8 @@ def cleanup_one_recovery_quarantine(
                 return False
             cleanup.unlink()
             identity.unlink()
+            proof = path.with_name(path.name + QUARANTINE_PROOF_SUFFIX)
+            proof.unlink()
             receipt = path.with_name(path.name + QUARANTINE_RECEIPT_SUFFIX)
             receipt.unlink()
             return True
@@ -913,7 +1073,7 @@ def cleanup_one_recovery_quarantine(
                 identity.unlink()
             except FileNotFoundError:
                 pass
-            return True
+            return False
         except (OSError, UnicodeError, ValueError):
             try:
                 identity.unlink()
@@ -924,29 +1084,39 @@ def cleanup_one_recovery_quarantine(
 
 
 def cleanup_recovery_quarantines(
-    path: Path, expected: dict[str, str], key: bytes
+    path: Path, expected: dict[str, str]
 ) -> bool:
     quarantines = sorted(
         candidate
         for candidate in path.parent.glob(f".{path.name}.recovery-*")
         if not candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
+        and not candidate.name.endswith(QUARANTINE_PROOF_SUFFIX)
     )
     for quarantine in quarantines:
-        if not cleanup_one_recovery_quarantine(quarantine, expected, key):
+        if not cleanup_one_recovery_quarantine(quarantine, expected):
             continue
     remaining = sorted(path.parent.glob(f".{path.name}.recovery-*"))
+    quarantine_count = sum(
+        not candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
+        and not candidate.name.endswith(QUARANTINE_PROOF_SUFFIX)
+        for candidate in remaining
+    )
     return (
         not any(
             candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
             for candidate in remaining
         )
-        and len(remaining) <= MAX_RECOVERY_QUARANTINES
+        and not any(
+            candidate.name.endswith(QUARANTINE_PROOF_SUFFIX)
+            for candidate in remaining
+        )
+        and quarantine_count <= MAX_RECOVERY_QUARANTINES
     )
 
 
 def unlink_owned_record(
     path: Path, expected: dict[str, str], expected_stat: os.stat_result | None = None,
-    *, lock_held: bool = False, quarantine_key: bytes | None = None
+    *, lock_held: bool = False
 ) -> bool:
     def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
         return left.st_dev == right.st_dev and left.st_ino == right.st_ino
@@ -969,7 +1139,6 @@ def unlink_owned_record(
                     expected,
                     expected_stat=expected_stat,
                     lock_held=True,
-                    quarantine_key=quarantine_key,
                 )
         initial_stat = path.lstat()
         if expected_stat is not None and (
@@ -984,11 +1153,21 @@ def unlink_owned_record(
             quarantine = path.with_name(
                 f".{path.name}.recovery-{secrets.token_hex(16)}"
             )
+            proof = quarantine.with_name(quarantine.name + QUARANTINE_PROOF_SUFFIX)
             try:
+                os.link(path, proof, follow_symlinks=False)
                 rename_noreplace(path, quarantine)
             except FileExistsError:
+                try:
+                    proof.unlink()
+                except FileNotFoundError:
+                    pass
                 continue
             except FileNotFoundError:
+                try:
+                    proof.unlink()
+                except FileNotFoundError:
+                    pass
                 return False
             try:
                 quarantined_stat = quarantine.lstat()
@@ -997,14 +1176,17 @@ def unlink_owned_record(
                     quarantined_metadata.get(key) == value
                     for key, value in expected.items()
                 ):
-                    if quarantine_key is not None:
-                        write_quarantine_receipt(
-                            quarantine, quarantined_metadata, quarantine_key
-                        )
+                    write_quarantine_receipt(
+                        quarantine, quarantined_metadata, proof
+                    )
                     return True
             except (OSError, UnicodeError, ValueError):
                 pass
             restore_quarantine(quarantine)
+            try:
+                proof.unlink()
+            except FileNotFoundError:
+                pass
             return False
         return False
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
@@ -1097,96 +1279,101 @@ def recover_stale(args: argparse.Namespace) -> int:
         if not raw_home or not task or not launch_script:
             return 1
         expected_home = canonical(raw_home)
-        read_launch_evidence(
+        launch_evidence = read_launch_evidence(
             RECOVERY_LAUNCH_EVIDENCE_FD,
             home=expected_home,
             task=task,
             launch_script=canonical(launch_script),
         )
-        lock_home = canonical(str(record.parent.parent))
-        with record_lock(
-            record, blocking=False, authority_home=lock_home
-        ) as lock:
-            if lock is None:
-                return 1
-            return recover_stale_locked(args)
+        return recover_stale_locked(args, launch_evidence=launch_evidence)
     except FileNotFoundError:
         return 0 if not record.exists() and not record.is_symlink() else 1
     except (OSError, UnicodeError, ValueError):
         return 1
 
 
-def recover_stale_locked(args: argparse.Namespace) -> int:
+def recover_stale_locked(
+    args: argparse.Namespace,
+    *, launch_evidence: tuple[bytes, int, str, str] | None = None,
+) -> int:
     if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
         return 1
     record = Path(args.record)
     try:
-        record_stat = record.lstat()
         metadata = read_record_shape(record)
         expected_home = canonical(metadata["home"])
         expected_script = canonical(__file__)
         expected_checkout = canonical(str(Path(expected_script).parent.parent))
         expected_launch_script = canonical(metadata["launch-script"])
-        expected_state = canonical(str(record.parent))
-        if (
-            metadata["home"] != expected_home
-            or metadata["checkout"] != expected_checkout
-            or metadata["script"] != expected_script
-            or metadata["launch-script"] != expected_launch_script
-            or expected_launch_script != canonical(
-                f"{expected_home}/bin/fm-session-authority-exec.sh"
+        if launch_evidence is None:
+            launch_evidence = read_launch_evidence(
+                RECOVERY_LAUNCH_EVIDENCE_FD,
+                home=expected_home,
+                task=metadata["task"],
+                launch_script=expected_launch_script,
             )
-            or record.parent != Path(expected_home) / "state"
-        ):
-            return 1
-        durable_root_key, launch_pid, launch_start, launch_identity = read_launch_evidence(
-            RECOVERY_LAUNCH_EVIDENCE_FD,
-            home=expected_home,
-            task=metadata["task"],
+        with record_lock(
+            record,
+            blocking=False,
+            authority_home=expected_home,
+            authority_task=metadata["task"],
             launch_script=expected_launch_script,
-        )
-        if launch_pid != os.getppid():
-            return 1
-        launch_generation = process_generation_for_recovery(
-            int(metadata["launch-pid"])
-        )
-        if launch_generation == (
-            metadata["launch-start"], metadata["launch-identity"]
-        ):
-            return 1
-        pid = int(metadata["pid"])
-        generation = process_generation_for_recovery(pid)
-        if generation is not None and not stop_recorded_broker(
-            pid,
-            (metadata["start"], metadata["identity"]),
-            script=expected_script,
-            state=expected_state,
-            home=expected_home,
-            checkout=expected_checkout,
-            task=metadata["task"],
-            launch_script=expected_launch_script,
-        ):
-            return 1
-        if not record.exists() and not record.is_symlink():
-            return 0
-        durable_key = derive_broker_durable_key(
-            durable_root_key,
-            task=metadata["task"],
-            home=expected_home,
-            launch_pid=launch_pid,
-            launch_start=launch_start,
-            launch_identity=launch_identity,
-            launch_script=expected_launch_script,
-        )
-        return int(
-            not unlink_owned_record(
-                record,
-                metadata,
-                expected_stat=record_stat,
-                lock_held=True,
-                quarantine_key=durable_key,
+            launch_evidence=launch_evidence,
+        ) as lock:
+            if lock is None:
+                return 1
+            record_stat = record.lstat()
+            metadata = read_record_shape(record)
+            expected_home = canonical(metadata["home"])
+            expected_launch_script = canonical(metadata["launch-script"])
+            expected_state = canonical(str(record.parent))
+            if launch_evidence is None:
+                return 1
+            _, launch_pid, _, _ = launch_evidence
+            if (
+                metadata["task"] == ""
+                or metadata["home"] != expected_home
+                or metadata["checkout"] != expected_checkout
+                or metadata["script"] != expected_script
+                or metadata["launch-script"] != expected_launch_script
+                or expected_launch_script != canonical(
+                    f"{expected_home}/bin/fm-session-authority-exec.sh"
+                )
+                or record.parent != Path(expected_home) / "state"
+            ):
+                return 1
+            if launch_pid != os.getppid():
+                return 1
+            launch_generation = process_generation_for_recovery(
+                int(metadata["launch-pid"])
             )
-        )
+            if launch_generation == (
+                metadata["launch-start"], metadata["launch-identity"]
+            ):
+                return 1
+            pid = int(metadata["pid"])
+            generation = process_generation_for_recovery(pid)
+            if generation is not None and not stop_recorded_broker(
+                pid,
+                (metadata["start"], metadata["identity"]),
+                script=expected_script,
+                state=expected_state,
+                home=expected_home,
+                checkout=expected_checkout,
+                task=metadata["task"],
+                launch_script=expected_launch_script,
+            ):
+                return 1
+            if not record.exists() and not record.is_symlink():
+                return 0
+            return int(
+                not unlink_owned_record(
+                    record,
+                    metadata,
+                    expected_stat=record_stat,
+                    lock_held=True,
+                )
+            )
     except FileNotFoundError:
         return 0 if not record.exists() and not record.is_symlink() else 1
     except (OSError, UnicodeError, ValueError):

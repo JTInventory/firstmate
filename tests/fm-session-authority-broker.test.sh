@@ -296,7 +296,6 @@ with TemporaryDirectory() as temporary:
         record,
         metadata,
         expected_stat=original_stat,
-        quarantine_key=b"review-fix-quarantine-key",
     ):
         raise SystemExit("owned record was not quarantined")
     if record.exists():
@@ -305,6 +304,7 @@ with TemporaryDirectory() as temporary:
         candidate
         for candidate in record.parent.glob(f".{record.name}.recovery-*")
         if not candidate.name.endswith(broker.QUARANTINE_RECEIPT_SUFFIX)
+        and not candidate.name.endswith(broker.QUARANTINE_PROOF_SUFFIX)
     ]
     if len(quarantines) != 1 or quarantines[0].lstat().st_ino != original_stat.st_ino:
         raise SystemExit("owned record inode was not retained atomically")
@@ -319,7 +319,6 @@ with TemporaryDirectory() as temporary:
             "uid": "0",
             "gid": "0",
         },
-        b"review-fix-quarantine-key",
     ):
         raise SystemExit("owned record quarantine cleanup failed")
     if list(record.parent.glob(f".{record.name}.recovery-*")):
@@ -330,7 +329,6 @@ with TemporaryDirectory() as temporary:
     if not broker.cleanup_recovery_quarantines(
         record,
         {"home": "/home"},
-        b"review-fix-quarantine-key",
     ) or not forged.exists():
         raise SystemExit("unproven quarantine was removed")
     forged.unlink()
@@ -341,8 +339,6 @@ PY
   pass "stale record deletion uses atomic quarantine"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
-import fcntl
-import os
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -354,24 +350,15 @@ assert spec.loader is not None
 spec.loader.exec_module(broker)
 
 with TemporaryDirectory() as temporary:
-    state = Path(temporary) / "state"
-    state.mkdir()
-    broker.create_record_lock_capability(state)
-    descriptor = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            pass
-        else:
-            raise SystemExit("a second supervisor acquired the shared lock")
-    finally:
-        os.close(descriptor)
+    home = str(Path(temporary))
+    address = broker.lock_manager_address(home, "task", b"review-lock-key")
+    if not address.startswith("\0firstmate-session-lock-"):
+        raise SystemExit("per-home lock manager did not use an abstract socket")
 PY
   then
-    fail "supervisors did not share the authenticated per-home serialization"
+    fail "per-home serialization did not use a non-reopenable endpoint"
   fi
-  pass "supervisors share the authenticated per-home serialization"
+  pass "per-home serialization uses a non-reopenable endpoint"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi
