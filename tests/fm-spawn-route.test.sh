@@ -354,7 +354,7 @@ EOF
   expect_code 1 "$status" "empty tmux window id should fail"
   assert_contains "$out" "tmux did not return a window id" "empty tmux window id should explain failure"
   assert_grep "new-window" "$home/tmux.log" "empty tmux window id should create the window once"
-  assert_grep "kill-window -t @57" "$home/tmux.log" "empty tmux window id should remove the newly created window by id"
+  assert_no_grep "kill-window -t @57" "$home/tmux.log" "empty tmux window id must retain an endpoint whose identity is unknown"
   assert_no_grep "kill-window -t firstmate:fm-$id" "$home/tmux.log" "empty tmux window id must not clean up by mutable title"
   assert_no_grep "set-window-option" "$home/tmux.log" "empty tmux window id must stop before option changes"
   assert_no_grep "send-keys" "$home/tmux.log" "empty tmux window id must stop before pane commands"
@@ -373,7 +373,7 @@ EOF
   out=$(FM_FAKE_NEW_WINDOW_ID=@not-a-window-id FM_FAKE_TMUX_WINDOW_IDS_BEFORE=@1 FM_FAKE_TMUX_WINDOW_IDS_AFTER=$'@1\n@58' run_spawn_case "$home" "$id" "$proj" "$wt" "$fakebin"); status=$?
   expect_code 1 "$status" "malformed tmux window id should fail"
   assert_contains "$out" "tmux did not return a window id" "malformed tmux window id should explain failure"
-  assert_grep "kill-window -t @58" "$home/tmux.log" "malformed tmux window id should remove the newly created window by id"
+  assert_no_grep "kill-window -t @58" "$home/tmux.log" "malformed tmux window id must retain an endpoint whose identity is unknown"
   assert_no_grep "set-window-option" "$home/tmux.log" "malformed tmux window id must stop before option changes"
   assert_no_grep "send-keys" "$home/tmux.log" "malformed tmux window id must stop before pane commands"
   pass "malformed tmux window ids stop before post-create commands"

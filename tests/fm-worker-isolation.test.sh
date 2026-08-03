@@ -699,13 +699,15 @@ test_abort_retires_endpoint_before_returning_lease() {
   dir="$TMP_ROOT/abort-order"
   log="$dir/order.log"
   mkdir -p "$dir"
-  function_source=$(sed -n '/^spawn_abort_retire_unpublished_endpoint()/,/^trap spawn_abort_cleanup EXIT/p' \
+  function_source=$(sed -n '/^spawn_abort_endpoint_identity_matches()/,/^trap spawn_abort_cleanup EXIT/p' \
     "$SPAWN" | sed '$d')
   out=$(FUNCTION_SOURCE="$function_source" LOG="$log" STATE="$dir/state" ID=abort-order \
     bash -c '
       eval "$FUNCTION_SOURCE"
       BACKEND=tmux
-      WID=firstmate:fm-abort-order
+      WID=@42
+      SPAWN_ENDPOINT_TARGET=%42
+      ENDPOINT_GENERATION=abort-generation
       SPAWN_SLOT_CLAIM_PUBLISHED=0
       SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
       SPAWN_TREEHOUSE_LEASE_WT=/tmp/abort-order
@@ -723,6 +725,7 @@ test_abort_retires_endpoint_before_returning_lease() {
       SPAWN_TASK_LOCK_HELD=0
       SPAWN_ADMISSION_LOCKS=()
       ORCA_ABORT_CLEANUP=0
+      fm_backend_endpoint_identity_matches() { return 0; }
       fm_backend_kill() { printf "kill\n" >> "$LOG"; }
       fm_backend_agent_alive() { printf "alive\n" >> "$LOG"; printf dead; }
       spawn_return_unpublished_treehouse_lease() { printf "return\n" >> "$LOG"; }
@@ -731,6 +734,42 @@ test_abort_retires_endpoint_before_returning_lease() {
   [ "$(cat "$log")" = $'kill\nalive\nreturn' ] \
     || fail "abort cleanup returned a lease before endpoint retirement: $(cat "$log")"
   pass "abort cleanup proves endpoint retirement before returning a Treehouse lease"
+}
+
+test_spawn_abort_rejects_recycled_tmux_endpoint() {
+  local function_source dir kill_marker return_marker out
+  dir="$TMP_ROOT/abort-recycled-tmux"
+  kill_marker="$dir/kill"
+  return_marker="$dir/return"
+  mkdir -p "$dir"
+  function_source=$(sed -n '/^spawn_abort_endpoint_identity_matches()/,/^trap spawn_abort_cleanup EXIT/p' \
+    "$SPAWN" | sed '$d')
+  out=$(FUNCTION_SOURCE="$function_source" KILL_MARKER="$kill_marker" \
+    RETURN_MARKER="$return_marker" bash -c '
+    eval "$FUNCTION_SOURCE"
+    BACKEND=tmux
+    WID=@7
+    SPAWN_ENDPOINT_TARGET=%7
+    ENDPOINT_GENERATION=old-generation
+    SPAWN_SLOT_CLAIM_PUBLISHED=0
+    SPAWN_TREEHOUSE_LEASE_ACQUIRED=1
+    SPAWN_SLOT_CLAIMED=1
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    HERDR_FLAT_ABORT_CLEANUP=0
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    fm_backend_endpoint_identity_matches() {
+      [ "$3" = "@7|%7|new-generation" ]
+    }
+    fm_backend_kill() { : > "$KILL_MARKER"; }
+    fm_backend_agent_alive() { printf dead; }
+    spawn_return_unpublished_treehouse_lease() { : > "$RETURN_MARKER"; }
+    spawn_abort_retire_unpublished_endpoint && exit 31
+    [ ! -e "$KILL_MARKER" ] || exit 32
+    [ ! -e "$RETURN_MARKER" ] || exit 33
+    [ "$SPAWN_ABORT_ENDPOINT_RETIRED" = 0 ]
+  ' 2>&1) || fail "recycled tmux abort fixture failed: $out"
+  pass "recycled tmux endpoint identity retains the pooled lease without cleanup"
 }
 
 test_spawn_abort_uses_guarded_signer_cleanup() {
@@ -798,7 +837,7 @@ test_projected_abort_cleanup_retains_ownership_on_live_pane() {
   dir="$TMP_ROOT/projected-abort-live-pane"
   marker="$dir/task.herdr-cleanup-uncertain"
   mkdir -p "$dir"
-  function_source=$(sed -n '/^spawn_abort_retire_unpublished_endpoint()/,/^trap spawn_abort_cleanup EXIT/p' \
+  function_source=$(sed -n '/^spawn_abort_endpoint_identity_matches()/,/^trap spawn_abort_cleanup EXIT/p' \
     "$SPAWN" | sed '$d')
   out=$(FUNCTION_SOURCE="$function_source" STATE="$dir" ID=task \
     MARKER="$marker" bash -c '
@@ -820,6 +859,41 @@ test_projected_abort_cleanup_retains_ownership_on_live_pane() {
     [ -f "$MARKER" ] || exit 33
   ' 2>&1) || fail "projected live-pane cleanup fixture failed: $out"
   pass "projected live-pane cleanup retains ownership and durable uncertainty"
+}
+
+test_projected_abort_rejects_recycled_herdr_endpoint() {
+  local function_source dir cleanup_marker uncertainty_marker out
+  dir="$TMP_ROOT/abort-recycled-herdr"
+  cleanup_marker="$dir/cleanup"
+  uncertainty_marker="$dir/uncertainty"
+  mkdir -p "$dir"
+  function_source=$(sed -n '/^spawn_abort_endpoint_identity_matches()/,/^trap spawn_abort_cleanup EXIT/p' \
+    "$SPAWN" | sed '$d')
+  out=$(FUNCTION_SOURCE="$function_source" CLEANUP_MARKER="$cleanup_marker" \
+    UNCERTAINTY_MARKER="$uncertainty_marker" bash -c '
+    eval "$FUNCTION_SOURCE"
+    BACKEND=herdr
+    HERDR_SES=default
+    HERDR_WORKSPACE_ID=w1
+    HERDR_TAB_ID=w1:t2
+    HERDR_PANE_ID=w1:p2
+    ENDPOINT_GENERATION=old-generation
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+    HERDR_PROJECTION_ABORT_SESSION=default
+    HERDR_PROJECTION_ABORT_TASK_PANE=w1:p2
+    HERDR_PROJECTION_ABORT_SEEDED_PANE=
+    HERDR_FLAT_ABORT_CLEANUP=0
+    HERDR_FLAT_ABORT_UNCERTAIN=0
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+    SPAWN_SLOT_CLAIM_PUBLISHED=0
+    fm_backend_endpoint_identity_matches() { return 1; }
+    fm_backend_herdr_projection_cleanup_exact() { : > "$CLEANUP_MARKER"; }
+    spawn_herdr_flat_uncertainty_record() { : > "$UNCERTAINTY_MARKER"; }
+    spawn_abort_retire_unpublished_endpoint && exit 31
+    [ ! -e "$CLEANUP_MARKER" ] || exit 32
+    [ -e "$UNCERTAINTY_MARKER" ]
+  ' 2>&1) || fail "recycled Herdr abort fixture failed: $out"
+  pass "recycled Herdr endpoint identity retains ownership without cleanup"
 }
 
 # --- C. a declared worker is inert and refused -------------------------------
@@ -4217,9 +4291,13 @@ test_verification_capture_includes_lifecycle_clears() {
 
 test_sweep_uses_read_only_target_derivation() {
   local source
-  source=$(sed -n '63,94p' "$SWEEP")
+  source=$(cat "$SWEEP")
   assert_contains "$source" 'fm_backend_recorded_target_of_meta "$meta"' \
     "the isolation sweep did not use the read-only recorded target helper"
+  assert_contains "$source" 'fm_backend_recorded_endpoint_identity_of_meta "$meta"' \
+    "the isolation sweep did not validate the complete recorded endpoint identity"
+  assert_contains "$source" 'fm_backend_endpoint_identity' \
+    "the isolation sweep did not resolve the live endpoint identity"
   assert_not_contains "$source" 'fm_backend_target_of_meta "$meta"' \
     "the isolation sweep still uses the lifecycle-bound target helper"
   assert_not_contains "$source" 'fm_backend_tmux_meta_ensure_live_bound' \
@@ -4230,14 +4308,29 @@ test_sweep_uses_read_only_target_derivation() {
 make_sweep_home() {
   local name=$1 world
   world="$TMP_ROOT/$name"
-  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$world/fakebin"
   fm_git_worktree "$world/project" "$world/wt" "sweep-$name"
+  cat > "$world/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_id}"*) printf '%%7\n' ;;
+      *"#{window_id}"*) printf '@42\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  show-options) printf 'sweep-generation\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$world/fakebin/tmux"
   printf '%s\n' "$world"
 }
 
 run_sweep() {
   local status=0
-  FM_ROOT_OVERRIDE="$1/project" FM_HOME="$1/home" \
+  PATH="$1/fakebin:$PATH" FM_ROOT_OVERRIDE="$1/project" FM_HOME="$1/home" \
     FM_STATE_OVERRIDE="$1/home/state" "$SWEEP" 2>&1 || status=$?
   return "$status"
 }
@@ -4248,15 +4341,17 @@ test_sweep_preserves_fail_closed_exit_status() {
   world=$(make_sweep_home sweep-status-finding)
   id="task-f11-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   out=$(run_sweep "$world") || status=$?
   expect_code 1 "$status" "a sweep finding was masked by its test helper"
   healthy=$(make_sweep_home sweep-status-healthy)
   healthy_id="task-f12-$RUN_TAG"
   fm_write_meta "$healthy/home/state/$healthy_id.meta" \
-    "window=firstmate:fm-$healthy_id" "worktree=$healthy/wt" "project=$healthy/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$healthy/wt" "project=$healthy/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$healthy/wt" "$healthy_id" "$healthy/home" >/dev/null
   status=0
   out=$(run_sweep "$healthy") || status=$?
@@ -4271,8 +4366,9 @@ test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout() {
   world=$(make_sweep_home sweep-collapsed)
   id="task-f1-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$world/project" "$id" "$world/home" >/dev/null
   out=$(run_sweep "$world")
   assert_contains "$out" "ISOLATION: task $id collapsed onto the primary checkout" \
@@ -4286,8 +4382,9 @@ test_sweep_is_silent_for_a_correctly_isolated_worker() {
   world=$(make_sweep_home sweep-isolated)
   id="task-f2-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$world/wt" "$id" "$world/home" >/dev/null
   # Captured with stderr folded in: the sweep scans every process on the host,
   # and a /proc entry it may not read must stay silent rather than surfacing a
@@ -4305,8 +4402,9 @@ test_sweep_canonicalizes_declared_owner_home_aliases() {
   alias="$world/home-alias"
   ln -s "$world/home" "$alias"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$world/wt" "$id" "$alias" >/dev/null
   out=$(run_sweep "$world") || status=$?
   expect_code 0 "$status" "a canonical owner-home alias caused a false sweep finding: $out"
@@ -4318,8 +4416,9 @@ test_sweep_never_promotes_a_pane_path_to_evidence() {
   local world out
   world=$(make_sweep_home sweep-hint)
   fm_write_meta "$world/home/state/task-f3.meta" \
-    "window=firstmate:fm-task-f3" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   out=$(run_sweep "$world")
   assert_contains "$out" "ISOLATION: task task-f3 is unproven" \
     "an unprovable task did not produce an actionable isolation finding"
@@ -4333,26 +4432,30 @@ test_sweep_reports_corrupt_scope_metadata() {
   local world out
   world=$(make_sweep_home sweep-corrupt-scope)
   fm_write_meta "$world/home/state/task-corrupt.meta" \
-    "window=firstmate:fm-task-corrupt" "worktree=" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   out=$(run_sweep "$world")
   assert_contains "$out" "ISOLATION: task task-corrupt has corrupt scope metadata" \
     "empty worktree metadata was silently skipped"
   fm_write_meta "$world/home/state/task-corrupt.meta" \
-    "window=firstmate:fm-task-corrupt" "worktree=$world/wt" "worktree=$world/project" \
-    "project=$world/project" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "worktree=$world/project" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
   out=$(run_sweep "$world")
   assert_contains "$out" "worktree must appear exactly once" \
     "duplicate worktree metadata was silently accepted"
   fm_write_meta "$world/home/state/task-corrupt.meta" \
-    "window=firstmate:fm-task-corrupt" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=secondmate" "mode=secondmate" "yolo=off" "home="
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=secondmate" "mode=secondmate" "yolo=off" "home="
   out=$(run_sweep "$world")
   assert_contains "$out" "home must be one non-empty absolute path" \
     "empty secondmate home metadata was silently skipped"
   fm_write_meta "$world/home/state/task-corrupt.meta" \
-    "window=firstmate:fm-task-corrupt" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "kind=secondmate" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "kind=secondmate" "mode=no-mistakes" "yolo=off"
   out=$(run_sweep "$world")
   assert_contains "$out" "kind must appear exactly once" \
     "duplicate kind metadata was silently accepted"
@@ -4365,8 +4468,9 @@ test_sweep_reports_an_agent_declared_for_another_home() {
   world=$(make_sweep_home sweep-foreign)
   id="task-f4-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   mkdir -p "$world/other-home"
   start_declared_agent "$world/wt" "$id" "$world/other-home" >/dev/null
   out=$(run_sweep "$world")
@@ -4383,8 +4487,9 @@ test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id() {
   mkdir -p "$unrelated" "$world/other-home"
   id="task-f9-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$unrelated" "$id" "$world/other-home" secondmate >/dev/null
   out=$(run_sweep "$world")
   assert_contains "$out" "ISOLATION: task $id is unproven" \
@@ -4393,6 +4498,45 @@ test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id() {
   assert_contains "$out" "ISOLATION: task $id is unproven" \
     "an unrelated same-id identity suppressed conservative provider fallback"
   pass "the resume sweep preserves complete identity and ignores unrelated same-id agents"
+}
+
+test_sweep_rejects_recycled_tmux_endpoint_identity() {
+  local meta function_source out
+  meta="$TMP_ROOT/recycled-tmux.meta"
+  fm_write_meta "$meta" \
+    "window=@7" "tmux_pane_id=%7" "endpoint_generation=old-generation"
+  function_source=$(sed -n '/^fm_isolation_recorded_endpoint_identity_matches_live()/,/^}/p' \
+    "$SWEEP")
+  out=$(ROOT="$ROOT" META="$meta" FUNCTION_SOURCE="$function_source" bash -c '
+    . "$ROOT/bin/fm-backend.sh"
+    eval "$FUNCTION_SOURCE"
+    fm_backend_endpoint_identity() { printf "%s" "@7|%7|new-generation"; }
+    status=0
+    fm_isolation_recorded_endpoint_identity_matches_live "$META" || status=$?
+    [ "$status" -eq 1 ]
+  ' 2>&1) || fail "recycled tmux sweep fixture failed: $out"
+  pass "the restore sweep rejects a recycled tmux generation before cwd proof"
+}
+
+test_sweep_rejects_recycled_herdr_endpoint_identity() {
+  local meta function_source out
+  meta="$TMP_ROOT/recycled-herdr.meta"
+  fm_write_meta "$meta" \
+    "backend=herdr" "window=default:w1:p2" \
+    "herdr_session=default" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" \
+    "endpoint_generation=old-generation"
+  function_source=$(sed -n '/^fm_isolation_recorded_endpoint_identity_matches_live()/,/^}/p' \
+    "$SWEEP")
+  out=$(ROOT="$ROOT" META="$meta" FUNCTION_SOURCE="$function_source" bash -c '
+    . "$ROOT/bin/fm-backend.sh"
+    eval "$FUNCTION_SOURCE"
+    fm_backend_endpoint_identity() { printf "default|w9|w9:t9|w1:p2|new-generation"; }
+    status=0
+    fm_isolation_recorded_endpoint_identity_matches_live "$META" || status=$?
+    [ "$status" -eq 1 ]
+  ' 2>&1) || fail "recycled Herdr sweep fixture failed: $out"
+  pass "the restore sweep rejects a recycled Herdr endpoint before cwd proof"
 }
 
 test_spawn_claim_abort_clears_only_a_new_exact_claim() {
@@ -4495,7 +4639,10 @@ test_sweep_is_silent_for_a_healthy_secondmate() {
   id="dom-f5-$RUN_TAG"
   sub_home="$world/secondmate-home"
   mkdir -p "$sub_home/state"
-  fm_write_secondmate_meta "$world/home/state/$id.meta" "$sub_home" "firstmate:fm-$id"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$sub_home" "project=$sub_home" "harness=claude" \
+    "kind=secondmate" "task=$id" "mode=secondmate" "yolo=off" "home=$sub_home"
   start_declared_agent "$sub_home" "$id" "$sub_home" secondmate >/dev/null
   out=$(run_sweep "$world")
   [ -z "$out" ] || fail "the resume sweep reported a healthy live secondmate: $out"
@@ -4509,7 +4656,10 @@ test_sweep_still_reports_a_secondmate_running_for_a_foreign_home() {
   id="dom-f6-$RUN_TAG"
   sub_home="$world/secondmate-home"
   mkdir -p "$sub_home/state" "$world/other-home"
-  fm_write_secondmate_meta "$world/home/state/$id.meta" "$sub_home" "firstmate:fm-$id"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$sub_home" "project=$sub_home" "harness=claude" \
+    "kind=secondmate" "task=$id" "mode=secondmate" "yolo=off" "home=$sub_home"
   start_declared_agent "$sub_home" "$id" "$world/other-home" secondmate >/dev/null
   out=$(run_sweep "$world")
   assert_contains "$out" "ISOLATION: task $id has conflicting worker identity" \
@@ -4523,8 +4673,9 @@ test_sweep_reports_a_worker_declared_with_the_wrong_role() {
   world=$(make_sweep_home sweep-wrong-role)
   id="task-f8-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$world/wt" "$id" "$world/home" secondmate >/dev/null
   out=$(run_sweep "$world")
   assert_contains "$out" "ISOLATION: task $id has conflicting worker identity" \
@@ -4540,8 +4691,9 @@ test_sweep_evaluates_every_matching_root_process() {
   world=$(make_sweep_home sweep-duplicate-roots)
   id="task-f7-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$world/wt" "$id" "$world/home" >/dev/null
   start_declared_agent "$world/project" "$id" "$world/home" >/dev/null
   out=$(run_sweep "$world")
@@ -4556,8 +4708,9 @@ test_sweep_reports_collapsed_conflict_alongside_correct_worker() {
   world=$(make_sweep_home sweep-collapsed-conflict)
   id="task-f10-$RUN_TAG"
   fm_write_meta "$world/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "window=@42" "tmux_pane_id=%7" "endpoint_generation=sweep-generation" \
+    "worktree=$world/wt" "project=$world/project" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$world/wt" "$id" "$world/home" crewmate >/dev/null
   start_declared_agent "$world/project" "$id" "$world/home" secondmate >/dev/null
   out=$(run_sweep "$world")
@@ -4588,6 +4741,8 @@ fi
 
 if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = isolation-sweep ]; then
   test_sweep_uses_read_only_target_derivation
+  test_sweep_rejects_recycled_tmux_endpoint_identity
+  test_sweep_rejects_recycled_herdr_endpoint_identity
   test_sweep_preserves_fail_closed_exit_status
   test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
   test_sweep_is_silent_for_a_correctly_isolated_worker
@@ -4640,9 +4795,11 @@ if [ "${FM_WORKER_ISOLATION_FOCUS:-}" = review-fixes ]; then
   test_treehouse_acquisition_timeout_is_bounded
   test_treehouse_return_records_unknown_and_committed_outcomes
   test_abort_retires_endpoint_before_returning_lease
+  test_spawn_abort_rejects_recycled_tmux_endpoint
   test_spawn_abort_uses_guarded_signer_cleanup
   test_spawn_abort_preserves_prior_signer_uncertainty
   test_projected_abort_cleanup_retains_ownership_on_live_pane
+  test_projected_abort_rejects_recycled_herdr_endpoint
   test_missing_worktree_runs_all_ownership_gates_before_retaining
   test_missing_worktree_accepts_valid_return_claim_before_stamp
   test_signer_cleanup_failure_is_durable
@@ -4687,6 +4844,8 @@ test_secondmate_spawn_waits_for_enrollment_acceptance
 test_enrollment_validator_trace_is_stage_only
 test_signer_cleanup_failure_is_durable
 test_spawn_abort_uses_guarded_signer_cleanup
+test_spawn_abort_rejects_recycled_tmux_endpoint
+test_projected_abort_rejects_recycled_herdr_endpoint
 test_forged_key_cannot_issue_secondmate_enrollment
 test_non_git_cross_home_enrollment_is_refused
 test_project_local_startup_adapter_stays_inert_for_a_worker
@@ -4755,6 +4914,8 @@ test_sweep_never_promotes_a_pane_path_to_evidence
 test_sweep_reports_corrupt_scope_metadata
 test_sweep_reports_an_agent_declared_for_another_home
 test_sweep_ignores_an_unrelated_complete_identity_with_the_same_task_id
+test_sweep_rejects_recycled_tmux_endpoint_identity
+test_sweep_rejects_recycled_herdr_endpoint_identity
 test_sweep_is_silent_for_a_healthy_secondmate
 test_sweep_still_reports_a_secondmate_running_for_a_foreign_home
 test_sweep_evaluates_every_matching_root_process

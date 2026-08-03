@@ -80,6 +80,18 @@ fm_isolation_unreadable_candidate_matches_endpoint() {
   esac
 }
 
+fm_isolation_recorded_endpoint_identity_matches_live() {
+  local meta=$1 live recorded_target
+  fm_backend_recorded_endpoint_identity_of_meta "$meta" >/dev/null || return 2
+  recorded_target=$(fm_backend_recorded_target_of_meta "$meta") || return 2
+  [ "$recorded_target" = "$FM_BACKEND_RECORDED_ENDPOINT_TARGET" ] || return 2
+  live=$(fm_backend_endpoint_identity \
+    "$FM_BACKEND_RECORDED_ENDPOINT_BACKEND" \
+    "$FM_BACKEND_RECORDED_ENDPOINT_TARGET" 2>/dev/null) || return 2
+  [ -n "$live" ] || return 2
+  [ "$live" = "$FM_BACKEND_RECORDED_ENDPOINT_IDENTITY" ] || return 1
+}
+
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   id=$(basename "$meta" .meta)
@@ -98,12 +110,23 @@ for meta in "$STATE"/*.meta; do
     ISOLATION_FAILED=1
     continue
   fi
-  if ! target=$(fm_backend_recorded_target_of_meta "$meta") || [ -z "$target" ]; then
-    echo "ISOLATION: task $id is unproven: recorded endpoint metadata could not be read; preserve its state and reconcile $meta before any mutation"
-    ISOLATION_FAILED=1
-    continue
-  fi
-  backend=$(fm_backend_of_meta "$meta")
+  endpoint_identity_status=0
+  fm_isolation_recorded_endpoint_identity_matches_live "$meta" || endpoint_identity_status=$?
+  case "$endpoint_identity_status" in
+    0) ;;
+    1)
+      echo "ISOLATION: task $id is unproven: recorded endpoint identity does not match the live endpoint; preserve its state and reconcile $meta before any mutation"
+      ISOLATION_FAILED=1
+      continue
+      ;;
+    *)
+      echo "ISOLATION: task $id is unproven: complete recorded endpoint identity or live endpoint identity could not be verified; preserve its state and reconcile $meta before any mutation"
+      ISOLATION_FAILED=1
+      continue
+      ;;
+  esac
+  target=$FM_BACKEND_RECORDED_ENDPOINT_TARGET
+  backend=$FM_BACKEND_RECORDED_ENDPOINT_BACKEND
   endpoint_match_status=0
   if [ -n "$UNREADABLE_CANDIDATES" ] \
     && fm_isolation_unreadable_candidate_matches_endpoint \

@@ -127,7 +127,7 @@ Before an unpublished lease return, spawn stages an exact task, home, and lease-
 An unpublished return whose `worktree=` path is missing, or whose return claim is malformed or incomplete, is retained because pooled-slot ownership is unproven; absence of the directory is never treated as permission to dispose.
 When an unknown return outcome is recorded, it lives at `state/<id>.treehouse-lease-unknown` and the next spawn for that id refuses until the exact lease is manually reconciled.
 
-The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode, and every primary or secondmate mutator re-runs the current sweep against its state and metadata before it can proceed.
+The restore-time isolation sweep first matches the complete recorded backend endpoint identity, including its stable generation, against a strictly read-only live resolution. A mismatch or unknown endpoint is unproven and cannot authorize a cwd verdict. The sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode, and every primary or secondmate mutator re-runs the current sweep against its state and metadata before it can proceed.
 
 #### Reclaiming an already-leaked slot
 

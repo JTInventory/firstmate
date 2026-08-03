@@ -432,6 +432,36 @@ spawn_treehouse_return_unknown_record() {
   return 1
 }
 
+spawn_abort_endpoint_identity_matches() {
+  local target expected
+  case "$BACKEND" in
+    tmux)
+      target=${SPAWN_ENDPOINT_TARGET:-}
+      [ -n "${WID:-}" ] && [ -n "$target" ] \
+        && [ -n "${ENDPOINT_GENERATION:-}" ] || return 1
+      expected="$WID|$target|$ENDPOINT_GENERATION"
+      ;;
+    herdr)
+      [ -n "${HERDR_SES:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] \
+        && [ -n "${HERDR_TAB_ID:-}" ] && [ -n "${HERDR_PANE_ID:-}" ] \
+        && [ -n "${ENDPOINT_GENERATION:-}" ] || return 1
+      target="$HERDR_SES:$HERDR_PANE_ID"
+      expected="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"
+      if [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ] \
+        && { [ "${HERDR_PROJECTION_ABORT_SESSION:-}" != "$HERDR_SES" ] \
+          || [ "${HERDR_PROJECTION_ABORT_TASK_PANE:-}" != "$HERDR_PANE_ID" ]; }; then
+        return 1
+      fi
+      if [ "${HERDR_FLAT_ABORT_CLEANUP:-0}" = 1 ] \
+        && [ "${HERDR_FLAT_ABORT_TARGET:-}" != "$target" ]; then
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  fm_backend_endpoint_identity_matches "$BACKEND" "$target" "$expected"
+}
+
 spawn_abort_retire_unpublished_endpoint() {
   local status=0 cleanup_session uncertainty_file uncertainty_fallback
   SPAWN_ABORT_ENDPOINT_RETIRED=0
@@ -440,7 +470,8 @@ spawn_abort_retire_unpublished_endpoint() {
     return 0
   fi
   if [ "$BACKEND" = tmux ] && [ -n "${WID:-}" ]; then
-    if ! fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 \
+    if ! spawn_abort_endpoint_identity_matches \
+      || ! fm_backend_kill "$BACKEND" "$WID" >/dev/null 2>&1 \
       || [ "$(fm_backend_agent_alive "$BACKEND" "$WID" 2>/dev/null || true)" != dead ]; then
       status=1
     fi
@@ -451,6 +482,12 @@ spawn_abort_retire_unpublished_endpoint() {
         "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
       spawn_herdr_flat_uncertainty_record \
         "presentation lock unavailable during projected abort cleanup" \
+        "${HERDR_PROJECTION_ABORT_SESSION:-}:${HERDR_PROJECTION_ABORT_TASK_PANE:-}" \
+        "" "" || echo "error: could not persist Herdr projected cleanup uncertainty for $ID" >&2
+      status=1
+    elif ! spawn_abort_endpoint_identity_matches; then
+      spawn_herdr_flat_uncertainty_record \
+        "projected abort endpoint identity is unknown or recycled" \
         "${HERDR_PROJECTION_ABORT_SESSION:-}:${HERDR_PROJECTION_ABORT_TASK_PANE:-}" \
         "" "" || echo "error: could not persist Herdr projected cleanup uncertainty for $ID" >&2
       status=1
@@ -477,6 +514,11 @@ spawn_abort_retire_unpublished_endpoint() {
         "presentation lock unavailable during abort cleanup" \
         "$HERDR_FLAT_ABORT_TARGET" "" "" \
         || echo "error: could not persist Herdr abort-cleanup uncertainty for $ID" >&2
+      status=1
+    elif ! spawn_abort_endpoint_identity_matches; then
+      spawn_herdr_flat_uncertainty_record \
+        "abort endpoint identity is unknown or recycled" \
+        "$HERDR_FLAT_ABORT_TARGET" "" "" || true
       status=1
     elif fm_backend_herdr_parse_target "$HERDR_FLAT_ABORT_TARGET" \
       && fm_backend_herdr_projection_teardown_close \
@@ -1331,23 +1373,19 @@ HERDR_TAB_ID=
 HERDR_PANE_ID=
 
 cleanup_spawn_window() {
+  [ "${WID:-}" = "$1" ] || return 1
   if [ "$BACKEND" = herdr ] && [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ]; then
     return 0
   fi
-  fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1 || true
+  if spawn_abort_endpoint_identity_matches \
+    && fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1 \
+    && [ "$(fm_backend_agent_alive "$BACKEND" "$1" 2>/dev/null || true)" = dead ]; then
+    SPAWN_ABORT_ENDPOINT_RETIRED=1
+  fi
 }
 
 cleanup_unidentified_spawn_window() {
-  local window_ids_after window_id candidate='' candidate_count=0
-  window_ids_after=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
-  while IFS= read -r window_id; do
-    [ -n "$window_id" ] || continue
-    if ! grep -qxF "$window_id" <<<"$WINDOW_IDS_BEFORE"; then
-      candidate=$window_id
-      candidate_count=$((candidate_count + 1))
-    fi
-  done <<<"$window_ids_after"
-  [ "$candidate_count" -eq 1 ] && fm_backend_kill "$BACKEND" "$candidate" >/dev/null 2>&1 || true
+  return 1
 }
 
 # Spawn-time isolation guard: the resolved pane path must be the root of a real
@@ -1438,7 +1476,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
       echo "error: $1 did not yield an isolated worktree of the target project; refusing to launch. $SPAWN_WT_FAIL"
       echo "  resolved: '$WT'"
       echo "  expected: a linked worktree of '$PROJ_ABS' (git common dir '$(proj_git_common_real)')"
-      echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $2 before respawning. The just-created window is killed and no meta is recorded."
+      echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $2 before respawning. The endpoint is retired only after its complete identity is proven; otherwise ownership evidence is retained."
     } >&2
     cleanup_spawn_window "$WID"
     exit 1
@@ -1454,6 +1492,18 @@ case "$BACKEND" in
     if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
       cleanup_unidentified_spawn_window
       echo "error: tmux did not return a window id for $T" >&2
+      exit 1
+    fi
+    ENDPOINT_GENERATION="fm-$(date +%s)-$$-$RANDOM"
+    SPAWN_ENDPOINT_TARGET=$(fm_backend_tmux_pane_id "$WID") || {
+      cleanup_spawn_window "$WID"
+      echo "error: tmux did not return an exact pane id for $T" >&2
+      exit 1
+    }
+    if ! fm_backend_bind_endpoint_generation \
+      "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$ENDPOINT_GENERATION"; then
+      cleanup_spawn_window "$WID"
+      echo "error: tmux failed to bind endpoint generation for $T" >&2
       exit 1
     fi
     if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
@@ -1474,18 +1524,6 @@ case "$BACKEND" in
     if [ "$(fm_backend_task_name "$BACKEND" "$WID")" != "$W" ]; then
       cleanup_spawn_window "$WID"
       echo "error: tmux did not retain canonical window name $T" >&2
-      exit 1
-    fi
-    ENDPOINT_GENERATION="fm-$(date +%s)-$$-$RANDOM"
-    SPAWN_ENDPOINT_TARGET=$(fm_backend_tmux_pane_id "$WID") || {
-      cleanup_spawn_window "$WID"
-      echo "error: tmux did not return an exact pane id for $T" >&2
-      exit 1
-    }
-    if ! fm_backend_bind_endpoint_generation \
-      "$BACKEND" "$SPAWN_ENDPOINT_TARGET" "$ENDPOINT_GENERATION"; then
-      cleanup_spawn_window "$WID"
-      echo "error: tmux failed to bind endpoint generation for $T" >&2
       exit 1
     fi
     ;;

@@ -623,6 +623,55 @@ fm_backend_recorded_target_of_meta() {  # <meta-file>
   [ -n "$window" ] && printf '%s' "$window"
 }
 
+FM_BACKEND_RECORDED_ENDPOINT_BACKEND=
+FM_BACKEND_RECORDED_ENDPOINT_TARGET=
+FM_BACKEND_RECORDED_ENDPOINT_GENERATION=
+FM_BACKEND_RECORDED_ENDPOINT_IDENTITY=
+
+fm_backend_recorded_endpoint_identity_of_meta() {  # <meta-file>
+  local meta=$1 backend generation target session workspace tab pane
+  local tmux_pane identity
+  FM_BACKEND_RECORDED_ENDPOINT_BACKEND=
+  FM_BACKEND_RECORDED_ENDPOINT_TARGET=
+  FM_BACKEND_RECORDED_ENDPOINT_GENERATION=
+  FM_BACKEND_RECORDED_ENDPOINT_IDENTITY=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  backend=$(fm_backend_meta_value_exact "$meta" backend optional) || return 1
+  backend=${backend:-tmux}
+  generation=$(fm_backend_meta_value_exact "$meta" endpoint_generation required) || return 1
+  case "$generation" in
+    *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
+  esac
+  case "$backend" in
+    tmux)
+      fm_backend_tmux_meta_read "$meta" || return 1
+      [ "$FM_BACKEND_TMUX_META_LEGACY" -eq 0 ] || return 1
+      tmux_pane=$FM_BACKEND_TMUX_META_PANE
+      [ -n "$tmux_pane" ] || return 1
+      [ "$FM_BACKEND_TMUX_META_GENERATION" = "$generation" ] || return 1
+      target=$FM_BACKEND_TMUX_META_TARGET
+      identity="$FM_BACKEND_TMUX_META_WINDOW|$tmux_pane|$generation"
+      ;;
+    herdr)
+      session=$(fm_backend_meta_value_exact "$meta" herdr_session required) || return 1
+      workspace=$(fm_backend_meta_value_exact "$meta" herdr_workspace_id required) || return 1
+      tab=$(fm_backend_meta_value_exact "$meta" herdr_tab_id required) || return 1
+      pane=$(fm_backend_meta_value_exact "$meta" herdr_pane_id required) || return 1
+      grep -q '^tmux_pane_id=' "$meta" 2>/dev/null && return 1
+      case "$session$workspace$tab$pane" in *'|'*) return 1 ;; esac
+      target=$(fm_backend_recorded_target_of_meta "$meta") || return 1
+      [ "$target" = "$session:$pane" ] || return 1
+      identity="$session|$workspace|$tab|$pane|$generation"
+      ;;
+    *) return 1 ;;
+  esac
+  FM_BACKEND_RECORDED_ENDPOINT_BACKEND=$backend
+  FM_BACKEND_RECORDED_ENDPOINT_TARGET=$target
+  FM_BACKEND_RECORDED_ENDPOINT_GENERATION=$generation
+  FM_BACKEND_RECORDED_ENDPOINT_IDENTITY=$identity
+  printf '%s' "$identity"
+}
+
 fm_backend_target_of_meta() {  # <meta-file>
   local meta=$1 backend target
   target=$(fm_backend_recorded_target_of_meta "$meta") || return 1
@@ -1065,6 +1114,13 @@ fm_backend_endpoint_identity() {
     herdr) fm_backend_herdr_endpoint_identity "$@" ;;
     *) return 1 ;;
   esac
+}
+
+fm_backend_endpoint_identity_matches() {
+  local backend=$1 target=$2 expected=$3 live
+  [ -n "$backend" ] && [ -n "$target" ] && [ -n "$expected" ] || return 1
+  live=$(fm_backend_endpoint_identity "$backend" "$target" 2>/dev/null) || return 1
+  [ "$live" = "$expected" ]
 }
 
 fm_backend_foreground_process_pid() {
