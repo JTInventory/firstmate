@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import ctypes
+import errno
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -301,7 +303,7 @@ def record_lock(
         )
     else:
         descriptor = open_authority_record_lock(
-            authority_home, blocking=blocking
+            blocking=blocking
         )
     try:
         yield descriptor
@@ -346,25 +348,16 @@ def close_record_lock(descriptor: int | None) -> None:
         os.close(descriptor)
 
 
-def open_authority_record_lock(home: str, *, blocking: bool) -> int | None:
+def open_authority_record_lock(*, blocking: bool) -> int | None:
     try:
         inherited_stat = os.fstat(RECORD_LOCK_FD)
-        parent_stat = os.stat(
-            f"/proc/{os.getppid()}/fd/{RECORD_LOCK_FD}", follow_symlinks=True
-        )
         if (
-            not stat.S_ISREG(inherited_stat.st_mode)
-            or inherited_stat.st_mode & 0o077
-            or inherited_stat.st_dev != parent_stat.st_dev
-            or inherited_stat.st_ino != parent_stat.st_ino
-            or os.pread(RECORD_LOCK_FD, 4096, 0).decode("utf-8").rstrip("\n") != home
+            not stat.S_ISSOCK(inherited_stat.st_mode)
         ):
             raise ValueError("invalid authority record lock")
-        descriptor = os.open(
-            f"/proc/self/fd/{RECORD_LOCK_FD}",
-            os.O_RDWR | os.O_CLOEXEC,
-        )
-    except (OSError, UnicodeError, ValueError):
+        descriptor = os.dup(RECORD_LOCK_FD)
+        os.set_inheritable(descriptor, False)
+    except (OSError, ValueError):
         return None
     try:
         duplicated_stat = os.fstat(descriptor)
@@ -404,7 +397,7 @@ def serve(args: argparse.Namespace) -> int:
     if not state.is_dir() or state.is_symlink() or not Path(home).is_dir():
         return 1
     record = state / ".session-authority-broker"
-    record_lock_fd = open_authority_record_lock(home, blocking=False)
+    record_lock_fd = open_authority_record_lock(blocking=False)
     if record_lock_fd is None:
         return 1
     try:
@@ -414,6 +407,92 @@ def serve(args: argparse.Namespace) -> int:
         )
     finally:
         close_record_lock(record_lock_fd)
+
+
+def read_evidence_bytes(fd: int) -> bytes:
+    chunks: list[bytes] = []
+    length = 0
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        length += len(chunk)
+        if length > 1024 * 1024:
+            raise ValueError("oversized launch evidence")
+        chunks.append(chunk)
+    if not chunks:
+        raise ValueError("empty launch evidence")
+    return b"".join(chunks)
+
+
+def install_evidence_bytes(data: bytes) -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        offset = 0
+        while offset < len(data):
+            offset += os.write(write_fd, data[offset:])
+    except BaseException:
+        os.close(read_fd)
+        raise
+    finally:
+        os.close(write_fd)
+    try:
+        os.dup2(read_fd, RECOVERY_LAUNCH_EVIDENCE_FD, inheritable=True)
+    finally:
+        os.close(read_fd)
+
+
+def create_record_lock_capability() -> None:
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    left_fd = left.detach()
+    right.close()
+    try:
+        if left_fd != RECORD_LOCK_FD:
+            os.dup2(left_fd, RECORD_LOCK_FD, inheritable=True)
+        else:
+            os.set_inheritable(left_fd, True)
+    finally:
+        if left_fd != RECORD_LOCK_FD:
+            os.close(left_fd)
+
+
+def supervise(args: argparse.Namespace) -> int:
+    try:
+        evidence = read_evidence_bytes(args.launch_evidence_fd)
+        if args.launch_evidence_fd != RECOVERY_LAUNCH_EVIDENCE_FD:
+            os.close(args.launch_evidence_fd)
+        create_record_lock_capability()
+        install_evidence_bytes(evidence)
+        read_launch_evidence(
+            RECOVERY_LAUNCH_EVIDENCE_FD,
+            home=canonical(args.home),
+            task=args.task,
+            launch_script=canonical(args.launch_script),
+        )
+        install_evidence_bytes(evidence)
+        recovery_args = argparse.Namespace(
+            record=str(Path(canonical(args.state)) / ".session-authority-broker")
+        )
+        if recover_stale(recovery_args) != 0:
+            return 1
+        install_evidence_bytes(evidence)
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                canonical(__file__),
+                "serve",
+                "--state", args.state,
+                "--home", args.home,
+                "--checkout", args.checkout,
+                "--task", args.task,
+                "--launch-evidence-fd", str(RECOVERY_LAUNCH_EVIDENCE_FD),
+                "--launch-script", args.launch_script,
+            ],
+        )
+    except (OSError, UnicodeError, ValueError, struct.error):
+        return 1
+    return 1
 
 
 def serve_locked(
@@ -464,6 +543,7 @@ def serve_locked(
             launch_script=launch_script, uid=broker_uid, gid=broker_gid
         )
         expected_record = {
+            "version": str(PROTOCOL_VERSION),
             "pid": str(broker_pid),
             "start": broker_start,
             "identity": broker_identity,
@@ -633,10 +713,41 @@ def launch_process_state(
     return "unknown"
 
 
+def rename_noreplace(source: Path, target: Path) -> None:
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as error:
+        raise OSError(errno.ENOSYS, "renameat2 unavailable") from error
+    renameat2.argtypes = [
+        ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(
+        -100,
+        os.fsencode(source),
+        -100,
+        os.fsencode(target),
+        1,
+    ) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), str(source))
+
+
 def unlink_owned_record(
     path: Path, expected: dict[str, str], expected_stat: os.stat_result | None = None,
     *, lock_held: bool = False
 ) -> bool:
+    def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+        return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+    def restore_quarantine(quarantine: Path) -> None:
+        try:
+            rename_noreplace(quarantine, path)
+        except OSError:
+            pass
+
     try:
         if not lock_held:
             with record_lock(
@@ -656,19 +767,29 @@ def unlink_owned_record(
         metadata = read_record_shape(path)
         if any(metadata.get(key) != value for key, value in expected.items()):
             return False
-        final_stat = path.lstat()
-        if (
-            initial_stat.st_dev != final_stat.st_dev
-            or initial_stat.st_ino != final_stat.st_ino
-        ):
+        for _ in range(8):
+            quarantine = path.with_name(
+                f".{path.name}.recovery-{secrets.token_hex(16)}"
+            )
+            try:
+                rename_noreplace(path, quarantine)
+            except FileExistsError:
+                continue
+            except FileNotFoundError:
+                return False
+            try:
+                quarantined_stat = quarantine.lstat()
+                quarantined_metadata = read_record_shape(quarantine)
+                if same_inode(initial_stat, quarantined_stat) and all(
+                    quarantined_metadata.get(key) == value
+                    for key, value in expected.items()
+                ):
+                    return True
+            except (OSError, UnicodeError, ValueError):
+                pass
+            restore_quarantine(quarantine)
             return False
-        if expected_stat is not None and (
-            final_stat.st_dev != expected_stat.st_dev
-            or final_stat.st_ino != expected_stat.st_ino
-        ):
-            return False
-        path.unlink()
-        return True
+        return False
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
         return False
 
@@ -880,6 +1001,13 @@ def parse_args() -> argparse.Namespace:
     client_parser.add_argument("--kind", choices=("live", "durable"), required=True)
     server.add_argument("--launch-evidence-fd", type=int, required=True)
     server.add_argument("--launch-script", required=True)
+    supervisor = subparsers.add_parser("supervise", add_help=False)
+    supervisor.add_argument("--state", required=True)
+    supervisor.add_argument("--home", required=True)
+    supervisor.add_argument("--checkout", required=True)
+    supervisor.add_argument("--task", required=True)
+    supervisor.add_argument("--launch-evidence-fd", type=int, required=True)
+    supervisor.add_argument("--launch-script", required=True)
     recovery = subparsers.add_parser("recover-stale", add_help=False)
     recovery.add_argument("--record", required=True)
     return parser.parse_args()
@@ -889,6 +1017,8 @@ if __name__ == "__main__":
     arguments = parse_args()
     if arguments.mode == "serve":
         result = serve(arguments)
+    elif arguments.mode == "supervise":
+        result = supervise(arguments)
     elif arguments.mode == "client":
         result = client(arguments)
     else:

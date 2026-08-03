@@ -256,6 +256,58 @@ PY
   pass "stale record deletion rejects inode replacement"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_quarantine", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    record = Path(temporary) / "record"
+    metadata = {
+        "version": "1",
+        "pid": "2",
+        "start": "proc:start",
+        "identity": "exe:python",
+        "socket": "abstract:record",
+        "home": "/home",
+        "checkout": "/checkout",
+        "task": "task",
+        "script": "/checkout/bin/fm-session-authority-broker.py",
+        "uid": "0",
+        "gid": "0",
+        "launch-pid": "2",
+        "launch-start": "proc:launch",
+        "launch-identity": "exe:python",
+        "launch-script": "/home/bin/fm-session-authority-exec.sh",
+    }
+    record.write_text(
+        "".join(f"{key}={value}\n" for key, value in metadata.items()),
+        encoding="utf-8",
+    )
+    record.chmod(0o600)
+    original_stat = record.lstat()
+    if not broker.unlink_owned_record(
+        record, metadata, expected_stat=original_stat
+    ):
+        raise SystemExit("owned record was not quarantined")
+    if record.exists():
+        raise SystemExit("owned record pathname remained after quarantine")
+    quarantines = list(record.parent.glob(f".{record.name}.recovery-*"))
+    if len(quarantines) != 1 or quarantines[0].lstat().st_ino != original_stat.st_ino:
+        raise SystemExit("owned record inode was not retained atomically")
+PY
+  then
+    fail "stale record deletion did not use atomic quarantine"
+  fi
+  pass "stale record deletion uses atomic quarantine"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -356,18 +408,11 @@ SH
 }
 
 start_broker() {
-  local evidence_fd receipt_b64 lock_path attempts=0
-  if [ ! -e /proc/$$/fd/20 ]; then
-    lock_path=$(mktemp "$STATE/.session-authority-broker-lock.XXXXXX")
-    chmod 600 "$lock_path"
-    exec 20<>"$lock_path"
-    rm -f -- "$lock_path"
-    printf '%s\n' "$HOME_DIR" >&20
-  fi
+  local evidence_fd receipt_b64 attempts=0
   receipt_b64=$(openssl base64 -A < "$HOME_DIR/state/.session-authority-launch") \
     || fail "could not encode authenticated launch evidence"
   exec {evidence_fd}< <(printf '%s\n%s\n' "$BROKER_KEY" "$receipt_b64")
-  python3 "$BROKER" serve --state "$STATE" --home "$HOME_DIR" \
+  python3 "$BROKER" supervise --state "$STATE" --home "$HOME_DIR" \
     --checkout "$ROOT" --task alpha --launch-evidence-fd "$evidence_fd" \
     --launch-script "$LAUNCH_SCRIPT" >/dev/null 2>&1 &
   BROKER_PID=$!
