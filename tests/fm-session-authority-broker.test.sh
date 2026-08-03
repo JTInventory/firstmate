@@ -265,16 +265,31 @@ broker_path = Path(sys.argv[1]).resolve()
 source = broker_path.read_text(encoding="utf-8")
 if any(
     marker in source
-    for marker in ("connection_slots", "BoundedSemaphore", "threading.Thread")
+    for marker in (
+        "connection_slots",
+        "BoundedSemaphore",
+        "threading.Thread",
+        "lock_manager_peer_is_reserved",
+        "MAX_LOCK_MANAGER_RESERVED_PENDING",
+        "MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING",
+    )
 ):
     raise SystemExit("lock manager still creates unbounded pre-auth admission work")
-client = source[source.index("def lock_manager_client("):source.index("def process_has_ancestor(")]
-if "connection.settimeout(LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS)" not in client:
+client = source[source.index("def lock_manager_client("):source.index("def lock_manager_serve(")]
+serve = source[source.index("def lock_manager_serve("):source.index("def ensure_lock_manager(")]
+cleanup = source[source.index("def cleanup_recovery_quarantines("):source.index("def unlink_owned_record(")]
+if "connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)" not in client:
     raise SystemExit("lock manager connect is not bounded")
-if client.index("settimeout(LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS)") > client.index("connection.connect("):
-    raise SystemExit("lock manager connect timeout is applied too late")
-if "MAX_LOCK_MANAGER_RESERVED_PENDING" not in source:
-    raise SystemExit("lock manager has no reserved authenticated admission")
+if client.index('connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)') > client.index("connection.sendto("):
+    raise SystemExit("lock manager datagram timeout is applied too late")
+if "connection.bind(\"\")" not in client or "socket.SCM_RIGHTS" not in client:
+    raise SystemExit("lock manager client lacks anonymous descriptor handoff")
+if "socket.SOCK_DGRAM" not in serve or "recvmsg(" not in serve:
+    raise SystemExit("lock manager does not authenticate datagrams first")
+if ".listen(" in serve or ".accept(" in serve:
+    raise SystemExit("lock manager still exposes a shared stream backlog")
+if ".glob(" in cleanup:
+    raise SystemExit("quarantine cleanup still scans an attacker-controlled namespace")
 handoff = source[source.index("def supervise("):source.index("def serve_locked(")]
 transfer = handoff.index("if record_lock_fd.fileno()")
 if "record_lock_fd = None" in handoff[transfer:]:
@@ -446,10 +461,11 @@ with TemporaryDirectory() as temporary:
     if record.exists():
         raise SystemExit("owned record pathname remained after quarantine")
     quarantines = [
-        candidate
-        for candidate in record.parent.glob(f".{record.name}.recovery-*")
-        if not candidate.name.endswith(broker.QUARANTINE_RECEIPT_SUFFIX)
-        and not candidate.name.endswith(broker.QUARANTINE_PROOF_SUFFIX)
+        broker.quarantine_slot_path(record, b"review-quarantine-key", slot)
+        for slot in range(broker.MAX_RECOVERY_QUARANTINES)
+        if broker.quarantine_slot_path(
+            record, b"review-quarantine-key", slot
+        ).exists()
     ]
     if len(quarantines) != 1 or quarantines[0].lstat().st_ino != original_stat.st_ino:
         raise SystemExit("owned record inode was not retained atomically")
@@ -467,7 +483,10 @@ with TemporaryDirectory() as temporary:
         b"review-quarantine-key",
     ):
         raise SystemExit("owned record quarantine cleanup failed")
-    if list(record.parent.glob(f".{record.name}.recovery-*")):
+    if any(
+        broker.quarantine_slot_path(record, b"review-quarantine-key", slot).exists()
+        for slot in range(broker.MAX_RECOVERY_QUARANTINES)
+    ):
         raise SystemExit("owned record quarantine was not reclaimed")
     forged = record.parent / f".{record.name}.recovery-forged"
     forged.write_text("forged\n", encoding="utf-8")
@@ -479,7 +498,9 @@ with TemporaryDirectory() as temporary:
     ) or not forged.exists():
         raise SystemExit("unproven quarantine was removed")
     forged.unlink()
-    proof_only = record.parent / f".{record.name}.recovery-proof-only"
+    proof_only = broker.quarantine_slot_path(
+        record, b"review-quarantine-key", 0
+    )
     proof_only.write_text("old\n", encoding="utf-8")
     proof_only_marker = proof_only.with_name(
         proof_only.name + broker.QUARANTINE_PROOF_SUFFIX

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import array
 import base64
 import binascii
 import ctypes
@@ -34,14 +35,13 @@ RECORD_LOCK_FD = 20
 MAX_RECOVERY_QUARANTINES = 4
 QUARANTINE_RECEIPT_SUFFIX = ".receipt"
 QUARANTINE_PROOF_SUFFIX = ".proof"
-QUARANTINE_RECEIPT_TEMP_PREFIX = ".session-authority-broker.receipt-"
-QUARANTINE_IDENTITY_PREFIX = ".session-authority-broker.identity-"
+QUARANTINE_RECEIPT_TEMP_SUFFIX = ".receipt-tmp"
+QUARANTINE_IDENTITY_SUFFIX = ".identity"
 LOCK_MANAGER_TIMEOUT_SECONDS = 0.25
-LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS = 1.0
-MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS = 128
-MAX_LOCK_MANAGER_RESERVED_PENDING = 8
-MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING = 32
+MAX_LOCK_MANAGER_REQUEST_BYTES = 1024
+MAX_LOCK_MANAGER_REQUESTS_PER_TICK = 128
 MAX_LOCK_MANAGER_WAITERS = 128
+MAX_QUARANTINE_RECEIPT_BYTES = 4096
 
 
 def canonical(value: str) -> str:
@@ -397,20 +397,89 @@ def lock_manager_context(
     )
 
 
-def recv_line(connection: socket.socket, deadline: float) -> bytes:
-    data = bytearray()
-    while len(data) <= 256:
-        timeout = deadline - time.monotonic()
-        if timeout <= 0:
-            raise TimeoutError("lock manager request deadline exceeded")
-        connection.settimeout(timeout)
-        chunk = connection.recv(1)
-        if not chunk:
-            raise ValueError("short lock manager request")
-        data.extend(chunk)
-        if chunk == b"\n":
-            return bytes(data)
-    raise ValueError("oversized lock manager request")
+def lock_manager_lease_token(
+    root_key: bytes, context: bytes
+) -> bytes:
+    return (
+        b"lease="
+        + hmac.new(
+            root_key,
+            b"firstmate/session-authority-lock/lease/v1\0" + context,
+            hashlib.sha256,
+        ).hexdigest().encode("ascii")
+        + b"\n"
+    )
+
+
+def lock_manager_request_fields(
+    request: bytes
+) -> tuple[bytes, bytes, str] | None:
+    if len(request) > MAX_LOCK_MANAGER_REQUEST_BYTES:
+        return None
+    lines = request.splitlines()
+    if len(lines) != 3 or any(b"=" not in line for line in lines):
+        return None
+    fields: dict[bytes, bytes] = {}
+    for line in lines:
+        name, value = line.split(b"=", 1)
+        if name in fields or name not in {b"nonce", b"auth", b"mode"}:
+            return None
+        fields[name] = value
+    nonce = fields.get(b"nonce", b"")
+    auth = fields.get(b"auth", b"")
+    try:
+        mode = fields.get(b"mode", b"").decode("ascii")
+    except UnicodeError:
+        return None
+    if (
+        len(nonce) != 64
+        or any(value not in b"0123456789abcdef" for value in nonce)
+        or len(auth) != 64
+        or any(value not in b"0123456789abcdef" for value in auth)
+        or mode not in {"probe", "try", "wait"}
+    ):
+        return None
+    return nonce, auth, mode
+
+
+def lock_manager_send_response(
+    server: socket.socket, address: str | bytes,
+    response: bytes, descriptor: socket.socket | None = None
+) -> bool:
+    try:
+        if descriptor is None:
+            server.sendto(response, address)
+            return True
+        fds = array.array("i", [descriptor.fileno()])
+        server.sendmsg(
+            [response],
+            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)],
+            0,
+            address,
+        )
+        return True
+    except OSError:
+        return False
+
+
+def lock_manager_socketpair() -> tuple[socket.socket, socket.socket]:
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    left.set_inheritable(False)
+    right.set_inheritable(False)
+    return left, right
+
+
+def lock_manager_lease_pair(
+    root_key: bytes, context: bytes
+) -> tuple[socket.socket, socket.socket]:
+    left, right = lock_manager_socketpair()
+    try:
+        left.sendall(lock_manager_lease_token(root_key, context))
+    except BaseException:
+        left.close()
+        right.close()
+        raise
+    return left, right
 
 
 def lock_manager_client(
@@ -418,95 +487,75 @@ def lock_manager_client(
     launch_evidence: tuple[bytes, int, str, str], mode: str
 ) -> socket.socket | bool | None:
     root_key, launch_pid, launch_start, launch_identity = launch_evidence
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if mode not in {"probe", "try", "wait"}:
+        return None
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    received: list[int] = []
     try:
-        connection.settimeout(LOCK_MANAGER_CONNECT_TIMEOUT_SECONDS)
-        connection.connect(lock_manager_address(home, task, root_key))
-        deadline = time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
-        nonce_line = recv_line(connection, deadline)
-        if not nonce_line.startswith(b"nonce="):
-            raise ValueError("malformed lock manager challenge")
-        nonce = nonce_line[len(b"nonce="):-1]
-        if len(nonce) != 64 or any(value not in b"0123456789abcdef" for value in nonce):
-            raise ValueError("malformed lock manager challenge")
+        connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
+        connection.bind("")
+        nonce = secrets.token_bytes(32).hex().encode("ascii")
         context = lock_manager_context(
             home, task, launch_pid, launch_start, launch_identity, launch_script
         )
         tag = hmac.new(
-            root_key, b"lock\0" + context + b"\0" + nonce, hashlib.sha256
+            root_key,
+            b"lock\0" + context + b"\0" + nonce + b"\0" + mode.encode("ascii"),
+            hashlib.sha256,
         ).hexdigest().encode("ascii")
-        connection.sendall(b"auth=" + tag + b"\nmode=" + mode.encode("ascii") + b"\n")
-        response = recv_line(connection, deadline)
-        if response == b"READY\n":
-            if mode == "probe":
-                close_record_lock(connection)
-                return True
-            return connection
-        connection.close()
-        return False if response == b"BUSY\n" else None
-    except (OSError, UnicodeError, ValueError, TimeoutError):
-        connection.close()
-        return None
-
-
-def process_has_ancestor(pid: int, ancestor: int) -> bool:
-    current = pid
-    visited: set[int] = set()
-    for _ in range(MAX_ANCESTRY_DEPTH):
-        if current == ancestor:
+        request = (
+            b"nonce=" + nonce + b"\n"
+            + b"auth=" + tag + b"\n"
+            + b"mode=" + mode.encode("ascii") + b"\n"
+        )
+        connection.sendto(
+            request, lock_manager_address(home, task, root_key)
+        )
+        response, ancdata, _, _ = connection.recvmsg(
+            128, socket.CMSG_SPACE(array.array("i").itemsize * 4)
+        )
+        for level, kind, data in ancdata:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                received.extend(
+                    array.array("i", data[: len(data) - len(data) % array.array("i").itemsize])
+                )
+        if response == b"BUSY\n":
+            for fd in received:
+                os.close(fd)
+            return False
+        if response != b"READY\n" or len(received) != 1:
+            for fd in received:
+                os.close(fd)
+            return None
+        lock = socket.socket(fileno=received[0])
+        received = []
+        if mode == "probe":
+            expected_lease = lock_manager_lease_token(root_key, context)
+            try:
+                lock.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
+                if recv_exact(
+                    lock,
+                    len(expected_lease),
+                    time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS,
+                ) != expected_lease:
+                    lock.close()
+                    return None
+                lock.settimeout(None)
+            except (OSError, TimeoutError, ValueError):
+                lock.close()
+                return None
+            close_record_lock(lock)
             return True
-        if current <= 1 or current in visited:
-            return False
-        visited.add(current)
-        try:
-            current = parent_pid(current)
-        except (OSError, UnicodeError, ValueError):
-            return False
-    return False
-
-
-def lock_manager_peer_is_reserved(
-    connection: socket.socket, *, home: str, task: str,
-    launch_pid: int, launch_script: str
-) -> bool:
-    try:
-        credentials = connection.getsockopt(
-            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-        )
-        pid, uid, gid = struct.unpack("3i", credentials)
-        if uid != os.geteuid() or gid != os.getegid():
-            return False
-        command = process_command(pid)
-        if (
-            len(command) < 3
-            or canonical(command[1]) != canonical(__file__)
-            or command[2] not in {"serve", "supervise", "recover-stale"}
-            or not process_has_ancestor(pid, launch_pid)
-        ):
-            return False
-        options: dict[str, str] = {}
-        index = 3
-        while index + 1 < len(command):
-            name = command[index]
-            if not name.startswith("--"):
-                return False
-            options[name] = command[index + 1]
-            index += 2
-        if command[2] == "recover-stale":
-            return canonical(options.get("--record", "")) == canonical(
-                f"{home}/state/.session-authority-broker"
-            )
-        return (
-            canonical(options.get("--state", "")) == canonical(f"{home}/state")
-            and canonical(options.get("--home", "")) == home
-            and canonical(options.get("--checkout", ""))
-            == canonical(str(Path(__file__).parent.parent))
-            and options.get("--task") == task
-            and canonical(options.get("--launch-script", ""))
-            == canonical(launch_script)
-        )
+        return lock
     except (OSError, UnicodeError, ValueError):
-        return False
+        for fd in received:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return None
+    finally:
+        connection.close()
 
 
 def lock_manager_serve(
@@ -514,182 +563,115 @@ def lock_manager_serve(
     launch_evidence: tuple[bytes, int, str, str]
 ) -> None:
     root_key, launch_pid, launch_start, launch_identity = launch_evidence
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    pending: dict[socket.socket, tuple[float, bytes, bytearray, bool]] = {}
-    waiters: list[socket.socket] = []
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     owner: socket.socket | None = None
+    waiters: list[tuple[float, str | bytes]] = []
+    context = lock_manager_context(
+        home, task, launch_pid, launch_start, launch_identity, launch_script
+    )
+    address = lock_manager_address(home, task, root_key)
 
-    def close_connection(connection: socket.socket) -> None:
-        try:
-            connection.close()
-        except OSError:
-            pass
-
-    def send_response(connection: socket.socket, response: bytes) -> bool:
-        try:
-            connection.sendall(response)
-            return True
-        except OSError:
-            close_connection(connection)
-            return False
-
-    def grant_waiter() -> socket.socket | None:
+    def grant_waiter(now: float) -> socket.socket | None:
         while waiters:
-            candidate = waiters.pop(0)
-            if send_response(candidate, b"READY\n"):
-                return candidate
-            close_connection(candidate)
+            deadline, waiter_address = waiters.pop(0)
+            if deadline <= now:
+                continue
+            left, right = lock_manager_lease_pair(root_key, context)
+            if lock_manager_send_response(server, waiter_address, b"READY\n", right):
+                right.close()
+                return left
+            left.close()
+            right.close()
         return None
 
     try:
-        server.bind(lock_manager_address(home, task, root_key))
-        server.listen(
-            MAX_LOCK_MANAGER_RESERVED_PENDING
-            + MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING
-        )
+        server.bind(address)
         server.setblocking(False)
-        context = lock_manager_context(
-            home, task, launch_pid, launch_start, launch_identity, launch_script
-        )
         while True:
-            new_owner: socket.socket | None = None
             if launch_process_state(
                 launch_pid, launch_start, launch_identity, launch_script
             ) == "dead":
                 return
             now = time.monotonic()
-            for connection, (deadline, _, _, _) in list(pending.items()):
-                if deadline <= now:
-                    pending.pop(connection, None)
-                    close_connection(connection)
-            readers = [server, *pending]
+            waiters[:] = [
+                (deadline, waiter_address)
+                for deadline, waiter_address in waiters
+                if deadline > now
+            ]
+            readers: list[socket.socket] = [server]
             if owner is not None:
                 readers.append(owner)
-            readers.extend(waiters)
             readable, _, _ = select.select(readers, [], [], 0.05)
             if server in readable:
-                for _ in range(MAX_LOCK_MANAGER_PENDING_AUTHENTICATIONS):
+                for _ in range(MAX_LOCK_MANAGER_REQUESTS_PER_TICK):
                     try:
-                        connection, _ = server.accept()
-                    except (BlockingIOError, OSError):
+                        request, ancdata, flags, source = server.recvmsg(
+                            MAX_LOCK_MANAGER_REQUEST_BYTES,
+                            socket.CMSG_SPACE(array.array("i").itemsize * 4),
+                        )
+                    except BlockingIOError:
                         break
-                    connection.setblocking(False)
-                    reserved = lock_manager_peer_is_reserved(
-                        connection, home=home, task=task,
-                        launch_pid=launch_pid, launch_script=launch_script
-                    )
-                    reserved_count = sum(
-                        value[3] for value in pending.values()
-                    )
-                    unauthenticated_count = len(pending) - reserved_count
-                    if (
-                        reserved and reserved_count >= MAX_LOCK_MANAGER_RESERVED_PENDING
-                    ) or (
-                        not reserved
-                        and unauthenticated_count
-                        >= MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING
-                    ):
-                        close_connection(connection)
+                    except OSError:
+                        break
+                    for level, kind, data in ancdata:
+                        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                            size = array.array("i").itemsize
+                            for fd in array.array("i", data[: len(data) - len(data) % size]):
+                                try:
+                                    os.close(fd)
+                                except OSError:
+                                    pass
+                    if flags & (
+                        getattr(socket, "MSG_TRUNC", 0)
+                        | getattr(socket, "MSG_CTRUNC", 0)
+                    ) or source is None:
                         continue
-                    nonce = secrets.token_bytes(32).hex().encode("ascii")
-                    if not send_response(connection, b"nonce=" + nonce + b"\n"):
+                    fields = lock_manager_request_fields(request)
+                    if fields is None:
                         continue
-                    pending[connection] = (
-                        time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS,
-                        nonce,
-                        bytearray(),
-                        reserved,
-                    )
-            for connection in list(pending):
-                if connection not in readable or connection not in pending:
-                    continue
-                deadline, nonce, buffer, _ = pending[connection]
-                if time.monotonic() >= deadline:
-                    pending.pop(connection, None)
-                    close_connection(connection)
-                    continue
-                try:
-                    chunk = connection.recv(512)
-                except BlockingIOError:
-                    continue
-                except OSError:
-                    pending.pop(connection, None)
-                    close_connection(connection)
-                    continue
-                if not chunk:
-                    pending.pop(connection, None)
-                    close_connection(connection)
-                    continue
-                buffer.extend(chunk)
-                if len(buffer) > 512 or buffer.count(b"\n") < 2:
-                    continue
-                lines = buffer.split(b"\n", 2)
-                auth_line = lines[0] + b"\n"
-                mode_line = lines[1] + b"\n"
-                pending.pop(connection, None)
-                if not auth_line.startswith(b"auth=") or not mode_line.startswith(b"mode="):
-                    send_response(connection, b"DENIED\n")
-                    close_connection(connection)
-                    continue
-                tag = auth_line[len(b"auth="):-1]
-                try:
-                    mode = mode_line[len(b"mode="):-1].decode("ascii")
-                except UnicodeError:
-                    mode = ""
-                expected_tag = hmac.new(
-                    root_key, b"lock\0" + context + b"\0" + nonce,
-                    hashlib.sha256,
-                ).hexdigest().encode("ascii")
-                if not hmac.compare_digest(tag, expected_tag):
-                    send_response(connection, b"DENIED\n")
-                    close_connection(connection)
-                    continue
-                if mode == "probe":
-                    send_response(connection, b"READY\n")
-                    close_connection(connection)
-                    continue
-                if mode not in {"try", "wait"}:
-                    close_connection(connection)
-                    continue
-                if owner is None:
-                    if send_response(connection, b"READY\n"):
-                        owner = connection
-                        new_owner = connection
+                    nonce, tag, mode = fields
+                    expected_tag = hmac.new(
+                        root_key,
+                        b"lock\0" + context + b"\0" + nonce + b"\0" + mode.encode("ascii"),
+                        hashlib.sha256,
+                    ).hexdigest().encode("ascii")
+                    if not hmac.compare_digest(tag, expected_tag):
+                        continue
+                    if mode == "probe":
+                        left, right = lock_manager_lease_pair(root_key, context)
+                        if lock_manager_send_response(
+                            server, source, b"READY\n", right
+                        ):
+                            right.close()
+                            close_record_lock(left)
+                        else:
+                            left.close()
+                            right.close()
+                        continue
+                    if owner is None:
+                        left, right = lock_manager_lease_pair(root_key, context)
+                        if lock_manager_send_response(
+                            server, source, b"READY\n", right
+                        ):
+                            right.close()
+                            owner = left
+                        else:
+                            left.close()
+                            right.close()
+                    elif mode == "try" or len(waiters) >= MAX_LOCK_MANAGER_WAITERS:
+                        lock_manager_send_response(server, source, b"BUSY\n")
                     else:
-                        close_connection(connection)
-                elif mode == "try" or len(waiters) >= MAX_LOCK_MANAGER_WAITERS:
-                    send_response(connection, b"BUSY\n")
-                    close_connection(connection)
-                else:
-                    waiters.append(connection)
-            if owner is not None and owner in readable and owner is not new_owner:
+                        waiters.append((time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS, source))
+            if owner is not None and owner in readable:
                 try:
                     owner.recv(256)
                 except (BlockingIOError, OSError):
                     pass
-                close_connection(owner)
-                owner = grant_waiter()
-                new_owner = owner
-            for connection in list(waiters):
-                if connection not in readable or connection is owner:
-                    continue
-                try:
-                    if connection.recv(256):
-                        close_connection(connection)
-                        waiters.remove(connection)
-                    else:
-                        close_connection(connection)
-                        waiters.remove(connection)
-                except (BlockingIOError, OSError):
-                    close_connection(connection)
-                    waiters.remove(connection)
+                owner.close()
+                owner = grant_waiter(time.monotonic())
     finally:
-        for connection in pending:
-            close_connection(connection)
-        for connection in waiters:
-            close_connection(connection)
         if owner is not None:
-            close_connection(owner)
+            owner.close()
         server.close()
 
 
@@ -754,16 +736,35 @@ def open_authority_record_lock(
 
 def inherited_authority_record_lock(
     fd: int, *, home: str, task: str,
+    launch_script: str,
     launch_evidence: tuple[bytes, int, str, str]
 ) -> socket.socket | None:
-    root_key, _, _, _ = launch_evidence
     try:
-        connection = socket.socket(fileno=fd)
-        peer = connection.getpeername()
-        expected = lock_manager_address(home, task, root_key)
-        if peer not in {expected, expected.encode("utf-8")}:
+        connection = socket.socket(
+            family=socket.AF_UNIX, type=socket.SOCK_STREAM, fileno=fd
+        )
+        if connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
             connection.close()
             return None
+        if hasattr(socket, "SO_DOMAIN") and connection.getsockopt(
+            socket.SOL_SOCKET, socket.SO_DOMAIN
+        ) != socket.AF_UNIX:
+            connection.close()
+            return None
+        root_key, launch_pid, launch_start, launch_identity = launch_evidence
+        context = lock_manager_context(
+            home, task, launch_pid, launch_start, launch_identity,
+            launch_script,
+        )
+        connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
+        if recv_exact(
+            connection,
+            len(lock_manager_lease_token(root_key, context)),
+            time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS,
+        ) != lock_manager_lease_token(root_key, context):
+            connection.close()
+            return None
+        connection.settimeout(None)
         return connection
     except (OSError, UnicodeError, ValueError):
         try:
@@ -802,6 +803,7 @@ def serve(args: argparse.Namespace) -> int:
             return 1
         record_lock_fd = inherited_authority_record_lock(
             record_lock_argument, home=home, task=args.task,
+            launch_script=launch_script,
             launch_evidence=launch_evidence
         )
     else:
@@ -1173,6 +1175,20 @@ def record_metadata_digest(metadata: dict[str, str]) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def quarantine_slot_path(path: Path, key: bytes, slot: int) -> Path:
+    if slot < 0 or slot >= MAX_RECOVERY_QUARANTINES:
+        raise ValueError("invalid recovery quarantine slot")
+    digest = hmac.new(
+        key,
+        b"firstmate/session-authority-quarantine/v1\0"
+        + path.name.encode("utf-8")
+        + b"\0"
+        + str(slot).encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return path.with_name(f".{path.name}.recovery-{digest}")
+
+
 def write_quarantine_receipt(
     quarantine: Path, metadata: dict[str, str], proof: Path, key: bytes,
     quarantine_stat: os.stat_result | None = None
@@ -1192,8 +1208,13 @@ def write_quarantine_receipt(
         + hmac.new(key, body, hashlib.sha256).hexdigest()
         + "\n"
     ).encode("ascii")
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=QUARANTINE_RECEIPT_TEMP_PREFIX, dir=quarantine.parent
+    temporary = quarantine.with_name(
+        quarantine.name + QUARANTINE_RECEIPT_TEMP_SUFFIX
+    )
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
     )
     try:
         os.fchmod(descriptor, 0o600)
@@ -1201,17 +1222,19 @@ def write_quarantine_receipt(
             output.write(body)
             output.flush()
             os.fsync(output.fileno())
+        descriptor = -1
         rename_noreplace(
-            Path(temporary),
+            temporary,
             quarantine.with_name(quarantine.name + QUARANTINE_RECEIPT_SUFFIX),
         )
     except BaseException:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        try:
-            os.unlink(temporary)
+            temporary.unlink()
         except OSError:
             pass
         raise
@@ -1224,6 +1247,12 @@ def quarantine_receipt_fields(
         quarantine.name + QUARANTINE_RECEIPT_SUFFIX
     )
     try:
+        receipt_stat = receipt_path.lstat()
+        if (
+            not stat.S_ISREG(receipt_stat.st_mode)
+            or receipt_stat.st_size > MAX_QUARANTINE_RECEIPT_BYTES
+        ):
+            return None
         lines = receipt_path.read_bytes().splitlines(keepends=True)
         if len(lines) != 7 or any(not line.endswith(b"\n") for line in lines):
             return None
@@ -1301,8 +1330,9 @@ def quarantine_receipt_matches(
 def cleanup_one_recovery_quarantine(
     path: Path, record: Path, expected: dict[str, str], key: bytes
 ) -> bool:
-    identity = path.with_name(
-        f"{QUARANTINE_IDENTITY_PREFIX}{secrets.token_hex(16)}"
+    identity = path.with_name(path.name + QUARANTINE_IDENTITY_SUFFIX)
+    temporary = path.with_name(
+        path.name + QUARANTINE_RECEIPT_TEMP_SUFFIX
     )
     proof = path.with_name(path.name + QUARANTINE_PROOF_SUFFIX)
     receipt = path.with_name(path.name + QUARANTINE_RECEIPT_SUFFIX)
@@ -1386,50 +1416,26 @@ def cleanup_one_recovery_quarantine(
     except (OSError, UnicodeError, ValueError):
         return False
     finally:
-        try:
-            identity.unlink()
-        except OSError:
-            pass
+        for artifact in (identity, temporary):
+            try:
+                artifact.unlink()
+            except OSError:
+                pass
 
 
 def cleanup_recovery_quarantines(
     path: Path, expected: dict[str, str], key: bytes
 ) -> bool:
-    candidates = {
-        candidate.name.removesuffix(suffix)
-        for candidate in path.parent.glob(f".{path.name}.recovery-*")
-        for suffix in (QUARANTINE_RECEIPT_SUFFIX, QUARANTINE_PROOF_SUFFIX)
-        if candidate.name.endswith(suffix)
-    }
-    candidates.update(
-        candidate.name
-        for candidate in path.parent.glob(f".{path.name}.recovery-*")
-        if not candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
-        and not candidate.name.endswith(QUARANTINE_PROOF_SUFFIX)
-    )
-    quarantines = sorted(path.parent / candidate for candidate in candidates)
+    quarantines = [
+        quarantine_slot_path(path, key, slot)
+        for slot in range(MAX_RECOVERY_QUARANTINES)
+    ]
     for quarantine in quarantines:
-        if not cleanup_one_recovery_quarantine(quarantine, path, expected, key):
-            continue
-    for pattern in (QUARANTINE_RECEIPT_TEMP_PREFIX, QUARANTINE_IDENTITY_PREFIX):
-        for artifact in path.parent.glob(pattern + "*"):
-            try:
-                artifact.unlink()
-            except OSError:
-                pass
-    remaining = sorted(path.parent.glob(f".{path.name}.recovery-*"))
-    authenticated = {
-        candidate.name.removesuffix(QUARANTINE_RECEIPT_SUFFIX)
-        for candidate in remaining
-        if candidate.name.endswith(QUARANTINE_RECEIPT_SUFFIX)
-        and quarantine_receipt_fields(
-            candidate.with_name(
-                candidate.name.removesuffix(QUARANTINE_RECEIPT_SUFFIX)
-            ),
-            key,
-        ) is not None
-    }
-    return len(authenticated) <= MAX_RECOVERY_QUARANTINES and not authenticated
+        cleanup_one_recovery_quarantine(quarantine, path, expected, key)
+    return not any(
+        quarantine_receipt_fields(quarantine, key) is not None
+        for quarantine in quarantines
+    )
 
 
 def unlink_owned_record(
@@ -1464,10 +1470,8 @@ def unlink_owned_record(
         metadata = read_record_shape(path)
         if any(metadata.get(key) != value for key, value in expected.items()):
             return False
-        for _ in range(8):
-            quarantine = path.with_name(
-                f".{path.name}.recovery-{secrets.token_hex(16)}"
-            )
+        for slot in range(MAX_RECOVERY_QUARANTINES):
+            quarantine = quarantine_slot_path(path, quarantine_key, slot)
             proof = quarantine.with_name(quarantine.name + QUARANTINE_PROOF_SUFFIX)
             receipt = quarantine.with_name(
                 quarantine.name + QUARANTINE_RECEIPT_SUFFIX
