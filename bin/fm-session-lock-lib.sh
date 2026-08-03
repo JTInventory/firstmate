@@ -385,6 +385,7 @@ fm_session_authority_broker_bootstrap() {
     exec 18<&-
     return 1
   }
+  FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
   FM_SESSION_AUTHORITY_DURABLE_FD=18
   export FM_SESSION_AUTHORITY_DURABLE_FD
 }
@@ -392,6 +393,7 @@ fm_session_authority_broker_bootstrap() {
 fm_session_authority_wrapper_provenance_present() {
   local source wrapper
   [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" = 1 ] || return 1
+  [ "${FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN:-}" = trusted ] || return 1
   wrapper="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
   for source in "${BASH_SOURCE[@]}"; do
     [ "$(cd "$(dirname "$source")" 2>/dev/null && pwd -P)/$(basename "$source")" = "$wrapper" ] || continue
@@ -794,6 +796,7 @@ fm_session_authority_descriptor_create() {
     return 1
   }
   fm_session_enrollment_trace authority-descriptor-fd18-isolation pass 2>/dev/null || true
+  FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
 }
@@ -812,6 +815,7 @@ fm_session_authority_live_descriptor_rotate() {
     exec 9<&-
     return 1
   }
+  FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
   FM_SESSION_AUTHORITY_FD=9
 }
 
@@ -832,6 +836,7 @@ fm_session_authority_durable_descriptor_adopt() {
     exec 18<&-
     return 1
   }
+  FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
   FM_SESSION_AUTHORITY_DURABLE_FD=18
 }
 

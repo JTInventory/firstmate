@@ -12,7 +12,10 @@ STATE="$HOME_DIR/state"
 RECORD="$STATE/.session-authority-broker"
 BROKER_PID=
 LAUNCH_PID=
+PRIMARY_PID=
+SIGNER_PID=
 REQUEST_FIFO=
+PRIMARY_REQUEST_FIFO=
 REQUEST_SEQUENCE=0
 BROKER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
@@ -21,6 +24,10 @@ cleanup() {
   [ -z "$BROKER_PID" ] || wait "$BROKER_PID" 2>/dev/null || true
   [ -z "$LAUNCH_PID" ] || kill "$LAUNCH_PID" 2>/dev/null || true
   [ -z "$LAUNCH_PID" ] || wait "$LAUNCH_PID" 2>/dev/null || true
+  [ -z "$SIGNER_PID" ] || kill "$SIGNER_PID" 2>/dev/null || true
+  [ -z "$SIGNER_PID" ] || wait "$SIGNER_PID" 2>/dev/null || true
+  [ -z "$PRIMARY_PID" ] || kill "$PRIMARY_PID" 2>/dev/null || true
+  [ -z "$PRIMARY_PID" ] || wait "$PRIMARY_PID" 2>/dev/null || true
   fm_test_cleanup
 }
 trap cleanup EXIT
@@ -181,6 +188,68 @@ PY
     fail "broker accepted self-signed launch evidence without enrollment proof"
   fi
   pass "broker rejects self-signed launch evidence without enrollment proof"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_forged_chain", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    issuer = Path(temporary) / "issuer"
+    state = issuer / "state"
+    state.mkdir(parents=True)
+    (state / ".lock").write_text("forged-owner\n", encoding="utf-8")
+    (state / ".primary-checkout").write_text(
+        f"{broker_path.parent.parent}\n", encoding="utf-8"
+    )
+    current = os.getpid()
+    start, identity = broker.process_generation(current)
+    authority = state / ".session-authority"
+    authority.write_text(
+        "version=2\n"
+        f"pid={current}\nstart={start}\nidentity={identity}\n"
+        "token=" + "0" * 64 + "\nowner=forged-owner\n"
+        f"home={issuer}\ncheckout={broker_path.parent.parent}\n",
+        encoding="utf-8",
+    )
+    authority.chmod(0o600)
+    fields = {
+        "version": "5", "role": "secondmate", "task": "alpha",
+        "home": str(Path(temporary) / "home"), "issuer-home": str(issuer),
+        "issuer-authority": "0" * 64,
+        "nonce": "a" * 64, "broker-pid": str(current),
+        "broker-start": start, "broker-identity": identity,
+        "broker-script": str(broker_path.parent.parent / "bin" / "fm-session-authority-exec.sh"),
+        "authority-fd": "18", "authority-descriptor": "pipe:[forged]",
+        "signer-pid": str(current), "signer-start": start,
+        "signer-identity": identity, "public-key": "ZmFrZQ==",
+        "public-key-sha256": "0" * 64, "endpoint-pid": str(current),
+        "endpoint-start": start, "endpoint-identity": identity,
+    }
+    try:
+        broker.verify_trusted_primary_authority(
+            fields,
+            home=fields["home"],
+            launch_pid=current,
+            launch_start=start,
+            launch_identity=identity,
+        )
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("a complete forged enrollment chain was accepted")
+PY
+  then
+    fail "broker accepted a complete forged enrollment chain"
+  fi
+  pass "broker rejects a complete forged enrollment chain"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
 import sys
@@ -660,27 +729,55 @@ fi
 prepare_launch() {
   local home=$1 launch_script
   local launch_start launch_identity receipt_body receipt_hmac nonce
-  local issuer signer_key signer_public signer_public_b64 signer_digest
+  local issuer signer_private signer_public signer_public_b64 signer_digest
   local consumer_key consumer_public consumer_public_b64 consumer_digest
-  local issuer_digest ticket_body accepted_body accepted_digest final_body final_signature
+  local accepted_body accepted_digest final_body final_signature
+  local primary_fixture primary_pid_file primary_start primary_identity primary_descriptor
+  local primary_owner primary_token signer_output enrollment random_bin attempts=0
   nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   launch_script="$home/bin/fm-session-authority-exec.sh"
   [ -z "$LAUNCH_PID" ] || kill "$LAUNCH_PID" 2>/dev/null || true
   [ -z "$LAUNCH_PID" ] || wait "$LAUNCH_PID" 2>/dev/null || true
+  [ -z "$SIGNER_PID" ] || kill "$SIGNER_PID" 2>/dev/null || true
+  [ -z "$SIGNER_PID" ] || wait "$SIGNER_PID" 2>/dev/null || true
+  [ -z "$PRIMARY_PID" ] || kill "$PRIMARY_PID" 2>/dev/null || true
+  [ -z "$PRIMARY_PID" ] || wait "$PRIMARY_PID" 2>/dev/null || true
   REQUEST_FIFO="$TMP_ROOT/requests-$REQUEST_SEQUENCE"
+  PRIMARY_REQUEST_FIFO="$TMP_ROOT/primary-requests-$REQUEST_SEQUENCE"
   REQUEST_SEQUENCE=$((REQUEST_SEQUENCE + 1))
+  issuer="$TMP_ROOT/issuer-$REQUEST_SEQUENCE"
+  primary_fixture="$issuer/primary-fixture.sh"
+  primary_pid_file="$issuer/primary.pid"
   mkdir -p "$home/bin" "$home/state"
+  printf '%s\n' alpha > "$home/.fm-secondmate-home"
+  mkdir -p "$issuer/state"
+  random_bin="$issuer/test-bin"
+  mkdir -p "$random_bin"
+  cat > "$random_bin/od" <<SH
+#!/usr/bin/env bash
+if [ "\${2:-}" = -N ] && [ "\${3:-}" = 32 ]; then
+  printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+else
+  exec /usr/bin/od "\$@"
+fi
+SH
+  chmod 700 "$random_bin/od"
   rm -f "$REQUEST_FIFO"
-  mkfifo "$REQUEST_FIFO"
+  rm -f "$PRIMARY_REQUEST_FIFO"
+  mkfifo "$REQUEST_FIFO" "$PRIMARY_REQUEST_FIFO"
   cat > "$launch_script" <<SH
 #!/usr/bin/env bash
 set -u
 while :; do
   exec 7< "$REQUEST_FIFO"
-  while IFS='|' read -r kind role request_home output <&7; do
-    [ -n "\$output" ] || continue
-    status=0
-    case "\$kind" in
+  IFS='|' read -r kind role request_home output <&7 || {
+    exec 7<&-
+    continue
+  }
+  exec 7<&-
+  [ -n "\$output" ] || continue
+  status=0
+  case "\$kind" in
       broker)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
@@ -721,9 +818,7 @@ while :; do
         ) || status=1
         ;;
     esac
-    printf '%s\n' "\$status" > "\$output.status"
-  done
-  exec 7<&-
+  printf '%s\n' "\$status" > "\$output.status"
 done
 SH
   chmod 700 "$launch_script"
@@ -738,18 +833,87 @@ SH
     || fail "authenticated launch fixture did not start"
   launch_identity=$(test_process_identity "$LAUNCH_PID") \
     || fail "authenticated launch fixture has no executable identity"
-  issuer="$TMP_ROOT/issuer"
-  mkdir -p "$issuer/state"
-  printf 'trusted-primary-authority\n' > "$issuer/state/.session-authority"
-  issuer_digest=$(test_sha256_file "$issuer/state/.session-authority") \
-    || fail "trusted fixture authority digest could not be computed"
-  signer_key="$issuer/state/.signer-key"
+cat > "$primary_fixture" <<SH
+#!/usr/bin/env bash
+set -u
+exec 7< "$PRIMARY_REQUEST_FIFO"
+while :; do
+  IFS='|' read -r kind output ticket task consumer issuer_path endpoint start identity public digest private <&7 || break
+  [ "\$kind" = signer ] || continue
+  exec 10< "\$private"
+  exec 18< /proc/\$\$/fd/18
+  exec 19< /proc/\$\$/fd/19
+  FM_SESSION_AUTHORITY_FD=19 \
+  FM_SESSION_AUTHORITY_BROKER_PID=\$(cat "$primary_pid_file") \
+  FM_SESSION_AUTHORITY_BROKER_START=\$(sed -n '3s/^start=//p' "$issuer/state/.session-authority") \
+  FM_SESSION_AUTHORITY_BROKER_IDENTITY=\$(sed -n '4s/^identity=//p' "$issuer/state/.session-authority") \
+  FM_SESSION_AUTHORITY_BROKER_SCRIPT="$ROOT/bin/fm-session-authority-exec.sh" \
+  FM_TEST_PROCESS=1 \
+  FM_TEST_AUTHORITY_BROKER_PID=\$(cat "$primary_pid_file") \
+  FM_TEST_AUTHORITY_FD=19 \
+  FM_TEST_DURABLE_AUTHORITY_FD=18 \
+  FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD=10 \
+    FM_SESSION_ENROLLMENT_PUBLIC_KEY="\$public" \
+    FM_SESSION_ENROLLMENT_PUBLIC_SHA256="\$digest" \
+    export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_BROKER_PID \
+    FM_SESSION_AUTHORITY_BROKER_START FM_SESSION_AUTHORITY_BROKER_IDENTITY \
+    FM_SESSION_AUTHORITY_BROKER_SCRIPT FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD \
+    FM_TEST_PROCESS FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_FD \
+    FM_TEST_DURABLE_AUTHORITY_FD \
+    FM_SESSION_ENROLLMENT_PUBLIC_KEY FM_SESSION_ENROLLMENT_PUBLIC_SHA256
+  PATH="$random_bin:\$PATH" "$ROOT/bin/fm-session-enrollment-signer.sh" "\$ticket" "\$task" "\$consumer" "\$issuer_path" \
+    "\$endpoint" "\$start" "\$identity" >"\$output" 2>&1 &
+  signer_pid=\$!
+  printf '%s\\n' "\$signer_pid" >"\$output.pid"
+  wait "\$signer_pid" || true
+done
+exec 7<&-
+SH
+  chmod 700 "$primary_fixture"
+  PRIMARY_DURABLE_KEY=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+  PRIMARY_LIVE_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  exec 19< <(while :; do printf '%s\n' "$PRIMARY_LIVE_KEY"; done)
+  exec 18< <(while :; do printf '%s\n' "$PRIMARY_DURABLE_KEY"; done)
+  (
+    cd "$issuer" || exit 1
+    FM_TEST_PROCESS=1 FM_TEST_AUTHORITY_FD=19 \
+      FM_TEST_DURABLE_AUTHORITY_FD=18 FM_HOME="$issuer" \
+      FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-session-authority-exec.sh" \
+      --behavior-test-authority-broker "$primary_fixture"
+  ) >/dev/null 2>&1 &
+  PRIMARY_PID=$!
+  printf '%s\n' "$PRIMARY_PID" > "$primary_pid_file"
+  primary_start=$(test_process_start "$PRIMARY_PID") \
+    || fail "trusted primary authority fixture did not start"
+  primary_identity=$(test_process_identity "$PRIMARY_PID") \
+    || fail "trusted primary authority fixture has no executable identity"
+  primary_descriptor=$(readlink "/proc/$PRIMARY_PID/fd/19") \
+    || fail "trusted primary authority fixture has no protected descriptor"
+  primary_owner=primary-fixture
+  printf '%s\n' "$ROOT" > "$issuer/state/.primary-checkout"
+  printf '%s\n' "$primary_owner" > "$issuer/state/.lock"
+  primary_token=$(KEY="$PRIMARY_DURABLE_KEY" PID="$PRIMARY_PID" \
+    START="$primary_start" IDENTITY="$primary_identity" OWNER="$primary_owner" \
+    HOME="$issuer" CHECKOUT="$ROOT" python3 -c '
+import hashlib
+import os
+key = bytes.fromhex(os.environ["KEY"])[:64].ljust(64, b"\0")
+body = "".join(f"{os.environ[name]}\n" for name in ("PID", "START", "IDENTITY", "OWNER", "HOME", "CHECKOUT")).encode()
+inner = hashlib.sha256(bytes(value ^ 0x36 for value in key) + body).digest()
+print(hashlib.sha256(bytes(value ^ 0x5c for value in key) + inner).hexdigest())') \
+    || fail "trusted primary authority token could not be created"
+  printf 'version=2\npid=%s\nstart=%s\nidentity=%s\ntoken=%s\nowner=%s\nhome=%s\ncheckout=%s\n' \
+    "$PRIMARY_PID" "$primary_start" "$primary_identity" "$primary_token" \
+    "$primary_owner" "$issuer" "$ROOT" > "$issuer/state/.session-authority"
+  chmod 600 "$issuer/state/.session-authority" "$issuer/state/.lock" \
+    "$issuer/state/.primary-checkout"
+  signer_private="$issuer/state/.signer-private"
   signer_public="$issuer/state/.signer-public"
   consumer_key="$issuer/state/.consumer-key"
   consumer_public="$issuer/state/.consumer-public"
-  openssl ecparam -name prime256v1 -genkey -noout -out "$signer_key" \
+  openssl ecparam -name prime256v1 -genkey -noout -out "$signer_private" \
     2>/dev/null || fail "trusted fixture signer key could not be created"
-  openssl ec -in "$signer_key" -pubout -outform DER -out "$signer_public" \
+  openssl ec -in "$signer_private" -pubout -outform DER -out "$signer_public" \
     2>/dev/null || fail "trusted fixture signer public key could not be created"
   openssl ecparam -name prime256v1 -genkey -noout -out "$consumer_key" \
     2>/dev/null || fail "trusted fixture consumer key could not be created"
@@ -759,42 +923,47 @@ SH
   signer_digest=$(test_sha256_file "$signer_public")
   consumer_public_b64=$(openssl base64 -A < "$consumer_public")
   consumer_digest=$(test_sha256_file "$consumer_public")
-  ticket_body=$(mktemp "$TMP_ROOT/ticket.XXXXXX")
-  ticket_signature=$(mktemp "$TMP_ROOT/ticket-signature.XXXXXX")
-  printf 'version=5\nrole=secondmate\ntask=alpha\nhome=%s\nissuer-home=%s\nissuer-authority=%s\nnonce=%s\nbroker-pid=2\nbroker-start=proc:broker\nbroker-identity=exe:broker\nbroker-script=%s\nauthority-fd=18\nauthority-descriptor=fixture\nsigner-pid=%s\nsigner-start=proc:signer\nsigner-identity=exe:signer\npublic-key=%s\npublic-key-sha256=%s\nendpoint-pid=%s\nendpoint-start=%s\nendpoint-identity=%s\n' \
-    "$home" "$issuer" "$issuer_digest" "$nonce" \
-    "$ROOT/bin/fm-session-authority-exec.sh" "$LAUNCH_PID" \
-    "$signer_public_b64" "$signer_digest" "$LAUNCH_PID" \
-    "$launch_start" "$launch_identity" > "$ticket_body"
-  openssl dgst -sha256 -sign "$signer_key" -out "$ticket_signature" \
-    "$ticket_body" 2>/dev/null || fail "trusted fixture ticket could not be signed"
-  printf '%s\nsignature=%s\n' "$(cat "$ticket_body")" \
-    "$(openssl base64 -A < "$ticket_signature")" \
-    > "$HOME_DIR/state/.test-enrollment-ticket"
+  enrollment="$HOME_DIR/state/.session-authority-enrollment"
+  signer_output="$TMP_ROOT/signer-output-$REQUEST_SEQUENCE"
+  printf 'signer|%s|%s|alpha|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$signer_output" "$enrollment" "$home" "$issuer" "$LAUNCH_PID" "$launch_start" \
+    "$launch_identity" "$signer_public_b64" "$signer_digest" "$signer_private" \
+    > "$PRIMARY_REQUEST_FIFO"
+  while [ "$attempts" -lt 100 ] && [ ! -f "$enrollment.ready" ]; do
+    [ -f "$signer_output.pid" ] && SIGNER_PID=$(cat "$signer_output.pid")
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$enrollment" ] && [ -f "$enrollment.ready" ] \
+    || { [ ! -f "$signer_output" ] || cat "$signer_output" >&2; \
+      fail "trusted primary signer did not publish an enrollment ticket"; }
+  [ -f "$signer_output.pid" ] && SIGNER_PID=$(cat "$signer_output.pid") \
+    || fail "trusted primary signer did not publish its process identity"
+  nonce=$(sed -n '7s/^nonce=//p' "$enrollment")
   accepted_body=$(mktemp "$TMP_ROOT/accepted.XXXXXX")
   accepted_signature=$(mktemp "$TMP_ROOT/accepted-signature.XXXXXX")
   printf 'version=2\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nconsumer-public-key-sha256=%s\n' \
-    "$LAUNCH_PID" "$nonce" "$LAUNCH_PID" "$launch_start" \
+    "$SIGNER_PID" "$nonce" "$LAUNCH_PID" "$launch_start" \
     "$consumer_digest" > "$accepted_body"
-  openssl dgst -sha256 -sign "$signer_key" -out "$accepted_signature" \
+  openssl dgst -sha256 -sign "$signer_private" -out "$accepted_signature" \
     "$accepted_body" 2>/dev/null || fail "trusted fixture acceptance could not be signed"
   printf '%s\nsignature=%s\n' "$(cat "$accepted_body")" \
     "$(openssl base64 -A < "$accepted_signature")" \
-    > "$HOME_DIR/state/.test-enrollment-accepted"
-  accepted_digest=$(test_sha256_file "$HOME_DIR/state/.test-enrollment-accepted")
+    > "$enrollment.accepted"
+  accepted_digest=$(test_sha256_file "$enrollment.accepted")
   final_body=$(mktemp "$TMP_ROOT/final.XXXXXX")
   final_signature=$(mktemp "$TMP_ROOT/final-signature.XXXXXX")
   printf 'version=2\nstage=final\nsigner-pid=%s\nnonce=%s\nconsumer-pid=%s\nconsumer-start=%s\nacceptance-sha256=%s\nconsumer-public-key-sha256=%s\n' \
-    "$LAUNCH_PID" "$nonce" "$LAUNCH_PID" "$launch_start" \
+    "$SIGNER_PID" "$nonce" "$LAUNCH_PID" "$launch_start" \
     "$accepted_digest" "$consumer_digest" > "$final_body"
   openssl dgst -sha256 -sign "$consumer_key" -out "$final_signature" \
     "$final_body" 2>/dev/null || fail "trusted fixture final receipt could not be signed"
   printf '%s\nsignature=%s\n' "$(cat "$final_body")" \
     "$(openssl base64 -A < "$final_signature")" \
-    > "$HOME_DIR/state/.session-authority-enrollment.accepted.final"
-  TRUSTED_TICKET_B64=$(openssl base64 -A < "$HOME_DIR/state/.test-enrollment-ticket")
-  TRUSTED_ACCEPTANCE_B64=$(openssl base64 -A < "$HOME_DIR/state/.test-enrollment-accepted")
-  TRUSTED_FINAL_B64=$(openssl base64 -A < "$HOME_DIR/state/.session-authority-enrollment.accepted.final")
+    > "$enrollment.accepted.final"
+  TRUSTED_TICKET_B64=$(openssl base64 -A < "$enrollment")
+  TRUSTED_ACCEPTANCE_B64=$(openssl base64 -A < "$enrollment.accepted")
+  TRUSTED_FINAL_B64=$(openssl base64 -A < "$enrollment.accepted.final")
   TRUSTED_CONSUMER_KEY_B64=$consumer_public_b64
   receipt_body=$(printf 'version=1\ntask=alpha\nhome=%s\npid=%s\nstart=%s\nidentity=%s\nnonce=%s' \
     "$home" "$LAUNCH_PID" "$launch_start" "$launch_identity" "$nonce")

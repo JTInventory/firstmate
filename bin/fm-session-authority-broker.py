@@ -92,6 +92,185 @@ def process_command(pid: int) -> list[str]:
     ]
 
 
+def descriptor_identity(pid: int, fd: int) -> str:
+    target = os.readlink(f"/proc/{pid}/fd/{fd}")
+    if not target:
+        raise ValueError("empty authority descriptor")
+    return target
+
+
+def process_runs_script(pid: int, script: str) -> bool:
+    command = process_command(pid)
+    return len(command) >= 2 and canonical(command[1]) == canonical(script)
+
+
+def process_ancestry_contains(pid: int, wanted: int) -> bool:
+    current = pid
+    visited: set[int] = set()
+    for _ in range(MAX_ANCESTRY_DEPTH):
+        if current == wanted:
+            return True
+        if current <= 1 or current in visited:
+            return False
+        visited.add(current)
+        parent = parent_pid(current)
+        if parent == current or parent < 1:
+            return False
+        current = parent
+    return False
+
+
+def read_process_fd_line(pid: int, fd: int) -> str:
+    with open(f"/proc/{pid}/fd/{fd}", "rb", buffering=0) as source:
+        value = source.readline()
+    key = value.decode("ascii").strip()
+    if len(key) < 64 or len(key) % 2 or any(c not in "0123456789abcdef" for c in key):
+        raise ValueError("malformed primary authority key")
+    return key
+
+
+def authority_hmac(key: str, body: bytes) -> str:
+    key_bytes = bytes.fromhex(key)[:64]
+    key_bytes = key_bytes.ljust(64, b"\0")
+    inner = hashlib.sha256(
+        bytes(value ^ 0x36 for value in key_bytes) + body
+    ).digest()
+    return hashlib.sha256(
+        bytes(value ^ 0x5C for value in key_bytes) + inner
+    ).hexdigest()
+
+
+def read_primary_authority(path: Path) -> dict[str, str]:
+    file_stat = path.lstat()
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_mode & 0o077:
+        raise ValueError("unsafe primary authority")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    ordered = ("version", "pid", "start", "identity", "token", "owner", "home", "checkout")
+    if len(lines) != len(ordered) or any(not line.endswith("\n") for line in lines):
+        raise ValueError("malformed primary authority")
+    fields: dict[str, str] = {}
+    for expected, line in zip(ordered, lines):
+        prefix = f"{expected}="
+        if not line.startswith(prefix) or line.count("=") != 1:
+            raise ValueError("malformed primary authority")
+        value = line[len(prefix):-1]
+        if not value or "\x00" in value or "\r" in value:
+            raise ValueError("malformed primary authority")
+        fields[expected] = value
+    if fields["version"] != "2" or len(fields["token"]) != 64:
+        raise ValueError("malformed primary authority")
+    if any(c not in "0123456789abcdef" for c in fields["token"]):
+        raise ValueError("malformed primary authority")
+    try:
+        if int(fields["pid"]) <= 1:
+            raise ValueError
+    except ValueError as error:
+        raise ValueError("malformed primary authority") from error
+    return fields
+
+
+def verify_trusted_primary_authority(
+    ticket_fields: dict[str, str], *, home: str, launch_pid: int,
+    launch_start: str, launch_identity: str
+) -> None:
+    issuer_value = ticket_fields["issuer-home"]
+    issuer = Path(issuer_value)
+    if (
+        not issuer.is_absolute()
+        or issuer.is_symlink()
+        or not issuer.is_dir()
+        or canonical(issuer_value) != issuer_value
+        or issuer_value == home
+        or (issuer / ".fm-secondmate-home").exists()
+    ):
+        raise ValueError("untrusted primary home")
+    state = issuer / "state"
+    lock = state / ".lock"
+    binding = state / ".primary-checkout"
+    authority = state / ".session-authority"
+    if any(path.is_symlink() for path in (state, lock, binding, authority)):
+        raise ValueError("untrusted primary authority")
+    if not state.is_dir() or not lock.is_file() or not binding.is_file():
+        raise ValueError("untrusted primary authority")
+    authority_fields = read_primary_authority(authority)
+    broker_script = ticket_fields["broker-script"]
+    if (
+        not os.path.isabs(broker_script)
+        or canonical(broker_script) != broker_script
+        or Path(broker_script).name != "fm-session-authority-exec.sh"
+        or Path(broker_script).parent.name != "bin"
+        or not Path(broker_script).is_file()
+        or Path(broker_script).is_symlink()
+    ):
+        raise ValueError("untrusted primary authority script")
+    checkout = canonical(str(Path(broker_script).parent.parent))
+    owner = authority_fields["owner"]
+    if (
+        authority_fields["home"] != issuer_value
+        or canonical(authority_fields["checkout"]) != checkout
+        or lock.read_text(encoding="utf-8") != owner + "\n"
+        or binding.read_text(encoding="utf-8") != checkout + "\n"
+    ):
+        raise ValueError("untrusted primary authority binding")
+    try:
+        authority_pid = int(authority_fields["pid"])
+        authority_fd = int(ticket_fields["authority-fd"])
+    except ValueError as error:
+        raise ValueError("malformed primary authority identity") from error
+    if authority_fd < 3 or authority_pid != int(ticket_fields["broker-pid"]):
+        raise ValueError("untrusted primary authority identity")
+    if (
+        process_generation(authority_pid)
+        != (authority_fields["start"], authority_fields["identity"])
+        or process_generation(authority_pid)
+        != (ticket_fields["broker-start"], ticket_fields["broker-identity"])
+        or not process_runs_script(authority_pid, broker_script)
+        or canonical(os.readlink(f"/proc/{authority_pid}/cwd")) != issuer_value
+        or descriptor_identity(authority_pid, authority_fd)
+        != ticket_fields["authority-descriptor"]
+    ):
+        raise ValueError("untrusted primary authority process")
+    authority_environment = process_environment(authority_pid)
+    if (
+        authority_environment.get("FM_AGENT_ROLE", "") not in ("", "primary")
+        or authority_environment.get("FM_AGENT_TASK")
+        or authority_environment.get("FM_AGENT_OWNER_HOME")
+        or (
+            authority_environment.get("FM_HOME")
+            and canonical(authority_environment["FM_HOME"]) != issuer_value
+        )
+        or (
+            authority_environment.get("FM_ROOT_OVERRIDE")
+            and canonical(authority_environment["FM_ROOT_OVERRIDE"]) != checkout
+        )
+    ):
+        raise ValueError("untrusted primary authority provenance")
+    durable_descriptor = descriptor_identity(authority_pid, 18)
+    key = read_process_fd_line(authority_pid, 18)
+    authority_body = "".join(
+        f"{authority_fields[field]}\n"
+        for field in ("pid", "start", "identity", "owner", "home", "checkout")
+    ).encode("utf-8")
+    if not hmac.compare_digest(
+        authority_fields["token"], authority_hmac(key, authority_body)
+    ):
+        raise ValueError("untrusted primary authority token")
+    signer_pid = int(ticket_fields["signer-pid"])
+    signer_script = str(Path(checkout) / "bin" / "fm-session-enrollment-signer.sh")
+    if (
+        process_generation(signer_pid)
+        != (ticket_fields["signer-start"], ticket_fields["signer-identity"])
+        or not process_runs_script(signer_pid, signer_script)
+        or descriptor_identity(signer_pid, authority_fd)
+        != ticket_fields["authority-descriptor"]
+        or descriptor_identity(signer_pid, 18) != durable_descriptor
+        or not process_ancestry_contains(signer_pid, authority_pid)
+    ):
+        raise ValueError("untrusted primary signer")
+    if launch_pid <= 1 or (launch_start, launch_identity) == process_generation(authority_pid):
+        raise ValueError("untrusted enrollment endpoint")
+
+
 def recv_exact(
     connection: socket.socket, length: int, deadline: float | None = None
 ) -> bytes:
@@ -312,17 +491,6 @@ def read_launch_evidence(
         or executable_stat.st_mode & 0o022
     ):
         raise ValueError("untrusted launch executable")
-    launch_environment = process_environment(launch_pid)
-    owner_home = launch_environment.get("FM_AGENT_OWNER_HOME", "")
-    if (
-        launch_environment.get("FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED") != "1"
-        or launch_environment.get("FM_AGENT_ROLE") != "secondmate"
-        or launch_environment.get("FM_AGENT_TASK") != task
-        or not os.path.isabs(owner_home)
-        or canonical(owner_home) != home
-        or launch_environment.get("FM_SESSION_ENROLLMENT_NONCE") != fields["nonce"]
-    ):
-        raise ValueError("untrusted launch provenance")
     try:
         ticket = base64.b64decode(ticket_line.strip(), validate=True)
         accepted = base64.b64decode(accepted_line.strip(), validate=True)
@@ -349,6 +517,7 @@ def read_launch_evidence(
         or canonical(ticket_fields["issuer-home"]) == home
         or len(ticket_fields["nonce"]) != 64
         or any(c not in "0123456789abcdef" for c in ticket_fields["nonce"])
+        or ticket_fields["nonce"] != fields["nonce"]
         or ticket_fields["endpoint-pid"] != str(launch_pid)
         or ticket_fields["endpoint-start"] != fields["start"]
         or ticket_fields["endpoint-identity"] != fields["identity"]
@@ -362,6 +531,13 @@ def read_launch_evidence(
         )
     ):
         raise ValueError("untrusted enrollment ticket")
+    verify_trusted_primary_authority(
+        ticket_fields,
+        home=home,
+        launch_pid=launch_pid,
+        launch_start=fields["start"],
+        launch_identity=fields["identity"],
+    )
     issuer_authority = Path(canonical(ticket_fields["issuer-home"])) / "state" / ".session-authority"
     if (
         issuer_authority.is_symlink()
