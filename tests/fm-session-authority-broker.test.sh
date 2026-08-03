@@ -144,6 +144,69 @@ PY
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from tempfile import TemporaryDirectory
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_task", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    state = Path(temporary) / "state"
+    state.mkdir()
+    record = state / ".session-authority-broker"
+    home = Path(temporary)
+    checkout = broker_path.parent.parent
+    metadata = {
+        "home": str(home),
+        "checkout": str(checkout),
+        "task": "foreign-task",
+        "script": str(broker_path),
+        "launch-script": str(home / "bin" / "fm-session-authority-exec.sh"),
+    }
+    broker.read_record_shape = lambda _path: metadata
+    status = broker.recover_stale_locked(
+        SimpleNamespace(
+            record=str(record),
+            state=str(state),
+            home=str(home),
+            checkout=str(checkout),
+            task="requested-task",
+            launch_script=metadata["launch-script"],
+        ),
+        launch_evidence=(b"key", 2, "proc:start", "exe:launch"),
+    )
+    if status != 1:
+        raise SystemExit("stale recovery accepted a record for another task")
+PY
+  then
+    fail "stale recovery did not bind the requested task identity"
+  fi
+  pass "stale recovery binds the requested task identity"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+broker_path = Path(sys.argv[1]).resolve()
+source = broker_path.read_text(encoding="utf-8")
+if "connection_slots" in source or "BoundedSemaphore" in source:
+    raise SystemExit("lock manager still admits connections through a global slot pool")
+handoff = source[source.index("def supervise("):source.index("def serve_locked(")]
+transfer = handoff.index("if record_lock_fd.fileno()")
+if "record_lock_fd = None" in handoff[transfer:]:
+    raise SystemExit("supervisor dropped the transferred lease before exec")
+PY
+  then
+    fail "broker admission or lease handoff regressed"
+  fi
+  pass "broker admission and lease handoff retain authenticated ownership"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 

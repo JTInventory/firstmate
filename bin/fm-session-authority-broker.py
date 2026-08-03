@@ -447,62 +447,58 @@ def lock_manager_client(
 def lock_manager_handle_connection(
     connection: socket.socket, *, root_key: bytes, context: bytes,
     launch_pid: int, launch_start: str, launch_identity: str,
-    launch_script: str, lease_lock: threading.Lock,
-    connection_slots: threading.BoundedSemaphore
+    launch_script: str, lease_lock: threading.Lock
 ) -> None:
-    try:
-        with connection:
+    with connection:
+        try:
+            connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
+            nonce = secrets.token_bytes(32).hex().encode("ascii")
+            connection.sendall(b"nonce=" + nonce + b"\n")
+            deadline = time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
+            auth_line = recv_line(connection, deadline)
+            mode_line = recv_line(connection, deadline)
+            if not auth_line.startswith(b"auth=") or not mode_line.startswith(b"mode="):
+                raise ValueError("malformed lock manager authentication")
+            tag = auth_line[len(b"auth="):-1]
+            mode = mode_line[len(b"mode="):-1].decode("ascii")
+            expected_tag = hmac.new(
+                root_key, b"lock\0" + context + b"\0" + nonce,
+                hashlib.sha256,
+            ).hexdigest().encode("ascii")
+            if not hmac.compare_digest(tag, expected_tag):
+                connection.sendall(b"DENIED\n")
+                return
+            if mode == "probe":
+                connection.sendall(b"READY\n")
+                return
+            if mode not in {"try", "wait"}:
+                raise ValueError("invalid lock manager mode")
+            acquired = lease_lock.acquire(mode == "wait")
+            if not acquired:
+                connection.sendall(b"BUSY\n")
+                return
             try:
-                connection.settimeout(LOCK_MANAGER_TIMEOUT_SECONDS)
-                nonce = secrets.token_bytes(32).hex().encode("ascii")
-                connection.sendall(b"nonce=" + nonce + b"\n")
-                deadline = time.monotonic() + LOCK_MANAGER_TIMEOUT_SECONDS
-                auth_line = recv_line(connection, deadline)
-                mode_line = recv_line(connection, deadline)
-                if not auth_line.startswith(b"auth=") or not mode_line.startswith(b"mode="):
-                    raise ValueError("malformed lock manager authentication")
-                tag = auth_line[len(b"auth="):-1]
-                mode = mode_line[len(b"mode="):-1].decode("ascii")
-                expected_tag = hmac.new(
-                    root_key, b"lock\0" + context + b"\0" + nonce,
-                    hashlib.sha256,
-                ).hexdigest().encode("ascii")
-                if not hmac.compare_digest(tag, expected_tag):
-                    connection.sendall(b"DENIED\n")
+                if launch_process_state(
+                    launch_pid, launch_start, launch_identity, launch_script
+                ) == "dead":
                     return
-                if mode == "probe":
-                    connection.sendall(b"READY\n")
-                    return
-                if mode not in {"try", "wait"}:
-                    raise ValueError("invalid lock manager mode")
-                acquired = lease_lock.acquire(mode == "wait")
-                if not acquired:
-                    connection.sendall(b"BUSY\n")
-                    return
-                try:
+                connection.sendall(b"READY\n")
+                while True:
                     if launch_process_state(
                         launch_pid, launch_start, launch_identity, launch_script
                     ) == "dead":
                         return
-                    connection.sendall(b"READY\n")
-                    while True:
-                        if launch_process_state(
-                            launch_pid, launch_start, launch_identity, launch_script
-                        ) == "dead":
-                            return
-                        readable, _, _ = select.select([connection], [], [], 0.25)
-                        if not readable:
-                            continue
-                        release = connection.recv(256)
-                        if not release or release == b"RELEASE\n":
-                            break
-                        raise ValueError("invalid lock manager release")
-                finally:
-                    lease_lock.release()
-            except (OSError, UnicodeError, ValueError, TimeoutError):
-                return
-    finally:
-        connection_slots.release()
+                    readable, _, _ = select.select([connection], [], [], 0.25)
+                    if not readable:
+                        continue
+                    release = connection.recv(256)
+                    if not release or release == b"RELEASE\n":
+                        break
+                    raise ValueError("invalid lock manager release")
+            finally:
+                lease_lock.release()
+        except (OSError, UnicodeError, ValueError, TimeoutError):
+            return
 
 
 def lock_manager_serve(
@@ -512,7 +508,6 @@ def lock_manager_serve(
     root_key, launch_pid, launch_start, launch_identity = launch_evidence
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     lease_lock = threading.Lock()
-    connection_slots = threading.BoundedSemaphore(128)
     try:
         server.bind(lock_manager_address(home, task, root_key))
         server.listen(16)
@@ -529,9 +524,6 @@ def lock_manager_serve(
                 connection, _ = server.accept()
             except socket.timeout:
                 continue
-            if not connection_slots.acquire(False):
-                connection.close()
-                continue
             threading.Thread(
                 target=lock_manager_handle_connection,
                 args=(connection,),
@@ -543,7 +535,6 @@ def lock_manager_serve(
                     "launch_identity": launch_identity,
                     "launch_script": launch_script,
                     "lease_lock": lease_lock,
-                    "connection_slots": connection_slots,
                 },
                 daemon=True,
             ).start()
@@ -735,7 +726,12 @@ def supervise(args: argparse.Namespace) -> int:
         if record_lock_fd is None:
             return 1
         recovery_args = argparse.Namespace(
-            record=str(state / ".session-authority-broker")
+            record=str(state / ".session-authority-broker"),
+            state=str(state),
+            home=home,
+            checkout=canonical(args.checkout),
+            task=args.task,
+            launch_script=launch_script,
         )
         if recover_stale_locked(
             recovery_args, launch_evidence=launch_evidence, lease=record_lock_fd
@@ -747,7 +743,6 @@ def supervise(args: argparse.Namespace) -> int:
             record_lock_fd = socket.socket(fileno=RECORD_LOCK_FD)
         else:
             os.set_inheritable(RECORD_LOCK_FD, True)
-        record_lock_fd = None
         install_evidence_bytes(evidence)
         os.execv(
             sys.executable,
@@ -1460,11 +1455,16 @@ def recover_stale(args: argparse.Namespace) -> int:
         if not raw_home or not task or not launch_script:
             return 1
         expected_home = canonical(raw_home)
+        args.task = task
+        args.home = expected_home
+        args.state = canonical(str(record.parent))
+        args.checkout = canonical(metadata.get("checkout", ""))
+        args.launch_script = canonical(launch_script)
         launch_evidence = read_launch_evidence(
             RECOVERY_LAUNCH_EVIDENCE_FD,
             home=expected_home,
-            task=task,
-            launch_script=canonical(launch_script),
+            task=args.task,
+            launch_script=args.launch_script,
         )
         return recover_stale_locked(args, launch_evidence=launch_evidence)
     except FileNotFoundError:
@@ -1483,38 +1483,61 @@ def recover_stale_locked(
     record = Path(args.record)
     try:
         metadata = read_record_shape(record)
-        expected_home = canonical(metadata["home"])
+        requested_task = getattr(args, "task", metadata["task"])
+        requested_home = canonical(getattr(args, "home", metadata["home"]))
+        requested_state = canonical(getattr(args, "state", str(record.parent)))
+        requested_checkout = canonical(
+            getattr(args, "checkout", metadata["checkout"])
+        )
+        requested_launch_script = canonical(
+            getattr(args, "launch_script", metadata["launch-script"])
+        )
         expected_script = canonical(__file__)
         expected_checkout = canonical(str(Path(expected_script).parent.parent))
-        expected_launch_script = canonical(metadata["launch-script"])
+        if (
+            metadata["task"] != requested_task
+            or canonical(metadata["home"]) != requested_home
+            or canonical(metadata["checkout"]) != requested_checkout
+            or metadata["launch-script"] != requested_launch_script
+            or canonical(str(record.parent)) != requested_state
+            or requested_checkout != expected_checkout
+            or requested_launch_script
+            != canonical(f"{requested_home}/bin/fm-session-authority-exec.sh")
+        ):
+            return 1
         if launch_evidence is None:
             launch_evidence = read_launch_evidence(
                 RECOVERY_LAUNCH_EVIDENCE_FD,
-                home=expected_home,
-                task=metadata["task"],
-                launch_script=expected_launch_script,
+                home=requested_home,
+                task=requested_task,
+                launch_script=requested_launch_script,
             )
         def recover_under_lease(lock: socket.socket | None) -> int:
             if lock is None:
                 return 1
             record_stat = record.lstat()
             metadata = read_record_shape(record)
-            expected_home = canonical(metadata["home"])
-            expected_launch_script = canonical(metadata["launch-script"])
-            expected_state = canonical(str(record.parent))
             if launch_evidence is None:
                 return 1
             _, launch_pid, _, _ = launch_evidence
             if (
-                metadata["task"] == ""
-                or metadata["home"] != expected_home
+                metadata["task"] != requested_task
+                or canonical(metadata["home"]) != requested_home
+                or canonical(metadata["checkout"]) != requested_checkout
                 or metadata["checkout"] != expected_checkout
                 or metadata["script"] != expected_script
-                or metadata["launch-script"] != expected_launch_script
-                or expected_launch_script != canonical(
-                    f"{expected_home}/bin/fm-session-authority-exec.sh"
+                or metadata["launch-script"] != requested_launch_script
+                or canonical(str(record.parent)) != requested_state
+                or requested_launch_script
+                != canonical(f"{requested_home}/bin/fm-session-authority-exec.sh")
+                or requested_task == ""
+                or requested_home == ""
+                or requested_state == ""
+                or requested_checkout == ""
+                or requested_launch_script == ""
+                or requested_launch_script != canonical(
+                    f"{requested_home}/bin/fm-session-authority-exec.sh"
                 )
-                or record.parent != Path(expected_home) / "state"
             ):
                 return 1
             if launch_pid != os.getppid():
@@ -1532,11 +1555,11 @@ def recover_stale_locked(
                 pid,
                 (metadata["start"], metadata["identity"]),
                 script=expected_script,
-                state=expected_state,
-                home=expected_home,
-                checkout=expected_checkout,
-                task=metadata["task"],
-                launch_script=expected_launch_script,
+                state=requested_state,
+                home=requested_home,
+                checkout=requested_checkout,
+                task=requested_task,
+                launch_script=requested_launch_script,
             ):
                 return 1
             if not record.exists() and not record.is_symlink():
@@ -1549,12 +1572,12 @@ def recover_stale_locked(
                     lock_held=True,
                     quarantine_key=derive_broker_durable_key(
                         launch_evidence[0],
-                        task=metadata["task"],
-                        home=expected_home,
+                        task=requested_task,
+                        home=requested_home,
                         launch_pid=launch_evidence[1],
                         launch_start=launch_evidence[2],
                         launch_identity=launch_evidence[3],
-                        launch_script=expected_launch_script,
+                        launch_script=requested_launch_script,
                     ),
                 )
             )
