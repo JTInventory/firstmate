@@ -354,7 +354,7 @@ test_secondmate_child_receives_only_its_own_home() {
   launch_line=$(grep -n 'fm_backend_launch_trusted_process' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   ticket_line=$(grep -n 'fm_session_enrollment_ticket_write' "$SPAWN" | tail -1 | cut -d: -f1)
-  wrapper_line=$(grep -n 'SPAWN_AUTHORITY_COMMAND="PATH=.*GOTMPDIR=.*fm-session-authority-exec.sh' \
+  wrapper_line=$(grep -n 'SPAWN_AUTHORITY_COMMAND="${WORKER_ENV_PREFIX}${SPAWN_AUTHORITY_TRACE_PREFIX}PATH=.*GOTMPDIR=.*fm-session-authority-exec.sh' \
     "$SPAWN" | tail -1 | cut -d: -f1)
   [ -n "$wrapper_line" ] && [ -n "$launch_line" ] && [ -n "$ticket_line" ] \
     && [ "$wrapper_line" -lt "$launch_line" ] \
@@ -364,7 +364,7 @@ test_secondmate_child_receives_only_its_own_home() {
     "FM_SESSION_ENROLLMENT_CLAIM" \
     "secondmate launch exposed a bearer claim in terminal command text"
   assert_contains "$(sed -n "${wrapper_line}p" "$SPAWN")" \
-    '${WORKER_ENV_PREFIX}${SPAWN_AUTHORITY_TRACE_PREFIX}exec ' \
+    '${WORKER_ENV_PREFIX}${SPAWN_AUTHORITY_TRACE_PREFIX}PATH=' \
     "secondmate trace opt-in was scoped to the descriptor-isolation prelude instead of the endpoint exec"
   assert_not_contains "$(sed -n "${launch_line}p" "$SPAWN")" \
     "fm_agent_backend_shell_pid" \

@@ -2113,7 +2113,7 @@ if [ "$KIND" = secondmate ]; then
     rm -f -- "$PROJ_ABS/state/.session-enrollment-stage.trace" || exit 1
     SPAWN_AUTHORITY_TRACE_PREFIX="FM_SESSION_ENROLLMENT_STAGE_TRACE=1 FM_SESSION_ENROLLMENT_ENDPOINT_GENERATION_PRESENT=1 "
   fi
-  SPAWN_AUTHORITY_COMMAND="${WORKER_ENV_PREFIX}PATH=$(shell_quote "$PATH") GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") ${SPAWN_AUTHORITY_TRACE_PREFIX}exec $(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
+  SPAWN_AUTHORITY_COMMAND="${WORKER_ENV_PREFIX}${SPAWN_AUTHORITY_TRACE_PREFIX}PATH=$(shell_quote "$PATH") GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") exec $(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
   LAUNCH="sh -c $(shell_quote "$SPAWN_AUTHORITY_COMMAND")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"

@@ -11,6 +11,16 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+test_platform=$(uname -s 2>/dev/null || true)
+test_arch=$(uname -m 2>/dev/null || true)
+case "$test_platform:$test_arch" in
+  Linux:x86_64|Linux:amd64|Linux:aarch64|Linux:riscv64|Linux:s390x|Linux:i[3-6]86|Linux:arm*|Linux:ppc64*) ;;
+  *)
+    printf '%s\n' 'FAIL: unsupported platform or architecture; behavior tests require Linux pidfd/subreaper support' >&2
+    exit 125
+    ;;
+esac
+
 if ! bash "$ROOT/bin/fm-no-mistakes-pr-target-guard.sh"; then
   printf '%s\n' 'FAIL: PR target guard rejected this checkout; tests were not started' >&2
   exit 1

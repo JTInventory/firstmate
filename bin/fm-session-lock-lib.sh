@@ -371,10 +371,23 @@ fm_session_authority_socket_broker_present() {
       </dev/null >/dev/null 2>&1
 }
 
+fm_session_authority_broker_recovery_capability_present() {
+  local fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if [ -z "$fd" ] && fm_session_test_authority_broker_present; then
+    fd=$FM_TEST_DURABLE_AUTHORITY_FD
+  fi
+  if [ -n "$fd" ]; then
+    FM_SESSION_AUTHORITY_DURABLE_FD=$fd
+    export FM_SESSION_AUTHORITY_DURABLE_FD
+  fi
+  fm_session_descriptor_channel_isolated "$fd" \
+    && fm_session_exec_descriptor_isolation_durable
+}
+
 fm_session_authority_socket_broker_start() {
   local state=$1 home=$2 checkout=$3 task=$4 script record pid attempts=0
   local launch_script launch_receipt launch_start launch_identity durable_fd
-  local launch_key receipt_b64 evidence_fd
+  local launch_key receipt_b64 evidence_fd recovery_lock recovery_status
   script="$checkout/bin/fm-session-authority-broker.py"
   record="$state/.session-authority-broker"
   launch_script="$home/bin/fm-session-authority-exec.sh"
@@ -392,9 +405,21 @@ fm_session_authority_socket_broker_start() {
     if fm_session_authority_socket_broker_present; then
       return 0
     fi
+    fm_session_authority_broker_recovery_capability_present || return 1
+    if ! type fm_lock_try_acquire >/dev/null 2>&1; then
+      FM_WAKE_LIB_READ_ONLY=1
+      # shellcheck source=/dev/null
+      . "$_FM_SESSION_LOCK_LIB_DIR/fm-wake-lib.sh"
+    fi
+    recovery_lock="$state/.session-authority-broker-recovery.lock"
+    fm_lock_try_acquire "$recovery_lock" '' "$home" "$launch_script" || return 1
+    recovery_status=0
     python3 "$script" recover-stale --record "$record" --home "$home" \
       --checkout "$checkout" --task "$task" --script "$script" \
-      --launch-script "$launch_script" || return 1
+      --launch-script "$launch_script" --lock "$recovery_lock" \
+      --authority-script "$launch_script" || recovery_status=$?
+    fm_lock_release "$recovery_lock" || recovery_status=1
+    [ "$recovery_status" -eq 0 ] || return "$recovery_status"
   fi
   launch_start=$(fm_session_process_start "$$") || return 1
   launch_identity=$(fm_session_process_identity "$$") || return 1

@@ -451,6 +451,105 @@ def read_record(path: Path) -> dict[str, str]:
     return metadata
 
 
+def process_generation_for_recovery(pid: int) -> tuple[str, str] | None:
+    proc_path = Path(f"/proc/{pid}")
+    try:
+        proc_path.stat()
+    except FileNotFoundError:
+        return None
+    generation_error: OSError | ValueError | None = None
+    try:
+        return process_generation(pid)
+    except (OSError, ValueError) as error:
+        generation_error = error
+    try:
+        proc_path.stat()
+    except FileNotFoundError:
+        return None
+    if generation_error is not None:
+        raise generation_error
+    raise ValueError("unreadable process generation")
+
+
+def read_single_line(path: Path) -> str | None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) != 1 or not lines[0]:
+        return None
+    return lines[0]
+
+
+def recovery_lock_is_owned(
+    args: argparse.Namespace, caller: int, expected_home: str, expected_launch_script: str
+) -> bool:
+    lock = Path(args.lock)
+    record = Path(args.record)
+    if lock.parent != record.parent or lock.name != ".session-authority-broker-recovery.lock":
+        return False
+    if not lock.is_symlink():
+        return False
+    owner = Path(os.path.realpath(lock))
+    if (
+        owner.parent != lock.parent
+        or not owner.is_dir()
+        or owner.is_symlink()
+        or not owner.name.startswith(f"{lock.name}.owner.")
+    ):
+        return False
+    try:
+        if read_single_line(owner / "pid") != str(caller):
+            return False
+        if read_single_line(owner / "fm-home") != expected_home:
+            return False
+        owner_path = read_single_line(owner / "owner-path")
+        if owner_path is None or canonical(owner_path) != expected_launch_script:
+            return False
+        if read_single_line(owner / "pid-start") != process_start(caller):
+            return False
+        if read_single_line(owner / "pid-identity") != process_identity(caller):
+            return False
+        token = read_single_line(owner / "process-token")
+        if token is None or process_environment(caller).get("FM_LOCK_PROCESS_TOKEN") != token:
+            return False
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return True
+
+
+def recovery_authority_ancestor(
+    caller: int, expected_home: str, task: str, expected_authority_script: str
+) -> bool:
+    seen: set[int] = set()
+    pid = caller
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        try:
+            environment = process_environment(pid)
+            command = process_command(pid)
+        except (OSError, UnicodeError, ValueError):
+            return False
+        role = environment.get("FM_AGENT_ROLE")
+        owner_home = environment.get("FM_AGENT_OWNER_HOME")
+        durable_fd = environment.get("FM_SESSION_AUTHORITY_DURABLE_FD", "")
+        if (
+            role == "secondmate"
+            and environment.get("FM_AGENT_TASK") == task
+            and owner_home is not None
+            and canonical(owner_home) == expected_home
+            and durable_fd.isdigit()
+            and Path(f"/proc/{pid}/fd/{durable_fd}").exists()
+            and any(
+                item.startswith("/") and canonical(item) == expected_authority_script
+                for item in command
+            )
+        ):
+            return True
+        try:
+            pid = parent_pid(pid)
+        except (OSError, ValueError):
+            return False
+    return False
+
+
 def recover_stale(args: argparse.Namespace) -> int:
     if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
         return 1
@@ -460,6 +559,13 @@ def recover_stale(args: argparse.Namespace) -> int:
     expected_script = canonical(args.script)
     expected_launch_script = canonical(args.launch_script)
     if record.parent != Path(expected_home) / "state":
+        return 1
+    caller = os.getppid()
+    if not recovery_lock_is_owned(args, caller, expected_home, expected_launch_script):
+        return 1
+    if not recovery_authority_ancestor(
+        caller, expected_home, args.task, canonical(args.authority_script)
+    ):
         return 1
     try:
         metadata = read_record_shape(record)
@@ -472,17 +578,13 @@ def recover_stale(args: argparse.Namespace) -> int:
         ):
             return 1
         pid = int(metadata["pid"])
-        try:
-            generation = process_generation(pid)
-        except (OSError, ValueError):
-            generation = None
+        generation = process_generation_for_recovery(pid)
         if generation is not None:
-            if generation == (metadata["start"], metadata["identity"]):
-                return 1
+            return 1
         record.unlink()
         return 0
     except FileNotFoundError:
-        return 0
+        return 0 if not record.exists() and not record.is_symlink() else 1
     except (OSError, UnicodeError, ValueError):
         return 1
 
@@ -542,6 +644,8 @@ def parse_args() -> argparse.Namespace:
     recovery.add_argument("--task", required=True)
     recovery.add_argument("--script", required=True)
     recovery.add_argument("--launch-script", required=True)
+    recovery.add_argument("--lock", required=True)
+    recovery.add_argument("--authority-script", required=True)
     return parser.parse_args()
 
 

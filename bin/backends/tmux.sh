@@ -2,6 +2,12 @@
 # tmux session-provider adapter. This file is sourced by fm-backend.sh.
 # The command shapes intentionally match the pre-abstraction JT scripts.
 
+if ! command -v fm_worker_shell_quote >/dev/null 2>&1; then
+  _FM_BACKEND_WORKER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  # shellcheck source=/dev/null
+  . "$_FM_BACKEND_WORKER_LIB_DIR/fm-worker-isolation-lib.sh"
+  unset _FM_BACKEND_WORKER_LIB_DIR
+fi
 # shellcheck source=/dev/null
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 
@@ -173,18 +179,12 @@ fm_backend_tmux_foreground_process_pid() {
   printf '%s' "$foreground"
 }
 
-fm_backend_tmux_shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
 fm_backend_tmux_launch_trusted_process() {
   local target=$1 name=$2 cwd=$3 command=$4 expected=$5 pid current identity
   identity=$(fm_backend_tmux_endpoint_identity "$target") || return 1
   [ "$identity" = "$expected" ] || return 1
   pid=$(tmux respawn-pane -k -t "$target" -c "$cwd" \
-    "exec sh -c $(fm_backend_tmux_shell_quote "$command")" \; \
+    "exec sh -c $(fm_worker_shell_quote "$command")" \; \
     display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
     | tr -d '[:space:]') || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac

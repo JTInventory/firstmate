@@ -59,6 +59,11 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+if ! command -v fm_worker_shell_quote >/dev/null 2>&1; then
+  # shellcheck source=/dev/null
+  . "$FM_BACKEND_HERDR_ROOT/bin/fm-worker-isolation-lib.sh"
+fi
+
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
@@ -1940,12 +1945,6 @@ fm_backend_herdr_launch_cleanup_after_start() {
     }
 }
 
-fm_backend_herdr_shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
 fm_backend_herdr_launch_trusted_process() {
   local target=$1 name=$2 cwd=$3 command=$4 expected=$5
   local replacement_generation=${6:-}
@@ -1966,7 +1965,7 @@ EOF
   case "$replacement_generation" in
     *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
   esac
-  response_command="exec sh -c $(fm_backend_herdr_shell_quote "$command")"
+  response_command="exec sh -c $(fm_worker_shell_quote "$command")"
   out=$(fm_backend_herdr_cli "$session" agent start "$name" \
     --tab "$tab" \
     --cwd "$cwd" --no-focus -- sh -c "$response_command" 2>/dev/null) || {
