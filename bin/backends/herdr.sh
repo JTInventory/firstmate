@@ -1940,6 +1940,12 @@ fm_backend_herdr_launch_cleanup_after_start() {
     }
 }
 
+fm_backend_herdr_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 fm_backend_herdr_launch_trusted_process() {
   local target=$1 name=$2 cwd=$3 command=$4 expected=$5
   local replacement_generation=${6:-}
@@ -1960,7 +1966,7 @@ EOF
   case "$replacement_generation" in
     *[!A-Za-z0-9._-]*|""|*/*) return 1 ;;
   esac
-  response_command="exec env $command"
+  response_command="exec sh -c $(fm_backend_herdr_shell_quote "$command")"
   out=$(fm_backend_herdr_cli "$session" agent start "$name" \
     --tab "$tab" \
     --cwd "$cwd" --no-focus -- sh -c "$response_command" 2>/dev/null) || {

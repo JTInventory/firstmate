@@ -66,9 +66,16 @@ ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 # a missing one.
 PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
 UNREADABLE_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
-  '$1 == "__FM_UNPROVEN__" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')
+  '$1 == "__FM_UNPROVEN__" && $3 == "unreadable" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')
+MALFORMED_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
+  '$1 == "__FM_UNPROVEN__" && $3 == "malformed" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')
 ISOLATION_FAILED=0
 FM_ISOLATION_ENDPOINT_PID=
+
+if [ -n "$MALFORMED_CANDIDATES" ]; then
+  echo "ISOLATION: worker identity census is unproven for process(es) $MALFORMED_CANDIDATES; preserve their state and reconcile the worker declarations before any mutation"
+  ISOLATION_FAILED=1
+fi
 
 fm_isolation_unreadable_candidate_matches_endpoint() {
   local candidates=$1 backend=$2 target=$3 endpoint_pid
@@ -100,6 +107,21 @@ fm_isolation_recorded_endpoint_identity_matches_live() {
   [ "$live" = "$FM_BACKEND_RECORDED_ENDPOINT_IDENTITY" ] || return 1
 }
 
+fm_isolation_secondmate_recovery_state() {
+  local meta=$1 kind kind_count backend target
+  kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
+  [ "$kind_count" -eq 1 ] || return 1
+  kind=$(fm_meta_get "$meta" kind)
+  [ "$kind" = secondmate ] || return 1
+  fm_backend_recorded_endpoint_identity_of_meta "$meta" >/dev/null || return 1
+  backend=$FM_BACKEND_RECORDED_ENDPOINT_BACKEND
+  target=$FM_BACKEND_RECORDED_ENDPOINT_TARGET
+  case "$(fm_backend_agent_state "$backend" "$target")" in
+    dead|missing) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   id=$(basename "$meta" .meta)
@@ -118,8 +140,12 @@ for meta in "$STATE"/*.meta; do
     ISOLATION_FAILED=1
     continue
   fi
+  recoverable_endpoint=0
+  fm_isolation_secondmate_recovery_state "$meta" && recoverable_endpoint=1
   endpoint_identity_status=0
-  fm_isolation_recorded_endpoint_identity_matches_live "$meta" || endpoint_identity_status=$?
+  if [ "$recoverable_endpoint" -eq 0 ]; then
+    fm_isolation_recorded_endpoint_identity_matches_live "$meta" || endpoint_identity_status=$?
+  fi
   case "$endpoint_identity_status" in
     0) ;;
     1)
@@ -136,13 +162,13 @@ for meta in "$STATE"/*.meta; do
   target=$FM_BACKEND_RECORDED_ENDPOINT_TARGET
   backend=$FM_BACKEND_RECORDED_ENDPOINT_BACKEND
   endpoint_match_status=0
-  if [ -n "$UNREADABLE_CANDIDATES" ] \
+  if [ "$recoverable_endpoint" -eq 0 ] && [ -n "$UNREADABLE_CANDIDATES" ] \
     && fm_isolation_unreadable_candidate_matches_endpoint \
       "$UNREADABLE_CANDIDATES" "$backend" "$target"; then
     endpoint_pid=$FM_ISOLATION_ENDPOINT_PID
     echo "ISOLATION: task $id is unproven for recorded endpoint $target: candidate agent process environment is unreadable for pid $endpoint_pid; stop or make that endpoint process authoritative before any mutation"
     ISOLATION_FAILED=1
-  else
+  elif [ "$recoverable_endpoint" -eq 0 ]; then
     endpoint_match_status=$?
     if [ "$endpoint_match_status" -eq 2 ]; then
       echo "ISOLATION: task $id is unproven for recorded endpoint $target: the endpoint process could not be read while unreadable candidate evidence exists; preserve its state and reconcile $meta before any mutation"
@@ -217,6 +243,9 @@ $conflict_identities
 EOF
   pids=$(fm_agent_root_pids_for_identity "$id" "$expected_home" "$role" "$PID_INDEX" 2>/dev/null || true)
   if [ -z "$pids" ]; then
+    if [ "$recoverable_endpoint" -eq 1 ]; then
+      continue
+    fi
     echo "ISOLATION: task $id is unproven: no live agent process declares the required task=$id home=$expected_home role=$role identity; stop any undeclared endpoint process and relaunch the worker with complete isolation declarations"
     ISOLATION_FAILED=1
     continue

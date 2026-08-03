@@ -358,7 +358,7 @@ case "${1:-}" in
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -c) shift; cwd=${1:-} ;;
-        'exec env '*) command=$1 ;;
+        'exec sh -c '*) command=$1 ;;
       esac
       shift
     done

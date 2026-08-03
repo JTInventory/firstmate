@@ -389,8 +389,12 @@ fm_session_authority_socket_broker_start() {
     && [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] \
     || return 1
   if [ -e "$record" ] || [ -L "$record" ]; then
-    fm_session_authority_socket_broker_present
-    return
+    if fm_session_authority_socket_broker_present; then
+      return 0
+    fi
+    python3 "$script" recover-stale --record "$record" --home "$home" \
+      --checkout "$checkout" --task "$task" --script "$script" \
+      --launch-script "$launch_script" || return 1
   fi
   launch_start=$(fm_session_process_start "$$") || return 1
   launch_identity=$(fm_session_process_identity "$$") || return 1

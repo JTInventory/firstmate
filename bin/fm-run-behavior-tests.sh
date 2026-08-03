@@ -1976,9 +1976,13 @@ if [ "${#tests[@]}" -eq 0 ]; then
 fi
 
 gate_test="$ROOT/tests/fm-gate-refuse.test.sh"
-if [ -f "$gate_test" ] && ! run_bounded "$test_timeout" bash "$gate_test"; then
-  printf '%s\n' 'FAIL: gate-refusal test failed; tests were not started' >&2
-  exit 1
+if [ -f "$gate_test" ]; then
+  gate_status=0
+  run_bounded "$test_timeout" bash "$gate_test" || gate_status=$?
+  if [ "$gate_status" -ne 0 ]; then
+    printf '%s\n' 'FAIL: gate-refusal test failed; tests were not started' >&2
+    exit "$gate_status"
+  fi
 fi
 
 base_tmp=${TMPDIR:-/tmp}
@@ -2253,6 +2257,9 @@ cleanup() {
   local cleanup_ok=1 broker_shutdown_ok=1 entry key state still_alive broker_state=0
   if [ "$SUPERVISOR_HANDLE_READY" -eq 1 ]; then
     supervisor_handle_broker_state || broker_state=$?
+  else
+    cleanup_ok=0
+    supervisor_handle_force_broker_teardown
   fi
   if [ "$broker_state" -ne 1 ]; then
     cleanup_ok=0
@@ -2301,11 +2308,15 @@ cleanup() {
   fi
   [ "$broker_shutdown_ok" -eq 1 ] || supervisor_handle_force_broker_teardown
   if [ -n "$SUPERVISOR_HANDLE_BROKER_PID" ]; then
-    supervisor_handle_broker_join || {
+    if supervisor_handle_broker_join; then
+      SUPERVISOR_HANDLE_BROKER_PID=
+    else
       cleanup_ok=0
       supervisor_handle_force_broker_teardown
-    }
-    SUPERVISOR_HANDLE_BROKER_PID=
+      if supervisor_handle_broker_join; then
+        SUPERVISOR_HANDLE_BROKER_PID=
+      fi
+    fi
   fi
   supervisor_handle_close_channels
   if [ "$cleanup_ok" -ne 1 ]; then

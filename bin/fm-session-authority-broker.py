@@ -390,7 +390,7 @@ def serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def read_record(path: Path) -> dict[str, str]:
+def read_record_shape(path: Path) -> dict[str, str]:
     metadata: dict[str, str] = {}
     file_stat = path.lstat()
     if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_mode & 0o077:
@@ -410,14 +410,11 @@ def read_record(path: Path) -> dict[str, str]:
     if set(metadata) != required or metadata["version"] != str(PROTOCOL_VERSION):
         raise ValueError("malformed broker record")
     pid = int(metadata["pid"])
+    if pid <= 1:
+        raise ValueError("malformed broker record")
     for key in ("uid", "gid", "launch-pid"):
         if int(metadata[key]) < 0:
             raise ValueError("malformed broker record")
-    if process_start(pid) != metadata["start"] or process_identity(pid) != metadata["identity"]:
-        raise ValueError("stale broker record")
-    command = process_command(pid)
-    if len(command) < 3 or canonical(command[1]) != canonical(metadata["script"]) or command[2] != "serve":
-        raise ValueError("wrong broker process")
     if canonical(metadata["launch-script"]) != metadata["launch-script"]:
         raise ValueError("malformed launch script")
     socket_value = metadata["socket"]
@@ -437,6 +434,57 @@ def read_record(path: Path) -> dict[str, str]:
         if socket_path.parent != path.parent:
             raise ValueError("foreign broker socket")
     return metadata
+
+
+def read_record(path: Path) -> dict[str, str]:
+    metadata = read_record_shape(path)
+    pid = int(metadata["pid"])
+    try:
+        generation = process_generation(pid)
+    except (OSError, ValueError) as error:
+        raise ValueError("stale broker record") from error
+    if generation != (metadata["start"], metadata["identity"]):
+        raise ValueError("stale broker record")
+    command = process_command(pid)
+    if len(command) < 3 or canonical(command[1]) != canonical(metadata["script"]) or command[2] != "serve":
+        raise ValueError("wrong broker process")
+    return metadata
+
+
+def recover_stale(args: argparse.Namespace) -> int:
+    if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
+        return 1
+    record = Path(args.record)
+    expected_home = canonical(args.home)
+    expected_checkout = canonical(args.checkout)
+    expected_script = canonical(args.script)
+    expected_launch_script = canonical(args.launch_script)
+    if record.parent != Path(expected_home) / "state":
+        return 1
+    try:
+        metadata = read_record_shape(record)
+        if (
+            metadata["home"] != expected_home
+            or metadata["checkout"] != expected_checkout
+            or canonical(metadata["script"]) != expected_script
+            or metadata["task"] != args.task
+            or metadata["launch-script"] != expected_launch_script
+        ):
+            return 1
+        pid = int(metadata["pid"])
+        try:
+            generation = process_generation(pid)
+        except (OSError, ValueError):
+            generation = None
+        if generation is not None:
+            if generation == (metadata["start"], metadata["identity"]):
+                return 1
+        record.unlink()
+        return 0
+    except FileNotFoundError:
+        return 0
+    except (OSError, UnicodeError, ValueError):
+        return 1
 
 
 def client(args: argparse.Namespace) -> int:
@@ -487,9 +535,22 @@ def parse_args() -> argparse.Namespace:
     client_parser.add_argument("--kind", choices=("live", "durable"), required=True)
     server.add_argument("--launch-evidence-fd", type=int, required=True)
     server.add_argument("--launch-script", required=True)
+    recovery = subparsers.add_parser("recover-stale", add_help=False)
+    recovery.add_argument("--record", required=True)
+    recovery.add_argument("--home", required=True)
+    recovery.add_argument("--checkout", required=True)
+    recovery.add_argument("--task", required=True)
+    recovery.add_argument("--script", required=True)
+    recovery.add_argument("--launch-script", required=True)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     arguments = parse_args()
-    raise SystemExit(serve(arguments) if arguments.mode == "serve" else client(arguments))
+    if arguments.mode == "serve":
+        result = serve(arguments)
+    elif arguments.mode == "client":
+        result = client(arguments)
+    else:
+        result = recover_stale(arguments)
+    raise SystemExit(result)

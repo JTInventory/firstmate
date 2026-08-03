@@ -127,6 +127,20 @@ fm_agent_proc_env() {
   printf '%s' "$value"
 }
 
+fm_agent_marker_value() {
+  local env=$1 var=$2 count=0 value line
+  while IFS= read -r line; do
+    case "$line" in
+      "$var="*)
+        count=$((count + 1))
+        value=${line#"$var="}
+        ;;
+    esac
+  done <<<"$env"
+  [ "$count" -eq 1 ] && [ -n "${value:-}" ] || return 1
+  printf '%s' "$value"
+}
+
 # fm_agent_task_pid_index: one
 # `<task-id>\t<owner-home>\t<role>\t<pid>` line per live declared process,
 # built from a SINGLE process-list walk (/proc/[0-9]* on Linux or ps on macOS),
@@ -140,7 +154,7 @@ fm_agent_proc_env() {
 # Returns 1 when no supported process list/identity can be read or no live
 # process declares a task.
 fm_agent_task_pid_index() {
-  local pid task home role env found=1 pids comm args
+  local pid task home role env found=1 pids comm args marker_evidence
   if [ -n "${FM_TEST_AGENT_PIDS:-}" ]; then
     [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
     # A bounded process list is a test-only performance fixture. The protected
@@ -167,12 +181,33 @@ fm_agent_task_pid_index() {
       fi
       continue
     fi
-    task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
-    home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
-    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
-    [ -n "$task" ] && [ -n "$home" ] || continue
-    case "$role" in crewmate|secondmate) ;; *) continue ;; esac
-    home=$(fm_agent_canonical_dir "$home" 2>/dev/null || printf '%s' "$home")
+    marker_evidence=0
+    if printf '%s\n' "$env" | grep -qE '^FM_AGENT_(TASK|OWNER_HOME|ROLE)='; then
+      marker_evidence=1
+    fi
+    task=$(fm_agent_marker_value "$env" FM_AGENT_TASK 2>/dev/null || true)
+    home=$(fm_agent_marker_value "$env" FM_AGENT_OWNER_HOME 2>/dev/null || true)
+    role=$(fm_agent_marker_value "$env" FM_AGENT_ROLE 2>/dev/null || true)
+    if [ -z "$task" ] || [ -z "$home" ]; then
+      if [ "$marker_evidence" -eq 1 ]; then
+        printf '__FM_UNPROVEN__\t__FM_UNPROVEN__\tmalformed\t%s\n' "$pid"
+        found=0
+      fi
+      continue
+    fi
+    case "$role" in
+      crewmate|secondmate) ;;
+      *)
+        printf '__FM_UNPROVEN__\t__FM_UNPROVEN__\tmalformed\t%s\n' "$pid"
+        found=0
+        continue
+        ;;
+    esac
+    home=$(fm_agent_canonical_dir "$home" 2>/dev/null) || {
+      printf '__FM_UNPROVEN__\t__FM_UNPROVEN__\tmalformed\t%s\n' "$pid"
+      found=0
+      continue
+    }
     printf '%s\t%s\t%s\t%s\n' "$task" "$home" "$role" "$pid"
     found=0
   done

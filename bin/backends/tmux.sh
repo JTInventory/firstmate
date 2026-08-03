@@ -166,18 +166,25 @@ fm_backend_tmux_foreground_process_pid() {
   foreground=$(ps -o tpgid= -p "$shell" 2>/dev/null | tr -d '[:space:]') \
     || return 1
   case "$foreground" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$foreground" -gt 1 ] && [ "$foreground" != "$shell" ] || return 1
+  [ "$foreground" -gt 1 ] || return 1
   current=$(ps -o pgid= -p "$foreground" 2>/dev/null | tr -d '[:space:]') \
     || return 1
   [ "$current" = "$foreground" ] || return 1
   printf '%s' "$foreground"
 }
 
+fm_backend_tmux_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 fm_backend_tmux_launch_trusted_process() {
   local target=$1 name=$2 cwd=$3 command=$4 expected=$5 pid current identity
   identity=$(fm_backend_tmux_endpoint_identity "$target") || return 1
   [ "$identity" = "$expected" ] || return 1
-  pid=$(tmux respawn-pane -k -t "$target" -c "$cwd" "exec env $command" \; \
+  pid=$(tmux respawn-pane -k -t "$target" -c "$cwd" \
+    "exec sh -c $(fm_backend_tmux_shell_quote "$command")" \; \
     display-message -p -t "$target" '#{pane_pid}' 2>/dev/null \
     | tr -d '[:space:]') || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
