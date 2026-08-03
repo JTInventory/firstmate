@@ -269,7 +269,10 @@ spec.loader.exec_module(broker)
 with TemporaryDirectory() as temporary:
     record = Path(temporary) / "record"
     record.write_text("replacement\n", encoding="utf-8")
+    record.chmod(0o600)
     with broker.record_lock(record, blocking=True):
+        if Path(f"{record}.lock").exists():
+            raise SystemExit("record locking created a replaceable lock path")
         if broker.unlink_owned_record(record, {}, expected_stat=record.lstat()):
             raise SystemExit("record cleanup ignored the active serialization lock")
         if not record.exists():
@@ -353,7 +356,14 @@ SH
 }
 
 start_broker() {
-  local evidence_fd receipt_b64 attempts=0
+  local evidence_fd receipt_b64 lock_path attempts=0
+  if [ ! -e /proc/$$/fd/20 ]; then
+    lock_path=$(mktemp "$STATE/.session-authority-broker-lock.XXXXXX")
+    chmod 600 "$lock_path"
+    exec 20<>"$lock_path"
+    rm -f -- "$lock_path"
+    printf '%s\n' "$HOME_DIR" >&20
+  fi
   receipt_b64=$(openssl base64 -A < "$HOME_DIR/state/.session-authority-launch") \
     || fail "could not encode authenticated launch evidence"
   exec {evidence_fd}< <(printf '%s\n%s\n' "$BROKER_KEY" "$receipt_b64")

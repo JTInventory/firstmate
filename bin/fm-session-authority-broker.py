@@ -27,6 +27,7 @@ PROTOCOL_VERSION = 1
 MAX_ANCESTRY_DEPTH = 128
 BROKER_REQUEST_TIMEOUT_SECONDS = 2.0
 RECOVERY_LAUNCH_EVIDENCE_FD = 19
+RECORD_LOCK_FD = 20
 
 
 def canonical(value: str) -> str:
@@ -290,32 +291,101 @@ def write_record(
 
 
 @contextmanager
-def record_lock(path: Path, *, blocking: bool):
-    lock_path = Path(f"{path}.lock")
-    descriptor = os.open(
-        lock_path,
-        os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
-        0o600,
-    )
+def record_lock(
+    path: Path, *, blocking: bool, expected_stat: os.stat_result | None = None,
+    authority_home: str | None = None
+):
+    if authority_home is None:
+        descriptor = open_record_lock(
+            path, blocking=blocking, expected_stat=expected_stat
+        )
+    else:
+        descriptor = open_authority_record_lock(
+            authority_home, blocking=blocking
+        )
     try:
-        os.fchmod(descriptor, 0o600)
+        yield descriptor
+    finally:
+        close_record_lock(descriptor)
+
+
+def open_record_lock(
+    path: Path, *, blocking: bool, expected_stat: os.stat_result | None = None
+) -> int | None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
         lock_stat = os.fstat(descriptor)
         if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_mode & 0o077:
             raise ValueError("unsafe broker record lock")
+        if expected_stat is not None and (
+            lock_stat.st_dev != expected_stat.st_dev
+            or lock_stat.st_ino != expected_stat.st_ino
+        ):
+            os.close(descriptor)
+            return None
         flags = fcntl.LOCK_EX
         if not blocking:
             flags |= fcntl.LOCK_NB
         try:
             fcntl.flock(descriptor, flags)
         except BlockingIOError:
-            yield None
-            return
-        yield descriptor
-    finally:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
             os.close(descriptor)
+            return None
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def close_record_lock(descriptor: int | None) -> None:
+    if descriptor is None:
+        return
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def open_authority_record_lock(home: str, *, blocking: bool) -> int | None:
+    try:
+        inherited_stat = os.fstat(RECORD_LOCK_FD)
+        parent_stat = os.stat(
+            f"/proc/{os.getppid()}/fd/{RECORD_LOCK_FD}", follow_symlinks=True
+        )
+        if (
+            not stat.S_ISREG(inherited_stat.st_mode)
+            or inherited_stat.st_mode & 0o077
+            or inherited_stat.st_dev != parent_stat.st_dev
+            or inherited_stat.st_ino != parent_stat.st_ino
+            or os.pread(RECORD_LOCK_FD, 4096, 0).decode("utf-8").rstrip("\n") != home
+        ):
+            raise ValueError("invalid authority record lock")
+        descriptor = os.open(
+            f"/proc/self/fd/{RECORD_LOCK_FD}",
+            os.O_RDWR | os.O_CLOEXEC,
+        )
+    except (OSError, UnicodeError, ValueError):
+        return None
+    try:
+        duplicated_stat = os.fstat(descriptor)
+        if (
+            duplicated_stat.st_dev != inherited_stat.st_dev
+            or duplicated_stat.st_ino != inherited_stat.st_ino
+        ):
+            os.close(descriptor)
+            return None
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(descriptor, flags)
+        except BlockingIOError:
+            os.close(descriptor)
+            return None
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def serve(args: argparse.Namespace) -> int:
@@ -333,6 +403,23 @@ def serve(args: argparse.Namespace) -> int:
         return 1
     if not state.is_dir() or state.is_symlink() or not Path(home).is_dir():
         return 1
+    record = state / ".session-authority-broker"
+    record_lock_fd = open_authority_record_lock(home, blocking=False)
+    if record_lock_fd is None:
+        return 1
+    try:
+        return serve_locked(
+            args, state=state, home=home, checkout=checkout, script=script,
+            launch_script=launch_script, record=record
+        )
+    finally:
+        close_record_lock(record_lock_fd)
+
+
+def serve_locked(
+    args: argparse.Namespace, *, state: Path, home: str, checkout: str,
+    script: str, launch_script: str, record: Path
+) -> int:
     try:
         durable_root_key, launch_pid, launch_start, launch_identity = read_launch_evidence(
             args.launch_evidence_fd, home=home, task=args.task,
@@ -340,7 +427,6 @@ def serve(args: argparse.Namespace) -> int:
         )
     except (OSError, UnicodeError, ValueError, struct.error):
         return 1
-    record = state / ".session-authority-broker"
     if record.exists() or record.is_symlink():
         return 1
     durable_key = derive_broker_durable_key(
@@ -367,9 +453,7 @@ def serve(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    with record_lock(record, blocking=True):
-        if record.exists() or record.is_symlink():
-            return 1
+    try:
         server.bind(bind_address)
         server.listen(16)
         server.settimeout(1.0)
@@ -379,7 +463,24 @@ def serve(args: argparse.Namespace) -> int:
             launch_start=launch_start, launch_identity=launch_identity,
             launch_script=launch_script, uid=broker_uid, gid=broker_gid
         )
-    try:
+        expected_record = {
+            "pid": str(broker_pid),
+            "start": broker_start,
+            "identity": broker_identity,
+            "socket": socket_address,
+            "home": home,
+            "checkout": checkout,
+            "task": args.task,
+            "script": script,
+            "launch-pid": str(launch_pid),
+            "launch-start": launch_start,
+            "launch-identity": launch_identity,
+            "launch-script": launch_script,
+            "uid": str(broker_uid),
+            "gid": str(broker_gid),
+        }
+        if read_record_shape(record) != expected_record:
+            return 1
         while not stopping:
             try:
                 connection, _ = server.accept()
@@ -428,25 +529,6 @@ def serve(args: argparse.Namespace) -> int:
             server.close()
         except OSError:
             pass
-        unlink_owned_record(
-            record,
-            {
-                "pid": str(broker_pid),
-                "start": broker_start,
-                "identity": broker_identity,
-                "socket": socket_address,
-                "home": home,
-                "checkout": checkout,
-                "task": args.task,
-                "script": script,
-                "launch-pid": str(launch_pid),
-                "launch-start": launch_start,
-                "launch-identity": launch_identity,
-                "launch-script": launch_script,
-                "uid": str(broker_uid),
-                "gid": str(broker_gid),
-            },
-        )
     return 0
 
 
@@ -555,14 +637,16 @@ def unlink_owned_record(
     path: Path, expected: dict[str, str], expected_stat: os.stat_result | None = None,
     *, lock_held: bool = False
 ) -> bool:
-    if not lock_held:
-        with record_lock(path, blocking=False) as lock:
-            if lock is None:
-                return False
-            return unlink_owned_record(
-                path, expected, expected_stat=expected_stat, lock_held=True
-            )
     try:
+        if not lock_held:
+            with record_lock(
+                path, blocking=False, expected_stat=expected_stat
+            ) as lock:
+                if lock is None:
+                    return False
+                return unlink_owned_record(
+                    path, expected, expected_stat=expected_stat, lock_held=True
+                )
         initial_stat = path.lstat()
         if expected_stat is not None and (
             initial_stat.st_dev != expected_stat.st_dev
@@ -666,67 +750,82 @@ def stop_recorded_broker(
 
 
 def recover_stale(args: argparse.Namespace) -> int:
+    record = Path(args.record)
+    try:
+        lock_home = canonical(str(record.parent.parent))
+        with record_lock(
+            record, blocking=False, authority_home=lock_home
+        ) as lock:
+            if lock is None:
+                return 1
+            return recover_stale_locked(args)
+    except FileNotFoundError:
+        return 0 if not record.exists() and not record.is_symlink() else 1
+    except (OSError, UnicodeError, ValueError):
+        return 1
+
+
+def recover_stale_locked(args: argparse.Namespace) -> int:
     if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
         return 1
     record = Path(args.record)
     try:
-        with record_lock(record, blocking=True):
-            record_stat = record.lstat()
-            metadata = read_record_shape(record)
-            expected_home = canonical(metadata["home"])
-            expected_script = canonical(__file__)
-            expected_checkout = canonical(str(Path(expected_script).parent.parent))
-            expected_launch_script = canonical(metadata["launch-script"])
-            expected_state = canonical(str(record.parent))
-            if (
-                metadata["home"] != expected_home
-                or metadata["checkout"] != expected_checkout
-                or metadata["script"] != expected_script
-                or metadata["launch-script"] != expected_launch_script
-                or expected_launch_script != canonical(
-                    f"{expected_home}/bin/fm-session-authority-exec.sh"
-                )
-                or record.parent != Path(expected_home) / "state"
-            ):
-                return 1
-            _, launch_pid, _, _ = read_launch_evidence(
-                RECOVERY_LAUNCH_EVIDENCE_FD,
-                home=expected_home,
-                task=metadata["task"],
-                launch_script=expected_launch_script,
+        record_stat = record.lstat()
+        metadata = read_record_shape(record)
+        expected_home = canonical(metadata["home"])
+        expected_script = canonical(__file__)
+        expected_checkout = canonical(str(Path(expected_script).parent.parent))
+        expected_launch_script = canonical(metadata["launch-script"])
+        expected_state = canonical(str(record.parent))
+        if (
+            metadata["home"] != expected_home
+            or metadata["checkout"] != expected_checkout
+            or metadata["script"] != expected_script
+            or metadata["launch-script"] != expected_launch_script
+            or expected_launch_script != canonical(
+                f"{expected_home}/bin/fm-session-authority-exec.sh"
             )
-            if launch_pid != os.getppid():
-                return 1
-            launch_generation = process_generation_for_recovery(
-                int(metadata["launch-pid"])
+            or record.parent != Path(expected_home) / "state"
+        ):
+            return 1
+        _, launch_pid, _, _ = read_launch_evidence(
+            RECOVERY_LAUNCH_EVIDENCE_FD,
+            home=expected_home,
+            task=metadata["task"],
+            launch_script=expected_launch_script,
+        )
+        if launch_pid != os.getppid():
+            return 1
+        launch_generation = process_generation_for_recovery(
+            int(metadata["launch-pid"])
+        )
+        if launch_generation == (
+            metadata["launch-start"], metadata["launch-identity"]
+        ):
+            return 1
+        pid = int(metadata["pid"])
+        generation = process_generation_for_recovery(pid)
+        if generation is not None and not stop_recorded_broker(
+            pid,
+            (metadata["start"], metadata["identity"]),
+            script=expected_script,
+            state=expected_state,
+            home=expected_home,
+            checkout=expected_checkout,
+            task=metadata["task"],
+            launch_script=expected_launch_script,
+        ):
+            return 1
+        if not record.exists() and not record.is_symlink():
+            return 0
+        return int(
+            not unlink_owned_record(
+                record,
+                metadata,
+                expected_stat=record_stat,
+                lock_held=True,
             )
-            if launch_generation == (
-                metadata["launch-start"], metadata["launch-identity"]
-            ):
-                return 1
-            pid = int(metadata["pid"])
-            generation = process_generation_for_recovery(pid)
-            if generation is not None and not stop_recorded_broker(
-                pid,
-                (metadata["start"], metadata["identity"]),
-                script=expected_script,
-                state=expected_state,
-                home=expected_home,
-                checkout=expected_checkout,
-                task=metadata["task"],
-                launch_script=expected_launch_script,
-            ):
-                return 1
-            if not record.exists() and not record.is_symlink():
-                return 0
-            return int(
-                not unlink_owned_record(
-                    record,
-                    metadata,
-                    expected_stat=record_stat,
-                    lock_held=True,
-                )
-            )
+        )
     except FileNotFoundError:
         return 0 if not record.exists() and not record.is_symlink() else 1
     except (OSError, UnicodeError, ValueError):

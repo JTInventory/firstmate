@@ -397,6 +397,50 @@ fm_session_authority_broker_bootstrap() {
   export FM_SESSION_AUTHORITY_DURABLE_FD
 }
 
+fm_session_authority_record_lock_bootstrap() {
+  local state=$1 home=$2 fd=${FM_SESSION_AUTHORITY_RECORD_LOCK_FD:-}
+  local path existing
+  [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" = 1 ] || return 1
+  [ "${FM_AGENT_ROLE:-}" = secondmate ] || return 1
+  [ -n "${FM_AGENT_TASK:-}" ] && [ "${FM_AGENT_OWNER_HOME:-}" = "$home" ] || return 1
+  if [ -n "$fd" ]; then
+    [ "$fd" = 20 ] || return 1
+    [ -e "/proc/$$/fd/20" ] || return 1
+    existing=$(cat "/proc/$$/fd/20" 2>/dev/null || true)
+    [ "$existing" = "$home" ] || return 1
+    fm_session_descriptor_channel_isolated 20 || return 1
+    return 0
+  fi
+  if ( : <&20 ) 2>/dev/null || ( : >&20 ) 2>/dev/null; then
+    return 1
+  fi
+  fm_session_exec_descriptor_isolation_durable || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  path=$(mktemp "$state/.session-authority-broker-lock.XXXXXX") || return 1
+  chmod 600 "$path" || {
+    rm -f -- "$path"
+    return 1
+  }
+  exec 20<>"$path" || {
+    rm -f -- "$path"
+    return 1
+  }
+  rm -f -- "$path" || {
+    exec 20<&-
+    return 1
+  }
+  printf '%s\n' "$home" >&20 || {
+    exec 20<&-
+    return 1
+  }
+  fm_session_descriptor_channel_isolated 20 || {
+    exec 20<&-
+    return 1
+  }
+  FM_SESSION_AUTHORITY_RECORD_LOCK_FD=20
+  export FM_SESSION_AUTHORITY_RECORD_LOCK_FD
+}
+
 fm_session_authority_socket_broker_start_locked() {
   local state=$1 home=$2 checkout=$3 task=$4 script record pid attempts=0
   local launch_script launch_receipt launch_start launch_identity durable_fd
@@ -421,6 +465,7 @@ fm_session_authority_socket_broker_start_locked() {
     "$$" "$launch_start" "$launch_identity" || return 1
   durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_durable_capability_present || return 1
+  fm_session_authority_record_lock_bootstrap "$state" "$home" || return 1
   IFS= read -r launch_key <&"$durable_fd" || return 1
   [ "${#launch_key}" -ge 64 ] || return 1
   case "$launch_key" in *[!0-9a-f]*) return 1 ;; esac
@@ -620,6 +665,7 @@ fm_session_descriptor_channel_isolated() {
           17) exec 17</dev/null ;;
           18) exec 18</dev/null ;;
           19) exec 19</dev/null ;;
+          20) exec 20</dev/null ;;
           *) return 1 ;;
         esac
         opened=1
@@ -638,6 +684,7 @@ fm_session_descriptor_channel_isolated() {
           17) exec 17<&- ;;
           18) exec 18<&- ;;
           19) exec 19<&- ;;
+          20) exec 20<&- ;;
         esac
       fi
       if [ "$status" -ne 0 ] && [ "$opened" -eq 0 ] \
