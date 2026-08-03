@@ -1490,7 +1490,7 @@ case "$BACKEND" in
     WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
     WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS") || exit 1
     if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
-      cleanup_unidentified_spawn_window
+      cleanup_unidentified_spawn_window || true
       echo "error: tmux did not return a window id for $T" >&2
       exit 1
     fi
