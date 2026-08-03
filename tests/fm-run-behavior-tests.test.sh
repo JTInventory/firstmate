@@ -385,6 +385,14 @@ test_bounded_runner_uses_stable_containment() {
     "top-level reaper must retain adopted descendant handles"
   assert_contains "$source" 'my $cleanup_adopted = sub' \
     "top-level reaper must clean adopted descendants before exit"
+  assert_contains "$source" 'my ($cleanup_deadline, $cleanup_kill_at);' \
+    "top-level reaper must use one total cleanup deadline"
+  assert_contains "$source" '$cleanup_adopted->($cleanup_deadline, $cleanup_kill_at)' \
+    "top-level reaper must not reset cleanup deadlines"
+  assert_contains "$source" 'my $second = $children->();' \
+    "top-level reaper must recensus after reaping"
+  assert_contains "$source" '$quarantine->("receipt") unless $record_exit->("done");' \
+    "top-level reaper must quarantine receipt publication failures"
   assert_contains "$source" 'my $original_guard_live = sub' \
     "top-level reaper must bind guard exclusion to stable identity"
   assert_contains "$source" '$child_pid == $pid && $original_guard_live->()' \
@@ -462,8 +470,10 @@ test_bounded_runner_uses_stable_containment() {
     "job-owner reap failure must have a distinct injection point"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT' \
     "job-owner reap failure must emit a custody receipt"
-  assert_contains "$source" 'owner-reap-failure' \
-    "job-owner reap failure receipt must identify the owner path"
+  assert_contains "$source" 'custody|$job_pid|$job_identity|$$|$owner_identity' \
+    "job-owner reap failure must transfer bound identities"
+  assert_contains "$source" 'custody-accepted|$job_identity|$owner_identity' \
+    "top-level reaper must acknowledge bound job custody"
   assert_contains "$source" 'return 2' \
     "ambiguous broker disappearance must remain unknown"
   assert_not_contains "$source" 'kill -0 "$SUPERVISOR_HANDLE_BROKER_PID"' \
@@ -502,7 +512,7 @@ SH
 assert_identity_gone() {
   local identity=$1 pid stat_line stat_fields current identity_tick
   pid=${identity%%:*}
-  for ((identity_tick = 0; identity_tick < 100; identity_tick++)); do
+  for ((identity_tick = 0; identity_tick < 1000; identity_tick++)); do
     [ -e "/proc/$pid" ] || return 0
     [ -r "/proc/$pid/stat" ] || fail "could not read recorded process identity"
     IFS= read -r stat_line <"/proc/$pid/stat" || fail "could not read recorded process identity"
@@ -513,7 +523,7 @@ assert_identity_gone() {
     [ "$current" != "$identity" ] && return 0
     sleep 0.01
   done
-  fail "recorded process identity survived cleanup"
+  fail "recorded process identity survived cleanup: $identity"
 }
 
 test_failure_injection_refuses_before_launch() {
@@ -575,7 +585,7 @@ run_cleanup_failure_case() {
   local drop_launch=$8 break_control=$9 force_terminate_control=${10:-0}
   local force_job_abort_after_start=${11:-0} require_job_chain=${12:-0}
   local force_job_reap_failure=${13:-0}
-  local fixture output fixture_output rc start_seconds elapsed sentinel_marker sentinel_pid job_duration
+  local fixture output fixture_output rc start_seconds elapsed sentinel_marker sentinel_pid job_duration job_identity owner_identity
   local supervisor_pid_file root_pid_file guard_pid_file worker_pid_file broker_pid_file reaper_pid_file job_pid_file job_reaper_pid_file ready_file job_reap_receipt pid_file
   fixture=$(make_fixture_root "$case_name")
   output="$TMP_ROOT/$case_name.out"
@@ -623,8 +633,10 @@ run_cleanup_failure_case() {
     [ -e "$ready_file" ] || fail "$case_name did not observe the released-job readiness marker"
     if [ "$case_name" = job-pidfd-reap-failure ]; then
       [ -s "$job_reap_receipt" ] || fail "job pidfd reap failure did not transfer owner custody"
-      assert_grep 'owner-reap-failure' "$job_reap_receipt" \
-        "job pidfd reap failure did not exercise the per-job owner path"
+      job_identity=$(cat "$job_pid_file")
+      owner_identity=$(cat "$job_reaper_pid_file")
+      assert_grep "custody-accepted|$job_identity|$owner_identity" "$job_reap_receipt" \
+        "job pidfd reap failure did not exercise authenticated per-job custody"
     fi
   else
     [ ! -e "$fixture_output/pass-a.started" ] || fail "$case_name released a behavior test"

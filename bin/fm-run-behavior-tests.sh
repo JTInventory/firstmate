@@ -536,6 +536,7 @@ exit($status >> 8);
 FM_TEST_SUPERVISOR_HANDLE_PERL='
 use Config;
 use Errno qw(ECHILD EINTR EIO EPERM ESRCH);
+use Fcntl qw(O_NONBLOCK O_WRONLY);
 use POSIX qw(:sys_wait_h);
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 my ($input_path, $output_path) = @ARGV;
@@ -677,9 +678,9 @@ while (my $line = <$input>) {
       my $owner_parent = getppid();
       syscall($sys_prctl, 1, 15, 0, 0, 0) == 0 or exit 125;
       exit 125 if getppid() != $owner_parent;
+      my $owner_identity = $identity->($$);
+      defined $owner_identity or exit 125;
       if (defined $ENV{FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE} && length $ENV{FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE}) {
-        my $owner_identity = $identity->($$);
-        defined $owner_identity or exit 125;
         open my $record, ">", $ENV{FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE} or exit 125;
         print $record "$owner_identity\n";
         close $record or exit 125;
@@ -725,6 +726,34 @@ while (my $line = <$input>) {
       my $ready_wire = "ready|$job_pid|$job_identity\n";
       syswrite($response_w, $ready_wire) == length($ready_wire) or exit 125;
       delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
+      my $custody_acknowledged = 0;
+      my $send_custody = sub {
+        return 1 if $custody_acknowledged;
+        my $custody_path = $ENV{FM_TEST_SUPERVISOR_REAPER_CUSTODY_PATH};
+        return 0 unless defined $custody_path && length $custody_path;
+        sysopen my $custody, $custody_path, O_NONBLOCK | O_WRONLY or return 0;
+        my $wire = "custody|$job_pid|$job_identity|$$|$owner_identity\n";
+        my $written = syswrite($custody, $wire);
+        close $custody;
+        return 0 unless defined $written && $written == length($wire);
+        my $ack_path = $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT};
+        return 0 unless defined $ack_path && length $ack_path;
+        my $ack = "custody-accepted|$job_identity|$owner_identity\n";
+        my $deadline = clock_gettime(CLOCK_MONOTONIC) + 2;
+        while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
+          if (open my $receipt, "<", $ack_path) {
+            local $/;
+            my $contents = <$receipt> // "";
+            close $receipt;
+            if ($contents eq $ack) {
+              $custody_acknowledged = 1;
+              return 1;
+            }
+          }
+          select undef, undef, undef, 0.02;
+        }
+        return 0;
+      };
       my $job_status;
       my $stop = 0;
       $SIG{INT} = sub { $stop = 1 };
@@ -732,6 +761,10 @@ while (my $line = <$input>) {
       my $reap_job = sub {
         return 1 if defined $job_status;
         my $waited = waitpid($job_pid, WNOHANG);
+        if ($ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE}) {
+          $! = EIO;
+          return 0;
+        }
         if ($waited == $job_pid) {
           $job_status = $?;
           return 1;
@@ -809,18 +842,11 @@ while (my $line = <$input>) {
             my $alive = $probe_fd->($job_fd);
             print $response_w (!defined $alive ? "error\n" : $alive ? "alive\n" : "gone\n");
           } elsif ($request eq "wait") {
-            if ($ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE}) {
-              my $receipt_ok = 0;
-              if (defined $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT} &&
-                  length $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT} &&
-                  open my $receipt, ">", $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT}) {
-                my $written = print $receipt "owner-reap-failure\n";
-                my $closed = close $receipt;
-                $receipt_ok = $written && $closed;
-              }
-              print $response_w ($receipt_ok ? "reap-error\n" : "error\n");
+            my $reaped = $reap_job->();
+            if (!$reaped && $ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE}) {
+              my $transferred = $send_custody->();
+              print $response_w ($transferred ? "reap-error\n" : "error\n");
             } else {
-              $reap_job->();
               print $response_w (defined $job_status ? "exit|$job_status\n" : "running\n");
             }
           } elsif ($request eq "close") {
@@ -1469,8 +1495,8 @@ while (1) {
 '
 FM_TEST_SUPERVISOR_REAPER_PERL='
 use Config;
-use Errno qw(ECHILD EINTR EIO ESRCH);
-use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+use Errno qw(EAGAIN ECHILD EINTR EIO ESRCH);
+use Fcntl qw(F_GETFL F_SETFL O_CREAT O_NONBLOCK O_TRUNC O_WRONLY);
 use POSIX qw(:sys_wait_h);
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 my ($guard_parent_perl, $guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, $control_path, $reaper_control_fd, $exit_path) = @ARGV;
@@ -1500,6 +1526,10 @@ if (!$pid) {
 }
 my $fd = syscall($sys_pidfd_open, $pid, 0);
 my $startup_error = 0;
+my $exit_fd;
+if (!sysopen($exit_fd, $exit_path, O_CREAT | O_TRUNC | O_WRONLY, 0600)) {
+  $startup_error = 1;
+}
 if (!defined $fd || $fd < 0) {
   $fd = undef;
   $startup_error = 1;
@@ -1563,6 +1593,7 @@ if (!open($control, "<&=$reaper_control_fd")) {
     $startup_error = 1;
   }
 }
+my $control_buffer = "";
 my $children = sub {
   open my $list, "<", "/proc/$$/task/$$/children" or return;
   local $/;
@@ -1585,23 +1616,61 @@ my $close_adopted = sub {
   POSIX::close($entry->{fd}) if defined $entry->{fd};
   $entry->{fd} = undef;
 };
+my $acquire_custody_fd = sub {
+  my ($candidate, $expected) = @_;
+  if (exists $adopted{$candidate}) {
+    return unless $adopted{$candidate}{identity} eq $expected;
+    return ($adopted{$candidate}{fd}, 0);
+  }
+  my $candidate_fd = syscall($sys_pidfd_open, $candidate, 0);
+  return unless defined $candidate_fd && $candidate_fd >= 0;
+  my $observed = $identity->($candidate);
+  if (!defined $observed || $observed ne $expected) {
+    POSIX::close($candidate_fd);
+    return;
+  }
+  return ($candidate_fd, 1);
+};
+my $accept_custody = sub {
+  my ($job_pid, $job_identity, $owner_pid, $owner_identity) = @_;
+  return 0 if $job_pid == $owner_pid || $job_pid == $pid || $owner_pid == $pid;
+  my ($job_fd, $job_new) = $acquire_custody_fd->($job_pid, $job_identity);
+  return 0 unless defined $job_fd;
+  my ($owner_fd, $owner_new) = $acquire_custody_fd->($owner_pid, $owner_identity);
+  if (!defined $owner_fd) {
+    POSIX::close($job_fd) if $job_new;
+    return 0;
+  }
+  $adopted{$job_pid} = { fd => $job_fd, identity => $job_identity } if $job_new;
+  $adopted{$owner_pid} = { fd => $owner_fd, identity => $owner_identity } if $owner_new;
+  my $receipt_path = $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT};
+  return 0 unless defined $receipt_path && length $receipt_path;
+  my $receipt_line = "custody-accepted|$job_identity|$owner_identity\n";
+  open my $receipt, ">", $receipt_path or return 0;
+  my $written = print $receipt $receipt_line;
+  my $closed = close $receipt;
+  return $written && $closed;
+};
 my $refresh_adopted = sub {
   my $child_pids = $children->();
   return 0 unless defined $child_pids;
+  my $ok = 1;
   for my $child_pid (@$child_pids) {
     next if exists $adopted{$child_pid};
     next if $child_pid == $pid && $original_guard_live->();
     my $child_fd = syscall($sys_pidfd_open, $child_pid, 0);
     if (!defined $child_fd || $child_fd < 0) {
       next if $!{ESRCH};
-      return 0;
+      $ok = 0;
+      next;
     }
     my $child_identity = $identity->($child_pid);
     if (!defined $child_identity) {
       my $alive = $probe->($child_fd);
       POSIX::close($child_fd);
       next if defined $alive && !$alive;
-      return 0;
+      $ok = 0;
+      next;
     }
     $adopted{$child_pid} = { fd => $child_fd, identity => $child_identity };
   }
@@ -1609,7 +1678,8 @@ my $refresh_adopted = sub {
     my $entry = $adopted{$child_pid};
     my $alive = $probe->($entry->{fd});
     if (!defined $alive) {
-      return 0;
+      $ok = 0;
+      next;
     }
     if (!$alive) {
       $close_adopted->($entry);
@@ -1617,33 +1687,49 @@ my $refresh_adopted = sub {
       next;
     }
     my $child_identity = $identity->($child_pid);
-    return 0 unless defined $child_identity && $child_identity eq $entry->{identity};
+    if (!defined $child_identity || $child_identity ne $entry->{identity}) {
+      $ok = 0;
+    }
   }
-  return 1;
+  return $ok;
 };
 my $reap_adopted = sub {
-  my $waited;
-  while (($waited = waitpid(-1, WNOHANG)) > 0) {
+  my $ok = 1;
+  while (1) {
+    my $waited = waitpid(-1, WNOHANG);
+    last if $waited == 0;
+    if ($waited < 0) {
+      last if $!{ECHILD} || $!{EINTR};
+      $ok = 0;
+      last;
+    }
     my $entry = $adopted{$waited};
     if (defined $entry) {
       $close_adopted->($entry);
       delete $adopted{$waited};
     }
   }
-  return 1 if $waited < 0 && $!{ECHILD};
-  return 1 if $waited == 0;
-  return 0;
+  return $ok;
 };
 my $adopted_gone = sub {
-  my $child_pids = $children->();
-  return 0 unless defined $child_pids;
   $reap_adopted->() or return 0;
-  return 0 if @$child_pids || keys %adopted;
-  return 1;
+  my $ok = $refresh_adopted->();
+  $reap_adopted->() or return 0;
+  my $first = $children->();
+  return 0 unless defined $first;
+  return 0 if @$first || keys %adopted;
+  select undef, undef, undef, 0.02;
+  $reap_adopted->() or return 0;
+  $ok = 0 unless $refresh_adopted->();
+  $reap_adopted->() or return 0;
+  my $second = $children->();
+  return 0 unless defined $second;
+  return 0 if @$second || keys %adopted;
+  return $ok;
 };
 my $signal_adopted = sub {
   my ($signal) = @_;
-  $refresh_adopted->() or return 0;
+  my $ok = $refresh_adopted->();
   for my $child_pid (keys %adopted) {
     my $entry = $adopted{$child_pid};
     my $sent = syscall($sys_pidfd_send_signal, $entry->{fd}, $signal, 0, 0);
@@ -1653,14 +1739,13 @@ my $signal_adopted = sub {
     if (defined $sent && $sent < 0 && $!{ESRCH}) {
       next;
     }
-    return 0;
+    $ok = 0;
   }
-  return 1;
+  return $ok;
 };
 my $cleanup_adopted = sub {
-  my ($deadline) = @_;
+  my ($deadline, $kill_at) = @_;
   delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
-  my $kill_at = clock_gettime(CLOCK_MONOTONIC) + 2;
   my $killed = 0;
   my $term_ok = $signal_adopted->(15);
   while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
@@ -1717,14 +1802,83 @@ my $terminate = sub {
   }
   return 0;
 };
+my $exit_recorded = 0;
 my $record_exit = sub {
-  open my $record, ">", $exit_path or return 0;
-  my $written = print $record "$reaper_identity|done\n";
-  my $closed = close $record;
-  return $written && $closed;
+  my ($state) = @_;
+  return 1 if $exit_recorded;
+  return 0 unless defined $exit_fd;
+  my $payload = "$reaper_identity|$state\n";
+  my $offset = 0;
+  my $deadline = clock_gettime(CLOCK_MONOTONIC) + 1;
+  while ($offset < length($payload) && clock_gettime(CLOCK_MONOTONIC) < $deadline) {
+    my $written = syswrite($exit_fd, $payload, length($payload) - $offset, $offset);
+    if (defined $written && $written > 0) {
+      $offset += $written;
+      next;
+    }
+    select undef, undef, undef, 0.02;
+  }
+  return 0 unless $offset == length($payload);
+  $exit_recorded = 1;
+  return -e $exit_path;
+};
+my $quarantine = sub {
+  my ($reason) = @_;
+  $record_exit->("quarantine|$reason");
+  my $quarantine_buffer = "";
+  while (1) {
+    if ($adopted_gone->()) {
+      exit 125;
+    }
+    $signal_adopted->(9);
+    if (defined $control) {
+      my $readable = "";
+      vec($readable, fileno($control), 1) = 1;
+      my $selected = select($readable, undef, undef, 1);
+      if (defined $selected && $selected > 0 && vec($readable, fileno($control), 1)) {
+        my $command = "";
+        my $count = sysread($control, $command, 4096);
+        if (!defined $count) {
+          if (!$!{EAGAIN} && !$!{EINTR}) {
+            close $control;
+            undef $control;
+          }
+        } elsif ($count == 0) {
+          close $control;
+          undef $control;
+        } else {
+          $quarantine_buffer .= $command;
+          while ($quarantine_buffer =~ s/^([^\n]*)\n//) {
+            $signal_adopted->(9) if $1 eq "terminate";
+          }
+        }
+      }
+    } else {
+      select undef, undef, undef, 1;
+    }
+  }
 };
 my $child_done = 0;
 my $child_status = 125 << 8;
+my ($cleanup_deadline, $cleanup_kill_at);
+my $mark_child_unwaitable = sub {
+  return 0 unless defined $fd;
+  my $alive = $probe->($fd);
+  if (defined $alive && !$alive) {
+    POSIX::close($fd);
+    undef $fd;
+    $child_done = 1;
+    return 1;
+  }
+  if (defined $alive && $alive && defined $current) {
+    $adopted{$pid} = { fd => $fd, identity => $current };
+    undef $fd;
+    $child_status = 125 << 8;
+    $child_done = 1;
+    return 1;
+  }
+  return 0;
+};
 while (1) {
   if (!$child_done) {
     my $waited = waitpid($pid, WNOHANG);
@@ -1733,19 +1887,36 @@ while (1) {
       $child_done = 1;
       POSIX::close($fd) if defined $fd;
     } elsif ($waited < 0 && !$!{EINTR}) {
-      $stop = 1;
+      if ($!{ECHILD}) {
+        $mark_child_unwaitable->() or $stop = 1;
+      } else {
+        $stop = 1;
+      }
     }
   }
   if (!$child_done && $stop) {
     if (!$terminate->()) {
+      if ($mark_child_unwaitable->()) {
+        next;
+      }
       select undef, undef, undef, 0.05;
       next;
     }
-    my $waited = waitpid($pid, WNOHANG);
-    next unless $waited == $pid;
-    $child_status = $?;
-    $child_done = 1;
-    POSIX::close($fd) if defined $fd;
+    unless ($child_done) {
+      my $waited = waitpid($pid, WNOHANG);
+      if ($waited == $pid) {
+        $child_status = $?;
+        $child_done = 1;
+        POSIX::close($fd) if defined $fd;
+      } elsif ($waited < 0 && $!{ECHILD}) {
+        $mark_child_unwaitable->();
+      }
+    }
+    next unless $child_done;
+  }
+  if ($child_done && !defined $cleanup_deadline) {
+    $cleanup_deadline = clock_gettime(CLOCK_MONOTONIC) + 8;
+    $cleanup_kill_at = clock_gettime(CLOCK_MONOTONIC) + 2;
   }
   if (!$child_done) {
     $stop = 1 if $startup_error;
@@ -1757,7 +1928,19 @@ while (1) {
     if (defined $selected && $selected > 0 && vec($readable, fileno($control), 1)) {
       my $command = "";
       my $count = sysread($control, $command, 4096);
-      $stop = 1 if !defined $count || $count == 0 || $command =~ /(?:^|\n)terminate(?:\n|$)/;
+      if (!defined $count || $count == 0) {
+        $stop = 1;
+      } else {
+        $control_buffer .= $command;
+        while ($control_buffer =~ s/^([^\n]*)\n//) {
+          my $line = $1;
+          if ($line eq "terminate") {
+            $stop = 1;
+          } elsif ($line =~ /^custody\|(\d+)\|(\d+:\d+)\|(\d+)\|(\d+:\d+)$/) {
+            $accept_custody->($1, $2, $3, $4);
+          }
+        }
+      }
     }
     next;
   }
@@ -1765,12 +1948,13 @@ while (1) {
     select undef, undef, undef, 0.05;
     next;
   }
-  if (!$cleanup_adopted->(clock_gettime(CLOCK_MONOTONIC) + 8)) {
+  if (!$cleanup_adopted->($cleanup_deadline, $cleanup_kill_at)) {
+    $quarantine->("cleanup") if clock_gettime(CLOCK_MONOTONIC) >= $cleanup_deadline;
     select undef, undef, undef, 0.05;
     next;
   }
-  exit(125) if $startup_error;
-  $record_exit->() or next;
+  $quarantine->("startup") if $startup_error;
+  $quarantine->("receipt") unless $record_exit->("done");
   exit($child_status >> 8) if ($child_status & 127) == 0;
   exit(125);
 }
@@ -2157,6 +2341,8 @@ if ! exec {SUPERVISOR_HANDLE_REAPER_CONTROL}<>"$supervisor_handle_reaper_control
   printf '%s\n' 'FAIL: could not open supervisor reaper control channel' >&2
   exit 125
 fi
+FM_TEST_SUPERVISOR_REAPER_CUSTODY_PATH="$supervisor_handle_reaper_control"
+export FM_TEST_SUPERVISOR_REAPER_CUSTODY_PATH
 if ! printf '%s' "$FM_TEST_SUPERVISOR_HANDLE_PERL" >"$supervisor_handle_worker"; then
   printf '%s\n' 'FAIL: could not write supervisor handle worker' >&2
   exit 125
