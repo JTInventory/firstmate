@@ -155,7 +155,7 @@ run_fixture() {
   local force_job_open_failure=${23:-0} force_job_signal_failure=${24:-0}
   local force_terminate_control=${25:-0} force_job_abort_after_start=${26:-0}
   local ready_file=${27:-} reaper_pid_file=${28:-} job_pid_file=${29:-} job_reaper_pid_file=${30:-}
-  local job_duration=${31:-0.15}
+  local job_duration=${31:-0.15} force_job_reap_failure=${32:-0} job_reap_receipt=${33:-}
   local fixture_output
   fixture_output="$TMP_ROOT/$fixture-output-$jobs"
   mkdir -p "$fixture_output"
@@ -188,6 +188,8 @@ run_fixture() {
       FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE="$force_signal_failure" \
       FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_OPEN_FAILURE="$force_job_open_failure" \
       FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_SIGNAL_FAILURE="$force_job_signal_failure" \
+      FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE="$force_job_reap_failure" \
+      FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT="$job_reap_receipt" \
       FM_TEST_SUPERVISOR_FORCE_TERMINATE_CONTROL="$force_terminate_control" \
       FM_TEST_SUPERVISOR_FORCE_JOB_ABORT_AFTER_START="$force_job_abort_after_start" \
       FM_TEST_SUPERVISOR_READY_FILE="$ready_file" \
@@ -383,6 +385,10 @@ test_bounded_runner_uses_stable_containment() {
     "top-level reaper must retain adopted descendant handles"
   assert_contains "$source" 'my $cleanup_adopted = sub' \
     "top-level reaper must clean adopted descendants before exit"
+  assert_contains "$source" 'my $original_guard_live = sub' \
+    "top-level reaper must bind guard exclusion to stable identity"
+  assert_contains "$source" '$child_pid == $pid && $original_guard_live->()' \
+    "top-level reaper must treat a reused guard PID as an adopted child"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_JOB_PID_FILE' \
     "behavior runner must record the released job identity"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE' \
@@ -448,6 +454,16 @@ test_bounded_runner_uses_stable_containment() {
     "released-job regressions must wait for readiness"
   assert_contains "$source" 'SUPERVISOR_HANDLE_REAPER_CONTROL' \
     "top-level reaper must have a private control channel"
+  assert_contains "$source" '"$SUPERVISOR_HANDLE_REAPER_CONTROL" "$supervisor_handle_reaper_exit"' \
+    "top-level reaper must inherit its retained control handle"
+  assert_not_contains "$source" 'kill -TERM "$SUPERVISOR_HANDLE_BROKER_PID"' \
+    "broker teardown must not signal a recycled numeric PID"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE' \
+    "job-owner reap failure must have a distinct injection point"
+  assert_contains "$source" 'FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT' \
+    "job-owner reap failure must emit a custody receipt"
+  assert_contains "$source" 'owner-reap-failure' \
+    "job-owner reap failure receipt must identify the owner path"
   assert_contains "$source" 'return 2' \
     "ambiguous broker disappearance must remain unknown"
   assert_not_contains "$source" 'kill -0 "$SUPERVISOR_HANDLE_BROKER_PID"' \
@@ -558,8 +574,9 @@ run_cleanup_failure_case() {
   local force_nested_open=$5 force_job_open=$6 force_job_signal=$7
   local drop_launch=$8 break_control=$9 force_terminate_control=${10:-0}
   local force_job_abort_after_start=${11:-0} require_job_chain=${12:-0}
+  local force_job_reap_failure=${13:-0}
   local fixture output fixture_output rc start_seconds elapsed sentinel_marker sentinel_pid job_duration
-  local supervisor_pid_file root_pid_file guard_pid_file worker_pid_file broker_pid_file reaper_pid_file job_pid_file job_reaper_pid_file ready_file pid_file
+  local supervisor_pid_file root_pid_file guard_pid_file worker_pid_file broker_pid_file reaper_pid_file job_pid_file job_reaper_pid_file ready_file job_reap_receipt pid_file
   fixture=$(make_fixture_root "$case_name")
   output="$TMP_ROOT/$case_name.out"
   supervisor_pid_file="$TMP_ROOT/$case_name-supervisor.identity"
@@ -571,6 +588,7 @@ run_cleanup_failure_case() {
   job_pid_file="$TMP_ROOT/$case_name-job.identity"
   job_reaper_pid_file="$TMP_ROOT/$case_name-job-reaper.identity"
   ready_file="$TMP_ROOT/$case_name-ready"
+  job_reap_receipt="$TMP_ROOT/$case_name-job-reap.receipt"
   job_duration=0.15
   [ "$require_job_chain" -eq 1 ] && job_duration=5
   sentinel_marker="$TMP_ROOT/$case_name-sentinel-term"
@@ -583,7 +601,7 @@ run_cleanup_failure_case() {
     "$broker_pid_file" "$guard_pid_file" "$break_control" '' \
     "$worker_pid_file" "$force_signal" "$force_reap" "$force_root_open" \
     "$force_nested_open" "$force_job_open" "$force_job_signal" \
-    "$force_terminate_control" "$force_job_abort_after_start" "$ready_file" "$reaper_pid_file" "$job_pid_file" "$job_reaper_pid_file" "$job_duration")
+    "$force_terminate_control" "$force_job_abort_after_start" "$ready_file" "$reaper_pid_file" "$job_pid_file" "$job_reaper_pid_file" "$job_duration" "$force_job_reap_failure" "$job_reap_receipt")
   rc=$?
   set -u
   elapsed=$((SECONDS - start_seconds))
@@ -604,8 +622,9 @@ run_cleanup_failure_case() {
     [ -s "$job_pid_file" ] || fail "$case_name did not record the released job"
     [ -e "$ready_file" ] || fail "$case_name did not observe the released-job readiness marker"
     if [ "$case_name" = job-pidfd-reap-failure ]; then
-      assert_grep 'FAIL: could not reap behavior-test supervisor' "$output" \
-        "job pidfd reap failure did not exercise the broker wait path"
+      [ -s "$job_reap_receipt" ] || fail "job pidfd reap failure did not transfer owner custody"
+      assert_grep 'owner-reap-failure' "$job_reap_receipt" \
+        "job pidfd reap failure did not exercise the per-job owner path"
     fi
   else
     [ ! -e "$fixture_output/pass-a.started" ] || fail "$case_name released a behavior test"
@@ -620,7 +639,7 @@ test_cleanup_failure_injections_are_bounded() {
   run_cleanup_failure_case nested-pidfd-open-failure 0 0 0 1 0 0 0 0
   run_cleanup_failure_case job-pidfd-open-failure 0 0 0 0 1 0 0 0
   run_cleanup_failure_case job-pidfd-signal-failure 0 0 0 0 0 1 0 0 0 1 1
-  run_cleanup_failure_case job-pidfd-reap-failure 0 1 0 0 0 0 0 0 0 0 1
+  run_cleanup_failure_case job-pidfd-reap-failure 0 0 0 0 0 1 0 0 0 0 1 1
   run_cleanup_failure_case nested-pidfd-signal-failure 1 0 0 0 0 0 0 0 1
   pass "pidfd cleanup failures are bounded and fail closed"
 }

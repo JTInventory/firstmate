@@ -809,8 +809,20 @@ while (my $line = <$input>) {
             my $alive = $probe_fd->($job_fd);
             print $response_w (!defined $alive ? "error\n" : $alive ? "alive\n" : "gone\n");
           } elsif ($request eq "wait") {
-            $reap_job->();
-            print $response_w (defined $job_status ? "exit|$job_status\n" : "running\n");
+            if ($ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE}) {
+              my $receipt_ok = 0;
+              if (defined $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT} &&
+                  length $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT} &&
+                  open my $receipt, ">", $ENV{FM_TEST_SUPERVISOR_JOB_REAP_FAILURE_RECEIPT}) {
+                my $written = print $receipt "owner-reap-failure\n";
+                my $closed = close $receipt;
+                $receipt_ok = $written && $closed;
+              }
+              print $response_w ($receipt_ok ? "reap-error\n" : "error\n");
+            } else {
+              $reap_job->();
+              print $response_w (defined $job_status ? "exit|$job_status\n" : "running\n");
+            }
           } elsif ($request eq "close") {
             $reap_job->();
             if (defined $job_status) {
@@ -1010,11 +1022,13 @@ my $fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}
   ? -1
   : syscall($sys_pidfd_open, $pid, 0);
 my $reap_bounded = sub {
+  my ($until) = @_;
   if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
     $! = EIO;
     return 0;
   }
   for (1 .. 100) {
+    return 0 if defined $until && clock_gettime(CLOCK_MONOTONIC) >= $until;
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
@@ -1026,7 +1040,9 @@ my $reap_bounded = sub {
 if (!defined $fd || $fd < 0) {
   close $gate_w;
   delete $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE};
-  while (!$reap_bounded->()) {
+  my $cleanup_deadline = clock_gettime(CLOCK_MONOTONIC) + 8;
+  while (!$reap_bounded->($cleanup_deadline)) {
+    last if clock_gettime(CLOCK_MONOTONIC) >= $cleanup_deadline;
     select undef, undef, undef, 0.05;
   }
   exit 125;
@@ -1165,11 +1181,13 @@ my $guard_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}
   ? -1
   : syscall($sys_pidfd_open, $pid, 0);
 my $reap_bounded = sub {
+  my ($until) = @_;
   if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
     $! = EIO;
     return 0;
   }
   for (1 .. 100) {
+    return 0 if defined $until && clock_gettime(CLOCK_MONOTONIC) >= $until;
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
@@ -1181,7 +1199,9 @@ my $reap_bounded = sub {
 if (!defined $guard_fd || $guard_fd < 0) {
   close $gate_w;
   delete $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE};
-  while (!$reap_bounded->()) {
+  my $cleanup_deadline = clock_gettime(CLOCK_MONOTONIC) + 8;
+  while (!$reap_bounded->($cleanup_deadline)) {
+    last if clock_gettime(CLOCK_MONOTONIC) >= $cleanup_deadline;
     select undef, undef, undef, 0.05;
   }
   exit 125;
@@ -1310,11 +1330,13 @@ if (!$pid) {
 }
 close $release_r;
 my $reap_bounded = sub {
+  my ($until) = @_;
   if ($ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE}) {
     $! = EIO;
     return 0;
   }
   for (1 .. 100) {
+    return 0 if defined $until && clock_gettime(CLOCK_MONOTONIC) >= $until;
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
@@ -1329,7 +1351,9 @@ my $outer_fd = $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_OPEN_FAILURE}
 if (!defined $outer_fd || $outer_fd < 0) {
   close $release_w;
   delete $ENV{FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE};
-  while (!$reap_bounded->()) {
+  my $cleanup_deadline = clock_gettime(CLOCK_MONOTONIC) + 8;
+  while (!$reap_bounded->($cleanup_deadline)) {
+    last if clock_gettime(CLOCK_MONOTONIC) >= $cleanup_deadline;
     select undef, undef, undef, 0.05;
   }
   exit 125;
@@ -1446,10 +1470,10 @@ while (1) {
 FM_TEST_SUPERVISOR_REAPER_PERL='
 use Config;
 use Errno qw(ECHILD EINTR EIO ESRCH);
-use Fcntl qw(O_NONBLOCK O_RDONLY);
+use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 use POSIX qw(:sys_wait_h);
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
-my ($guard_parent_perl, $guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, $control_path, $reaper_control_path, $exit_path) = @ARGV;
+my ($guard_parent_perl, $guard_perl, $guard_worker_path, $worker_path, $input_path, $output_path, $control_path, $reaper_control_fd, $exit_path) = @ARGV;
 my $arch = $Config{archname} // "";
 my ($sys_prctl, $sys_pidfd_open, $sys_pidfd_send_signal);
 if ($arch =~ /(?:x86_64|amd64)/) {
@@ -1497,6 +1521,11 @@ my $current = $identity->($pid);
 if (!defined $current) {
   $startup_error = 1;
 }
+my $original_guard_live = sub {
+  return 0 unless defined $current;
+  my $observed = $identity->($pid);
+  return defined $observed && $observed eq $current;
+};
 my $self_identity = sub {
   open my $stat, "<", "/proc/$$/stat" or return;
   my $line = <$stat>;
@@ -1524,8 +1553,15 @@ if (defined $ENV{FM_TEST_SUPERVISOR_PID_FILE} && length $ENV{FM_TEST_SUPERVISOR_
   }
 }
 my $control;
-if (!sysopen($control, $reaper_control_path, O_NONBLOCK | O_RDONLY)) {
+if (!open($control, "<&=$reaper_control_fd")) {
   $startup_error = 1;
+} else {
+  my $flags = fcntl($control, F_GETFL, 0);
+  if (!defined $flags || !defined fcntl($control, F_SETFL, $flags | O_NONBLOCK)) {
+    close $control;
+    undef $control;
+    $startup_error = 1;
+  }
 }
 my $children = sub {
   open my $list, "<", "/proc/$$/task/$$/children" or return;
@@ -1553,7 +1589,8 @@ my $refresh_adopted = sub {
   my $child_pids = $children->();
   return 0 unless defined $child_pids;
   for my $child_pid (@$child_pids) {
-    next if $child_pid == $pid || exists $adopted{$child_pid};
+    next if exists $adopted{$child_pid};
+    next if $child_pid == $pid && $original_guard_live->();
     my $child_fd = syscall($sys_pidfd_open, $child_pid, 0);
     if (!defined $child_fd || $child_fd < 0) {
       next if $!{ESRCH};
@@ -1625,12 +1662,16 @@ my $cleanup_adopted = sub {
   delete @ENV{qw(FM_TEST_SUPERVISOR_FORCE_PIDFD_SIGNAL_FAILURE FM_TEST_SUPERVISOR_FORCE_PIDFD_REAP_FAILURE)};
   my $kill_at = clock_gettime(CLOCK_MONOTONIC) + 2;
   my $killed = 0;
-  $signal_adopted->(15) or return 0;
+  my $term_ok = $signal_adopted->(15);
   while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     return 1 if $adopted_gone->();
     if (!$killed && clock_gettime(CLOCK_MONOTONIC) >= $kill_at) {
-      $signal_adopted->(9) or return 0;
       $killed = 1;
+    }
+    if ($killed) {
+      $signal_adopted->(9);
+    } elsif (!$term_ok) {
+      $term_ok = $signal_adopted->(15);
     }
     select undef, undef, undef, 0.02;
   }
@@ -1645,12 +1686,19 @@ my $terminate = sub {
   my $term_ok = defined $fd
     ? defined $sent && ($sent == 0 || ($sent < 0 && $!{ESRCH}))
     : defined $sent && $sent == 1;
-  return 0 unless $term_ok;
   while (clock_gettime(CLOCK_MONOTONIC) < $deadline) {
     my $waited = waitpid($pid, WNOHANG);
     return 1 if $waited == $pid;
     return 1 if $waited < 0 && $!{ECHILD};
     return 0 if $waited < 0 && !$!{EINTR};
+    if (!$term_ok) {
+      my $retry = defined $fd
+        ? syscall($sys_pidfd_send_signal, $fd, 15, 0, 0, 0)
+        : kill(15, $pid);
+      $term_ok = defined $fd
+        ? defined $retry && ($retry == 0 || ($retry < 0 && $!{ESRCH}))
+        : defined $retry && $retry == 1;
+    }
     select undef, undef, undef, 0.02;
   }
   my $killed = defined $fd
@@ -1864,13 +1912,6 @@ supervisor_handle_force_broker_teardown() {
   fi
   if [ -n "$SUPERVISOR_HANDLE_REAPER_CONTROL" ]; then
     printf '%s\n' terminate >&"$SUPERVISOR_HANDLE_REAPER_CONTROL" || true
-  fi
-  if [ -n "$SUPERVISOR_HANDLE_BROKER_PID" ] && [ -n "$SUPERVISOR_HANDLE_BROKER_IDENTITY" ]; then
-    local current_identity=
-    current_identity=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null || true)
-    if [ "$current_identity" = "$SUPERVISOR_HANDLE_BROKER_IDENTITY" ]; then
-      kill -TERM "$SUPERVISOR_HANDLE_BROKER_PID" 2>/dev/null || true
-    fi
   fi
 }
 supervisor_handle_broker_join() {
@@ -2128,7 +2169,7 @@ perl -e "$FM_TEST_SUPERVISOR_REAPER_PERL" "$FM_TEST_SUPERVISOR_GUARD_PARENT_PERL
   "$supervisor_handle_guard_worker" \
   "$supervisor_handle_worker" \
   "$supervisor_handle_input" "$supervisor_handle_output" "$supervisor_handle_control" \
-  "$supervisor_handle_reaper_control" "$supervisor_handle_reaper_exit" &
+  "$SUPERVISOR_HANDLE_REAPER_CONTROL" "$supervisor_handle_reaper_exit" &
 SUPERVISOR_HANDLE_BROKER_PID=$!
 if ! SUPERVISOR_HANDLE_BROKER_IDENTITY=$(supervisor_handle_process_identity "$SUPERVISOR_HANDLE_BROKER_PID"); then
   printf '%s\n' 'FAIL: could not bind supervisor broker handle' >&2
