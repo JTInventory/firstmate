@@ -254,6 +254,31 @@ PY
     fail "stale record deletion did not reject an inode replacement"
   fi
   pass "stale record deletion rejects inode replacement"
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_lock", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    record = Path(temporary) / "record"
+    record.write_text("replacement\n", encoding="utf-8")
+    with broker.record_lock(record, blocking=True):
+        if broker.unlink_owned_record(record, {}, expected_stat=record.lstat()):
+            raise SystemExit("record cleanup ignored the active serialization lock")
+        if not record.exists():
+            raise SystemExit("record cleanup removed a locked record")
+PY
+  then
+    fail "record cleanup did not honor per-home serialization"
+  fi
+  pass "record cleanup honors per-home serialization"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi
