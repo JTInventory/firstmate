@@ -428,7 +428,7 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
     fi
     unset FM_SESSION_AUTHORITY_DURABLE_FD
   elif [ "$durable_fd" = 18 ] \
-    && fm_session_authority_durable_capability_present; then
+    && fm_session_authority_durable_capability_present rotation; then
     fm_session_authority_live_descriptor_rotate || {
       fm_session_enrollment_trace consumer-authority-descriptor fail 2>/dev/null || true
       echo "error: protected session authority rotation failed" >&2
@@ -520,7 +520,10 @@ elif [ "$enrollment_fd" = 9 ] \
     exit 1
   }
 elif [ "$durable_fd" = 18 ] \
-  && fm_session_authority_durable_capability_present; then
+  && { [ "$enrollment_fd" = 9 ] \
+    && fm_session_authority_durable_capability_present \
+    || [ "$enrollment_fd" != 9 ] \
+    && fm_session_authority_durable_capability_present rotation; }; then
   if [ "$enrollment_fd" = 9 ]; then
     exec 9<&-
   elif [ -n "$enrollment_fd" ]; then
@@ -583,7 +586,9 @@ if [ "${FM_AGENT_ROLE:-}" != secondmate ] \
   && [ ! -e "$STATE/.primary-checkout" ] \
   && [ ! -L "$STATE/.primary-checkout" ] \
   && [ ! -e "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] \
-  && [ ! -e "$authority" ] && [ ! -L "$authority" ]; then
+  && [ ! -e "$authority" ] && [ ! -L "$authority" ] \
+  && [ ! -e "$STATE/.session-authority-live" ] \
+  && [ ! -L "$STATE/.session-authority-live" ]; then
   bootstrap_root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
   bootstrap_owner=$(fm_session_lock_owner) || exit 1
   bootstrap_checkout_tmp=$(mktemp "$STATE/.primary-checkout.XXXXXX") || exit 1
@@ -595,23 +600,32 @@ if [ "${FM_AGENT_ROLE:-}" != secondmate ] \
     rm -f "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp"
     exit 1
   }
+  bootstrap_live_tmp=$(mktemp "$STATE/.session-authority-live.XXXXXX") || {
+    rm -f "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp" \
+      "$bootstrap_authority_tmp"
+    exit 1
+  }
   if chmod 600 "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp" \
-      "$bootstrap_authority_tmp" \
+      "$bootstrap_authority_tmp" "$bootstrap_live_tmp" \
     && printf '%s\n' "$bootstrap_root" > "$bootstrap_checkout_tmp" \
     && printf '%s\n' "$bootstrap_owner" > "$bootstrap_lock_tmp" \
     && fm_session_authority_write_file \
       "$bootstrap_authority_tmp" "$$" "$bootstrap_owner" \
       "$home_real" "$bootstrap_root" \
+    && fm_session_authority_live_binding_write \
+      "$STATE" "$bootstrap_live_tmp" "$bootstrap_authority_tmp" \
     && mv "$bootstrap_checkout_tmp" "$STATE/.primary-checkout" \
     && mv "$bootstrap_lock_tmp" "$STATE/.lock" \
-    && mv "$bootstrap_authority_tmp" "$authority"; then
+    && mv "$bootstrap_authority_tmp" "$authority" \
+    && mv "$bootstrap_live_tmp" "$STATE/.session-authority-live"; then
     :
   else
     rm -f "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp" \
-      "$bootstrap_authority_tmp"
+      "$bootstrap_authority_tmp" "$bootstrap_live_tmp" \
+      "$STATE/.primary-checkout" "$STATE/.lock" "$authority" \
+      "$STATE/.session-authority-live"
     exit 1
   fi
-  fm_session_authority_live_binding_write "$STATE" || exit 1
 fi
 if fm_session_authority_socket_broker_present; then
   fm_session_enrollment_trace consumer-authority-broker pass 2>/dev/null || true

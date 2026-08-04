@@ -115,13 +115,15 @@ fm_test_authority_live_binding_write() {
 }
 
 fm_worker_test_primary_identity_bind() {
-  local root=$1 home=$2 state=${3:-$2/state} binding lock authority owner broker
+  local root=$1 home=$2 state=${3:-$2/state} binding lock authority owner broker authority_pid
   local binding_tmp lock_tmp authority_tmp
   binding="$state/.primary-checkout"
   lock="$state/.lock"
   authority="$state/.session-authority"
   broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
   case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  authority_pid=${FM_TEST_PRIMARY_AUTHORITY_PID:-$broker}
+  case "$authority_pid" in ''|*[!0-9]*) return 1 ;; esac
   owner=${FM_TEST_AUTHORITY_OWNER_PID:-$$}
   if [ -e "$binding" ] || [ -L "$binding" ] \
     || [ -e "$lock" ] || [ -L "$lock" ] \
@@ -131,7 +133,7 @@ fm_worker_test_primary_identity_bind() {
       && [ -f "$lock" ] && [ ! -L "$lock" ] \
       && [ "$(cat "$lock" 2>/dev/null)" = "$owner" ] \
       && fm_session_authority_read "$authority" \
-      && { [ "$FM_SESSION_AUTHORITY_PID" = "$broker" ] \
+      && { [ "$FM_SESSION_AUTHORITY_PID" = "$authority_pid" ] \
         || fm_session_authority_is_current_ancestor "$authority"; } \
       && [ "$FM_SESSION_AUTHORITY_OWNER" = "$owner" ] \
       && [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] \
@@ -139,7 +141,7 @@ fm_worker_test_primary_identity_bind() {
       if [ ! -f "$state/.session-authority-live" ] \
         || ! fm_session_authority_record_validate \
           "$state/.session-authority-live" 8; then
-        fm_test_authority_live_binding_write "$state" "$broker" || return 1
+        fm_test_authority_live_binding_write "$state" "$authority_pid" || return 1
       fi
       return 0
     fi
@@ -159,11 +161,11 @@ fm_worker_test_primary_identity_bind() {
     && printf '%s\n' "$root" > "$binding_tmp" \
     && printf '%s\n' "$owner" > "$lock_tmp" \
     && fm_session_authority_write_file \
-      "$authority_tmp" "$broker" "$owner" "$home" "$root" \
+      "$authority_tmp" "$authority_pid" "$owner" "$home" "$root" \
     && mv "$binding_tmp" "$binding" \
     && mv "$lock_tmp" "$lock" \
     && mv "$authority_tmp" "$authority" \
-    && fm_test_authority_live_binding_write "$state" "$broker" || {
+    && fm_test_authority_live_binding_write "$state" "$authority_pid" || {
       rm -f "$binding_tmp" "$lock_tmp" "$authority_tmp"
       return 1
     }

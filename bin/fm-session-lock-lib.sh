@@ -373,11 +373,13 @@ fm_session_authority_wrapper_provenance_present() {
 }
 
 fm_session_authority_live_binding_write() {
-  local state=${1:-} authority file fd=${FM_SESSION_AUTHORITY_FD:-}
+  local state=${1:-} output=${2:-} authority=${3:-}
+  local file fd=${FM_SESSION_AUTHORITY_FD:-}
   local key digest descriptor start identity body
   [ -n "$state" ] || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  authority="$state/.session-authority"
+  output=${output:-$state/.session-authority-live}
+  authority=${authority:-$state/.session-authority}
   [ -f "$authority" ] && [ ! -L "$authority" ] || return 1
   [ "$fd" = 9 ] || return 1
   fm_session_descriptor_channel_isolated "$fd" \
@@ -395,7 +397,7 @@ fm_session_authority_live_binding_write() {
   [ "${#digest}" -eq 64 ] || return 1
   body=$(printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nfd=%s\ndescriptor=%s\nkey-sha256=%s\n' \
     "$$" "$start" "$identity" "$fd" "$descriptor" "$digest") || return 1
-  file="$state/.session-authority-live"
+  file="$output"
   fm_session_authority_record_write "$file" "$body"
 }
 
@@ -434,8 +436,8 @@ fm_session_authority_live_binding_validate() {
   [ "$current" = "$digest" ]
 }
 
-fm_session_authority_record_capability_present() {
-  local home state authority fd key expected checkout broker broker_start broker_identity
+fm_session_authority_durable_record_capability_present() {
+  local home state authority checkout fd
   fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   case "$fd" in ''|*[!0-9]*) return 1 ;; esac
   fm_session_descriptor_channel_isolated "$fd" \
@@ -447,14 +449,31 @@ fm_session_authority_record_capability_present() {
   checkout=$(cd "${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}" \
     2>/dev/null && pwd -P) || return 1
   fm_session_authority_read "$authority" || return 1
-  fm_session_authority_live_binding_validate \
-    "$state" "$FM_SESSION_AUTHORITY_PID" "${FM_SESSION_AUTHORITY_FD:-}" \
-    || return 1
-  [ "$FM_SESSION_AUTHORITY_PID" != "$$" ] || return 1
   [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] || return 1
   [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$checkout" ] || return 1
   fm_session_authority_process_state "$authority" || return 1
   fm_session_pid_is_current_ancestor "$FM_SESSION_AUTHORITY_PID" || return 1
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] \
+    && [ "$(cat "$state/.lock" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_OWNER" ] \
+    || return 1
+  [ -f "$state/.primary-checkout" ] \
+    && [ ! -L "$state/.primary-checkout" ] \
+    && [ "$(cat "$state/.primary-checkout" 2>/dev/null)" = "$checkout" ] \
+    || return 1
+}
+
+fm_session_authority_record_capability_present() {
+  local home state authority fd key expected broker broker_start broker_identity
+  fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  fm_session_authority_durable_record_capability_present || return 1
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  authority="$state/.session-authority"
+  fm_session_authority_live_binding_validate \
+    "$state" "$FM_SESSION_AUTHORITY_PID" "${FM_SESSION_AUTHORITY_FD:-}" \
+    || return 1
+  [ "$FM_SESSION_AUTHORITY_PID" != "$$" ] || return 1
   broker=${FM_SESSION_AUTHORITY_BROKER_PID:-}
   broker_start=${FM_SESSION_AUTHORITY_BROKER_START:-}
   broker_identity=${FM_SESSION_AUTHORITY_BROKER_IDENTITY:-}
@@ -810,7 +829,7 @@ fm_session_authority_descriptor_create() {
 
 fm_session_authority_live_descriptor_rotate() {
   local key home state authority
-  fm_session_authority_durable_capability_present || return 1
+  fm_session_authority_durable_capability_present rotation || return 1
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null; then
     return 1
   fi
@@ -829,7 +848,11 @@ fm_session_authority_live_descriptor_rotate() {
   state=${FM_STATE_OVERRIDE:-$home/state}
   authority="$state/.session-authority"
   if [ -f "$authority" ] && [ ! -L "$authority" ]; then
-    fm_session_authority_live_binding_write "$state" || return 1
+    fm_session_authority_live_binding_write "$state" || {
+      exec 9<&-
+      unset FM_SESSION_AUTHORITY_FD
+      return 1
+    }
   fi
 }
 
@@ -2239,9 +2262,16 @@ fm_session_authority_hmac() {
 }
 
 fm_session_authority_durable_capability_present() {
-  local key fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  local key mode=${1:-} fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_socket_broker_present && return 0
-  fm_session_authority_production_capability_present || return 1
+  case "$mode" in
+    '') fm_session_authority_record_capability_present || return 1 ;;
+    rotation)
+      [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] || return 1
+      fm_session_authority_durable_record_capability_present || return 1
+      ;;
+    *) return 1 ;;
+  esac
   if [ -z "$fd" ]; then
     return 1
   fi

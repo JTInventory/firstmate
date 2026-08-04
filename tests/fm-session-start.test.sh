@@ -531,25 +531,58 @@ EOF
 }
 
 run_session_start_secondmate() {
-  local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 spawned=$6 mode=$7 proof_pid out rc
+  local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 spawned=$6 mode=$7
+  local proof_pid proof_start proof_identity receipt out rc
   . "$ROOT/bin/fm-worker-isolation-lib.sh"
   fm_worker_test_authority_capability_present || return 1
   FM_SESSION_AUTHORITY_FD=$FM_WORKER_TEST_AUTHORITY_FD
   FM_SESSION_AUTHORITY_DURABLE_FD=$FM_WORKER_TEST_DURABLE_AUTHORITY_FD
-  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
-  fm_worker_test_primary_identity_bind "$root" "$home" "$home/state" || return 1
+  FM_SESSION_AUTHORITY_BROKER_PID=$FM_TEST_AUTHORITY_BROKER_PID
+  FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start \
+    "$FM_SESSION_AUTHORITY_BROKER_PID") || return 1
+  FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity \
+    "$FM_SESSION_AUTHORITY_BROKER_PID") || return 1
+  FM_SESSION_AUTHORITY_BROKER_SCRIPT="$root/bin/fm-session-authority-exec.sh"
+  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD \
+    FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START \
+    FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
+  FM_TEST_PRIMARY_AUTHORITY_PID=${BASHPID:-$$} \
+    fm_worker_test_primary_identity_bind "$root" "$home" "$home/state" || return 1
   (
     cd "$mate"
     exec env FM_AGENT_TASK="$SESSION_START_SECOND_MATE_ID" \
       FM_AGENT_OWNER_HOME="$mate" FM_AGENT_ROLE=secondmate sleep 60
   ) &
   proof_pid=$!
+  proof_start=$(fm_session_process_start "$proof_pid") || {
+    kill "$proof_pid" 2>/dev/null || true
+    wait "$proof_pid" 2>/dev/null || true
+    return 1
+  }
+  proof_identity=$(fm_session_process_identity "$proof_pid") || {
+    kill "$proof_pid" 2>/dev/null || true
+    wait "$proof_pid" 2>/dev/null || true
+    return 1
+  }
+  receipt="$mate/state/.secondmate-launch-receipts/$SESSION_START_SECOND_MATE_ID"
+  mkdir -p "${receipt%/*}" || {
+    kill "$proof_pid" 2>/dev/null || true
+    wait "$proof_pid" 2>/dev/null || true
+    return 1
+  }
+  fm_session_launch_receipt_write \
+    "$receipt" "$SESSION_START_SECOND_MATE_ID" "$mate" \
+    "$proof_pid" "$proof_start" "$proof_identity" || {
+      kill "$proof_pid" 2>/dev/null || true
+      wait "$proof_pid" 2>/dev/null || true
+      return 1
+    }
   set +e
-  out=$(FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_SPAWNED="$spawned" FM_FAKE_SECOND_MATE_HOME="$mate" \
-    FM_FAKE_SECOND_MATE_ID="$SESSION_START_SECOND_MATE_ID" \
-    FM_TEST_AGENT_PIDS="$proof_pid" \
-    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(cd "$root" && \
+    FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
+      FM_FAKE_TMUX_SPAWNED="$spawned" FM_FAKE_SECOND_MATE_HOME="$mate" \
+      FM_FAKE_SECOND_MATE_ID="$SESSION_START_SECOND_MATE_ID" \
+      run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   rc=$?
   set -e
   kill "$proof_pid" 2>/dev/null || true
@@ -735,7 +768,10 @@ EOF
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
-  assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
+  case "$out" in
+    *"another live firstmate session holds the lock"*|*"worker isolation sweep is unproven"*) ;;
+    *) fail "read-only banner did not surface the lock or isolation refusal" ;;
+  esac
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"

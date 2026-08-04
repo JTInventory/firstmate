@@ -31,7 +31,7 @@ cleanup() {
   [ -z "$PRIMARY_PID" ] || wait "$PRIMARY_PID" 2>/dev/null || true
   [ -z "$PRIMARY_HARNESS_PID" ] || kill "$PRIMARY_HARNESS_PID" 2>/dev/null || true
   [ -z "$PRIMARY_HARNESS_PID" ] || wait "$PRIMARY_HARNESS_PID" 2>/dev/null || true
-  fm_test_cleanup
+  fm_test_cleanup || true
 }
 trap cleanup EXIT
 
@@ -167,13 +167,87 @@ test_primary_authority_record_and_live_descriptor_binding() {
     if fm_session_authority_live_binding_validate "$state" "$$" 9; then
       exit 1
     fi
+    exec 9<&-
+    unset FM_SESSION_AUTHORITY_FD
+    fm_session_authority_durable_capability_present rotation || exit 1
+    fm_session_authority_live_descriptor_rotate || exit 1
+    fm_session_authority_live_binding_validate "$state" "$$" 9
   )
-  pass "durable authority records reject rewrites and live descriptor substitution"
+  pass "durable authority records bind rewrites, rotation, and live descriptors"
+}
+
+test_primary_bootstrap_cleans_partial_live_binding() {
+  local fixture state fakebin rc target
+  fixture=$(fm_test_tmproot fm-primary-bootstrap-atomic)
+  state="$fixture/home/state"
+  fakebin="$fixture/fakebin"
+  mkdir -p "$state" "$fakebin"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=${!#}
+if [ "$target" = "$FM_TEST_BOOTSTRAP_LIVE" ]; then
+  exit 1
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  set +e
+  FM_HOME="$fixture/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_BOOTSTRAP_LIVE="$state/.session-authority-live" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-session-authority-exec.sh" bash -c ':' \
+    >"$fixture/stdout" 2>"$fixture/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "bootstrap succeeded after live binding commit failure"
+  for target in .primary-checkout .lock .session-authority .session-authority-live; do
+    [ ! -e "$state/$target" ] && [ ! -L "$state/$target" ] \
+      || fail "partial bootstrap state survived for $target"
+  done
+  pass "primary bootstrap removes partial ownership after live binding failure"
+}
+
+test_receipt_backed_synthetic_census() {
+  local fixture home state task pid start identity receipt index
+  fixture=$(fm_test_tmproot fm-receipt-census)
+  home="$fixture/home"
+  state="$home/state"
+  task=receipt-census-task
+  mkdir -p "$state"
+  (
+    cd "$home" || exit 1
+    exec 18< <(while :; do printf '%s\n' \
+      0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef; done)
+    export FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      FM_SESSION_AUTHORITY_DURABLE_FD=18
+    . "$ROOT/bin/fm-agent-cwd-lib.sh"
+    (
+      cd "$home" || exit 1
+      exec env FM_AGENT_TASK="$task" FM_AGENT_OWNER_HOME="$home" \
+        FM_AGENT_ROLE=secondmate sleep 60
+    ) &
+    pid=$!
+    start=$(fm_session_process_start "$pid") || exit 1
+    identity=$(fm_session_process_identity "$pid") || exit 1
+    receipt="$state/.secondmate-launch-receipts/$task"
+    mkdir -p "${receipt%/*}" || exit 1
+    fm_session_launch_receipt_write \
+      "$receipt" "$task" "$home" "$pid" "$start" "$identity" || exit 1
+    index=$(fm_agent_task_pid_index) || exit 1
+    printf '%s\n' "$index" | grep -F "$task	$home	secondmate	$pid" >/dev/null \
+      || exit 1
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  ) || fail "receipt-backed synthetic agent was not accepted by the census"
+  pass "synthetic agent census requires a signed launch receipt"
 }
 
 if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
   test_broker_client_deadline_is_behavioral
   test_primary_authority_record_and_live_descriptor_binding
+  test_primary_bootstrap_cleans_partial_live_binding
+  test_receipt_backed_synthetic_census
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
 import sys
