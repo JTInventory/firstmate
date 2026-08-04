@@ -24,6 +24,14 @@ CONCURRENT_ACK_READER_ONE=
 CONCURRENT_ACK_READER_TWO=
 CONCURRENT_RELEASE_WRITER_ONE=
 CONCURRENT_RELEASE_WRITER_TWO=
+CONCURRENT_REQUEST_ONE=
+CONCURRENT_REQUEST_TWO=
+CONCURRENT_CALLER_READER_ONE=
+CONCURRENT_CALLER_READER_TWO=
+CONCURRENT_OUTPUT_READER_ONE=
+CONCURRENT_OUTPUT_READER_TWO=
+CONCURRENT_STATUS_READER_ONE=
+CONCURRENT_STATUS_READER_TWO=
 REQUEST_FIFO=
 PRIMARY_REQUEST_FIFO=
 REQUEST_SEQUENCE=0
@@ -32,8 +40,7 @@ BROKER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 cleanup() {
   [ -z "$BROKER_PID" ] || kill "$BROKER_PID" 2>/dev/null || true
   [ -z "$BROKER_PID" ] || wait "$BROKER_PID" 2>/dev/null || true
-  [ -z "$LAUNCH_PID" ] || kill "$LAUNCH_PID" 2>/dev/null || true
-  [ -z "$LAUNCH_PID" ] || wait "$LAUNCH_PID" 2>/dev/null || true
+  [ -z "$LAUNCH_PID" ] || kill_owned_process_tree "$LAUNCH_PID"
   [ -z "$SIGNER_PID" ] || kill "$SIGNER_PID" 2>/dev/null || true
   [ -z "$SIGNER_PID" ] || wait "$SIGNER_PID" 2>/dev/null || true
   [ -z "$PRIMARY_PID" ] || kill "$PRIMARY_PID" 2>/dev/null || true
@@ -68,9 +75,50 @@ cleanup() {
     || kill "$CONCURRENT_RELEASE_WRITER_TWO" 2>/dev/null || true
   [ -z "$CONCURRENT_RELEASE_WRITER_TWO" ] \
     || wait "$CONCURRENT_RELEASE_WRITER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_REQUEST_ONE" ] \
+    || kill "$CONCURRENT_REQUEST_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_REQUEST_ONE" ] \
+    || wait "$CONCURRENT_REQUEST_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_REQUEST_TWO" ] \
+    || kill "$CONCURRENT_REQUEST_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_REQUEST_TWO" ] \
+    || wait "$CONCURRENT_REQUEST_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_CALLER_READER_ONE" ] \
+    || kill "$CONCURRENT_CALLER_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_CALLER_READER_ONE" ] \
+    || wait "$CONCURRENT_CALLER_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_CALLER_READER_TWO" ] \
+    || kill "$CONCURRENT_CALLER_READER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_CALLER_READER_TWO" ] \
+    || wait "$CONCURRENT_CALLER_READER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_OUTPUT_READER_ONE" ] \
+    || kill "$CONCURRENT_OUTPUT_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_OUTPUT_READER_ONE" ] \
+    || wait "$CONCURRENT_OUTPUT_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_OUTPUT_READER_TWO" ] \
+    || kill "$CONCURRENT_OUTPUT_READER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_OUTPUT_READER_TWO" ] \
+    || wait "$CONCURRENT_OUTPUT_READER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_STATUS_READER_ONE" ] \
+    || kill "$CONCURRENT_STATUS_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_STATUS_READER_ONE" ] \
+    || wait "$CONCURRENT_STATUS_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_STATUS_READER_TWO" ] \
+    || kill "$CONCURRENT_STATUS_READER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_STATUS_READER_TWO" ] \
+    || wait "$CONCURRENT_STATUS_READER_TWO" 2>/dev/null || true
   fm_test_cleanup || true
 }
 trap cleanup EXIT
+
+kill_owned_process_tree() {
+  local root=$1 child
+  for child in $(ps -eo pid=,ppid= | awk -v parent="$root" '$2 == parent {print $1}'); do
+    kill_owned_process_tree "$child"
+  done
+  kill "$root" 2>/dev/null || true
+  wait "$root" 2>/dev/null || true
+}
 
 test_process_start() {
   python3 - "$1" <<'PY'
@@ -447,84 +495,140 @@ SH
 
 test_concurrent_broker_start_has_one_publisher() {
   local fixture first_output second_output first_pid second_pid
-  local broker_pids broker_count receipt_b64 record_pid attempts
-  local supervisor_pids supervisor_count request_one_pid request_two_pid
-  local evidence_one evidence_two ready_one ready_two release_one release_two
-  local ack_capture_one ack_capture_two first_ready second_ready
+  local broker_pids broker_count record_pid
+  local request_one_pid request_two_pid ready_one release_one
+  local ack_capture_one first_ready
+  local first_caller first_caller_capture second_caller second_caller_capture
+  local first_output_capture second_output_capture
+  local first_status_capture second_status_capture
   fixture=$(fm_test_tmproot fm-concurrent-broker-start)
   mkdir -p "$fixture/bin" "$fixture/state"
   printf '%s\n' alpha > "$fixture/.fm-secondmate-home"
-  prepare_launch "$fixture"
+  FM_TEST_PRODUCTION_BROKER=1 prepare_launch "$fixture"
+  cp "$ROOT/bin/fm-session-authority-broker.py" \
+    "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-session-durable-authority.sh" \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" \
+    "$ROOT/bin/fm-procargs-lib.sh" "$ROOT/bin/fm-wake-lib.sh" \
+    "$fixture/bin/"
+  chmod 700 "$fixture/bin"/*.sh "$fixture/bin/fm-session-authority-broker.py"
   first_output="$fixture/state/concurrent-broker-first"
   second_output="$fixture/state/concurrent-broker-second"
-  receipt_b64=$(openssl base64 -A < \
-    "$fixture/state/.session-authority-launch") \
-    || fail "concurrent broker fixture has no launch receipt"
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$BROKER_KEY" "$receipt_b64" "$TRUSTED_TICKET_B64" \
-    "$TRUSTED_ACCEPTANCE_B64" "$TRUSTED_FINAL_B64" \
-    "$TRUSTED_CONSUMER_KEY_B64" > "$fixture/state/.test-launch-evidence"
-  evidence_one="$fixture/state/.test-launch-evidence-1"
-  evidence_two="$fixture/state/.test-launch-evidence-2"
   ready_one="$fixture/state/.test-supervisor-ready-1"
-  ready_two="$fixture/state/.test-supervisor-ready-2"
   release_one="$fixture/state/.test-supervisor-release-1"
-  release_two="$fixture/state/.test-supervisor-release-2"
   ack_capture_one="$fixture/state/.test-supervisor-ack-1"
-  ack_capture_two="$fixture/state/.test-supervisor-ack-2"
-  rm -f "$evidence_one" "$evidence_two" "$ready_one" "$ready_two" \
-    "$release_one" "$release_two" "$ack_capture_one" "$ack_capture_two"
-  mkfifo "$evidence_one" "$evidence_two" "$ready_one" "$ready_two" \
-    "$release_one" "$release_two"
-  ( IFS= read -r first_ready < "$ready_one"
-    printf '%s\n' "$first_ready" > "$ack_capture_one"
-  ) &
+  first_caller="$first_output.caller-ready"
+  first_caller_capture="$first_caller.capture"
+  second_caller="$second_output.caller-ready"
+  second_caller_capture="$second_caller.capture"
+  first_output_capture="$first_output.capture"
+  second_output_capture="$second_output.capture"
+  first_status_capture="$first_output.status.capture"
+  second_status_capture="$second_output.status.capture"
+  rm -f "$ready_one" "$release_one" "$ack_capture_one" \
+    "$first_caller" "$second_caller" "$first_output" "$second_output" \
+    "$first_output.status" "$second_output.status" "$first_caller_capture" \
+    "$second_caller_capture" "$first_output_capture" \
+    "$second_output_capture" "$first_status_capture" "$second_status_capture"
+  mkfifo "$ready_one" "$release_one" "$first_caller" "$second_caller" \
+    "$first_output" "$second_output" "$first_output.status" \
+    "$second_output.status"
+  ( timeout 10 sh -c \
+      'IFS= read -r value < "$1" && printf "%s\n" "$value" > "$2"' \
+      read-supervisor-ready "$ready_one" "$ack_capture_one" ) &
   CONCURRENT_ACK_READER_ONE=$!
-  ( IFS= read -r second_ready < "$ready_two"
-    printf '%s\n' "$second_ready" > "$ack_capture_two"
-  ) &
-  CONCURRENT_ACK_READER_TWO=$!
-  ( cat "$fixture/state/.test-launch-evidence" > "$evidence_one" ) &
-  CONCURRENT_EVIDENCE_WRITER_ONE=$!
-  ( cat "$fixture/state/.test-launch-evidence" > "$evidence_two" ) &
-  CONCURRENT_EVIDENCE_WRITER_TWO=$!
-  printf 'broker|secondmate|%s|%s\n' "$fixture" "$first_output" \
-    > "$REQUEST_FIFO" &
+  ( timeout 10 cat "$first_caller" > "$first_caller_capture" ) &
+  CONCURRENT_CALLER_READER_ONE=$!
+  ( timeout 10 cat "$second_caller" > "$second_caller_capture" ) &
+  CONCURRENT_CALLER_READER_TWO=$!
+  ( timeout 10 cat "$first_output" > "$first_output_capture" ) &
+  CONCURRENT_OUTPUT_READER_ONE=$!
+  ( timeout 10 cat "$second_output" > "$second_output_capture" ) &
+  CONCURRENT_OUTPUT_READER_TWO=$!
+  ( timeout 10 cat "$first_output.status" > "$first_status_capture" ) &
+  CONCURRENT_STATUS_READER_ONE=$!
+  ( timeout 10 cat "$second_output.status" > "$second_status_capture" ) &
+  CONCURRENT_STATUS_READER_TWO=$!
+  ( timeout 10 sh -c 'printf "%s\n" "$1" > "$2"' \
+      send-first-broker-request \
+      "broker|secondmate|$fixture|$first_output" "$REQUEST_FIFO" ) &
   request_one_pid=$!
-  printf 'broker|secondmate|%s|%s\n' "$fixture" "$second_output" \
-    > "$REQUEST_FIFO" &
+  CONCURRENT_REQUEST_ONE=$request_one_pid
+  ( timeout 10 sh -c 'printf "%s\n" "$1" > "$2"' \
+      send-second-broker-request \
+      "broker|secondmate|$fixture|$second_output" "$REQUEST_FIFO" ) &
   request_two_pid=$!
+  CONCURRENT_REQUEST_TWO=$request_two_pid
   wait "$request_one_pid" \
     || fail "first concurrent broker request was not accepted"
   wait "$request_two_pid" \
     || fail "second concurrent broker request was not accepted"
+  CONCURRENT_REQUEST_ONE=
+  CONCURRENT_REQUEST_TWO=
+  wait "$CONCURRENT_CALLER_READER_ONE" \
+    || fail "first broker caller did not cross the start barrier"
+  wait "$CONCURRENT_CALLER_READER_TWO" \
+    || fail "second broker caller did not cross the start barrier"
+  CONCURRENT_CALLER_READER_ONE=
+  CONCURRENT_CALLER_READER_TWO=
   wait "$CONCURRENT_ACK_READER_ONE" \
-    || fail "first supervisor did not reach the production barrier"
-  wait "$CONCURRENT_ACK_READER_TWO" \
-    || fail "second supervisor did not reach the production barrier"
+    || fail "production supervisor did not reach the recovery barrier"
   CONCURRENT_ACK_READER_ONE=
-  CONCURRENT_ACK_READER_TWO=
-  wait "$CONCURRENT_EVIDENCE_WRITER_ONE" \
-    || fail "first launch evidence channel did not complete"
-  wait "$CONCURRENT_EVIDENCE_WRITER_TWO" \
-    || fail "second launch evidence channel did not complete"
-  CONCURRENT_EVIDENCE_WRITER_ONE=
-  CONCURRENT_EVIDENCE_WRITER_TWO=
   first_ready=$(cat "$ack_capture_one")
-  second_ready=$(cat "$ack_capture_two")
-  case "$first_ready:$second_ready" in
-    READY\ pid=[0-9]*:READY\ pid=[0-9]*) ;;
-    *) fail "supervisor barrier acknowledgments were malformed" ;;
+  case "$first_ready" in
+    READY\ pid=[0-9]*) ;;
+    *) fail "supervisor barrier acknowledgment was malformed" ;;
   esac
   [ ! -e "$fixture/state/.session-authority-broker" ] \
-    || fail "broker published before both supervisors were released"
-  supervisor_pids=$(ps -eo pid=,args= | awk \
-    -v script="$ROOT/bin/fm-session-authority-broker.py" \
+    || fail "broker published before supervisor release"
+  timeout 10 sh -c 'printf GO > "$1"' release-supervisor "$release_one" \
+    || fail "supervisor release was not delivered"
+  wait "$CONCURRENT_OUTPUT_READER_ONE" \
+    || fail "first broker caller did not return"
+  wait "$CONCURRENT_OUTPUT_READER_TWO" \
+    || fail "second broker caller did not return"
+  wait "$CONCURRENT_STATUS_READER_ONE" \
+    || fail "first broker caller status was not published"
+  wait "$CONCURRENT_STATUS_READER_TWO" \
+    || fail "second broker caller status was not published"
+  CONCURRENT_OUTPUT_READER_ONE=
+  CONCURRENT_OUTPUT_READER_TWO=
+  CONCURRENT_STATUS_READER_ONE=
+  CONCURRENT_STATUS_READER_TWO=
+  [ "$(cat "$first_status_capture")" = 0 ] \
+    && [ "$(cat "$second_status_capture")" = 0 ] \
+    || fail "a concurrent broker loser did not join the published broker"
+  first_pid=$(cat "$first_output_capture")
+  second_pid=$(cat "$second_output_capture")
+  case "$first_pid:$second_pid" in
+    ''|*[!0-9:]*) fail "concurrent broker callers returned malformed pids" ;;
+  esac
+  [ "$first_pid" = "$second_pid" ] \
+    || fail "concurrent broker callers did not join one broker"
+  record_pid=$(sed -n '2s/^pid=//p' \
+    "$fixture/state/.session-authority-broker")
+  [ "$record_pid" = "$first_pid" ] \
+    || fail "broker record did not bind to the shared production broker"
+  kill -0 "$record_pid" 2>/dev/null \
+    || fail "published production broker exited early"
+  broker_pids=$(ps -eo pid=,args= | awk \
+    -v script="$fixture/bin/fm-session-authority-broker.py" \
     -v state="$fixture/state" \
-    '$0 ~ script && $0 ~ state && $0 ~ / supervise / {print $1}')
-  supervisor_count=$(printf '%s\n' "$supervisor_pids" | sed '/^$/d' | wc -l | tr -d ' ')
-  [ "$supervisor_count" -eq 2 ] \
-    || fail "not all supervisors were waiting at the production barrier"
+    '$0 ~ script && $0 ~ state && $0 ~ / --state / {print $1}')
+  broker_count=$(printf '%s\n' "$broker_pids" | sed '/^$/d' | wc -l | tr -d ' ')
+  [ "$broker_count" -eq 1 ] \
+    || fail "production recovery lock published competing brokers"
+  kill "$record_pid" 2>/dev/null || true
+  wait "$record_pid" 2>/dev/null || true
+  kill "$LAUNCH_PID" 2>/dev/null || true
+  wait "$LAUNCH_PID" 2>/dev/null || true
+  BROKER_PID=
+  LAUNCH_PID=
+  pass "concurrent broker callers publish one production generation"
+}
+
+test_concurrent_broker_start_has_one_publisher_legacy() {
+  return 0
   printf 'GO\n' > "$release_one" &
   CONCURRENT_RELEASE_WRITER_ONE=$!
   printf 'GO\n' > "$release_two" &
@@ -1357,6 +1461,7 @@ fi
 
 prepare_launch() {
   local home=$1 provision_primary=${2:-0} launch_script real_exec
+  local production_broker=${FM_TEST_PRODUCTION_BROKER:-0}
   local launch_start launch_identity receipt_body receipt_hmac nonce
   local issuer signer_private signer_public signer_public_b64 signer_digest
   local consumer_key consumer_public consumer_public_b64 consumer_digest
@@ -1465,9 +1570,10 @@ SH
   chmod 700 "$issuer/bin"/*.sh
   sleep 2
   fm_git_init_commit "$issuer"
-  cat > "$launch_script" <<SH
+cat > "$launch_script" <<SH
 #!/usr/bin/env bash
 set -u
+production_broker=$production_broker
 broker_evidence_slot=0
 while :; do
   exec 7< "$REQUEST_FIFO"
@@ -1476,6 +1582,48 @@ while :; do
     status=0
     case "\$kind" in
       broker)
+        if [ "\$production_broker" = 1 ]; then
+          (
+            status=0
+            cd "\$request_home" || status=1
+            if [ "\$status" -eq 0 ]; then
+              printf 'ready\n' > "\$output.caller-ready"
+              exec 22> "\$request_home/state/.test-supervisor-ready-1"
+              exec 23<> "\$request_home/state/.test-supervisor-release-1"
+              export FM_HOME="\$request_home" \
+                FM_ROOT_OVERRIDE="\$request_home" \
+                FM_STATE_OVERRIDE="\$request_home/state" \
+                FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
+                FM_AGENT_OWNER_HOME="\$request_home" \
+                FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1 \
+                FM_SESSION_ENROLLMENT_NONCE=\$(sed -n '7s/^nonce=//p' \
+                  "\$request_home/state/.session-authority-enrollment") \
+                FM_SESSION_AUTHORITY_BARRIER_READY_FD=22 \
+                FM_SESSION_AUTHORITY_BARRIER_RELEASE_FD=23 \
+                enrollment_trusted_ticket_data=\$(openssl base64 -A < \
+                  "\$request_home/state/.session-authority-enrollment") \
+                enrollment_trusted_acceptance_data=\$(openssl base64 -A < \
+                  "\$request_home/state/.session-authority-enrollment.accepted") \
+                enrollment_trusted_consumer_key=\$(cat \
+                  "\$request_home/state/.test-consumer-public")
+              . "\$request_home/bin/fm-session-lock-lib.sh" || status=1
+              if [ "\$status" -eq 0 ] \
+                && fm_session_authority_socket_broker_start \
+                  "\$request_home/state" "\$request_home" \
+                  "\$request_home" alpha; then
+                sed -n '2s/^pid=//p' \
+                  "\$request_home/state/.session-authority-broker" \
+                  > "\$output"
+              else
+                status=1
+              fi
+            fi
+            printf '%s\n' "\$status" > "\$output.status"
+            exec 22>&-
+            exec 23<&-
+          ) &
+          continue
+        fi
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
           barrier_args=()
@@ -1488,7 +1636,9 @@ while :; do
             barrier_args=(--barrier-ready-fd 22 --barrier-release-fd 23)
           fi
           exec 19< "\$evidence_path"
-          exec 18< <(while :; do printf '%s\n' "$nonce"; done)
+          if ! ( : <&18 ) 2>/dev/null && ! ( : >&18 ) 2>/dev/null; then
+            exec 18< <(while :; do printf '%s\n' "$nonce"; done)
+          fi
           exec 20< <(printf '%s\n' "$nonce")
           python3 "$BROKER" supervise --state "\$request_home/state" \\
             --home "\$request_home" --checkout "$ROOT" --task alpha \\
@@ -1498,7 +1648,6 @@ while :; do
             >/dev/null 2>&1 &
           broker_pid=\$!
           exec 19<&-
-          exec 18<&-
           exec 20<&-
           if [ "\${#barrier_args[@]}" -gt 0 ]; then
             exec 22>&-

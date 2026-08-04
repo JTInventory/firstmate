@@ -851,16 +851,23 @@ fm_session_authority_socket_broker_start_locked() {
   local launch_script launch_receipt launch_start launch_identity durable_fd
   local launch_key receipt_b64 enrollment_nonce enrollment_final_b64
   local trusted_ticket trusted_acceptance trusted_consumer_key
+  local durable_capability_kind=record barrier_ready_fd barrier_release_fd
+  local barrier_args=()
   script="$checkout/bin/fm-session-authority-broker.py"
   launch_script="$home/bin/fm-session-authority-exec.sh"
   launch_receipt="$state/.session-authority-launch"
   fm_session_authority_socket_broker_present && return 0
   durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   if ! fm_session_authority_durable_capability_present; then
-    [ -z "$durable_fd" ] || return 1
-    fm_session_authority_broker_bootstrap || return 1
-    durable_fd=$FM_SESSION_AUTHORITY_DURABLE_FD
-    fm_session_authority_durable_capability_present || return 1
+    if [ -n "$durable_fd" ]; then
+      fm_session_authority_inherited_durable_capability_present || return 1
+      durable_capability_kind=inherited
+    else
+      fm_session_authority_broker_bootstrap || return 1
+      durable_fd=$FM_SESSION_AUTHORITY_DURABLE_FD
+      fm_session_authority_inherited_durable_capability_present || return 1
+      durable_capability_kind=inherited
+    fi
   fi
   launch_start=$(fm_session_process_start "$$") || return 1
   launch_identity=$(fm_session_process_identity "$$") || return 1
@@ -881,7 +888,11 @@ fm_session_authority_socket_broker_start_locked() {
   fm_session_launch_receipt_validate "$launch_receipt" "$task" "$home" \
     "$$" "$launch_start" "$launch_identity" "$enrollment_nonce" || return 1
   durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
-  fm_session_authority_durable_capability_present || return 1
+  if [ "$durable_capability_kind" = record ]; then
+    fm_session_authority_durable_capability_present || return 1
+  else
+    fm_session_authority_inherited_durable_capability_present || return 1
+  fi
   IFS= read -r launch_key <&"$durable_fd" || return 1
   [ "${#launch_key}" -ge 64 ] || return 1
   case "$launch_key" in *[!0-9a-f]*) return 1 ;; esac
@@ -896,11 +907,24 @@ fm_session_authority_socket_broker_start_locked() {
     exec 19<&-
     return 1
   }
+  barrier_ready_fd=${FM_SESSION_AUTHORITY_BARRIER_READY_FD:-}
+  barrier_release_fd=${FM_SESSION_AUTHORITY_BARRIER_RELEASE_FD:-}
+  case "$barrier_ready_fd" in
+    '') ;;
+    *[!0-9]*|0|1|2|18|19|20|21) exec 19<&-; return 1 ;;
+    *) barrier_args+=(--barrier-ready-fd "$barrier_ready_fd") ;;
+  esac
+  case "$barrier_release_fd" in
+    '') ;;
+    *[!0-9]*|0|1|2|18|19|20|21) exec 19<&-; return 1 ;;
+    *) barrier_args+=(--barrier-release-fd "$barrier_release_fd") ;;
+  esac
   if command -v setsid >/dev/null 2>&1; then
     setsid python3 "$script" supervise --state "$state" --home "$home" \
       --checkout "$checkout" --task "$task" \
       --launch-evidence-fd 19 --launch-script "$launch_script" \
       --record-lock-fd 20 \
+      "${barrier_args[@]}" \
       </dev/null >/dev/null 2>&1 &
   elif command -v perl >/dev/null 2>&1; then
     perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
@@ -908,6 +932,7 @@ fm_session_authority_socket_broker_start_locked() {
       --checkout "$checkout" --task "$task" \
       --launch-evidence-fd 19 --launch-script "$launch_script" \
       --record-lock-fd 20 \
+      "${barrier_args[@]}" \
       </dev/null >/dev/null 2>&1 &
   else
     exec 19<&-
@@ -924,6 +949,20 @@ fm_session_authority_socket_broker_start_locked() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   return 1
+}
+
+fm_session_authority_inherited_durable_capability_present() {
+  local fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-} key
+  [ "${FM_AGENT_ROLE:-}" = secondmate ] || return 1
+  [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" = 1 ] || return 1
+  [ "${FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN:-}" = trusted ] || return 1
+  fm_session_authority_wrapper_provenance_present || return 1
+  [ "$fd" = 18 ] || return 1
+  fm_session_descriptor_channel_isolated 18 \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  IFS= read -r key <&18 || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
 }
 
 fm_session_authority_socket_broker_start() {
