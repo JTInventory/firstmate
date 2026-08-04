@@ -437,7 +437,7 @@ fm_session_authority_live_binding_validate() {
 }
 
 fm_session_authority_durable_record_capability_present() {
-  local home state authority checkout fd
+  local home state authority checkout fd authority_state mode=${1:-}
   fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   case "$fd" in ''|*[!0-9]*) return 1 ;; esac
   fm_session_descriptor_channel_isolated "$fd" \
@@ -451,8 +451,20 @@ fm_session_authority_durable_record_capability_present() {
   fm_session_authority_read "$authority" || return 1
   [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] || return 1
   [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$checkout" ] || return 1
-  fm_session_authority_process_state "$authority" || return 1
-  fm_session_pid_is_current_ancestor "$FM_SESSION_AUTHORITY_PID" || return 1
+  authority_state=0
+  fm_session_authority_process_state "$authority" || authority_state=$?
+  if [ "$authority_state" -eq 0 ]; then
+    fm_session_pid_is_current_ancestor "$FM_SESSION_AUTHORITY_PID" || return 1
+  elif [ "$authority_state" -eq 1 ]; then
+    [ "$mode" = rotation ] || return 1
+    kill -0 "$FM_SESSION_AUTHORITY_PID" 2>/dev/null && return 1
+    fm_session_durable_custodian_validate \
+      "$state/.session-durable-authority" \
+      && [ "$FM_SESSION_DURABLE_CUSTODIAN_HOME" = "$home" ] \
+      && [ "$FM_SESSION_DURABLE_CUSTODIAN_CHECKOUT" = "$checkout" ] || return 1
+  else
+    return 1
+  fi
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] \
     && [ "$(cat "$state/.lock" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_OWNER" ] \
     || return 1
@@ -828,32 +840,87 @@ fm_session_authority_descriptor_create() {
 }
 
 fm_session_authority_live_descriptor_rotate() {
-  local key home state authority
+  local key home state authority lock_fd= status=1
+  local owner checkout
+  local checkout_tmp lock_tmp authority_tmp live_tmp
   fm_session_authority_durable_capability_present rotation || return 1
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null; then
     return 1
   fi
   fm_session_exec_descriptor_isolation_durable || return 1
-  key=$(fm_session_random_hex 48) || return 1
-  exec 9< <(while :; do printf '%s\n' "$key"; done) || return 1
-  unset key
-  fm_session_descriptor_channel_isolated 9 || {
-    exec 9<&-
-    return 1
-  }
-  FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
-  FM_SESSION_AUTHORITY_FD=9
   home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
     2>/dev/null && pwd -P) || return 1
   state=${FM_STATE_OVERRIDE:-$home/state}
   authority="$state/.session-authority"
-  if [ -f "$authority" ] && [ ! -L "$authority" ]; then
-    fm_session_authority_live_binding_write "$state" || {
-      exec 9<&-
-      unset FM_SESSION_AUTHORITY_FD
+  if command -v flock >/dev/null 2>&1; then
+    exec {lock_fd}>"$state/.session-authority-rotation.lock" || return 1
+    flock -n "$lock_fd" || {
+      exec {lock_fd}>&-
       return 1
     }
+  else
+    return 1
   fi
+  if [ -f "$authority" ] && [ ! -L "$authority" ]; then
+    fm_session_authority_read "$authority" || {
+      exec {lock_fd}>&-
+      return 1
+    }
+    owner=$FM_SESSION_AUTHORITY_OWNER
+    checkout=$FM_SESSION_AUTHORITY_CHECKOUT
+  fi
+  key=$(fm_session_random_hex 48) || {
+    exec {lock_fd}>&-
+    return 1
+  }
+  exec 9< <(while :; do printf '%s\n' "$key"; done) || {
+    exec {lock_fd}>&-
+    return 1
+  }
+  unset key
+  fm_session_descriptor_channel_isolated 9 || {
+    exec 9<&-
+    exec {lock_fd}>&-
+    return 1
+  }
+  FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
+  FM_SESSION_AUTHORITY_FD=9
+  if [ -z "$owner" ]; then
+    status=0
+  else
+    checkout_tmp=$(mktemp "$state/.primary-checkout.XXXXXX") || status=1
+    lock_tmp=$(mktemp "$state/.lock.XXXXXX") || status=1
+    authority_tmp=$(mktemp "$state/.session-authority.XXXXXX") || status=1
+    live_tmp=$(mktemp "$state/.session-authority-live.XXXXXX") || status=1
+    if [ "$status" -eq 1 ]; then
+      rm -f "$checkout_tmp" "$lock_tmp" "$authority_tmp" "$live_tmp"
+    elif ! cp -p "$state/.primary-checkout" "$checkout_tmp" \
+      || ! cp -p "$state/.lock" "$lock_tmp" \
+      || ! fm_session_authority_write_file \
+        "$authority_tmp" "$$" "$owner" "$home" "$checkout" \
+      || ! fm_session_authority_live_binding_write \
+        "$state" "$live_tmp" "$authority_tmp"; then
+      rm -f "$checkout_tmp" "$lock_tmp" "$authority_tmp" "$live_tmp"
+      status=1
+    elif ! fm_session_authority_transaction_stage \
+        "$state" "$checkout_tmp" "$lock_tmp" "$authority_tmp" "$live_tmp" \
+      || ! fm_session_authority_transaction_commit "$state"; then
+      fm_session_authority_transaction_recover "$state" || true
+      rm -f "$checkout_tmp" "$lock_tmp" "$authority_tmp" "$live_tmp"
+      status=1
+    else
+      status=0
+    fi
+  fi
+  if [ "$status" -ne 0 ]; then
+    exec 9<&-
+    unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN
+  fi
+  exec {lock_fd}>&-
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  return 1
 }
 
 fm_session_authority_durable_descriptor_adopt() {
@@ -2268,7 +2335,7 @@ fm_session_authority_durable_capability_present() {
     '') fm_session_authority_record_capability_present || return 1 ;;
     rotation)
       [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] || return 1
-      fm_session_authority_durable_record_capability_present || return 1
+      fm_session_authority_durable_record_capability_present rotation || return 1
       ;;
     *) return 1 ;;
   esac
@@ -2320,6 +2387,334 @@ fm_session_authority_record_validate() {
   body=$(sed -n "1,$((lines - 1))p" "$file")$'\n'
   expected=$(printf '%s' "$body" | fm_session_authority_durable_hmac) || return 1
   [ "$actual" = "$expected" ]
+}
+
+fm_session_authority_transaction_file_signature() {
+  local file=$1 digest
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf '%s\n' absent
+    return
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  digest=$(fm_session_sha256_file "$file") || return 1
+  printf 'sha256:%s\n' "$digest"
+}
+
+fm_session_authority_transaction_signature_valid() {
+  local signature=$1 digest
+  [ "$signature" = absent ] && return 0
+  case "$signature" in sha256:*) digest=${signature#sha256:} ;; *) return 1 ;; esac
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+fm_session_authority_transaction_manifest_read() {
+  local state=$1 txn="$1/.session-authority-transaction"
+  local manifest="$txn/manifest" key="$txn/key" body expected signature
+  [ -d "$txn" ] && [ ! -L "$txn" ] || return 1
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  [ -f "$key" ] && [ ! -L "$key" ] || return 1
+  [ "$(wc -l < "$manifest" | tr -d ' ')" -eq 10 ] || return 1
+  [ "$(sed -n '1p' "$manifest")" = version=3 ] || return 1
+  body=$(sed -n '1,9p' "$manifest") || return 1
+  expected=$(printf '%s\n' "$body" \
+    | fm_session_hmac_sha256_key_file "$key") || return 1
+  [ "$(sed -n '10s/^hmac=//p' "$manifest")" = "$expected" ] || return 1
+  FM_SESSION_AUTHORITY_TXN_MANIFEST_HMAC=$expected
+  FM_SESSION_AUTHORITY_TXN_OLD_CHECKOUT=$(sed -n '2s/^old-checkout=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_OLD_LOCK=$(sed -n '3s/^old-lock=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_OLD_AUTHORITY=$(sed -n '4s/^old-authority=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_OLD_LIVE=$(sed -n '5s/^old-live=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT=$(sed -n '6s/^new-checkout=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_LOCK=$(sed -n '7s/^new-lock=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY=$(sed -n '8s/^new-authority=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_LIVE=$(sed -n '9s/^new-live=//p' "$manifest")
+  for signature in \
+    "$FM_SESSION_AUTHORITY_TXN_OLD_CHECKOUT" \
+    "$FM_SESSION_AUTHORITY_TXN_OLD_LOCK" \
+    "$FM_SESSION_AUTHORITY_TXN_OLD_AUTHORITY" \
+    "$FM_SESSION_AUTHORITY_TXN_OLD_LIVE" \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_LOCK" \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY" \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE"; do
+    fm_session_authority_transaction_signature_valid "$signature" || return 1
+  done
+  [ "$(fm_session_authority_transaction_file_signature \
+    "$txn/old-checkout")" = "$FM_SESSION_AUTHORITY_TXN_OLD_CHECKOUT" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$txn/old-lock")" = "$FM_SESSION_AUTHORITY_TXN_OLD_LOCK" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$txn/old-authority")" = "$FM_SESSION_AUTHORITY_TXN_OLD_AUTHORITY" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$txn/old-live")" = "$FM_SESSION_AUTHORITY_TXN_OLD_LIVE" ] || return 1
+  for signature in \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_LOCK" \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY" \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE"; do
+    [ "$signature" = absent ] || [ "${signature#sha256:}" != "$signature" ] \
+      || return 1
+  done
+}
+
+fm_session_authority_transaction_restore_file() {
+  local state=$1 snapshot=$2 destination=$3 tmp
+  if [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
+    [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
+    tmp=$(mktemp "$state/.session-authority-restore.XXXXXX") || return 1
+    chmod 600 "$tmp" && cp -p "$snapshot" "$tmp" \
+      && mv "$tmp" "$destination" || {
+      rm -f "$tmp"
+      return 1
+    }
+    [ -f "$destination" ] && [ ! -L "$destination" ] \
+      && cmp -s "$snapshot" "$destination"
+    return
+  fi
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  fi
+  rm -f "$destination" \
+    && [ ! -e "$destination" ] && [ ! -L "$destination" ]
+}
+
+fm_session_authority_transaction_restore() {
+  local state=$1 txn="$1/.session-authority-transaction"
+  fm_session_authority_transaction_restore_file \
+    "$state" "$txn/old-checkout" "$state/.primary-checkout" \
+    && fm_session_authority_transaction_restore_file \
+      "$state" "$txn/old-lock" "$state/.lock" \
+    && fm_session_authority_transaction_restore_file \
+      "$state" "$txn/old-authority" "$state/.session-authority" \
+    && fm_session_authority_transaction_restore_file \
+      "$state" "$txn/old-live" "$state/.session-authority-live"
+}
+
+fm_session_authority_transaction_recover_legacy() {
+  local state=$1 txn="$1/.session-authority-transaction"
+  local manifest="$txn/manifest" key body expected signature committed
+  local old_lock old_binding old_authority new_lock new_binding new_authority
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  [ -f "$key" ] && [ ! -L "$key" ] || return 1
+  [ "$(wc -l < "$manifest" | tr -d ' ')" -eq 8 ] || return 1
+  [ "$(sed -n '1p' "$manifest")" = version=2 ] || return 1
+  body=$(sed -n '1,7p' "$manifest") || return 1
+  expected=$(printf '%s\n' "$body" \
+    | fm_session_hmac_sha256_key_file "$key") || return 1
+  [ "$(sed -n '8s/^hmac=//p' "$manifest")" = "$expected" ] || return 1
+  old_lock=$(sed -n '2s/^old-lock=//p' "$manifest")
+  old_binding=$(sed -n '3s/^old-binding=//p' "$manifest")
+  old_authority=$(sed -n '4s/^old-authority=//p' "$manifest")
+  new_lock=$(sed -n '5s/^new-lock=//p' "$manifest")
+  new_binding=$(sed -n '6s/^new-binding=//p' "$manifest")
+  new_authority=$(sed -n '7s/^new-authority=//p' "$manifest")
+  for signature in "$old_lock" "$old_binding" "$old_authority" \
+    "$new_lock" "$new_binding" "$new_authority"; do
+    fm_session_authority_transaction_signature_valid "$signature" || return 1
+  done
+  [ "$(fm_session_authority_transaction_file_signature \
+    "$txn/old-lock")" = "$old_lock" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$txn/old-binding")" = "$old_binding" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$txn/old-authority")" = "$old_authority" ] || return 1
+  committed=$(cat "$txn/committed" 2>/dev/null || true)
+  if [ -n "$committed" ]; then
+    [ "$committed" = "manifest=$expected" ] || return 1
+    [ "$(fm_session_authority_transaction_file_signature "$state/.lock")" \
+      = "$new_lock" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.primary-checkout")" = "$new_binding" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.session-authority")" = "$new_authority" ] || return 1
+  else
+    fm_session_authority_transaction_restore_file \
+      "$state" "$txn/old-binding" "$state/.primary-checkout" \
+      && fm_session_authority_transaction_restore_file \
+        "$state" "$txn/old-authority" "$state/.session-authority" \
+      && fm_session_authority_transaction_restore_file \
+        "$state" "$txn/old-lock" "$state/.lock" || return 1
+  fi
+  rm -rf -- "$txn"
+}
+
+fm_session_authority_transaction_recover() {
+  local state=$1 txn="$1/.session-authority-transaction" committed
+  [ ! -e "$txn" ] && [ ! -L "$txn" ] && return 0
+  [ -d "$txn" ] && [ ! -L "$txn" ] || return 1
+  if [ "$(sed -n '1p' "$txn/manifest" 2>/dev/null)" = version=2 ]; then
+    fm_session_authority_transaction_recover_legacy "$state"
+    return
+  fi
+  fm_session_authority_transaction_manifest_read "$state" || return 1
+  committed=$(cat "$txn/committed" 2>/dev/null || true)
+  if [ -n "$committed" ]; then
+    [ "$committed" = \
+      "manifest=$FM_SESSION_AUTHORITY_TXN_MANIFEST_HMAC" ] || return 1
+    [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.primary-checkout")" = \
+      "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.lock")" = "$FM_SESSION_AUTHORITY_TXN_NEW_LOCK" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.session-authority")" = \
+        "$FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.session-authority-live")" = \
+        "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE" ] || return 1
+  else
+    fm_session_authority_transaction_restore "$state" || return 1
+  fi
+  rm -rf -- "$txn"
+}
+
+fm_session_authority_transaction_stage() {
+  local state=$1 checkout_tmp=$2 lock_tmp=$3 authority_tmp=$4 live_tmp=${5:-}
+  local txn txn_tmp old_checkout old_lock old_authority old_live
+  local new_checkout new_lock new_authority new_live manifest_body manifest_hmac
+  txn="$state/.session-authority-transaction"
+  [ ! -e "$txn" ] && [ ! -L "$txn" ] || return 1
+  for file in "$checkout_tmp" "$lock_tmp" "$authority_tmp"; do
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  done
+  if [ -n "$live_tmp" ]; then
+    [ -f "$live_tmp" ] && [ ! -L "$live_tmp" ] || return 1
+  fi
+  txn_tmp=$(mktemp -d "$state/.session-authority-transaction.XXXXXX") || return 1
+  chmod 700 "$txn_tmp" || { rm -rf -- "$txn_tmp"; return 1; }
+  if [ -e "$state/.primary-checkout" ] || [ -L "$state/.primary-checkout" ]; then
+    [ -f "$state/.primary-checkout" ] && [ ! -L "$state/.primary-checkout" ] \
+      && cp -p "$state/.primary-checkout" "$txn_tmp/old-checkout" || {
+      rm -rf -- "$txn_tmp"
+      return 1
+    }
+  fi
+  if [ -e "$state/.lock" ] || [ -L "$state/.lock" ]; then
+    [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] \
+      && cp -p "$state/.lock" "$txn_tmp/old-lock" || {
+      rm -rf -- "$txn_tmp"
+      return 1
+    }
+  fi
+  if [ -e "$state/.session-authority" ] || [ -L "$state/.session-authority" ]; then
+    [ -f "$state/.session-authority" ] \
+      && [ ! -L "$state/.session-authority" ] \
+      && cp -p "$state/.session-authority" "$txn_tmp/old-authority" || {
+      rm -rf -- "$txn_tmp"
+      return 1
+    }
+  fi
+  if [ -e "$state/.session-authority-live" ] \
+    || [ -L "$state/.session-authority-live" ]; then
+    [ -f "$state/.session-authority-live" ] \
+      && [ ! -L "$state/.session-authority-live" ] \
+      && cp -p "$state/.session-authority-live" "$txn_tmp/old-live" || {
+      rm -rf -- "$txn_tmp"
+      return 1
+    }
+  fi
+  cp -p "$checkout_tmp" "$txn_tmp/new-checkout" \
+    && cp -p "$lock_tmp" "$txn_tmp/new-lock" \
+    && cp -p "$authority_tmp" "$txn_tmp/new-authority" || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  [ -z "$live_tmp" ] || cp -p "$live_tmp" "$txn_tmp/new-live" || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  fm_session_random_hex 48 > "$txn_tmp/key" \
+    && chmod 600 "$txn_tmp/key" || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  old_checkout=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/old-checkout") || { rm -rf -- "$txn_tmp"; return 1; }
+  old_lock=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/old-lock") || { rm -rf -- "$txn_tmp"; return 1; }
+  old_authority=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/old-authority") || { rm -rf -- "$txn_tmp"; return 1; }
+  old_live=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/old-live") || { rm -rf -- "$txn_tmp"; return 1; }
+  new_checkout=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/new-checkout") || { rm -rf -- "$txn_tmp"; return 1; }
+  new_lock=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/new-lock") || { rm -rf -- "$txn_tmp"; return 1; }
+  new_authority=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/new-authority") || { rm -rf -- "$txn_tmp"; return 1; }
+  new_live=$(fm_session_authority_transaction_file_signature \
+    "$txn_tmp/new-live") || { rm -rf -- "$txn_tmp"; return 1; }
+  manifest_body=$(printf 'version=3\nold-checkout=%s\nold-lock=%s\nold-authority=%s\nold-live=%s\nnew-checkout=%s\nnew-lock=%s\nnew-authority=%s\nnew-live=%s\n' \
+    "$old_checkout" "$old_lock" "$old_authority" "$old_live" \
+    "$new_checkout" "$new_lock" "$new_authority" "$new_live") || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  manifest_hmac=$(printf '%s\n' "$manifest_body" \
+    | fm_session_hmac_sha256_key_file "$txn_tmp/key") || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  printf '%s\nhmac=%s\n' "$manifest_body" "$manifest_hmac" \
+    > "$txn_tmp/manifest" \
+    && chmod 600 "$txn_tmp/manifest" \
+    && printf '%s\n' ready > "$txn_tmp/ready" \
+    && chmod 600 "$txn_tmp/ready" \
+    && mv "$txn_tmp" "$txn" || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  rm -f "$checkout_tmp" "$lock_tmp" "$authority_tmp" \
+    ${live_tmp:+"$live_tmp"}
+}
+
+fm_session_authority_transaction_commit() {
+  local state=$1 txn="$1/.session-authority-transaction" commit_tmp
+  fm_session_authority_transaction_manifest_read "$state" || return 1
+  if [ "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" = absent ]; then
+    rm -f "$state/.primary-checkout" || return 1
+  else
+    [ -f "$txn/new-checkout" ] && [ ! -L "$txn/new-checkout" ] \
+      && mv "$txn/new-checkout" "$state/.primary-checkout" || return 1
+  fi
+  if [ "$FM_SESSION_AUTHORITY_TXN_NEW_LOCK" = absent ]; then
+    rm -f "$state/.lock" || return 1
+  else
+    [ -f "$txn/new-lock" ] && [ ! -L "$txn/new-lock" ] \
+      && mv "$txn/new-lock" "$state/.lock" || return 1
+  fi
+  if [ "$FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY" = absent ]; then
+    rm -f "$state/.session-authority" || return 1
+  else
+    [ -f "$txn/new-authority" ] && [ ! -L "$txn/new-authority" ] \
+      && mv "$txn/new-authority" "$state/.session-authority" || return 1
+  fi
+  if [ "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE" = absent ]; then
+    rm -f "$state/.session-authority-live" || return 1
+  else
+    [ -f "$txn/new-live" ] && [ ! -L "$txn/new-live" ] \
+      && mv "$txn/new-live" "$state/.session-authority-live" || return 1
+  fi
+  [ "$(fm_session_authority_transaction_file_signature \
+    "$state/.primary-checkout")" = \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.lock")" = "$FM_SESSION_AUTHORITY_TXN_NEW_LOCK" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.session-authority")" = \
+      "$FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.session-authority-live")" = \
+      "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE" ] || return 1
+  commit_tmp=$(mktemp "$txn/.committed.XXXXXX") || return 1
+  printf 'manifest=%s\n' "$FM_SESSION_AUTHORITY_TXN_MANIFEST_HMAC" \
+    > "$commit_tmp" && chmod 600 "$commit_tmp" \
+    && mv "$commit_tmp" "$txn/committed" || {
+    rm -f "$commit_tmp"
+    return 1
+  }
+  rm -rf -- "$txn"
 }
 
 fm_session_primary_root_path() {

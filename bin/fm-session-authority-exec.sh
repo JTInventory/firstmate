@@ -578,6 +578,10 @@ else
     }
   fi
 fi
+fm_session_authority_transaction_recover "$STATE" || {
+  echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
+  exit 1
+}
 FM_SESSION_AUTHORITY_BROKER_PID=$$
 FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
 FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
@@ -614,12 +618,13 @@ if [ "${FM_AGENT_ROLE:-}" != secondmate ] \
       "$home_real" "$bootstrap_root" \
     && fm_session_authority_live_binding_write \
       "$STATE" "$bootstrap_live_tmp" "$bootstrap_authority_tmp" \
-    && mv "$bootstrap_checkout_tmp" "$STATE/.primary-checkout" \
-    && mv "$bootstrap_lock_tmp" "$STATE/.lock" \
-    && mv "$bootstrap_authority_tmp" "$authority" \
-    && mv "$bootstrap_live_tmp" "$STATE/.session-authority-live"; then
+    && fm_session_authority_transaction_stage \
+      "$STATE" "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp" \
+      "$bootstrap_authority_tmp" "$bootstrap_live_tmp" \
+    && fm_session_authority_transaction_commit "$STATE"; then
     :
   else
+    fm_session_authority_transaction_recover "$STATE" || true
     rm -f "$bootstrap_checkout_tmp" "$bootstrap_lock_tmp" \
       "$bootstrap_authority_tmp" "$bootstrap_live_tmp" \
       "$STATE/.primary-checkout" "$STATE/.lock" "$authority" \

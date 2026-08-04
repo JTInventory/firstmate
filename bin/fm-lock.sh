@@ -73,6 +73,11 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
+fm_session_authority_transaction_recover "$STATE" || {
+  echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
+  exit 1
+}
+
 fm_session_authority_capability_present || {
   echo "error: session authority capability is missing or invalid; operate read-only until resolved" >&2
   exit 1
@@ -323,54 +328,28 @@ if ! printf '%s\n' "$ROOT_REAL" > "$BINDING_TMP" \
   echo "error: cannot bind the session lock to its primary checkout" >&2
   exit 1
 fi
-AUTH_TXN_TMP=$(mktemp -d "$STATE/.session-authority-transaction.XXXXXX") || exit 1
-chmod 700 "$AUTH_TXN_TMP" || exit 1
-[ "$OLD_LOCK_PRESENT" -eq 0 ] || cp -p "$LOCK" "$AUTH_TXN_TMP/old-lock" || exit 1
-[ "$OLD_BINDING_PRESENT" -eq 0 ] || cp -p "$BINDING" "$AUTH_TXN_TMP/old-binding" || exit 1
-[ "$OLD_AUTHORITY_PRESENT" -eq 0 ] \
-  || cp -p "$AUTHORITY" "$AUTH_TXN_TMP/old-authority" || exit 1
-fm_session_random_hex 48 > "$AUTH_TXN_TMP/key" && chmod 600 "$AUTH_TXN_TMP/key" || exit 1
-AUTH_OLD_LOCK=$(session_authority_file_signature "$AUTH_TXN_TMP/old-lock") || exit 1
-AUTH_OLD_BINDING=$(session_authority_file_signature "$AUTH_TXN_TMP/old-binding") || exit 1
-AUTH_OLD_AUTHORITY=$(session_authority_file_signature "$AUTH_TXN_TMP/old-authority") || exit 1
-AUTH_NEW_LOCK=$(session_authority_file_signature "$LOCK_TMP") || exit 1
-AUTH_NEW_BINDING=$(session_authority_file_signature "$BINDING_TMP") || exit 1
-AUTH_NEW_AUTHORITY=$(session_authority_file_signature "$AUTHORITY_TMP") || exit 1
-AUTH_MANIFEST_BODY=$(printf 'version=2\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=%s\nnew-binding=%s\nnew-authority=%s\n' \
-  "$AUTH_OLD_LOCK" "$AUTH_OLD_BINDING" "$AUTH_OLD_AUTHORITY" \
-  "$AUTH_NEW_LOCK" "$AUTH_NEW_BINDING" "$AUTH_NEW_AUTHORITY") || exit 1
-AUTH_MANIFEST_HMAC=$(printf '%s\n' "$AUTH_MANIFEST_BODY" \
-  | fm_session_hmac_sha256_key_file "$AUTH_TXN_TMP/key") || exit 1
-printf '%s\nhmac=%s\n' "$AUTH_MANIFEST_BODY" "$AUTH_MANIFEST_HMAC" \
-  > "$AUTH_TXN_TMP/manifest" || exit 1
-printf '%s\n' ready > "$AUTH_TXN_TMP/ready" && chmod 600 "$AUTH_TXN_TMP/ready" \
-  && mv "$AUTH_TXN_TMP" "$AUTH_TXN" || {
-  rm -rf -- "$AUTH_TXN_TMP"
-  exit 1
-}
-if ! mv "$BINDING_TMP" "$BINDING"; then
-  rm -f "$BINDING_TMP" "$LOCK_TMP" "$AUTHORITY_TMP"
-  echo "error: cannot bind the session lock to its primary checkout" >&2
-  exit 1
+LIVE_TMP=
+if [ -e "$STATE/.session-authority-live" ] \
+  || [ -L "$STATE/.session-authority-live" ]; then
+  [ -f "$STATE/.session-authority-live" ] \
+    && [ ! -L "$STATE/.session-authority-live" ] || exit 1
+  LIVE_TMP=$(mktemp "$STATE/.session-authority-live.XXXXXX") || exit 1
+  cp -p "$STATE/.session-authority-live" "$LIVE_TMP" || {
+    rm -f "$LIVE_TMP"
+    exit 1
+  }
 fi
-if ! mv "$AUTHORITY_TMP" "$AUTHORITY"; then
-  rm -f "$AUTHORITY_TMP" "$LOCK_TMP"
-  restore_session_authority || true
-  echo "error: cannot write session authority; operate read-only until resolved" >&2
-  exit 1
-fi
-if ! mv "$LOCK_TMP" "$LOCK"; then
-  rm -f "$LOCK_TMP"
-  restore_session_authority || true
-  echo "error: cannot write session lock; operate read-only until resolved" >&2
+if ! fm_session_authority_transaction_stage \
+    "$STATE" "$BINDING_TMP" "$LOCK_TMP" "$AUTHORITY_TMP" "$LIVE_TMP" \
+  || ! fm_session_authority_transaction_commit "$STATE"; then
+  fm_session_authority_transaction_recover "$STATE" || true
+  rm -f "$BINDING_TMP" "$LOCK_TMP" "$AUTHORITY_TMP" "$LIVE_TMP"
   exit 1
 fi
 if ! written=$(cat "$LOCK" 2>/dev/null); then
-  restore_session_authority || true
   exit 1
 fi
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
-  restore_session_authority || true
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
@@ -378,28 +357,9 @@ if ! fm_session_authority_read "$AUTHORITY" \
   || [ "$FM_SESSION_AUTHORITY_OWNER" != "$owner" ] \
   || [ "$FM_SESSION_AUTHORITY_HOME" != "$HOME_REAL" ] \
   || [ "$FM_SESSION_AUTHORITY_CHECKOUT" != "$ROOT_REAL" ]; then
-  restore_session_authority || true
   echo "error: session authority verification failed; operate read-only until resolved" >&2
   exit 1
 fi
-if [ "$(session_authority_file_signature "$LOCK")" != "$AUTH_NEW_LOCK" ] \
-  || [ "$(session_authority_file_signature "$BINDING")" != "$AUTH_NEW_BINDING" ] \
-  || [ "$(session_authority_file_signature "$AUTHORITY")" != "$AUTH_NEW_AUTHORITY" ]; then
-  restore_session_authority || true
-  echo "error: session authority publication is incomplete; operate read-only until resolved" >&2
-  exit 1
-fi
-AUTH_COMMIT_TMP=$(mktemp "$AUTH_TXN/.committed.XXXXXX") || {
-  restore_session_authority || true
-  exit 1
-}
-printf 'manifest=%s\n' "$AUTH_MANIFEST_HMAC" > "$AUTH_COMMIT_TMP" && chmod 600 "$AUTH_COMMIT_TMP" \
-  && mv "$AUTH_COMMIT_TMP" "$AUTH_TXN/committed" || {
-  rm -f "$AUTH_COMMIT_TMP"
-  restore_session_authority || true
-  exit 1
-}
-rm -rf -- "$AUTH_TXN"
 release_claim_lock
 case "$owner" in
   *'|codex:'*) echo "lock acquired: Codex session owner $owner" ;;

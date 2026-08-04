@@ -169,11 +169,27 @@ test_primary_authority_record_and_live_descriptor_binding() {
     fi
     exec 9<&-
     unset FM_SESSION_AUTHORITY_FD
-    fm_session_authority_durable_capability_present rotation || exit 1
-    fm_session_authority_live_descriptor_rotate || exit 1
-    fm_session_authority_live_binding_validate "$state" "$$" 9
+    old_pid=$$
+    export ROOT FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE \
+      FM_SESSION_AUTHORITY_DURABLE_FD=18 \
+      FM_ROTATION_RESULT="$state/rotation.result"
+    bash -c '
+      set -u
+      . "$ROOT/bin/fm-session-lock-lib.sh"
+      fm_session_authority_live_descriptor_rotate || exit 1
+      fm_session_authority_read "$FM_STATE_OVERRIDE/.session-authority" \
+        || exit 1
+      [ "$FM_SESSION_AUTHORITY_PID" = "$$" ] || exit 1
+      fm_session_authority_live_binding_validate \
+        "$FM_STATE_OVERRIDE" "$$" 9 || exit 1
+      printf "%s\n" "$$" > "$FM_ROTATION_RESULT"
+    ' 9<&- || exit 1
+    new_pid=$(cat "$state/rotation.result") || exit 1
+    [ "$new_pid" != "$old_pid" ] || exit 1
+    fm_session_authority_read "$authority" || exit 1
+    [ "$FM_SESSION_AUTHORITY_PID" = "$new_pid" ] || exit 1
   )
-  pass "durable authority records bind rewrites, rotation, and live descriptors"
+  pass "durable authority records bind rewrites and cross-process rotation"
 }
 
 test_primary_bootstrap_cleans_partial_live_binding() {
@@ -193,7 +209,7 @@ exec /bin/mv "$@"
 SH
   chmod +x "$fakebin/mv"
   set +e
-  FM_HOME="$fixture/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+  FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
     FM_TEST_BOOTSTRAP_LIVE="$state/.session-authority-live" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-session-authority-exec.sh" bash -c ':' \

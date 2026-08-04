@@ -1330,13 +1330,17 @@ test_binding_publication_is_verified_before_commit() {
     "$home/bin/fm-session-authority-exec.sh" \
       "$home/bin/fm-lock.sh" 2>&1) || status=$?
   expect_code 1 "$status" "corrupt published binding must fail before commit"
-  assert_contains "$out" "session authority publication is incomplete" \
-    "binding publication failure lost its transaction reason"
-  assert_present "$home/state/.session-authority-transaction" \
-    "binding publication failure deleted recovery evidence"
+  assert_absent "$home/state/.session-authority-transaction" \
+    "binding publication failure left transaction evidence after rollback"
   assert_absent "$home/state/.lock" \
     "binding publication failure left a new session lock installed"
-  pass "normal authority commit verifies the published binding digest"
+  assert_absent "$home/state/.primary-checkout" \
+    "binding publication failure left a checkout binding installed"
+  assert_absent "$home/state/.session-authority" \
+    "binding publication failure left session authority installed"
+  assert_absent "$home/state/.session-authority-live" \
+    "binding publication failure left a live binding installed"
+  pass "authority commit rolls back a corrupted published binding"
 }
 
 test_procargs2_parser_separates_argv_and_environment() {
