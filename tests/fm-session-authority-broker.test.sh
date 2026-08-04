@@ -85,15 +85,36 @@ terminate_owned_process() {
 }
 
 preserve_failure_evidence() {
-  local status=$1 evidence state record path base index=0
-  mkdir -p /tmp/no-mistakes-evidence 2>/dev/null || return 0
-  evidence=$(mktemp -d \
-    /tmp/no-mistakes-evidence/fm-session-authority-broker.XXXXXX \
-    2>/dev/null) || return 0
-  printf '%s\n' "$status" > "$evidence/exit-status"
-  printf '%s\n' "$CONCURRENT_FIXTURE_STATE" > "$evidence/concurrent-state"
-  printf 'pid ppid stat comm\n' > "$evidence/processes"
-  ps -eo pid=,ppid=,stat=,comm= >> "$evidence/processes" 2>/dev/null || true
+  local status=$1 parent=/tmp/no-mistakes-evidence
+  local evidence_tmp evidence state record path base index=0 tmp_name
+  mkdir -p "$parent" 2>/dev/null || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  evidence_tmp=$(mktemp -d \
+    "$parent/.fm-session-authority-broker.partial.XXXXXX" \
+    2>/dev/null) || return 1
+  if [ ! -d "$evidence_tmp" ] || [ -L "$evidence_tmp" ]; then
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  fi
+  tmp_name=$(basename -- "$evidence_tmp") || {
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  }
+  evidence="$parent/${tmp_name#.}"
+  if [ -e "$evidence" ]; then
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! {
+    printf '%s\n' "$status" > "$evidence_tmp/exit-status" \
+      && printf '%s\n' "$CONCURRENT_FIXTURE_STATE" > \
+        "$evidence_tmp/concurrent-state" \
+      && printf 'pid ppid stat comm\n' > "$evidence_tmp/processes" \
+      && ps -eo pid=,ppid=,stat=,comm= >> "$evidence_tmp/processes"
+  }; then
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  fi
   for state in "$CONCURRENT_FIXTURE_STATE" "$STATE"; do
     [ -n "$state" ] || continue
     [ -d "$state" ] || continue
@@ -102,7 +123,15 @@ preserve_failure_evidence() {
     if [ -f "$record" ] && [ ! -L "$record" ]; then
       sed -n -E \
         '/^(version|pid|start|identity|socket|home|checkout|task|script|uid|gid|launch-pid|launch-start|launch-identity|launch-script)=/p' \
-        "$record" > "$evidence/record-$index"
+        "$record" > "$evidence_tmp/record-$index" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+      [ -f "$evidence_tmp/record-$index" ] \
+        && [ ! -L "$evidence_tmp/record-$index" ] || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
     fi
     for path in \
       "$state/concurrent-broker-first" \
@@ -111,18 +140,69 @@ preserve_failure_evidence() {
       "$state/concurrent-broker-second.capture" \
       "$state/concurrent-broker-first.status.capture" \
       "$state/concurrent-broker-second.status.capture" \
+      "$state/.test-launch.log" \
+      "$state/.test-old-primary.log" \
+      "$state/.test-rotation-signer.log" \
+      "$state/.test-rotation-launch.log" \
+      "$state/.test-rotation-primary.log" \
       "$state/.test-start-barrier-ack" \
       "$state/.test-supervisor-ack-1"; do
       [ -f "$path" ] && [ ! -L "$path" ] || continue
-      base=$(basename -- "$path")
-      cp -- "$path" "$evidence/state-$index-$base" 2>/dev/null || true
+      base=$(basename -- "$path") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      if [[ "$base" == *.log ]]; then
+        sed \
+          -e "s|$TMP_ROOT|<fixture>|g" \
+          -e 's|-----BEGIN [^-]*-----|[redacted-key]|g' \
+          -e 's|-----END [^-]*-----|[redacted-key]|g' \
+          -e 's/[A-Za-z0-9+/=]\{80,\}/[redacted]/g' \
+          "$path" > "$evidence_tmp/state-$index-$base" || {
+            rm -rf -- "$evidence_tmp" 2>/dev/null || true
+            return 1
+          }
+      else
+        cp -- "$path" "$evidence_tmp/state-$index-$base" 2>/dev/null || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+      fi
+      [ -f "$evidence_tmp/state-$index-$base" ] \
+        && [ ! -L "$evidence_tmp/state-$index-$base" ] || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
     done
   done
+  printf 'complete\n' > "$evidence_tmp/complete" || {
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  }
+  [ -f "$evidence_tmp/complete" ] && [ ! -L "$evidence_tmp/complete" ] || {
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  }
+  mv -- "$evidence_tmp" "$evidence" || {
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  }
+  [ -d "$evidence" ] && [ ! -L "$evidence" ] \
+    && [ -f "$evidence/complete" ] && [ ! -L "$evidence/complete" ] || {
+      rm -rf -- "$evidence" 2>/dev/null || true
+      return 1
+    }
 }
 
 cleanup() {
-  local exit_status=$?
-  [ "$exit_status" -eq 0 ] || preserve_failure_evidence "$exit_status"
+  local exit_status=$? evidence_status=0
+  if [ "$exit_status" -ne 0 ] \
+    && ! preserve_failure_evidence "$exit_status"; then
+    evidence_status=1
+    printf '%s\n' \
+      'fm-session-authority-broker: failure evidence preservation failed; fixture retained' \
+      >&2
+  fi
   [ -z "$BROKER_PID" ] || kill_owned_process_tree "$BROKER_PID"
   reap_concurrent_broker
   [ -z "$LAUNCH_PID" ] || kill_owned_process_tree "$LAUNCH_PID"
@@ -172,7 +252,14 @@ cleanup() {
   done
   FM_TEST_AUTHORITY_BROKER_PIDS=()
   reap_concurrent_broker
-  fm_test_cleanup || true
+  if [ "$evidence_status" -eq 0 ]; then
+    fm_test_cleanup || true
+  else
+    printf '%s\n' \
+      'fm-session-authority-broker: cleanup skipped because fixture evidence was not captured' \
+      >&2
+  fi
+  [ "$evidence_status" -eq 0 ] || return 1
   return "$exit_status"
 }
 trap cleanup EXIT
@@ -619,9 +706,27 @@ test_concurrent_broker_start_has_one_publisher() {
       'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
       read-start-barrier-2 "$start_ready_two" 2 "$start_ack_result" ) &
   CONCURRENT_CALLER_READER_TWO=$!
-  ( timeout 10 sh -c \
-      'exec 9< "$1" && IFS= read -r first <&9 && IFS= read -r second <&9 && printf "%s\n%s\n" "$first" "$second" > "$2"' \
-      collect-start-barriers "$start_ack_result" "$start_ack_capture" ) &
+  (
+    LC_ALL=C timeout 10 awk -F '|' '
+      {
+        if (NF != 2 || ($1 != "1" && $1 != "2") ||
+            $2 !~ /^CONTEND pid=[0-9]+$/ || seen[$1]) {
+          invalid = 1
+          next
+        }
+        seen[$1] = 1
+        line[$1] = $0
+        count++
+      }
+      END {
+        if (invalid || count != 2 || !seen[1] || !seen[2]) {
+          exit 1
+        }
+        print line[1]
+        print line[2]
+      }
+    ' "$start_ack_result" > "$start_ack_capture"
+  ) &
   CONCURRENT_START_ACK_COLLECTOR=$!
   ( timeout 10 sh -c \
       'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
@@ -696,12 +801,12 @@ test_concurrent_broker_start_has_one_publisher() {
     1)
       wait "$CONCURRENT_ACK_READER_ONE" \
         || fail "first production supervisor acknowledgment failed"
-      terminate_owned_process "$CONCURRENT_ACK_READER_TWO"
+      kill_owned_process_tree "$CONCURRENT_ACK_READER_TWO"
       ;;
     2)
       wait "$CONCURRENT_ACK_READER_TWO" \
         || fail "second production supervisor acknowledgment failed"
-      terminate_owned_process "$CONCURRENT_ACK_READER_ONE"
+      kill_owned_process_tree "$CONCURRENT_ACK_READER_ONE"
       ;;
     *) fail "supervisor barrier acknowledgment named an invalid caller" ;;
   esac
