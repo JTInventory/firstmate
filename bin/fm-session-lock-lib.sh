@@ -1578,17 +1578,22 @@ fm_session_durable_custodian_candidate_challenge() {
 fm_session_durable_custodian_ensure_locked() {
   local state=$1 home=$2 checkout=$3 record script session session_start pid
   local attempts=0 log launch start identity private public output digest key
-  local launch_ready_path launch_ready_fd launch_ready
+  local launch_ready_parent_path launch_ready_child_path
+  local launch_ready_parent_fd launch_ready_child_fd launch_ready
   fm_session_durable_launch_ready_close() {
-    local ready_fd=$1 ready_path=$2
-    case "$ready_fd" in
+    local parent_fd=$1 child_fd=$2 parent_path=$3 child_path=$4
+    case "$parent_fd" in
       ''|*[!0-9]*) ;;
-      *) exec {ready_fd}>&- 2>/dev/null || true ;;
+      *) exec {parent_fd}>&- 2>/dev/null || true ;;
     esac
-    if [ -n "$ready_path" ] && [ -p "$ready_path" ] \
-      && [ ! -L "$ready_path" ]; then
-      rm -f "$ready_path"
-    fi
+    case "$child_fd" in
+      ''|*[!0-9]*) ;;
+      *) exec {child_fd}<&- 2>/dev/null || true ;;
+    esac
+    for ready_path in "$parent_path" "$child_path"; do
+      [ -n "$ready_path" ] && [ -p "$ready_path" ] \
+        && [ ! -L "$ready_path" ] && rm -f "$ready_path"
+    done
   }
   record="$state/.session-durable-authority"
   script="$checkout/bin/fm-session-durable-authority.sh"
@@ -1659,52 +1664,71 @@ fm_session_durable_custodian_ensure_locked() {
     exec 17<&-
     return 1
   }
-  launch_ready_path="${record}.ready.$$"
-  if [ -e "$launch_ready_path" ] || [ -L "$launch_ready_path" ]; then
-    [ -p "$launch_ready_path" ] && [ ! -L "$launch_ready_path" ] \
-      && rm -f "$launch_ready_path" || {
-      exec 17<&-
-      return 1
-    }
-  fi
-  mkfifo "$launch_ready_path" && chmod 600 "$launch_ready_path" || {
-    fm_session_durable_launch_ready_close "" "$launch_ready_path"
+  launch_ready_parent_path="${record}.ready-parent.$$"
+  launch_ready_child_path="${record}.ready-child.$$"
+  for launch_ready_path in "$launch_ready_parent_path" "$launch_ready_child_path"; do
+    if [ -e "$launch_ready_path" ] || [ -L "$launch_ready_path" ]; then
+      [ -p "$launch_ready_path" ] && [ ! -L "$launch_ready_path" ] \
+        && rm -f "$launch_ready_path" || {
+        exec 17<&-
+        return 1
+      }
+    fi
+  done
+  mkfifo "$launch_ready_parent_path" "$launch_ready_child_path" \
+    && chmod 600 "$launch_ready_parent_path" "$launch_ready_child_path" || {
+    fm_session_durable_launch_ready_close "" "" \
+      "$launch_ready_parent_path" "$launch_ready_child_path"
     exec 17<&-
     return 1
   }
-  exec {launch_ready_fd}<>"$launch_ready_path" || {
-    fm_session_durable_launch_ready_close "" "$launch_ready_path"
+  exec {launch_ready_parent_fd}<>"$launch_ready_parent_path" || {
+    fm_session_durable_launch_ready_close "" "" \
+      "$launch_ready_parent_path" "$launch_ready_child_path"
+    exec 17<&-
+    return 1
+  }
+  exec {launch_ready_child_fd}<>"$launch_ready_child_path" || {
+    fm_session_durable_launch_ready_close \
+      "$launch_ready_parent_fd" "" \
+      "$launch_ready_parent_path" "$launch_ready_child_path"
     exec 17<&-
     return 1
   }
   log="$state/.session-durable-authority.log"
   if command -v setsid >/dev/null 2>&1; then
-    setsid "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
-      --broker-pid "$FM_SESSION_AUTHORITY_BROKER_PID" \
-      --broker-start "$FM_SESSION_AUTHORITY_BROKER_START" \
-      --broker-identity "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
-      --broker-script "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
-      --custodian-public-key "$public" \
-      --custodian-public-key-sha256 "$digest" \
-      --launch-ready-fd "$launch_ready_fd" \
-      --launch-ready-path "$launch_ready_path" \
-      </dev/null >>"$log" 2>&1 &
+    (
+      exec {launch_ready_parent_fd}>&-
+      exec {launch_ready_child_fd}>&-
+      exec setsid "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
+        --broker-pid "$FM_SESSION_AUTHORITY_BROKER_PID" \
+        --broker-start "$FM_SESSION_AUTHORITY_BROKER_START" \
+        --broker-identity "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
+        --broker-script "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
+        --custodian-public-key "$public" \
+        --custodian-public-key-sha256 "$digest" \
+        --launch-ready-input "$launch_ready_parent_path" \
+        --launch-ready-output "$launch_ready_child_path"
+    ) </dev/null >>"$log" 2>&1 &
   elif command -v perl >/dev/null 2>&1; then
-    perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
-      "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
-      --broker-pid "$FM_SESSION_AUTHORITY_BROKER_PID" \
-      --broker-start "$FM_SESSION_AUTHORITY_BROKER_START" \
-      --broker-identity "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
-      --broker-script "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
-      --custodian-public-key "$public" \
-      --custodian-public-key-sha256 "$digest" \
-      --launch-ready-fd "$launch_ready_fd" \
-      --launch-ready-path "$launch_ready_path" \
-      </dev/null >>"$log" 2>&1 &
+    (
+      exec {launch_ready_parent_fd}>&-
+      exec {launch_ready_child_fd}>&-
+      exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
+        "$script" "$state" "$home" "$checkout" "$session" "$session_start" \
+        --broker-pid "$FM_SESSION_AUTHORITY_BROKER_PID" \
+        --broker-start "$FM_SESSION_AUTHORITY_BROKER_START" \
+        --broker-identity "$FM_SESSION_AUTHORITY_BROKER_IDENTITY" \
+        --broker-script "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
+        --custodian-public-key "$public" \
+        --custodian-public-key-sha256 "$digest" \
+        --launch-ready-input "$launch_ready_parent_path" \
+        --launch-ready-output "$launch_ready_child_path"
+    ) </dev/null >>"$log" 2>&1 &
   else
     fm_session_durable_launch_ready_close \
-      "$launch_ready_fd" "$launch_ready_path"
-    exec {launch_ready_fd}<&-
+      "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+      "$launch_ready_parent_path" "$launch_ready_child_path"
     exec 17<&-
     return 1
   fi
@@ -1719,7 +1743,8 @@ fm_session_durable_custodian_ensure_locked() {
     && start=$(fm_session_process_start "$pid") \
     && identity=$(fm_session_process_identity "$pid") || {
       fm_session_durable_launch_ready_close \
-        "$launch_ready_fd" "$launch_ready_path"
+        "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+        "$launch_ready_parent_path" "$launch_ready_child_path"
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       exec 17<&-
@@ -1727,9 +1752,10 @@ fm_session_durable_custodian_ensure_locked() {
     }
   attempts=0
   launch="${record}.launch.$pid"
-  IFS= read -r launch_ready <&"$launch_ready_fd" || {
+  IFS= read -r launch_ready <&"$launch_ready_child_fd" || {
     fm_session_durable_launch_ready_close \
-      "$launch_ready_fd" "$launch_ready_path"
+      "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+      "$launch_ready_parent_path" "$launch_ready_child_path"
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     exec 17<&-
@@ -1737,7 +1763,8 @@ fm_session_durable_custodian_ensure_locked() {
   }
   [ "$launch_ready" = opened ] || {
     fm_session_durable_launch_ready_close \
-      "$launch_ready_fd" "$launch_ready_path"
+      "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+      "$launch_ready_parent_path" "$launch_ready_child_path"
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     exec 17<&-
@@ -1751,24 +1778,27 @@ fm_session_durable_custodian_ensure_locked() {
     "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" \
     || {
       fm_session_durable_launch_ready_close \
-        "$launch_ready_fd" "$launch_ready_path"
+        "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+        "$launch_ready_parent_path" "$launch_ready_child_path"
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       rm -f "$launch"
       exec 17<&-
       return 1
     }
-  printf 'ready\n' >&"$launch_ready_fd" || {
+  printf 'ready\n' >&"$launch_ready_parent_fd" || {
     fm_session_durable_launch_ready_close \
-      "$launch_ready_fd" "$launch_ready_path"
+      "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+      "$launch_ready_parent_path" "$launch_ready_child_path"
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     rm -f "$launch"
     exec 17<&-
     return 1
   }
-  fm_session_durable_launch_ready_close "$launch_ready_fd" \
-    "$launch_ready_path"
+  fm_session_durable_launch_ready_close \
+    "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+    "$launch_ready_parent_path" "$launch_ready_child_path"
   while [ "$attempts" -lt 100 ]; do
     if fm_session_durable_custodian_validate "$record" \
       && [ "$FM_SESSION_DURABLE_CUSTODIAN_PID" = "$pid" ] \
@@ -1788,8 +1818,9 @@ fm_session_durable_custodian_ensure_locked() {
     sleep 0.02
     attempts=$((attempts + 1))
   done
-  fm_session_durable_launch_ready_close "$launch_ready_fd" \
-    "$launch_ready_path"
+  fm_session_durable_launch_ready_close \
+    "$launch_ready_parent_fd" "$launch_ready_child_fd" \
+    "$launch_ready_parent_path" "$launch_ready_child_path"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   rm -f "$launch"
