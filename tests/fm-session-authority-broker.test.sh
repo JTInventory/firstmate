@@ -87,6 +87,7 @@ terminate_owned_process() {
 preserve_failure_evidence() {
   local status=$1 parent=/tmp/no-mistakes-evidence
   local evidence_tmp evidence state record path base index=0 tmp_name
+  local value state_suffix scan_status
   mkdir -p "$parent" 2>/dev/null || return 1
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   evidence_tmp=$(mktemp -d \
@@ -105,10 +106,31 @@ preserve_failure_evidence() {
     rm -rf -- "$evidence_tmp" 2>/dev/null || true
     return 1
   fi
+  if [ -n "$CONCURRENT_FIXTURE_STATE" ]; then
+    case "$CONCURRENT_FIXTURE_STATE" in
+      "$TMP_ROOT"|"$TMP_ROOT"/*)
+        state_suffix=${CONCURRENT_FIXTURE_STATE#"$TMP_ROOT"}
+        printf '<fixture>%s\n' "$state_suffix" > \
+          "$evidence_tmp/concurrent-state" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      *)
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+        ;;
+    esac
+  else
+    printf '\n' > "$evidence_tmp/concurrent-state" || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
+  fi
   if ! {
     printf '%s\n' "$status" > "$evidence_tmp/exit-status" \
-      && printf '%s\n' "$CONCURRENT_FIXTURE_STATE" > \
-        "$evidence_tmp/concurrent-state" \
+      && [ -f "$evidence_tmp/concurrent-state" ] \
+      && [ ! -L "$evidence_tmp/concurrent-state" ] \
       && printf 'pid ppid stat comm\n' > "$evidence_tmp/processes" \
       && ps -eo pid=,ppid=,stat=,comm= >> "$evidence_tmp/processes"
   }; then
@@ -122,7 +144,8 @@ preserve_failure_evidence() {
     record="$state/.session-authority-broker"
     if [ -f "$record" ] && [ ! -L "$record" ]; then
       sed -n -E \
-        '/^(version|pid|start|identity|socket|home|checkout|task|script|uid|gid|launch-pid|launch-start|launch-identity|launch-script)=/p' \
+        -e "s|$TMP_ROOT|<fixture>|g" \
+        -e '/^(version|pid|start|identity|socket|home|checkout|task|script|uid|gid|launch-pid|launch-start|launch-identity|launch-script)=/p' \
         "$record" > "$evidence_tmp/record-$index" || {
           rm -rf -- "$evidence_tmp" 2>/dev/null || true
           return 1
@@ -140,11 +163,6 @@ preserve_failure_evidence() {
       "$state/concurrent-broker-second.capture" \
       "$state/concurrent-broker-first.status.capture" \
       "$state/concurrent-broker-second.status.capture" \
-      "$state/.test-launch.log" \
-      "$state/.test-old-primary.log" \
-      "$state/.test-rotation-signer.log" \
-      "$state/.test-rotation-launch.log" \
-      "$state/.test-rotation-primary.log" \
       "$state/.test-start-barrier-ack" \
       "$state/.test-supervisor-ack-1"; do
       [ -f "$path" ] && [ ! -L "$path" ] || continue
@@ -152,22 +170,80 @@ preserve_failure_evidence() {
         rm -rf -- "$evidence_tmp" 2>/dev/null || true
         return 1
       }
-      if [[ "$base" == *.log ]]; then
-        sed \
-          -e "s|$TMP_ROOT|<fixture>|g" \
-          -e 's|-----BEGIN [^-]*-----|[redacted-key]|g' \
-          -e 's|-----END [^-]*-----|[redacted-key]|g' \
-          -e 's/[A-Za-z0-9+/=]\{80,\}/[redacted]/g' \
-          "$path" > "$evidence_tmp/state-$index-$base" || {
+      case "$base" in
+        concurrent-broker-first|concurrent-broker-second|\
+        concurrent-broker-first.capture|concurrent-broker-second.capture|\
+        concurrent-broker-first.status.capture|\
+        concurrent-broker-second.status.capture)
+          value=$(cat -- "$path") || {
             rm -rf -- "$evidence_tmp" 2>/dev/null || true
             return 1
           }
-      else
-        cp -- "$path" "$evidence_tmp/state-$index-$base" 2>/dev/null || {
-          rm -rf -- "$evidence_tmp" 2>/dev/null || true
-          return 1
-        }
-      fi
+          case "$value" in
+            ''|*[!0-9]*)
+              rm -rf -- "$evidence_tmp" 2>/dev/null || true
+              return 1
+              ;;
+          esac
+          printf '%s\n' "$value" > \
+            "$evidence_tmp/state-$index-$base" || {
+            rm -rf -- "$evidence_tmp" 2>/dev/null || true
+            return 1
+          }
+          ;;
+        .test-start-barrier-ack)
+          awk -F '|' '
+            {
+              if (NF != 2 || ($1 != "1" && $1 != "2") ||
+                  $2 !~ /^CONTEND pid=[0-9]+$/ || seen[$1]) {
+                invalid = 1
+                next
+              }
+              seen[$1] = 1
+              line[$1] = $0
+              count++
+            }
+            END {
+              if (invalid || count != 2 || !seen[1] || !seen[2]) {
+                exit 1
+              }
+              print line[1]
+              print line[2]
+            }
+          ' "$path" > "$evidence_tmp/state-$index-$base" || {
+            rm -rf -- "$evidence_tmp" 2>/dev/null || true
+            return 1
+          }
+          ;;
+        .test-supervisor-ack-1)
+          awk '
+            NR == 1 {
+              if ($0 !~ /^[12]$/) invalid = 1
+              slot = $0
+              next
+            }
+            NR == 2 {
+              if ($0 !~ /^READY pid=[0-9]+$/) invalid = 1
+              ready = $0
+              next
+            }
+            { invalid = 1 }
+            END {
+              if (invalid || NR != 2 || slot == "" || ready == "") {
+                exit 1
+              }
+              print slot
+              print ready
+            }
+          ' "$path" > "$evidence_tmp/state-$index-$base" || {
+            rm -rf -- "$evidence_tmp" 2>/dev/null || true
+            return 1
+          }
+          ;;
+        *)
+          continue
+          ;;
+      esac
       [ -f "$evidence_tmp/state-$index-$base" ] \
         && [ ! -L "$evidence_tmp/state-$index-$base" ] || {
           rm -rf -- "$evidence_tmp" 2>/dev/null || true
@@ -183,6 +259,14 @@ preserve_failure_evidence() {
     rm -rf -- "$evidence_tmp" 2>/dev/null || true
     return 1
   }
+  grep -R -E -I -i -n \
+    -e '-----BEGIN|-----END|private[-_]?key|public[-_]?key|consumer[-_]?key|enrollment|nonce|token|secret|authority-hmac|signature' \
+    "$evidence_tmp" >/dev/null 2>&1
+  scan_status=$?
+  if [ "$scan_status" -eq 0 ] || [ "$scan_status" -gt 1 ]; then
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  fi
   mv -- "$evidence_tmp" "$evidence" || {
     rm -rf -- "$evidence_tmp" 2>/dev/null || true
     return 1
@@ -650,7 +734,8 @@ test_concurrent_broker_start_has_one_publisher() {
   local broker_pids broker_count record_pid
   local request_one_pid request_two_pid ready_one ready_two release_one release_two
   local start_ready_one start_ready_two start_release_one start_release_two
-  local start_ack_capture start_ack_result start_ack_one start_ack_two
+  local start_ack_capture start_ack_result_one start_ack_result_two
+  local start_ack_one start_ack_two
   local ack_capture_one ack_result winner_slot winner_ready release_path
   local first_output_capture second_output_capture
   local first_status_capture second_status_capture
@@ -674,7 +759,8 @@ test_concurrent_broker_start_has_one_publisher() {
   start_release_one="$fixture/state/.test-start-barrier-release-1"
   start_release_two="$fixture/state/.test-start-barrier-release-2"
   start_ack_capture="$fixture/state/.test-start-barrier-ack"
-  start_ack_result="$fixture/state/.test-start-barrier-result"
+  start_ack_result_one="$fixture/state/.test-start-barrier-result-1"
+  start_ack_result_two="$fixture/state/.test-start-barrier-result-2"
   ready_one="$fixture/state/.test-supervisor-ready-1"
   ready_two="$fixture/state/.test-supervisor-ready-2"
   release_one="$fixture/state/.test-supervisor-release-1"
@@ -687,46 +773,48 @@ test_concurrent_broker_start_has_one_publisher() {
   second_status_capture="$second_output.status.capture"
   rm -f "$start_ready_one" "$start_ready_two" \
     "$start_release_one" "$start_release_two" "$start_ack_capture" \
-    "$start_ack_result" "$ready_one" "$ready_two" "$release_one" \
+    "$start_ack_result_one" "$start_ack_result_two" \
+    "$ready_one" "$ready_two" "$release_one" \
     "$release_two" "$ack_capture_one" "$ack_result" "$first_output" \
     "$second_output" "$first_output.status" "$second_output.status" \
     "$first_output_capture" \
     "$second_output_capture" "$first_status_capture" "$second_status_capture"
   mkfifo "$start_ready_one" "$start_ready_two" \
-    "$start_release_one" "$start_release_two" "$start_ack_result" \
+    "$start_release_one" "$start_release_two" \
+    "$start_ack_result_one" "$start_ack_result_two" \
     "$ready_one" "$ready_two" "$release_one" "$release_two" \
     "$ack_result" \
     "$first_output" "$second_output" "$first_output.status" \
     "$second_output.status"
   ( timeout 10 sh -c \
       'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
-      read-start-barrier-1 "$start_ready_one" 1 "$start_ack_result" ) &
+      read-start-barrier-1 "$start_ready_one" 1 "$start_ack_result_one" ) &
   CONCURRENT_CALLER_READER_ONE=$!
   ( timeout 10 sh -c \
       'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
-      read-start-barrier-2 "$start_ready_two" 2 "$start_ack_result" ) &
+      read-start-barrier-2 "$start_ready_two" 2 "$start_ack_result_two" ) &
   CONCURRENT_CALLER_READER_TWO=$!
-  (
-    LC_ALL=C timeout 10 awk -F '|' '
-      {
-        if (NF != 2 || ($1 != "1" && $1 != "2") ||
-            $2 !~ /^CONTEND pid=[0-9]+$/ || seen[$1]) {
-          invalid = 1
-          next
-        }
-        seen[$1] = 1
-        line[$1] = $0
-        count++
-      }
-      END {
-        if (invalid || count != 2 || !seen[1] || !seen[2]) {
-          exit 1
-        }
-        print line[1]
-        print line[2]
-      }
-    ' "$start_ack_result" > "$start_ack_capture"
-  ) &
+  ( timeout 10 sh -c '
+      exec 9< "$1" || exit 1
+      IFS= read -r first <&9 || exit 1
+      if IFS= read -r extra <&9; then exit 1; fi
+      exec 9<&-
+      exec 8< "$2" || exit 1
+      IFS= read -r second <&8 || exit 1
+      if IFS= read -r extra <&8; then exit 1; fi
+      case "$first" in
+        1\|CONTEND\ pid=*) first_pid=${first#*pid=} ;;
+        *) exit 1 ;;
+      esac
+      case "$second" in
+        2\|CONTEND\ pid=*) second_pid=${second#*pid=} ;;
+        *) exit 1 ;;
+      esac
+      case "$first_pid" in ""|*[!0-9]*) exit 1 ;; esac
+      case "$second_pid" in ""|*[!0-9]*) exit 1 ;; esac
+      printf "%s\n%s\n" "$first" "$second" > "$3"
+    ' collect-start-barriers "$start_ack_result_one" \
+      "$start_ack_result_two" "$start_ack_capture" ) &
   CONCURRENT_START_ACK_COLLECTOR=$!
   ( timeout 10 sh -c \
       'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
