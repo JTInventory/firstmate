@@ -84,10 +84,50 @@ terminate_owned_process() {
   wait "$pid" 2>/dev/null || true
 }
 
+evidence_validate_decimal() {
+  local value=$1 max_length=${2:-10}
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#value}" -le "$max_length" ]
+}
+
+evidence_validate_generation() {
+  [[ "$1" =~ ^proc:[0-9]{1,20}$ ]]
+}
+
+evidence_validate_text() {
+  local value=$1
+  [ -n "$value" ] && [ "${#value}" -le 4096 ] || return 1
+  if LC_ALL=C printf '%s' "$value" | LC_ALL=C grep -q '[^[:print:]]'; then
+    return 1
+  fi
+}
+
+evidence_sha256() {
+  local value=$1 digest
+  digest=$(printf '%s' "$value" | sha256sum 2>/dev/null) || return 1
+  digest=${digest%% *}
+  case "$digest" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#digest}" -eq 64 ] || return 1
+  printf '%s\n' "$digest"
+}
+
 preserve_failure_evidence() {
   local status=$1 parent=/tmp/no-mistakes-evidence
   local evidence_tmp evidence state record path base index=0 tmp_name
-  local value state_suffix scan_status
+  local value state_suffix scan_status line key seen_keys record_count record_invalid
+  local record_version record_pid record_start record_identity record_socket
+  local record_home record_checkout record_task record_script record_uid
+  local record_gid record_launch_pid record_launch_start record_launch_identity
+  local record_launch_script record_state_label
+  local record_identity_hash record_socket_hash record_home_hash
+  local record_checkout_hash record_task_hash record_script_hash
+  local record_launch_identity_hash record_launch_script_hash known_secret
+  local bundle_file bundle_base
+  evidence_validate_decimal "$status" 3 || return 1
   mkdir -p "$parent" 2>/dev/null || return 1
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   evidence_tmp=$(mktemp -d \
@@ -107,22 +147,16 @@ preserve_failure_evidence() {
     return 1
   fi
   if [ -n "$CONCURRENT_FIXTURE_STATE" ]; then
-    case "$CONCURRENT_FIXTURE_STATE" in
-      "$TMP_ROOT"|"$TMP_ROOT"/*)
-        state_suffix=${CONCURRENT_FIXTURE_STATE#"$TMP_ROOT"}
-        printf '<fixture>%s\n' "$state_suffix" > \
-          "$evidence_tmp/concurrent-state" || {
-          rm -rf -- "$evidence_tmp" 2>/dev/null || true
-          return 1
-        }
-        ;;
-      *)
-        rm -rf -- "$evidence_tmp" 2>/dev/null || true
-        return 1
-        ;;
-    esac
+    [ "$CONCURRENT_FIXTURE_STATE" = "$TMP_ROOT/state" ] || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
+    printf '<fixture>/state\n' > "$evidence_tmp/concurrent-state" || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
   else
-    printf '\n' > "$evidence_tmp/concurrent-state" || {
+    printf 'none\n' > "$evidence_tmp/concurrent-state" || {
       rm -rf -- "$evidence_tmp" 2>/dev/null || true
       return 1
     }
@@ -131,30 +165,196 @@ preserve_failure_evidence() {
     printf '%s\n' "$status" > "$evidence_tmp/exit-status" \
       && [ -f "$evidence_tmp/concurrent-state" ] \
       && [ ! -L "$evidence_tmp/concurrent-state" ] \
-      && printf 'pid ppid stat comm\n' > "$evidence_tmp/processes" \
-      && ps -eo pid=,ppid=,stat=,comm= >> "$evidence_tmp/processes"
+      && printf 'pid ppid stat\n' > "$evidence_tmp/processes" \
+      && ps -eo pid=,ppid=,stat= \
+        | awk '
+          $1 !~ /^[0-9]{1,10}$/ ||
+          $2 !~ /^[0-9]{1,10}$/ ||
+          $3 !~ /^[[:alnum:]_+<>=~-]{1,8}$/ { exit 1 }
+          { print $1, $2, $3 }
+        ' >> "$evidence_tmp/processes"
   }; then
     rm -rf -- "$evidence_tmp" 2>/dev/null || true
     return 1
   fi
   for state in "$CONCURRENT_FIXTURE_STATE" "$STATE"; do
     [ -n "$state" ] || continue
+    case "$state" in
+      "$TMP_ROOT"|"$TMP_ROOT"/*) ;;
+      *)
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+        ;;
+    esac
     [ -d "$state" ] || continue
+    [ ! -L "$state" ] || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
+    state_suffix=${state#"$TMP_ROOT"}
+    [[ "$state_suffix" =~ ^(/[A-Za-z0-9._-]+)+$ ]] \
+      && [ "${#state_suffix}" -le 512 ] || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
+    record_state_label="<fixture>$state_suffix"
     index=$((index + 1))
     record="$state/.session-authority-broker"
-    if [ -f "$record" ] && [ ! -L "$record" ]; then
-      sed -n -E \
-        -e "s|$TMP_ROOT|<fixture>|g" \
-        -e '/^(version|pid|start|identity|socket|home|checkout|task|script|uid|gid|launch-pid|launch-start|launch-identity|launch-script)=/p' \
-        "$record" > "$evidence_tmp/record-$index" || {
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      [ -f "$record" ] && [ ! -L "$record" ] || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      [ "$(wc -c < "$record")" -le 8192 ] || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_version= record_pid= record_start= record_identity=
+      record_socket= record_home= record_checkout= record_task=
+      record_script= record_uid= record_gid= record_launch_pid=
+      record_launch_start= record_launch_identity= record_launch_script=
+      seen_keys= record_count=0 record_invalid=0
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          *=*)
+            key=${line%%=*}
+            value=${line#*=}
+            ;;
+          *)
+            record_invalid=1
+            continue
+            ;;
+        esac
+        case "$key" in
+          version|pid|start|identity|socket|home|checkout|task|script|uid|gid|launch-pid|launch-start|launch-identity|launch-script)
+            case "|$seen_keys|" in
+              *"|$key|"*)
+                record_invalid=1
+                continue
+                ;;
+            esac
+            seen_keys="$seen_keys|$key"
+            record_count=$((record_count + 1))
+            case "$key" in
+              version) record_version=$value ;;
+              pid) record_pid=$value ;;
+              start) record_start=$value ;;
+              identity) record_identity=$value ;;
+              socket) record_socket=$value ;;
+              home) record_home=$value ;;
+              checkout) record_checkout=$value ;;
+              task) record_task=$value ;;
+              script) record_script=$value ;;
+              uid) record_uid=$value ;;
+              gid) record_gid=$value ;;
+              launch-pid) record_launch_pid=$value ;;
+              launch-start) record_launch_start=$value ;;
+              launch-identity) record_launch_identity=$value ;;
+              launch-script) record_launch_script=$value ;;
+            esac
+            ;;
+          *)
+            record_invalid=1
+            ;;
+        esac
+      done < "$record"
+      [ "$record_invalid" -eq 0 ] && [ "$record_count" -eq 15 ] \
+        && [ "$record_version" = 1 ] \
+        && evidence_validate_decimal "$record_pid" \
+        && evidence_validate_decimal "$record_uid" \
+        && evidence_validate_decimal "$record_gid" \
+        && evidence_validate_decimal "$record_launch_pid" \
+        && evidence_validate_generation "$record_start" \
+        && evidence_validate_generation "$record_launch_start" \
+        && evidence_validate_text "$record_identity" \
+        && evidence_validate_text "$record_socket" \
+        && evidence_validate_text "$record_home" \
+        && evidence_validate_text "$record_checkout" \
+        && evidence_validate_text "$record_task" \
+        && evidence_validate_text "$record_script" \
+        && evidence_validate_text "$record_launch_identity" \
+        && evidence_validate_text "$record_launch_script" || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      case "$record_identity" in exe:/*) ;; *)
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+        ;; esac
+      case "$record_launch_identity" in exe:/*) ;; *)
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+        ;; esac
+      case "$record_home:$record_checkout:$record_script:$record_launch_script" in
+        /*:/*:/*:/*) ;;
+        *)
           rm -rf -- "$evidence_tmp" 2>/dev/null || true
           return 1
-        }
+          ;;
+      esac
+      case "$record_socket" in abstract:*|/*) ;; *)
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+        ;; esac
+      record_identity_hash=$(evidence_sha256 "$record_identity") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_socket_hash=$(evidence_sha256 "$record_socket") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_home_hash=$(evidence_sha256 "$record_home") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_checkout_hash=$(evidence_sha256 "$record_checkout") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_task_hash=$(evidence_sha256 "$record_task") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_script_hash=$(evidence_sha256 "$record_script") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_launch_identity_hash=$(evidence_sha256 "$record_launch_identity") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      record_launch_script_hash=$(evidence_sha256 "$record_launch_script") || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
+      {
+        printf 'status=record-present\n'
+        printf 'version=1\n'
+        printf 'pid=%s\n' "$record_pid"
+        printf 'start=%s\n' "$record_start"
+        printf 'launch-pid=%s\n' "$record_launch_pid"
+        printf 'launch-start=%s\n' "$record_launch_start"
+        printf 'uid=%s\n' "$record_uid"
+        printf 'gid=%s\n' "$record_gid"
+        printf 'state=%s\n' "$record_state_label"
+        printf 'identity-sha256=%s\n' "$record_identity_hash"
+        printf 'socket-sha256=%s\n' "$record_socket_hash"
+        printf 'home-sha256=%s\n' "$record_home_hash"
+        printf 'checkout-sha256=%s\n' "$record_checkout_hash"
+        printf 'task-sha256=%s\n' "$record_task_hash"
+        printf 'script-sha256=%s\n' "$record_script_hash"
+        printf 'launch-identity-sha256=%s\n' "$record_launch_identity_hash"
+        printf 'launch-script-sha256=%s\n' "$record_launch_script_hash"
+      } > "$evidence_tmp/record-$index" || {
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
       [ -f "$evidence_tmp/record-$index" ] \
         && [ ! -L "$evidence_tmp/record-$index" ] || {
-          rm -rf -- "$evidence_tmp" 2>/dev/null || true
-          return 1
-        }
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+      }
     fi
     for path in \
       "$state/concurrent-broker-first" \
@@ -259,6 +459,144 @@ preserve_failure_evidence() {
     rm -rf -- "$evidence_tmp" 2>/dev/null || true
     return 1
   }
+  while IFS= read -r bundle_file; do
+    [ -f "$bundle_file" ] && [ ! -L "$bundle_file" ] || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
+    bundle_base=${bundle_file##*/}
+    case "$bundle_base" in
+      concurrent-state)
+        awk 'NR == 1 && ($0 == "none" ||
+          $0 ~ /^<fixture>(\/[A-Za-z0-9._-]+)+$/) { valid = 1 }
+          NR > 1 { invalid = 1 }
+          END { exit !(valid && !invalid) }' "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      exit-status)
+        awk 'NR == 1 && $0 ~ /^[0-9][0-9]*$/ && length($0) <= 3 { valid = 1 }
+          NR > 1 { invalid = 1 }
+          END { exit !(valid && !invalid) }' "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      processes)
+        awk 'NR == 1 && $0 == "pid ppid stat" { next }
+          NR == 1 { invalid = 1; next }
+          $1 !~ /^[0-9][0-9]*$/ || length($1) > 10 ||
+          $2 !~ /^[0-9][0-9]*$/ || length($2) > 10 ||
+          $3 !~ /^[[:alnum:]_+<>=~-]+$/ || length($3) > 8 { invalid = 1 }
+          END { exit invalid }' "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      record-[1-9]|record-[1-9][0-9]*)
+        awk -F '=' '
+          BEGIN {
+            expected["status"] = 1
+            expected["version"] = 1
+            expected["pid"] = 1
+            expected["start"] = 1
+            expected["launch-pid"] = 1
+            expected["launch-start"] = 1
+            expected["uid"] = 1
+            expected["gid"] = 1
+            expected["state"] = 1
+            expected["identity-sha256"] = 1
+            expected["socket-sha256"] = 1
+            expected["home-sha256"] = 1
+            expected["checkout-sha256"] = 1
+            expected["task-sha256"] = 1
+            expected["script-sha256"] = 1
+            expected["launch-identity-sha256"] = 1
+            expected["launch-script-sha256"] = 1
+          }
+          {
+            if (NF != 2 || !($1 in expected) || seen[$1]++) {
+              invalid = 1
+              next
+            }
+            if ($1 == "status" && $2 != "record-present") invalid = 1
+            if ($1 == "version" && $2 != "1") invalid = 1
+            if ($1 ~ /(^|-)pid$/ &&
+                ($2 !~ /^[0-9][0-9]*$/ || length($2) > 10)) invalid = 1
+            if ($1 ~ /(^|-)start$/ &&
+                ($2 !~ /^proc:[0-9][0-9]*$/ || length($2) > 25)) invalid = 1
+            if ($1 == "state" &&
+                $2 !~ /^<fixture>(\/[A-Za-z0-9._-]+)+$/) invalid = 1
+            if ($1 ~ /-sha256$/ &&
+                ($2 !~ /^[0-9a-f][0-9a-f]*$/ || length($2) != 64)) invalid = 1
+            count++
+          }
+          END {
+            for (key in expected) if (!(key in seen)) invalid = 1
+            if (count != 17) invalid = 1
+            exit invalid
+          }' "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      state-*-concurrent-broker-first|state-*-concurrent-broker-second|\
+      state-*-concurrent-broker-first.capture|state-*-concurrent-broker-second.capture|\
+      state-*-concurrent-broker-first.status.capture|\
+      state-*-concurrent-broker-second.status.capture)
+        awk 'NR == 1 && $0 ~ /^[0-9][0-9]*$/ && length($0) <= 10 { valid = 1 }
+          NR > 1 { invalid = 1 }
+          END { exit !(valid && !invalid) }' "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      state-*.test-start-barrier-ack)
+        awk -F '|' '
+          {
+            if (NF != 2 || ($1 != "1" && $1 != "2") ||
+                $2 !~ /^CONTEND pid=[0-9][0-9]*$/ || seen[$1]++) {
+              invalid = 1
+            }
+            count++
+          }
+          END {
+            if (invalid || count != 2 || !seen[1] || !seen[2]) exit 1
+          }' "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      state-*.test-supervisor-ack-1)
+        awk 'NR == 1 && $0 ~ /^[12]$/ { slot = $0; next }
+          NR == 2 && $0 ~ /^READY pid=[0-9][0-9]*$/ { ready = 1; next }
+          { invalid = 1 }
+          END { exit !(NR == 2 && slot != "" && ready && !invalid) }' \
+          "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      complete)
+        [ "$(cat -- "$bundle_file")" = complete ] || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      *)
+        rm -rf -- "$evidence_tmp" 2>/dev/null || true
+        return 1
+        ;;
+    esac
+  done < <(find "$evidence_tmp" -maxdepth 1 -type f -print)
+  for known_secret in "${BROKER_KEY:-}" "${ROTATION_DURABLE_KEY:-}"; do
+    [ -n "$known_secret" ] || continue
+    if grep -R -F -I -n -- "$known_secret" "$evidence_tmp" >/dev/null 2>&1; then
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    fi
+  done
   grep -R -E -I -i -n \
     -e '-----BEGIN|-----END|private[-_]?key|public[-_]?key|consumer[-_]?key|enrollment|nonce|token|secret|authority-hmac|signature' \
     "$evidence_tmp" >/dev/null 2>&1
