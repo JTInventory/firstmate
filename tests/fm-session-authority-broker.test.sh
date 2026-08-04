@@ -23,6 +23,7 @@ CONCURRENT_EVIDENCE_WRITER_TWO=
 CONCURRENT_ACK_READER_ONE=
 CONCURRENT_ACK_READER_TWO=
 CONCURRENT_ACK_COLLECTOR=
+CONCURRENT_START_ACK_COLLECTOR=
 CONCURRENT_RELEASE_WRITER_ONE=
 CONCURRENT_RELEASE_WRITER_TWO=
 CONCURRENT_REQUEST_ONE=
@@ -68,83 +69,111 @@ reap_concurrent_broker() {
   CONCURRENT_PUBLISHED_BROKER_PID=
 }
 
+terminate_owned_process() {
+  local pid=$1
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  kill -TERM "$pid" 2>/dev/null || true
+  if timeout 5 tail --pid="$pid" -f /dev/null 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    return 0
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  timeout 5 tail --pid="$pid" -f /dev/null 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+preserve_failure_evidence() {
+  local status=$1 evidence state record path base index=0
+  mkdir -p /tmp/no-mistakes-evidence 2>/dev/null || return 0
+  evidence=$(mktemp -d \
+    /tmp/no-mistakes-evidence/fm-session-authority-broker.XXXXXX \
+    2>/dev/null) || return 0
+  printf '%s\n' "$status" > "$evidence/exit-status"
+  printf '%s\n' "$CONCURRENT_FIXTURE_STATE" > "$evidence/concurrent-state"
+  printf 'pid ppid stat comm\n' > "$evidence/processes"
+  ps -eo pid=,ppid=,stat=,comm= >> "$evidence/processes" 2>/dev/null || true
+  for state in "$CONCURRENT_FIXTURE_STATE" "$STATE"; do
+    [ -n "$state" ] || continue
+    [ -d "$state" ] || continue
+    index=$((index + 1))
+    record="$state/.session-authority-broker"
+    if [ -f "$record" ] && [ ! -L "$record" ]; then
+      sed -n -E \
+        '/^(version|pid|start|identity|socket|home|checkout|task|script|uid|gid|launch-pid|launch-start|launch-identity|launch-script)=/p' \
+        "$record" > "$evidence/record-$index"
+    fi
+    for path in \
+      "$state/concurrent-broker-first" \
+      "$state/concurrent-broker-second" \
+      "$state/concurrent-broker-first.capture" \
+      "$state/concurrent-broker-second.capture" \
+      "$state/concurrent-broker-first.status.capture" \
+      "$state/concurrent-broker-second.status.capture" \
+      "$state/.test-start-barrier-ack" \
+      "$state/.test-supervisor-ack-1"; do
+      [ -f "$path" ] && [ ! -L "$path" ] || continue
+      base=$(basename -- "$path")
+      cp -- "$path" "$evidence/state-$index-$base" 2>/dev/null || true
+    done
+  done
+}
+
 cleanup() {
-  [ -z "$BROKER_PID" ] || kill "$BROKER_PID" 2>/dev/null || true
-  [ -z "$BROKER_PID" ] || wait "$BROKER_PID" 2>/dev/null || true
+  local exit_status=$?
+  [ "$exit_status" -eq 0 ] || preserve_failure_evidence "$exit_status"
+  [ -z "$BROKER_PID" ] || kill_owned_process_tree "$BROKER_PID"
   reap_concurrent_broker
   [ -z "$LAUNCH_PID" ] || kill_owned_process_tree "$LAUNCH_PID"
-  [ -z "$SIGNER_PID" ] || kill "$SIGNER_PID" 2>/dev/null || true
-  [ -z "$SIGNER_PID" ] || wait "$SIGNER_PID" 2>/dev/null || true
-  [ -z "$PRIMARY_PID" ] || kill "$PRIMARY_PID" 2>/dev/null || true
-  [ -z "$PRIMARY_PID" ] || wait "$PRIMARY_PID" 2>/dev/null || true
-  [ -z "$PRIMARY_HARNESS_PID" ] || kill "$PRIMARY_HARNESS_PID" 2>/dev/null || true
-  [ -z "$PRIMARY_HARNESS_PID" ] || wait "$PRIMARY_HARNESS_PID" 2>/dev/null || true
-  [ -z "$ROTATION_PRIMARY_SETUP_PID" ] || kill "$ROTATION_PRIMARY_SETUP_PID" 2>/dev/null || true
-  [ -z "$ROTATION_PRIMARY_SETUP_PID" ] || wait "$ROTATION_PRIMARY_SETUP_PID" 2>/dev/null || true
-  [ -z "$ROTATION_CUSTODIAN_PID" ] || kill "$ROTATION_CUSTODIAN_PID" 2>/dev/null || true
-  [ -z "$ROTATION_CUSTODIAN_PID" ] || wait "$ROTATION_CUSTODIAN_PID" 2>/dev/null || true
+  [ -z "$SIGNER_PID" ] || kill_owned_process_tree "$SIGNER_PID"
+  [ -z "$PRIMARY_PID" ] || kill_owned_process_tree "$PRIMARY_PID"
+  [ -z "$PRIMARY_HARNESS_PID" ] \
+    || kill_owned_process_tree "$PRIMARY_HARNESS_PID"
+  [ -z "$ROTATION_PRIMARY_SETUP_PID" ] \
+    || kill_owned_process_tree "$ROTATION_PRIMARY_SETUP_PID"
+  [ -z "$ROTATION_CUSTODIAN_PID" ] \
+    || kill_owned_process_tree "$ROTATION_CUSTODIAN_PID"
   [ -z "$CONCURRENT_EVIDENCE_WRITER_ONE" ] \
-    || kill "$CONCURRENT_EVIDENCE_WRITER_ONE" 2>/dev/null || true
-  [ -z "$CONCURRENT_EVIDENCE_WRITER_ONE" ] \
-    || wait "$CONCURRENT_EVIDENCE_WRITER_ONE" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_EVIDENCE_WRITER_ONE"
   [ -z "$CONCURRENT_EVIDENCE_WRITER_TWO" ] \
-    || kill "$CONCURRENT_EVIDENCE_WRITER_TWO" 2>/dev/null || true
-  [ -z "$CONCURRENT_EVIDENCE_WRITER_TWO" ] \
-    || wait "$CONCURRENT_EVIDENCE_WRITER_TWO" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_EVIDENCE_WRITER_TWO"
   [ -z "$CONCURRENT_ACK_READER_ONE" ] \
-    || kill "$CONCURRENT_ACK_READER_ONE" 2>/dev/null || true
-  [ -z "$CONCURRENT_ACK_READER_ONE" ] \
-    || wait "$CONCURRENT_ACK_READER_ONE" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_ACK_READER_ONE"
   [ -z "$CONCURRENT_ACK_READER_TWO" ] \
-    || kill "$CONCURRENT_ACK_READER_TWO" 2>/dev/null || true
-  [ -z "$CONCURRENT_ACK_READER_TWO" ] \
-    || wait "$CONCURRENT_ACK_READER_TWO" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_ACK_READER_TWO"
   [ -z "$CONCURRENT_ACK_COLLECTOR" ] \
-    || kill "$CONCURRENT_ACK_COLLECTOR" 2>/dev/null || true
-  [ -z "$CONCURRENT_ACK_COLLECTOR" ] \
-    || wait "$CONCURRENT_ACK_COLLECTOR" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_ACK_COLLECTOR"
+  [ -z "$CONCURRENT_START_ACK_COLLECTOR" ] \
+    || kill_owned_process_tree "$CONCURRENT_START_ACK_COLLECTOR"
   [ -z "$CONCURRENT_RELEASE_WRITER_ONE" ] \
-    || kill "$CONCURRENT_RELEASE_WRITER_ONE" 2>/dev/null || true
-  [ -z "$CONCURRENT_RELEASE_WRITER_ONE" ] \
-    || wait "$CONCURRENT_RELEASE_WRITER_ONE" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_RELEASE_WRITER_ONE"
   [ -z "$CONCURRENT_RELEASE_WRITER_TWO" ] \
-    || kill "$CONCURRENT_RELEASE_WRITER_TWO" 2>/dev/null || true
-  [ -z "$CONCURRENT_RELEASE_WRITER_TWO" ] \
-    || wait "$CONCURRENT_RELEASE_WRITER_TWO" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_RELEASE_WRITER_TWO"
   [ -z "$CONCURRENT_REQUEST_ONE" ] \
-    || kill "$CONCURRENT_REQUEST_ONE" 2>/dev/null || true
-  [ -z "$CONCURRENT_REQUEST_ONE" ] \
-    || wait "$CONCURRENT_REQUEST_ONE" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_REQUEST_ONE"
   [ -z "$CONCURRENT_REQUEST_TWO" ] \
-    || kill "$CONCURRENT_REQUEST_TWO" 2>/dev/null || true
-  [ -z "$CONCURRENT_REQUEST_TWO" ] \
-    || wait "$CONCURRENT_REQUEST_TWO" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_REQUEST_TWO"
   [ -z "$CONCURRENT_CALLER_READER_ONE" ] \
-    || kill "$CONCURRENT_CALLER_READER_ONE" 2>/dev/null || true
-  [ -z "$CONCURRENT_CALLER_READER_ONE" ] \
-    || wait "$CONCURRENT_CALLER_READER_ONE" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_CALLER_READER_ONE"
   [ -z "$CONCURRENT_CALLER_READER_TWO" ] \
-    || kill "$CONCURRENT_CALLER_READER_TWO" 2>/dev/null || true
-  [ -z "$CONCURRENT_CALLER_READER_TWO" ] \
-    || wait "$CONCURRENT_CALLER_READER_TWO" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_CALLER_READER_TWO"
   [ -z "$CONCURRENT_OUTPUT_READER_ONE" ] \
-    || kill "$CONCURRENT_OUTPUT_READER_ONE" 2>/dev/null || true
-  [ -z "$CONCURRENT_OUTPUT_READER_ONE" ] \
-    || wait "$CONCURRENT_OUTPUT_READER_ONE" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_OUTPUT_READER_ONE"
   [ -z "$CONCURRENT_OUTPUT_READER_TWO" ] \
-    || kill "$CONCURRENT_OUTPUT_READER_TWO" 2>/dev/null || true
-  [ -z "$CONCURRENT_OUTPUT_READER_TWO" ] \
-    || wait "$CONCURRENT_OUTPUT_READER_TWO" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_OUTPUT_READER_TWO"
   [ -z "$CONCURRENT_STATUS_READER_ONE" ] \
-    || kill "$CONCURRENT_STATUS_READER_ONE" 2>/dev/null || true
-  [ -z "$CONCURRENT_STATUS_READER_ONE" ] \
-    || wait "$CONCURRENT_STATUS_READER_ONE" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_STATUS_READER_ONE"
   [ -z "$CONCURRENT_STATUS_READER_TWO" ] \
-    || kill "$CONCURRENT_STATUS_READER_TWO" 2>/dev/null || true
-  [ -z "$CONCURRENT_STATUS_READER_TWO" ] \
-    || wait "$CONCURRENT_STATUS_READER_TWO" 2>/dev/null || true
+    || kill_owned_process_tree "$CONCURRENT_STATUS_READER_TWO"
+  for pid in "${FM_TEST_AUTHORITY_BROKER_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
+    kill_owned_process_tree "$pid"
+  done
+  FM_TEST_AUTHORITY_BROKER_PIDS=()
   reap_concurrent_broker
   fm_test_cleanup || true
+  return "$exit_status"
 }
 trap cleanup EXIT
 
@@ -153,8 +182,7 @@ kill_owned_process_tree() {
   for child in $(ps -eo pid=,ppid= | awk -v parent="$root" '$2 == parent {print $1}'); do
     kill_owned_process_tree "$child"
   done
-  kill "$root" 2>/dev/null || true
-  wait "$root" 2>/dev/null || true
+  terminate_owned_process "$root"
 }
 
 test_process_start() {
@@ -534,8 +562,9 @@ test_concurrent_broker_start_has_one_publisher() {
   local fixture first_output second_output first_pid second_pid
   local broker_pids broker_count record_pid
   local request_one_pid request_two_pid ready_one ready_two release_one release_two
+  local start_ready_one start_ready_two start_release_one start_release_two
+  local start_ack_capture start_ack_result start_ack_one start_ack_two
   local ack_capture_one ack_result winner_slot winner_ready release_path
-  local first_caller first_caller_capture second_caller second_caller_capture
   local first_output_capture second_output_capture
   local first_status_capture second_status_capture
   fixture=$(fm_test_tmproot fm-concurrent-broker-start)
@@ -553,30 +582,47 @@ test_concurrent_broker_start_has_one_publisher() {
   chmod 700 "$fixture/bin"/*.sh "$fixture/bin/fm-session-authority-broker.py"
   first_output="$fixture/state/concurrent-broker-first"
   second_output="$fixture/state/concurrent-broker-second"
+  start_ready_one="$fixture/state/.test-start-barrier-ready-1"
+  start_ready_two="$fixture/state/.test-start-barrier-ready-2"
+  start_release_one="$fixture/state/.test-start-barrier-release-1"
+  start_release_two="$fixture/state/.test-start-barrier-release-2"
+  start_ack_capture="$fixture/state/.test-start-barrier-ack"
+  start_ack_result="$fixture/state/.test-start-barrier-result"
   ready_one="$fixture/state/.test-supervisor-ready-1"
   ready_two="$fixture/state/.test-supervisor-ready-2"
   release_one="$fixture/state/.test-supervisor-release-1"
   release_two="$fixture/state/.test-supervisor-release-2"
   ack_capture_one="$fixture/state/.test-supervisor-ack-1"
   ack_result="$fixture/state/.test-supervisor-ack-result"
-  first_caller="$first_output.caller-ready"
-  first_caller_capture="$first_caller.capture"
-  second_caller="$second_output.caller-ready"
-  second_caller_capture="$second_caller.capture"
   first_output_capture="$first_output.capture"
   second_output_capture="$second_output.capture"
   first_status_capture="$first_output.status.capture"
   second_status_capture="$second_output.status.capture"
-  rm -f "$ready_one" "$ready_two" "$release_one" "$release_two" \
-    "$ack_capture_one" "$ack_result" \
-    "$first_caller" "$second_caller" "$first_output" "$second_output" \
-    "$first_output.status" "$second_output.status" "$first_caller_capture" \
-    "$second_caller_capture" "$first_output_capture" \
+  rm -f "$start_ready_one" "$start_ready_two" \
+    "$start_release_one" "$start_release_two" "$start_ack_capture" \
+    "$start_ack_result" "$ready_one" "$ready_two" "$release_one" \
+    "$release_two" "$ack_capture_one" "$ack_result" "$first_output" \
+    "$second_output" "$first_output.status" "$second_output.status" \
+    "$first_output_capture" \
     "$second_output_capture" "$first_status_capture" "$second_status_capture"
-  mkfifo "$ready_one" "$ready_two" "$release_one" "$release_two" \
-    "$ack_result" "$first_caller" "$second_caller" \
+  mkfifo "$start_ready_one" "$start_ready_two" \
+    "$start_release_one" "$start_release_two" "$start_ack_result" \
+    "$ready_one" "$ready_two" "$release_one" "$release_two" \
+    "$ack_result" \
     "$first_output" "$second_output" "$first_output.status" \
     "$second_output.status"
+  ( timeout 10 sh -c \
+      'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
+      read-start-barrier-1 "$start_ready_one" 1 "$start_ack_result" ) &
+  CONCURRENT_CALLER_READER_ONE=$!
+  ( timeout 10 sh -c \
+      'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
+      read-start-barrier-2 "$start_ready_two" 2 "$start_ack_result" ) &
+  CONCURRENT_CALLER_READER_TWO=$!
+  ( timeout 10 sh -c \
+      'exec 9< "$1" && IFS= read -r first <&9 && IFS= read -r second <&9 && printf "%s\n%s\n" "$first" "$second" > "$2"' \
+      collect-start-barriers "$start_ack_result" "$start_ack_capture" ) &
+  CONCURRENT_START_ACK_COLLECTOR=$!
   ( timeout 10 sh -c \
       'IFS= read -r value < "$1" && printf "%s|%s\n" "$2" "$value" > "$3"' \
       read-supervisor-ready-1 "$ready_one" 1 "$ack_result" ) &
@@ -589,10 +635,6 @@ test_concurrent_broker_start_has_one_publisher() {
       'IFS="|" read -r slot value < "$1" && printf "%s\n%s\n" "$slot" "$value" > "$2"' \
       collect-supervisor-ready "$ack_result" "$ack_capture_one" ) &
   CONCURRENT_ACK_COLLECTOR=$!
-  ( timeout 10 cat "$first_caller" > "$first_caller_capture" ) &
-  CONCURRENT_CALLER_READER_ONE=$!
-  ( timeout 10 cat "$second_caller" > "$second_caller_capture" ) &
-  CONCURRENT_CALLER_READER_TWO=$!
   ( timeout 10 cat "$first_output" > "$first_output_capture" ) &
   CONCURRENT_OUTPUT_READER_ONE=$!
   ( timeout 10 cat "$second_output" > "$second_output_capture" ) &
@@ -618,28 +660,48 @@ test_concurrent_broker_start_has_one_publisher() {
   CONCURRENT_REQUEST_ONE=
   CONCURRENT_REQUEST_TWO=
   wait "$CONCURRENT_CALLER_READER_ONE" \
-    || fail "first broker caller did not cross the start barrier"
+    || fail "first broker caller did not reach recovery-lock contention"
   wait "$CONCURRENT_CALLER_READER_TWO" \
-    || fail "second broker caller did not cross the start barrier"
+    || fail "second broker caller did not reach recovery-lock contention"
   CONCURRENT_CALLER_READER_ONE=
   CONCURRENT_CALLER_READER_TWO=
-  wait "$CONCURRENT_ACK_COLLECTOR" \
-    || fail "production supervisor did not reach the recovery barrier"
-  CONCURRENT_ACK_COLLECTOR=
+  wait "$CONCURRENT_START_ACK_COLLECTOR" \
+    || fail "concurrent callers did not reach recovery-lock contention"
+  CONCURRENT_START_ACK_COLLECTOR=
+  start_ack_one=$(sed -n '1p' "$start_ack_capture")
+  start_ack_two=$(sed -n '2p' "$start_ack_capture")
+  case "$start_ack_one" in
+    1\|CONTEND\ pid=[0-9]*) ;;
+    *) fail "first caller did not acknowledge recovery-lock contention" ;;
+  esac
+  case "$start_ack_two" in
+    2\|CONTEND\ pid=[0-9]*) ;;
+    *) fail "second caller did not acknowledge recovery-lock contention" ;;
+  esac
+  ( timeout 10 sh -c 'printf "GO\n" > "$1"' \
+      release-start-barrier-1 "$start_release_one" ) &
+  CONCURRENT_RELEASE_WRITER_ONE=$!
+  ( timeout 10 sh -c 'printf "GO\n" > "$1"' \
+      release-start-barrier-2 "$start_release_two" ) &
+  CONCURRENT_RELEASE_WRITER_TWO=$!
+  wait "$CONCURRENT_RELEASE_WRITER_ONE" \
+    || fail "first recovery-lock barrier release was not delivered"
+  wait "$CONCURRENT_RELEASE_WRITER_TWO" \
+    || fail "second recovery-lock barrier release was not delivered"
+  CONCURRENT_RELEASE_WRITER_ONE=
+  CONCURRENT_RELEASE_WRITER_TWO=
   winner_slot=$(sed -n '1p' "$ack_capture_one")
   winner_ready=$(sed -n '2p' "$ack_capture_one")
   case "$winner_slot" in
     1)
       wait "$CONCURRENT_ACK_READER_ONE" \
         || fail "first production supervisor acknowledgment failed"
-      kill "$CONCURRENT_ACK_READER_TWO" 2>/dev/null || true
-      wait "$CONCURRENT_ACK_READER_TWO" 2>/dev/null || true
+      terminate_owned_process "$CONCURRENT_ACK_READER_TWO"
       ;;
     2)
       wait "$CONCURRENT_ACK_READER_TWO" \
         || fail "second production supervisor acknowledgment failed"
-      kill "$CONCURRENT_ACK_READER_ONE" 2>/dev/null || true
-      wait "$CONCURRENT_ACK_READER_ONE" 2>/dev/null || true
+      terminate_owned_process "$CONCURRENT_ACK_READER_ONE"
       ;;
     *) fail "supervisor barrier acknowledgment named an invalid caller" ;;
   esac
@@ -694,8 +756,7 @@ test_concurrent_broker_start_has_one_publisher() {
     || fail "production recovery lock published competing brokers"
   CONCURRENT_PUBLISHED_BROKER_PID=$record_pid
   reap_concurrent_broker
-  kill "$LAUNCH_PID" 2>/dev/null || true
-  wait "$LAUNCH_PID" 2>/dev/null || true
+  terminate_owned_process "$LAUNCH_PID"
   BROKER_PID=
   LAUNCH_PID=
   CONCURRENT_FIXTURE_STATE=
@@ -1595,7 +1656,12 @@ while :; do
             esac
             cd "\$request_home" || status=1
             if [ "\$status" -eq 0 ]; then
-              printf 'ready\n' > "\$output.caller-ready"
+              exec 24> "\$request_home/state/.test-start-barrier-ready-\$slot" \
+                || status=1
+              exec 25<> "\$request_home/state/.test-start-barrier-release-\$slot" \
+                || status=1
+            fi
+            if [ "\$status" -eq 0 ]; then
               exec 22> "\$request_home/state/.test-supervisor-ready-\$slot"
               exec 23<> "\$request_home/state/.test-supervisor-release-\$slot"
               export FM_HOME="\$request_home" \
@@ -1604,6 +1670,8 @@ while :; do
                 FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
                 FM_AGENT_OWNER_HOME="\$request_home" \
                 FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1 \
+                FM_SESSION_AUTHORITY_START_BARRIER_READY_FD=24 \
+                FM_SESSION_AUTHORITY_START_BARRIER_RELEASE_FD=25 \
                 FM_SESSION_ENROLLMENT_NONCE=\$(sed -n '7s/^nonce=//p' \
                   "\$request_home/state/.session-authority-enrollment") \
                 FM_SESSION_AUTHORITY_BARRIER_READY_FD=22 \
@@ -1627,6 +1695,8 @@ while :; do
               fi
             fi
             printf '%s\n' "\$status" > "\$output.status"
+            exec 24>&-
+            exec 25<&-
             exec 22>&-
             exec 23<&-
           ) &

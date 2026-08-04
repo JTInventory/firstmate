@@ -967,7 +967,8 @@ fm_session_authority_inherited_durable_capability_present() {
 
 fm_session_authority_socket_broker_start() {
   local state=$1 home=$2 checkout=$3 task=$4 script record launch_script
-  local attempts=0 status recovery_lock
+  local attempts=0 status recovery_lock barrier_ready_fd barrier_release_fd
+  local barrier_release barrier_signaled=0
   script="$checkout/bin/fm-session-authority-broker.py"
   record="$state/.session-authority-broker"
   launch_script="$home/bin/fm-session-authority-exec.sh"
@@ -982,8 +983,26 @@ fm_session_authority_socket_broker_start() {
     || return 1
   fm_session_authority_load_wake_lib || return 1
   recovery_lock="$state/.session-authority-broker-recovery.lock"
+  barrier_ready_fd=${FM_SESSION_AUTHORITY_START_BARRIER_READY_FD:-}
+  barrier_release_fd=${FM_SESSION_AUTHORITY_START_BARRIER_RELEASE_FD:-}
+  case "$barrier_ready_fd" in
+    '') [ -z "$barrier_release_fd" ] || return 1 ;;
+    *[!0-9]*|0|1|2|18|19|20|21) return 1 ;;
+  esac
+  case "$barrier_release_fd" in
+    '') [ -z "$barrier_ready_fd" ] || return 1 ;;
+    *[!0-9]*|0|1|2|18|19|20|21) return 1 ;;
+  esac
+  [ -z "$barrier_ready_fd" ] || [ "$barrier_ready_fd" != "$barrier_release_fd" ] \
+    || return 1
   while [ "$attempts" -lt 100 ]; do
     fm_session_authority_socket_broker_present && return 0
+    if [ "$barrier_signaled" -eq 0 ] && [ -n "$barrier_ready_fd" ]; then
+      printf 'CONTEND pid=%s\n' "$BASHPID" >&"$barrier_ready_fd" || return 1
+      IFS= read -r barrier_release <&"$barrier_release_fd" || return 1
+      [ "$barrier_release" = GO ] || return 1
+      barrier_signaled=1
+    fi
     if fm_lock_try_acquire "$recovery_lock"; then
       status=1
       if fm_session_authority_socket_broker_present; then
