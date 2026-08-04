@@ -1128,8 +1128,19 @@ def install_capability_bytes(data: bytes) -> None:
             os.close(read_fd)
 
 
+def write_supervisor_barrier_signal(fd: int, value: bytes) -> None:
+    offset = 0
+    while offset < len(value):
+        written = os.write(fd, value[offset:])
+        if written <= 0:
+            raise OSError("short supervisor barrier signal")
+        offset += written
+
+
 def supervise(args: argparse.Namespace) -> int:
     record_lock_fd: AuthorityRecordLock | None = None
+    barrier_ready_fd = getattr(args, "barrier_ready_fd", -1)
+    barrier_release_fd = getattr(args, "barrier_release_fd", -1)
     try:
         evidence = read_evidence_bytes(args.launch_evidence_fd)
         if args.launch_evidence_fd != RECOVERY_LAUNCH_EVIDENCE_FD:
@@ -1172,6 +1183,18 @@ def supervise(args: argparse.Namespace) -> int:
             recovery_args, launch_evidence=launch_evidence, lease=record_lock_fd
         ) != 0:
             return 1
+        if barrier_ready_fd >= 3:
+            write_supervisor_barrier_signal(
+                barrier_ready_fd, f"READY pid={os.getpid()}\n".encode("ascii")
+            )
+            os.close(barrier_ready_fd)
+            barrier_ready_fd = -1
+        if barrier_release_fd >= 3:
+            release = os.read(barrier_release_fd, len(b"GO\n"))
+            if release != b"GO\n":
+                return 1
+            os.close(barrier_release_fd)
+            barrier_release_fd = -1
         install_evidence_bytes(evidence)
         os.execv(
             sys.executable,
@@ -1191,6 +1214,12 @@ def supervise(args: argparse.Namespace) -> int:
     except (OSError, UnicodeError, ValueError, struct.error):
         return 1
     finally:
+        for descriptor in (barrier_ready_fd, barrier_release_fd):
+            if descriptor >= 3:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
         close_record_lock(record_lock_fd)
     return 1
 
@@ -2415,6 +2444,8 @@ def parse_args() -> argparse.Namespace:
     supervisor.add_argument("--launch-evidence-fd", type=int, required=True)
     supervisor.add_argument("--launch-script", required=True)
     supervisor.add_argument("--record-lock-fd", type=int, required=True)
+    supervisor.add_argument("--barrier-ready-fd", type=int, default=-1)
+    supervisor.add_argument("--barrier-release-fd", type=int, default=-1)
     recovery = subparsers.add_parser("recover-stale", add_help=False)
     recovery.add_argument("--record", required=True)
     recovery.add_argument("--record-lock-fd", type=int, required=True)

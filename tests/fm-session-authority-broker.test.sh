@@ -20,6 +20,10 @@ ROTATION_CUSTODIAN_PID=
 ROTATION_DURABLE_KEY=
 CONCURRENT_EVIDENCE_WRITER_ONE=
 CONCURRENT_EVIDENCE_WRITER_TWO=
+CONCURRENT_ACK_READER_ONE=
+CONCURRENT_ACK_READER_TWO=
+CONCURRENT_RELEASE_WRITER_ONE=
+CONCURRENT_RELEASE_WRITER_TWO=
 REQUEST_FIFO=
 PRIMARY_REQUEST_FIFO=
 REQUEST_SEQUENCE=0
@@ -48,6 +52,22 @@ cleanup() {
     || kill "$CONCURRENT_EVIDENCE_WRITER_TWO" 2>/dev/null || true
   [ -z "$CONCURRENT_EVIDENCE_WRITER_TWO" ] \
     || wait "$CONCURRENT_EVIDENCE_WRITER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_ACK_READER_ONE" ] \
+    || kill "$CONCURRENT_ACK_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_ACK_READER_ONE" ] \
+    || wait "$CONCURRENT_ACK_READER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_ACK_READER_TWO" ] \
+    || kill "$CONCURRENT_ACK_READER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_ACK_READER_TWO" ] \
+    || wait "$CONCURRENT_ACK_READER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_RELEASE_WRITER_ONE" ] \
+    || kill "$CONCURRENT_RELEASE_WRITER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_RELEASE_WRITER_ONE" ] \
+    || wait "$CONCURRENT_RELEASE_WRITER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_RELEASE_WRITER_TWO" ] \
+    || kill "$CONCURRENT_RELEASE_WRITER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_RELEASE_WRITER_TWO" ] \
+    || wait "$CONCURRENT_RELEASE_WRITER_TWO" 2>/dev/null || true
   fm_test_cleanup || true
 }
 trap cleanup EXIT
@@ -428,7 +448,9 @@ SH
 test_concurrent_broker_start_has_one_publisher() {
   local fixture first_output second_output first_pid second_pid
   local broker_pids broker_count receipt_b64 record_pid attempts
-  local evidence_barrier request_one_pid request_two_pid
+  local supervisor_pids supervisor_count request_one_pid request_two_pid
+  local evidence_one evidence_two ready_one ready_two release_one release_two
+  local ack_capture_one ack_capture_two first_ready second_ready
   fixture=$(fm_test_tmproot fm-concurrent-broker-start)
   mkdir -p "$fixture/bin" "$fixture/state"
   printf '%s\n' alpha > "$fixture/.fm-secondmate-home"
@@ -442,21 +464,29 @@ test_concurrent_broker_start_has_one_publisher() {
     "$BROKER_KEY" "$receipt_b64" "$TRUSTED_TICKET_B64" \
     "$TRUSTED_ACCEPTANCE_B64" "$TRUSTED_FINAL_B64" \
     "$TRUSTED_CONSUMER_KEY_B64" > "$fixture/state/.test-launch-evidence"
-  evidence_barrier="$fixture/state/.concurrent-evidence-barrier"
-  mkdir -p "$evidence_barrier"
-  ( exec 3> "$fixture/state/.test-launch-evidence-1"
-    : > "$evidence_barrier/ready-1"
-    while [ ! -e "$evidence_barrier/go" ]; do sleep 0.02; done
-    cat "$fixture/state/.test-launch-evidence" >&3
-    exec 3>&-
+  evidence_one="$fixture/state/.test-launch-evidence-1"
+  evidence_two="$fixture/state/.test-launch-evidence-2"
+  ready_one="$fixture/state/.test-supervisor-ready-1"
+  ready_two="$fixture/state/.test-supervisor-ready-2"
+  release_one="$fixture/state/.test-supervisor-release-1"
+  release_two="$fixture/state/.test-supervisor-release-2"
+  ack_capture_one="$fixture/state/.test-supervisor-ack-1"
+  ack_capture_two="$fixture/state/.test-supervisor-ack-2"
+  rm -f "$evidence_one" "$evidence_two" "$ready_one" "$ready_two" \
+    "$release_one" "$release_two" "$ack_capture_one" "$ack_capture_two"
+  mkfifo "$evidence_one" "$evidence_two" "$ready_one" "$ready_two" \
+    "$release_one" "$release_two"
+  ( IFS= read -r first_ready < "$ready_one"
+    printf '%s\n' "$first_ready" > "$ack_capture_one"
   ) &
+  CONCURRENT_ACK_READER_ONE=$!
+  ( IFS= read -r second_ready < "$ready_two"
+    printf '%s\n' "$second_ready" > "$ack_capture_two"
+  ) &
+  CONCURRENT_ACK_READER_TWO=$!
+  ( cat "$fixture/state/.test-launch-evidence" > "$evidence_one" ) &
   CONCURRENT_EVIDENCE_WRITER_ONE=$!
-  ( exec 3> "$fixture/state/.test-launch-evidence-2"
-    : > "$evidence_barrier/ready-2"
-    while [ ! -e "$evidence_barrier/go" ]; do sleep 0.02; done
-    cat "$fixture/state/.test-launch-evidence" >&3
-    exec 3>&-
-  ) &
+  ( cat "$fixture/state/.test-launch-evidence" > "$evidence_two" ) &
   CONCURRENT_EVIDENCE_WRITER_TWO=$!
   printf 'broker|secondmate|%s|%s\n' "$fixture" "$first_output" \
     > "$REQUEST_FIFO" &
@@ -468,15 +498,43 @@ test_concurrent_broker_start_has_one_publisher() {
     || fail "first concurrent broker request was not accepted"
   wait "$request_two_pid" \
     || fail "second concurrent broker request was not accepted"
-  for _ in $(seq 1 250); do
-    [ -e "$evidence_barrier/ready-1" ] \
-      && [ -e "$evidence_barrier/ready-2" ] && break
-    sleep 0.02
-  done
-  [ -e "$evidence_barrier/ready-1" ] \
-    && [ -e "$evidence_barrier/ready-2" ] \
-    || fail "concurrent broker supervisors did not reach the launch barrier"
-  : > "$evidence_barrier/go"
+  wait "$CONCURRENT_ACK_READER_ONE" \
+    || fail "first supervisor did not reach the production barrier"
+  wait "$CONCURRENT_ACK_READER_TWO" \
+    || fail "second supervisor did not reach the production barrier"
+  CONCURRENT_ACK_READER_ONE=
+  CONCURRENT_ACK_READER_TWO=
+  wait "$CONCURRENT_EVIDENCE_WRITER_ONE" \
+    || fail "first launch evidence channel did not complete"
+  wait "$CONCURRENT_EVIDENCE_WRITER_TWO" \
+    || fail "second launch evidence channel did not complete"
+  CONCURRENT_EVIDENCE_WRITER_ONE=
+  CONCURRENT_EVIDENCE_WRITER_TWO=
+  first_ready=$(cat "$ack_capture_one")
+  second_ready=$(cat "$ack_capture_two")
+  case "$first_ready:$second_ready" in
+    READY\ pid=[0-9]*:READY\ pid=[0-9]*) ;;
+    *) fail "supervisor barrier acknowledgments were malformed" ;;
+  esac
+  [ ! -e "$fixture/state/.session-authority-broker" ] \
+    || fail "broker published before both supervisors were released"
+  supervisor_pids=$(ps -eo pid=,args= | awk \
+    -v script="$ROOT/bin/fm-session-authority-broker.py" \
+    -v state="$fixture/state" \
+    '$0 ~ script && $0 ~ state && $0 ~ / supervise / {print $1}')
+  supervisor_count=$(printf '%s\n' "$supervisor_pids" | sed '/^$/d' | wc -l | tr -d ' ')
+  [ "$supervisor_count" -eq 2 ] \
+    || fail "not all supervisors were waiting at the production barrier"
+  printf 'GO\n' > "$release_one" &
+  CONCURRENT_RELEASE_WRITER_ONE=$!
+  printf 'GO\n' > "$release_two" &
+  CONCURRENT_RELEASE_WRITER_TWO=$!
+  wait "$CONCURRENT_RELEASE_WRITER_ONE" \
+    || fail "first supervisor release was not delivered"
+  wait "$CONCURRENT_RELEASE_WRITER_TWO" \
+    || fail "second supervisor release was not delivered"
+  CONCURRENT_RELEASE_WRITER_ONE=
+  CONCURRENT_RELEASE_WRITER_TWO=
   for _ in $(seq 1 250); do
     [ -f "$first_output" ] && [ -f "$second_output" ] \
       && [ -f "$fixture/state/.session-authority-broker" ] && break
@@ -1420,10 +1478,14 @@ while :; do
       broker)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
+          barrier_args=()
           evidence_path="\$request_home/state/.test-launch-evidence"
           if [ -e "\$request_home/state/.test-launch-evidence-1" ]; then
             broker_evidence_slot=\$((broker_evidence_slot + 1))
             evidence_path="\$request_home/state/.test-launch-evidence-\$broker_evidence_slot"
+            exec 22> "\$request_home/state/.test-supervisor-ready-\$broker_evidence_slot"
+            exec 23<> "\$request_home/state/.test-supervisor-release-\$broker_evidence_slot"
+            barrier_args=(--barrier-ready-fd 22 --barrier-release-fd 23)
           fi
           exec 19< "\$evidence_path"
           exec 18< <(while :; do printf '%s\n' "$nonce"; done)
@@ -1432,11 +1494,16 @@ while :; do
             --home "\$request_home" --checkout "$ROOT" --task alpha \\
             --launch-evidence-fd 19 \\
             --launch-script "$launch_script" --record-lock-fd 20 \\
+            "\${barrier_args[@]}" \\
             >/dev/null 2>&1 &
           broker_pid=\$!
           exec 19<&-
           exec 18<&-
           exec 20<&-
+          if [ "\${#barrier_args[@]}" -gt 0 ]; then
+            exec 22>&-
+            exec 23<&-
+          fi
           printf '%s\n' "\$broker_pid" >"\$output"
         fi
         ;;
