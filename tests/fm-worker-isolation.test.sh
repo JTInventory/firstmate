@@ -119,7 +119,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
   close_live="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
   close_durable="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_DURABLE_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
-  [ "$prefix" = "export PATH GOTMPDIR; ${close_live}${close_durable}FM_HOME= FM_ROOT= STATE= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "export PATH GOTMPDIR; ${close_live}${close_durable}FM_HOME= FM_ROOT= STATE= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_TEST_AUTHORITY_HARNESS= FM_TEST_AUTHORITY_HARNESS_PID= FM_TEST_AUTHORITY_HARNESS_SCRIPT= FM_TEST_AUTHORITY_EXEC_SCRIPT= FM_TEST_AUTHORITY_BROKER_PID_FILE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -131,7 +131,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
   close_live="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_AUTHORITY_FD ] || exec $FM_TEST_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
   close_durable="if [ -d /proc/\$\$/fd ] && [ -r /proc/\$\$/fd ] && [ -x /proc/\$\$/fd ]; then [ ! -e /proc/\$\$/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; elif [ -d /dev/fd ] && [ -r /dev/fd ] && [ -x /dev/fd ]; then [ ! -e /dev/fd/$FM_TEST_DURABLE_AUTHORITY_FD ] || exec $FM_TEST_DURABLE_AUTHORITY_FD>&-; else echo 'error: cannot prove authority descriptor $FM_TEST_DURABLE_AUTHORITY_FD absent before worker launch' >&2; exit 1; fi; "
-  [ "$prefix" = "export PATH GOTMPDIR; ${close_live}${close_durable}FM_HOME='/home/cap/homes/dom' FM_ROOT= STATE= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "export PATH GOTMPDIR; ${close_live}${close_durable}FM_HOME='/home/cap/homes/dom' FM_ROOT= STATE= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LIFECYCLE_HOME= FM_LIFECYCLE_STATE= FM_LIFECYCLE_SCRIPT= FM_LOCK_PROCESS_TOKEN= FM_SESSION_AUTHORITY_FD= FM_SESSION_AUTHORITY_DURABLE_FD= FM_SESSION_AUTHORITY_BROKER_PID= FM_SESSION_AUTHORITY_BROKER_START= FM_SESSION_AUTHORITY_BROKER_IDENTITY= FM_SESSION_AUTHORITY_BROKER_SCRIPT= FM_TEST_AUTHORITY_FD= FM_TEST_DURABLE_AUTHORITY_FD= FM_TEST_AUTHORITY_BROKER_PID= FM_TEST_AUTHORITY_OWNER_PID= FM_TEST_SESSION_LOCK_STABLE_OWNER= FM_TEST_AUTHORITY_HARNESS= FM_TEST_AUTHORITY_HARNESS_PID= FM_TEST_AUTHORITY_HARNESS_SCRIPT= FM_TEST_AUTHORITY_EXEC_SCRIPT= FM_TEST_AUTHORITY_BROKER_PID_FILE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   mkdir -p "$same_home"
   # shellcheck source=/dev/null
@@ -1392,17 +1392,24 @@ test_procargs2_parser_separates_argv_and_environment() {
 }
 
 write_session_authority_recovery_manifest() {
-  local txn=$1 body hmac
+  local txn=$1 body hmac state home owner_start owner_identity nonce old_live
   # shellcheck source=/dev/null
 . "${!FM_TEST_ROOT_VAR}/bin/fm-session-lock-lib.sh"
-  fm_session_random_hex 48 > "$txn/key" || return 1
-  chmod 600 "$txn/key" || return 1
-  body=$(printf 'version=2\nold-lock=%s\nold-binding=%s\nold-authority=%s\nnew-lock=sha256:%064d\nnew-binding=sha256:%064d\nnew-authority=sha256:%064d\n' \
+  state=${txn%/.session-authority-transaction}
+  home=${state%/state}
+  export FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_STATE_OVERRIDE="$state" FM_SESSION_AUTHORITY_DURABLE_FD=18
+  owner_start=$(fm_session_process_start "$$") || return 1
+  owner_identity=$(fm_session_process_identity "$$") || return 1
+  nonce=$(fm_session_random_hex 32) || return 1
+  old_live=$(session_test_signature "$txn/old-live") || return 1
+  body=$(printf 'version=5\nhome=%s\nstate=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nowner-pid=%s\nowner-start=%s\nowner-identity=%s\nnonce=%s\nold-checkout=%s\nold-lock=%s\nold-authority=%s\nold-live=%s\nnew-checkout=sha256:%064d\nnew-lock=sha256:%064d\nnew-authority=sha256:%064d\nnew-live=absent\n' \
+    "$home" "$state" "$$" "$owner_start" "$owner_identity" \
+    "$$" "$owner_start" "$owner_identity" "$nonce" \
+    "$(session_test_signature "$txn/old-checkout")" \
     "$(session_test_signature "$txn/old-lock")" \
-    "$(session_test_signature "$txn/old-binding")" \
-    "$(session_test_signature "$txn/old-authority")" 0 0 0)
-  hmac=$(printf '%s\n' "$body" \
-    | fm_session_hmac_sha256_key_file "$txn/key") || return 1
+    "$(session_test_signature "$txn/old-authority")" "$old_live" 0 0 0)
+  hmac=$(printf '%s\n' "$body" | fm_session_authority_transaction_hmac) || return 1
   printf '%s\nhmac=%s\n' "$body" "$hmac" > "$txn/manifest"
 }
 
@@ -1424,7 +1431,13 @@ test_session_authority_recovery_retains_unverified_backup() {
   mkdir "$home/state/.session-authority-transaction"
   cp "$home/state/.lock" "$home/state/.session-authority-transaction/old-lock"
   cp "$home/state/.primary-checkout" \
-    "$home/state/.session-authority-transaction/old-binding"
+    "$home/state/.session-authority-transaction/old-checkout"
+  cp "$home/state/.session-authority" \
+    "$home/state/.session-authority-transaction/old-authority"
+  if [ -e "$home/state/.session-authority-live" ]; then
+    cp "$home/state/.session-authority-live" \
+      "$home/state/.session-authority-transaction/old-live"
+  fi
   write_session_authority_recovery_manifest \
     "$home/state/.session-authority-transaction"
   printf 'ready\n' > "$home/state/.session-authority-transaction/ready"
@@ -1454,8 +1467,11 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
   txn="$home/state/.session-authority-transaction"
   mkdir "$txn"
   cp "$home/state/.lock" "$txn/old-lock"
-  cp "$home/state/.primary-checkout" "$txn/old-binding"
+  cp "$home/state/.primary-checkout" "$txn/old-checkout"
   cp "$home/state/.session-authority" "$txn/old-authority"
+  if [ -e "$home/state/.session-authority-live" ]; then
+    cp "$home/state/.session-authority-live" "$txn/old-live"
+  fi
   write_session_authority_recovery_manifest "$txn"
   printf '%s\n' ready > "$txn/ready"
   printf '%s\n' '999999|codex:foreign|fallback' > "$home/state/.lock"
@@ -1471,6 +1487,101 @@ test_session_authority_recovery_precedes_current_tuple_validation() {
   [ "$(cat "$home/state/.lock")" != '999999|codex:foreign|fallback' ] \
     || fail "durable-key recovery did not restore the saved lock"
   pass "session authority transaction recovery survives launcher-key loss"
+}
+
+test_session_authority_recovery_handles_owner_exit() {
+  local home txn out status=0
+  sleep 1
+  home=$(make_primary_home "$TMP_ROOT/session-authority-owner-exit")
+  cp -R "$ROOT/bin/." "$home/bin/"
+  txn="$home/state/.session-authority-transaction"
+  (
+    mkdir "$txn"
+    cp "$home/state/.lock" "$txn/old-lock"
+    cp "$home/state/.primary-checkout" "$txn/old-checkout"
+    cp "$home/state/.session-authority" "$txn/old-authority"
+    if [ -e "$home/state/.session-authority-live" ]; then
+      cp "$home/state/.session-authority-live" "$txn/old-live"
+    fi
+    write_session_authority_recovery_manifest "$txn"
+    printf '%s\n' ready > "$txn/ready"
+  ) || fail "owner-exit transaction fixture could not be staged"
+  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    "$home/bin/fm-session-authority-exec.sh" \
+      "$home/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 0 "$status" "a dead transaction owner must be recoverable"
+  assert_contains "$out" "lock acquired" \
+    "dead transaction owner recovery did not complete lock acquisition"
+  assert_absent "$txn" "dead transaction owner left recovery evidence behind"
+  pass "partial authority transactions recover after the owner exits"
+}
+
+test_session_authority_stale_commit_marker_blocks_recovery() {
+  local home txn marker out status=0 original_lock
+  home=$(make_primary_home "$TMP_ROOT/session-authority-stale-commit")
+  cp -R "$ROOT/bin/." "$home/bin/"
+  txn="$home/state/.session-authority-transaction"
+  mkdir "$txn"
+  cp "$home/state/.lock" "$txn/old-lock"
+  cp "$home/state/.primary-checkout" "$txn/old-checkout"
+  cp "$home/state/.session-authority" "$txn/old-authority"
+  if [ -e "$home/state/.session-authority-live" ]; then
+    cp "$home/state/.session-authority-live" "$txn/old-live"
+  fi
+  write_session_authority_recovery_manifest "$txn"
+  printf '%s\n' ready > "$txn/ready"
+  marker=$(sed -n '19s/^hmac=//p' "$txn/manifest")
+  printf 'manifest=%s\n' "$marker" > "$txn/committed"
+  original_lock=$(cat "$home/state/.lock")
+  out=$(cd "$home" && env -u FM_SESSION_AUTHORITY_FD \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    "$home/bin/fm-session-authority-exec.sh" \
+      "$home/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 1 "$status" "a stale committed marker must fail closed"
+  assert_contains "$out" "recovery could not be verified" \
+    "stale committed marker refusal lost its reason"
+  [ -d "$txn" ] || fail "stale committed marker was deleted"
+  [ "$(cat "$home/state/.lock")" = "$original_lock" ] \
+    || fail "stale committed marker changed the installed lock"
+  pass "stale committed authority markers remain recoverable and fail closed"
+}
+
+test_session_authority_competing_recovery_is_serialized() {
+  local home txn first second first_status=0 second_status=0
+  sleep 1
+  home=$(make_primary_home "$TMP_ROOT/session-authority-competing-recovery")
+  cp -R "$ROOT/bin/." "$home/bin/"
+  txn="$home/state/.session-authority-transaction"
+  (
+    mkdir "$txn"
+    cp "$home/state/.lock" "$txn/old-lock"
+    cp "$home/state/.primary-checkout" "$txn/old-checkout"
+    cp "$home/state/.session-authority" "$txn/old-authority"
+    if [ -e "$home/state/.session-authority-live" ]; then
+      cp "$home/state/.session-authority-live" "$txn/old-live"
+    fi
+    write_session_authority_recovery_manifest "$txn"
+    printf '%s\n' ready > "$txn/ready"
+  ) || fail "competing recovery fixture could not be staged"
+  (
+    cd "$home" || exit 1
+    env -u FM_SESSION_AUTHORITY_FD FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+      "$home/bin/fm-session-authority-exec.sh" bash -c ':'
+  ) > "$TMP_ROOT/competing-recovery-one.out" 2>&1 &
+  first=$!
+  (
+    cd "$home" || exit 1
+    env -u FM_SESSION_AUTHORITY_FD FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+      "$home/bin/fm-session-authority-exec.sh" bash -c ':'
+  ) > "$TMP_ROOT/competing-recovery-two.out" 2>&1 &
+  second=$!
+  wait "$first" || first_status=$?
+  wait "$second" || second_status=$?
+  expect_code 0 "$first_status" "first competing recovery did not complete"
+  expect_code 0 "$second_status" "second competing recovery did not complete"
+  assert_absent "$txn" "competing recovery left transaction evidence behind"
+  pass "competing authority recovery is serialized by the per-home admission"
 }
 
 issue_secondmate_enrollment() {
@@ -4839,6 +4950,9 @@ test_binding_publication_is_verified_before_commit
 test_procargs2_parser_separates_argv_and_environment
 test_session_authority_recovery_retains_unverified_backup
 test_session_authority_recovery_precedes_current_tuple_validation
+test_session_authority_recovery_handles_owner_exit
+test_session_authority_stale_commit_marker_blocks_recovery
+test_session_authority_competing_recovery_is_serialized
 test_fresh_enrollment_requires_external_capability
 test_secondmate_authority_delegation_uses_no_node
 test_unrelated_process_cannot_consume_endpoint_enrollment

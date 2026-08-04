@@ -173,23 +173,84 @@ test_primary_authority_record_and_live_descriptor_binding() {
     export ROOT FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE \
       FM_SESSION_AUTHORITY_DURABLE_FD=18 \
       FM_ROTATION_RESULT="$state/rotation.result"
-    bash -c '
+    if bash -c '
       set -u
       . "$ROOT/bin/fm-session-lock-lib.sh"
-      fm_session_authority_live_descriptor_rotate || exit 1
-      fm_session_authority_read "$FM_STATE_OVERRIDE/.session-authority" \
-        || exit 1
-      [ "$FM_SESSION_AUTHORITY_PID" = "$$" ] || exit 1
-      fm_session_authority_live_binding_validate \
-        "$FM_STATE_OVERRIDE" "$$" 9 || exit 1
-      printf "%s\n" "$$" > "$FM_ROTATION_RESULT"
-    ' 9<&- || exit 1
-    new_pid=$(cat "$state/rotation.result") || exit 1
-    [ "$new_pid" != "$old_pid" ] || exit 1
-    fm_session_authority_read "$authority" || exit 1
-    [ "$FM_SESSION_AUTHORITY_PID" = "$new_pid" ] || exit 1
+      fm_session_authority_live_descriptor_rotate
+    ' 9<&-; then
+      exit 1
+    fi
+    [ ! -e "$state/rotation.result" ] || exit 1
+    [ "$old_pid" = "$$" ] || exit 1
   )
-  pass "durable authority records bind rewrites and cross-process rotation"
+  pass "durable authority records bind rewrites and reject untrusted rotation"
+}
+
+test_primary_wrapper_rotates_dead_authority() {
+  local fixture authority first_pid second_pid
+  fixture=$(fm_test_tmproot fm-primary-wrapper-rotation)
+  mkdir -p "$fixture/bin"
+  (
+    sleep 3
+    fm_git_init_commit "$fixture"
+    git -C "$fixture" branch -M main
+    cp -R "$ROOT/bin/." "$fixture/bin/"
+    chmod 700 "$fixture/bin"/*.sh "$fixture/bin"/*.py
+    cd "$fixture" || exit 1
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+      FM_STATE_OVERRIDE="$fixture/state" \
+      "$fixture/bin/fm-session-authority-exec.sh" bash -c ':' >/dev/null 2>&1
+  ) || fail "primary wrapper could not create its protected authority"
+  authority="$fixture/state/.session-authority"
+  first_pid=$(sed -n '2s/^pid=//p' "$authority")
+  kill -0 "$first_pid" 2>/dev/null && fail "first primary wrapper remained alive"
+  [ -f "$fixture/state/.session-durable-authority" ] \
+    || fail "primary wrapper did not publish durable recovery authority"
+  (
+    cd "$fixture" || exit 1
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+      FM_STATE_OVERRIDE="$fixture/state" \
+      "$fixture/bin/fm-session-authority-exec.sh" bash -c ':' >/dev/null 2>&1
+  ) || fail "primary wrapper could not rotate dead authority"
+  second_pid=$(sed -n '2s/^pid=//p' "$authority")
+  [ "$first_pid" != "$second_pid" ] \
+    || fail "primary wrapper did not publish a new authority generation"
+  [ "$(sed -n '2s/^pid=//p' "$fixture/state/.session-authority-live")" = \
+    "$second_pid" ] || fail "rotated authority live binding was not published"
+  [ ! -e "$fixture/state/.session-authority-transaction" ] \
+    || fail "rotated authority left committed transaction evidence"
+  pass "trusted wrapper rotates dead primary authority"
+}
+
+test_transaction_authority_and_arbitration_controls() {
+  local lock_source broker_source
+  lock_source=$(cat "$ROOT/bin/fm-session-lock-lib.sh")
+  broker_source=$(cat "$ROOT/bin/fm-session-authority-broker.py")
+  [[ "$lock_source" == *"version=5"* ]] \
+    || fail "transaction manifest lost its authenticated generation version"
+  [[ "$lock_source" == *"fm_session_authority_transaction_hmac"* ]] \
+    || fail "transaction manifest is not rooted in durable authority"
+  [[ "$lock_source" == *"fm_session_authority_admission_lease_valid"* ]] \
+    || fail "transaction transitions are not lease-bound"
+  [[ "$lock_source" == *"fm_session_authority_transaction_remove"* ]] \
+    || fail "transaction cleanup is not bounded to authenticated entries"
+  [[ "$lock_source" == *'rmdir -- "$txn"'* ]] \
+    || fail "transaction cleanup does not reject unexpected entries"
+  [[ "$lock_source" != *'.session-authority-rotation.lock"'* ]] \
+    || fail "rotation retained a caller-precreatable path mutex"
+  [[ "$broker_source" == *"os.O_NOFOLLOW"* ]] \
+    || fail "authority arbitration does not reject symlinked lock paths"
+  [[ "$broker_source" == *"os.O_EXCL"* ]] \
+    || fail "authority arbitration does not reject precreated lock paths"
+  [[ "$broker_source" == *"trusted_wrapper_ancestor"* ]] \
+    || fail "broker admission is not bound to wrapper provenance"
+  [[ "$broker_source" == *"--capability-fd"* ]] \
+    || fail "broker admission lacks a protected wrapper capability"
+  [[ "$broker_source" == *"--caller-start"* ]] \
+    || fail "primary admission lacks caller-generation binding"
+  [[ "$lock_source" == *"FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD"* ]] \
+    || fail "wrapper admission capability is not retained for cleanup"
+  pass "transaction and arbitration controls retain authenticated ownership"
 }
 
 test_primary_bootstrap_cleans_partial_live_binding() {
@@ -209,11 +270,13 @@ exec /bin/mv "$@"
 SH
   chmod +x "$fakebin/mv"
   set +e
-  FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
-    FM_TEST_BOOTSTRAP_LIVE="$state/.session-authority-live" \
-    PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-session-authority-exec.sh" bash -c ':' \
-    >"$fixture/stdout" 2>"$fixture/stderr"
+  (
+    cd "$ROOT" || exit 1
+    FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+      FM_TEST_BOOTSTRAP_LIVE="$state/.session-authority-live" \
+      PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-session-authority-exec.sh" bash -c ':'
+  ) >"$fixture/stdout" 2>"$fixture/stderr"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "bootstrap succeeded after live binding commit failure"
@@ -262,6 +325,8 @@ test_receipt_backed_synthetic_census() {
 if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
   test_broker_client_deadline_is_behavioral
   test_primary_authority_record_and_live_descriptor_binding
+  test_primary_wrapper_rotates_dead_authority
+  test_transaction_authority_and_arbitration_controls
   test_primary_bootstrap_cleans_partial_live_binding
   test_receipt_backed_synthetic_census
   if ! python3 - "$BROKER" <<'PY'
@@ -868,6 +933,28 @@ with TemporaryDirectory() as temporary:
     holder.join(2)
     if contender.exitcode != 0 or holder.exitcode != 0 or result.read_text() != "busy":
         raise SystemExit("independent supervisors did not share the admission lock")
+
+    forged_state = home / "forged-state"
+    forged_state.mkdir()
+    forged_path = broker.authority_admission_path(
+        forged_state, (b"k", 2, "s", "i")
+    )
+    forged_path.write_text("forged\n", encoding="utf-8")
+    if broker.open_authority_admission_lock(
+        forged_state, (b"k", 2, "s", "i")
+    ) is not None:
+        raise SystemExit("precreated admission lock was accepted")
+
+    symlink_state = home / "symlink-state"
+    symlink_state.mkdir()
+    symlink_path = broker.authority_admission_path(
+        symlink_state, (b"k", 2, "s", "i")
+    )
+    symlink_path.symlink_to(result)
+    if broker.open_authority_admission_lock(
+        symlink_state, (b"k", 2, "s", "i")
+    ) is not None:
+        raise SystemExit("symlinked admission lock was accepted")
 
     read_fd, write_fd = os.pipe()
     try:

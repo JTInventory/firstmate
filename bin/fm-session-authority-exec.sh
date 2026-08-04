@@ -378,6 +378,8 @@ fi
 }
 FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1
 export FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
+FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
+export FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN
 mkdir -p "$STATE" && [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
   echo "error: trusted session state directory is unavailable" >&2
   exit 1
@@ -578,6 +580,10 @@ else
     }
   fi
 fi
+fm_session_authority_admission_acquire || {
+  echo "error: session authority admission could not be authenticated" >&2
+  exit 1
+}
 fm_session_authority_transaction_recover "$STATE" || {
   echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
   exit 1
@@ -632,6 +638,17 @@ if [ "${FM_AGENT_ROLE:-}" != secondmate ] \
     exit 1
   fi
 fi
+if [ -d "$STATE/.session-authority-transaction" ] \
+  && [ ! -L "$STATE/.session-authority-transaction" ]; then
+  if ! fm_session_authority_read "$authority" \
+    || ! fm_session_authority_live_binding_validate "$STATE" "$$" 9 \
+    || ! fm_session_authority_transaction_finalize "$STATE"; then
+    fm_session_authority_transaction_rollback "$STATE" || \
+      fm_session_authority_transaction_recover "$STATE" || true
+    echo "error: session authority publication failed semantic validation" >&2
+    exit 1
+  fi
+fi
 if fm_session_authority_socket_broker_present; then
   fm_session_enrollment_trace consumer-authority-broker pass 2>/dev/null || true
 else
@@ -642,6 +659,10 @@ else
   }
   fm_session_enrollment_trace consumer-durable-custodian pass 2>/dev/null || true
 fi
+fm_session_authority_admission_release || {
+  echo "error: session authority admission could not be released" >&2
+  exit 1
+}
 [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] || export FM_SESSION_AUTHORITY_FD
 [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \
   || export FM_SESSION_AUTHORITY_DURABLE_FD

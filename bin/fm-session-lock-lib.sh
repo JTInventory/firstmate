@@ -333,6 +333,206 @@ fm_session_authority_socket_broker_present() {
       </dev/null >/dev/null 2>&1
 }
 
+FM_SESSION_AUTHORITY_ADMISSION_HELD=0
+FM_SESSION_AUTHORITY_ADMISSION_PID=
+FM_SESSION_AUTHORITY_ADMISSION_BROKER_PID=
+FM_SESSION_AUTHORITY_ADMISSION_START=
+FM_SESSION_AUTHORITY_ADMISSION_IDENTITY=
+FM_SESSION_AUTHORITY_ADMISSION_BROKER_START=
+FM_SESSION_AUTHORITY_ADMISSION_BROKER_IDENTITY=
+FM_SESSION_AUTHORITY_ADMISSION_IN=
+FM_SESSION_AUTHORITY_ADMISSION_OUT=
+FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
+
+fm_session_authority_admission_acquire() {
+  local home state record script status broker_status broker_pid
+  local caller_start caller_identity
+  [ "${FM_SESSION_AUTHORITY_ADMISSION_HELD:-0}" -eq 1 ] && return 0
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  state=$(cd "${FM_STATE_OVERRIDE:-$home/state}" 2>/dev/null && pwd -P) || return 1
+  script="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-broker.py"
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  caller_start=$(fm_session_process_start "$$") || return 1
+  caller_identity=$(fm_session_process_identity "$$") || return 1
+  if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+    && fm_session_authority_socket_broker_present; then
+    record="$state/.session-authority-broker"
+    if ( : <&17 ) 2>/dev/null || ( : >&17 ) 2>/dev/null; then
+      return 1
+    fi
+    exec 17< <(fm_session_random_hex 48) || return 1
+    FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=17
+    coproc FM_SESSION_AUTHORITY_ADMISSION_PROCESS {
+      python3 "$script" lock-holder --record "$record" --capability-fd 17
+    }
+  else
+    [ "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" = 18 ] || return 1
+    coproc FM_SESSION_AUTHORITY_ADMISSION_PROCESS {
+      python3 "$script" primary-lock-holder --state "$state" \
+        --home "$home" --launch-script \
+        "$home/bin/fm-session-authority-exec.sh" --root-fd 18 \
+        --caller-pid "$$" --caller-start "$caller_start" \
+        --caller-identity "$caller_identity"
+    }
+  fi
+  FM_SESSION_AUTHORITY_ADMISSION_PID=${FM_SESSION_AUTHORITY_ADMISSION_PROCESS_PID:-}
+  FM_SESSION_AUTHORITY_ADMISSION_IN=${FM_SESSION_AUTHORITY_ADMISSION_PROCESS[1]:-}
+  FM_SESSION_AUTHORITY_ADMISSION_OUT=${FM_SESSION_AUTHORITY_ADMISSION_PROCESS[0]:-}
+  case "$FM_SESSION_AUTHORITY_ADMISSION_PID:$FM_SESSION_AUTHORITY_ADMISSION_IN:$FM_SESSION_AUTHORITY_ADMISSION_OUT" in
+    ''|*[!0-9:]*|*::*|*:)
+      if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
+        exec 17<&- 2>/dev/null || true
+        FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
+      fi
+      return 1
+      ;;
+  esac
+  if ! IFS= read -r status <&"$FM_SESSION_AUTHORITY_ADMISSION_OUT" \
+    || [ "$status" != LOCKED ]; then
+    exec {FM_SESSION_AUTHORITY_ADMISSION_IN}>&- 2>/dev/null || true
+    wait "$FM_SESSION_AUTHORITY_ADMISSION_PID" 2>/dev/null || true
+    exec {FM_SESSION_AUTHORITY_ADMISSION_OUT}<&- 2>/dev/null || true
+    FM_SESSION_AUTHORITY_ADMISSION_PID=
+    FM_SESSION_AUTHORITY_ADMISSION_BROKER_PID=
+    FM_SESSION_AUTHORITY_ADMISSION_START=
+    FM_SESSION_AUTHORITY_ADMISSION_IDENTITY=
+    FM_SESSION_AUTHORITY_ADMISSION_BROKER_START=
+    FM_SESSION_AUTHORITY_ADMISSION_BROKER_IDENTITY=
+    FM_SESSION_AUTHORITY_ADMISSION_IN=
+    FM_SESSION_AUTHORITY_ADMISSION_OUT=
+    if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
+      exec 17<&- 2>/dev/null || true
+      FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
+    fi
+    return 1
+  fi
+  if ! IFS= read -r broker_status <&"$FM_SESSION_AUTHORITY_ADMISSION_OUT" \
+    || [[ "$broker_status" != PID\ [0-9]* ]]; then
+    exec {FM_SESSION_AUTHORITY_ADMISSION_IN}>&- 2>/dev/null || true
+    wait "$FM_SESSION_AUTHORITY_ADMISSION_PID" 2>/dev/null || true
+    exec {FM_SESSION_AUTHORITY_ADMISSION_OUT}<&- 2>/dev/null || true
+    FM_SESSION_AUTHORITY_ADMISSION_PID=
+    FM_SESSION_AUTHORITY_ADMISSION_BROKER_PID=
+    FM_SESSION_AUTHORITY_ADMISSION_START=
+    FM_SESSION_AUTHORITY_ADMISSION_IDENTITY=
+    FM_SESSION_AUTHORITY_ADMISSION_BROKER_START=
+    FM_SESSION_AUTHORITY_ADMISSION_BROKER_IDENTITY=
+    FM_SESSION_AUTHORITY_ADMISSION_IN=
+    FM_SESSION_AUTHORITY_ADMISSION_OUT=
+    if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
+      exec 17<&- 2>/dev/null || true
+      FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
+    fi
+    return 1
+  fi
+  FM_SESSION_AUTHORITY_ADMISSION_HELD=1
+  broker_pid=${broker_status#PID }
+  case "$broker_pid" in ''|*[!0-9]*)
+    fm_session_authority_admission_release || true
+    return 1
+    ;;
+  esac
+  [ "$broker_pid" != "$$" ] || {
+    fm_session_authority_admission_release || true
+    return 1
+  }
+  [ "$(fm_session_parent_pid "$broker_pid" 2>/dev/null || true)" = \
+    "$FM_SESSION_AUTHORITY_ADMISSION_PID" ] || {
+    fm_session_authority_admission_release || true
+    return 1
+  }
+  fm_session_process_runs_script "$broker_pid" "$script" || {
+    fm_session_authority_admission_release || true
+    return 1
+  }
+  FM_SESSION_AUTHORITY_ADMISSION_BROKER_PID=$broker_pid
+  FM_SESSION_AUTHORITY_ADMISSION_BROKER_START=$(fm_session_process_start \
+    "$broker_pid") || {
+    fm_session_authority_admission_release || true
+    return 1
+  }
+  FM_SESSION_AUTHORITY_ADMISSION_BROKER_IDENTITY=$(fm_session_process_identity \
+    "$broker_pid") || {
+    fm_session_authority_admission_release || true
+    return 1
+  }
+  FM_SESSION_AUTHORITY_ADMISSION_START=$(fm_session_process_start \
+    "$FM_SESSION_AUTHORITY_ADMISSION_PID") || {
+    fm_session_authority_admission_release || true
+    return 1
+  }
+  FM_SESSION_AUTHORITY_ADMISSION_IDENTITY=$(fm_session_process_identity \
+    "$FM_SESSION_AUTHORITY_ADMISSION_PID") || {
+    fm_session_authority_admission_release || true
+    return 1
+  }
+}
+
+fm_session_authority_admission_release() {
+  local status=0
+  [ "${FM_SESSION_AUTHORITY_ADMISSION_HELD:-0}" -eq 1 ] || return 0
+  printf '%s\n' RELEASE >&"$FM_SESSION_AUTHORITY_ADMISSION_IN" 2>/dev/null || status=1
+  exec {FM_SESSION_AUTHORITY_ADMISSION_IN}>&- 2>/dev/null || status=1
+  wait "$FM_SESSION_AUTHORITY_ADMISSION_PID" 2>/dev/null || status=1
+  exec {FM_SESSION_AUTHORITY_ADMISSION_OUT}<&- 2>/dev/null || status=1
+  if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
+    exec 17<&- 2>/dev/null || status=1
+  fi
+  FM_SESSION_AUTHORITY_ADMISSION_HELD=0
+  FM_SESSION_AUTHORITY_ADMISSION_PID=
+  FM_SESSION_AUTHORITY_ADMISSION_BROKER_PID=
+  FM_SESSION_AUTHORITY_ADMISSION_START=
+  FM_SESSION_AUTHORITY_ADMISSION_IDENTITY=
+  FM_SESSION_AUTHORITY_ADMISSION_BROKER_START=
+  FM_SESSION_AUTHORITY_ADMISSION_BROKER_IDENTITY=
+  FM_SESSION_AUTHORITY_ADMISSION_IN=
+  FM_SESSION_AUTHORITY_ADMISSION_OUT=
+  FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
+  return "$status"
+}
+
+fm_session_authority_admission_lease_valid() {
+  local state=$1 pid=${FM_SESSION_AUTHORITY_ADMISSION_PID:-}
+  local broker_pid=${FM_SESSION_AUTHORITY_ADMISSION_BROKER_PID:-} script
+  local state_arg record_arg root_fd capability_fd
+  script="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-broker.py"
+  [ "${FM_SESSION_AUTHORITY_ADMISSION_HELD:-0}" -eq 1 ] || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ "$(fm_session_parent_pid "$pid" 2>/dev/null || true)" = "$$" ] \
+    || return 1
+  [ "$(fm_session_process_start "$pid" 2>/dev/null || true)" = \
+    "${FM_SESSION_AUTHORITY_ADMISSION_START:-}" ] || return 1
+  [ "$(fm_session_process_identity "$pid" 2>/dev/null || true)" = \
+    "${FM_SESSION_AUTHORITY_ADMISSION_IDENTITY:-}" ] || return 1
+  case "$broker_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$broker_pid" != "$$" ] || return 1
+  kill -0 "$broker_pid" 2>/dev/null || return 1
+  [ "$(fm_session_parent_pid "$broker_pid" 2>/dev/null || true)" = \
+    "$pid" ] || return 1
+  fm_session_process_runs_script "$broker_pid" "$script" || return 1
+  [ "$(fm_session_process_start "$broker_pid" 2>/dev/null || true)" = \
+    "${FM_SESSION_AUTHORITY_ADMISSION_BROKER_START:-}" ] || return 1
+  [ "$(fm_session_process_identity "$broker_pid" 2>/dev/null || true)" = \
+    "${FM_SESSION_AUTHORITY_ADMISSION_BROKER_IDENTITY:-}" ] || return 1
+  state_arg=$(fm_session_process_argument_value \
+    "$broker_pid" --state 2>/dev/null || true)
+  record_arg=$(fm_session_process_argument_value \
+    "$broker_pid" --record 2>/dev/null || true)
+  root_fd=$(fm_session_process_argument_value \
+    "$broker_pid" --root-fd 2>/dev/null || true)
+  capability_fd=$(fm_session_process_argument_value \
+    "$broker_pid" --capability-fd 2>/dev/null || true)
+  if [ -n "$state_arg" ]; then
+    [ "$state_arg" = "$state" ] && [ "$root_fd" = 18 ] \
+      && [ -z "$record_arg" ]
+  else
+    [ "$record_arg" = "$state/.session-authority-broker" ] \
+      && [ "$capability_fd" = 17 ] && [ -z "$root_fd" ]
+  fi
+}
+
 fm_session_authority_broker_bootstrap() {
   local key source wrapper
   [ "${FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED:-}" = 1 ] || return 1
@@ -398,7 +598,7 @@ fm_session_authority_live_binding_write() {
   body=$(printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nfd=%s\ndescriptor=%s\nkey-sha256=%s\n' \
     "$$" "$start" "$identity" "$fd" "$descriptor" "$digest") || return 1
   file="$output"
-  fm_session_authority_record_write "$file" "$body"
+  fm_session_authority_record_write "$file" "${body}"$'\n'
 }
 
 fm_session_authority_live_binding_validate() {
@@ -840,9 +1040,10 @@ fm_session_authority_descriptor_create() {
 }
 
 fm_session_authority_live_descriptor_rotate() {
-  local key home state authority lock_fd= status=1
+  local key home state authority status=1
   local owner checkout
   local checkout_tmp lock_tmp authority_tmp live_tmp
+  fm_session_authority_wrapper_provenance_present || return 1
   fm_session_authority_durable_capability_present rotation || return 1
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null; then
     return 1
@@ -852,35 +1053,27 @@ fm_session_authority_live_descriptor_rotate() {
     2>/dev/null && pwd -P) || return 1
   state=${FM_STATE_OVERRIDE:-$home/state}
   authority="$state/.session-authority"
-  if command -v flock >/dev/null 2>&1; then
-    exec {lock_fd}>"$state/.session-authority-rotation.lock" || return 1
-    flock -n "$lock_fd" || {
-      exec {lock_fd}>&-
-      return 1
-    }
-  else
-    return 1
-  fi
+  fm_session_authority_admission_acquire || return 1
   if [ -f "$authority" ] && [ ! -L "$authority" ]; then
     fm_session_authority_read "$authority" || {
-      exec {lock_fd}>&-
+      fm_session_authority_admission_release || true
       return 1
     }
     owner=$FM_SESSION_AUTHORITY_OWNER
     checkout=$FM_SESSION_AUTHORITY_CHECKOUT
   fi
   key=$(fm_session_random_hex 48) || {
-    exec {lock_fd}>&-
+    fm_session_authority_admission_release || true
     return 1
   }
   exec 9< <(while :; do printf '%s\n' "$key"; done) || {
-    exec {lock_fd}>&-
+    fm_session_authority_admission_release || true
     return 1
   }
   unset key
   fm_session_descriptor_channel_isolated 9 || {
     exec 9<&-
-    exec {lock_fd}>&-
+    fm_session_authority_admission_release || true
     return 1
   }
   FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
@@ -888,6 +1081,7 @@ fm_session_authority_live_descriptor_rotate() {
   if [ -z "$owner" ]; then
     status=0
   else
+    status=0
     checkout_tmp=$(mktemp "$state/.primary-checkout.XXXXXX") || status=1
     lock_tmp=$(mktemp "$state/.lock.XXXXXX") || status=1
     authority_tmp=$(mktemp "$state/.session-authority.XXXXXX") || status=1
@@ -904,7 +1098,12 @@ fm_session_authority_live_descriptor_rotate() {
       status=1
     elif ! fm_session_authority_transaction_stage \
         "$state" "$checkout_tmp" "$lock_tmp" "$authority_tmp" "$live_tmp" \
-      || ! fm_session_authority_transaction_commit "$state"; then
+      || ! fm_session_authority_transaction_commit "$state" \
+      || ! fm_session_authority_read "$authority" \
+      || ! fm_session_authority_live_binding_validate "$state" "$$" 9 \
+      || ! fm_session_authority_transaction_finalize "$state"; then
+      fm_session_authority_transaction_rollback "$state" || \
+        fm_session_authority_transaction_recover "$state" || true
       fm_session_authority_transaction_recover "$state" || true
       rm -f "$checkout_tmp" "$lock_tmp" "$authority_tmp" "$live_tmp"
       status=1
@@ -916,7 +1115,7 @@ fm_session_authority_live_descriptor_rotate() {
     exec 9<&-
     unset FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN
   fi
-  exec {lock_fd}>&-
+  fm_session_authority_admission_release || status=1
   if [ "$status" -eq 0 ]; then
     return 0
   fi
@@ -2332,7 +2531,15 @@ fm_session_authority_durable_capability_present() {
   local key mode=${1:-} fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_socket_broker_present && return 0
   case "$mode" in
-    '') fm_session_authority_record_capability_present || return 1 ;;
+    '')
+      case "${FM_AGENT_ROLE:-}" in
+        secondmate) fm_session_authority_record_capability_present || return 1 ;;
+        ''|primary)
+          fm_session_authority_primary_bootstrap_capability_present || return 1
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
     rotation)
       [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] || return 1
       fm_session_authority_durable_record_capability_present rotation || return 1
@@ -2359,6 +2566,19 @@ fm_session_authority_durable_hmac() {
     fm_session_authority_durable_capability_present || return 1
     fd=$FM_SESSION_AUTHORITY_DURABLE_FD
   fi
+  fm_session_descriptor_channel_isolated "$fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_hmac_from_descriptor "$fd"
+}
+
+fm_session_authority_transaction_hmac() {
+  local fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
+    && fm_session_authority_socket_broker_present; then
+    fm_session_authority_socket_broker_client durable
+    return
+  fi
+  [ "$fd" = 18 ] || return 1
   fm_session_descriptor_channel_isolated "$fd" \
     && fm_session_exec_descriptor_isolation_durable || return 1
   fm_session_hmac_from_descriptor "$fd"
@@ -2410,25 +2630,66 @@ fm_session_authority_transaction_signature_valid() {
 
 fm_session_authority_transaction_manifest_read() {
   local state=$1 txn="$1/.session-authority-transaction"
-  local manifest="$txn/manifest" key="$txn/key" body expected signature
+  local manifest="$txn/manifest" body expected signature home state_real owner_pid
+  local owner_start owner_identity broker_pid broker_start broker_identity nonce
   [ -d "$txn" ] && [ ! -L "$txn" ] || return 1
   [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-  [ -f "$key" ] && [ ! -L "$key" ] || return 1
-  [ "$(wc -l < "$manifest" | tr -d ' ')" -eq 10 ] || return 1
-  [ "$(sed -n '1p' "$manifest")" = version=3 ] || return 1
-  body=$(sed -n '1,9p' "$manifest") || return 1
-  expected=$(printf '%s\n' "$body" \
-    | fm_session_hmac_sha256_key_file "$key") || return 1
-  [ "$(sed -n '10s/^hmac=//p' "$manifest")" = "$expected" ] || return 1
+  [ -f "$txn/ready" ] && [ ! -L "$txn/ready" ] \
+    && [ "$(cat "$txn/ready" 2>/dev/null)" = ready ] || return 1
+  [ "$(wc -l < "$manifest" | tr -d ' ')" -eq 19 ] || return 1
+  [ "$(sed -n '1p' "$manifest")" = version=5 ] || return 1
+  body=$(sed -n '1,18p' "$manifest") || return 1
+  expected=$(printf '%s\n' "$body" | fm_session_authority_transaction_hmac) || return 1
+  [ "$(sed -n '19s/^hmac=//p' "$manifest")" = "$expected" ] || return 1
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  state_real=$(cd "$state" 2>/dev/null && pwd -P) || return 1
+  [ "$(sed -n '2s/^home=//p' "$manifest")" = "$home" ] || return 1
+  [ "$(sed -n '3s/^state=//p' "$manifest")" = "$state_real" ] || return 1
+  broker_pid=$(sed -n '4s/^broker-pid=//p' "$manifest")
+  broker_start=$(sed -n '5s/^broker-start=//p' "$manifest")
+  broker_identity=$(sed -n '6s/^broker-identity=//p' "$manifest")
+  owner_pid=$(sed -n '7s/^owner-pid=//p' "$manifest")
+  owner_start=$(sed -n '8s/^owner-start=//p' "$manifest")
+  owner_identity=$(sed -n '9s/^owner-identity=//p' "$manifest")
+  nonce=$(sed -n '10s/^nonce=//p' "$manifest")
+  case "$broker_pid:$owner_pid" in *[!0-9:]*|:) return 1 ;; esac
+  case "$broker_start:$broker_identity:$owner_start:$owner_identity:$nonce" in
+    ''|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  [ -n "$broker_start" ] && [ -n "$broker_identity" ] \
+    && [ -n "$owner_start" ] && [ -n "$owner_identity" ] || return 1
+  [ -n "$owner_start" ] && [ -n "$owner_identity" ] || return 1
+  [ "${#nonce}" -eq 64 ] || return 1
+  case "$nonce" in *[!0-9a-f]*) return 1 ;; esac
+  if kill -0 "$broker_pid" 2>/dev/null; then
+    [ "$(fm_session_process_start "$broker_pid" 2>/dev/null || true)" = \
+      "$broker_start" ] \
+      && [ "$(fm_session_process_identity "$broker_pid" 2>/dev/null || true)" = \
+        "$broker_identity" ] || return 1
+  fi
+  if kill -0 "$owner_pid" 2>/dev/null; then
+    [ "$(fm_session_process_start "$owner_pid" 2>/dev/null || true)" = \
+      "$owner_start" ] \
+      && [ "$(fm_session_process_identity "$owner_pid" 2>/dev/null || true)" = \
+        "$owner_identity" ] || return 1
+  fi
   FM_SESSION_AUTHORITY_TXN_MANIFEST_HMAC=$expected
-  FM_SESSION_AUTHORITY_TXN_OLD_CHECKOUT=$(sed -n '2s/^old-checkout=//p' "$manifest")
-  FM_SESSION_AUTHORITY_TXN_OLD_LOCK=$(sed -n '3s/^old-lock=//p' "$manifest")
-  FM_SESSION_AUTHORITY_TXN_OLD_AUTHORITY=$(sed -n '4s/^old-authority=//p' "$manifest")
-  FM_SESSION_AUTHORITY_TXN_OLD_LIVE=$(sed -n '5s/^old-live=//p' "$manifest")
-  FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT=$(sed -n '6s/^new-checkout=//p' "$manifest")
-  FM_SESSION_AUTHORITY_TXN_NEW_LOCK=$(sed -n '7s/^new-lock=//p' "$manifest")
-  FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY=$(sed -n '8s/^new-authority=//p' "$manifest")
-  FM_SESSION_AUTHORITY_TXN_NEW_LIVE=$(sed -n '9s/^new-live=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_BROKER_PID=$broker_pid
+  FM_SESSION_AUTHORITY_TXN_BROKER_START=$broker_start
+  FM_SESSION_AUTHORITY_TXN_BROKER_IDENTITY=$broker_identity
+  FM_SESSION_AUTHORITY_TXN_OWNER_PID=$owner_pid
+  FM_SESSION_AUTHORITY_TXN_OWNER_START=$owner_start
+  FM_SESSION_AUTHORITY_TXN_OWNER_IDENTITY=$owner_identity
+  FM_SESSION_AUTHORITY_TXN_NONCE=$nonce
+  FM_SESSION_AUTHORITY_TXN_OLD_CHECKOUT=$(sed -n '11s/^old-checkout=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_OLD_LOCK=$(sed -n '12s/^old-lock=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_OLD_AUTHORITY=$(sed -n '13s/^old-authority=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_OLD_LIVE=$(sed -n '14s/^old-live=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT=$(sed -n '15s/^new-checkout=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_LOCK=$(sed -n '16s/^new-lock=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY=$(sed -n '17s/^new-authority=//p' "$manifest")
+  FM_SESSION_AUTHORITY_TXN_NEW_LIVE=$(sed -n '18s/^new-live=//p' "$manifest")
   for signature in \
     "$FM_SESSION_AUTHORITY_TXN_OLD_CHECKOUT" \
     "$FM_SESSION_AUTHORITY_TXN_OLD_LOCK" \
@@ -2491,62 +2752,30 @@ fm_session_authority_transaction_restore() {
       "$state" "$txn/old-live" "$state/.session-authority-live"
 }
 
-fm_session_authority_transaction_recover_legacy() {
-  local state=$1 txn="$1/.session-authority-transaction"
-  local manifest="$txn/manifest" key body expected signature committed
-  local old_lock old_binding old_authority new_lock new_binding new_authority
-  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-  [ -f "$key" ] && [ ! -L "$key" ] || return 1
-  [ "$(wc -l < "$manifest" | tr -d ' ')" -eq 8 ] || return 1
-  [ "$(sed -n '1p' "$manifest")" = version=2 ] || return 1
-  body=$(sed -n '1,7p' "$manifest") || return 1
-  expected=$(printf '%s\n' "$body" \
-    | fm_session_hmac_sha256_key_file "$key") || return 1
-  [ "$(sed -n '8s/^hmac=//p' "$manifest")" = "$expected" ] || return 1
-  old_lock=$(sed -n '2s/^old-lock=//p' "$manifest")
-  old_binding=$(sed -n '3s/^old-binding=//p' "$manifest")
-  old_authority=$(sed -n '4s/^old-authority=//p' "$manifest")
-  new_lock=$(sed -n '5s/^new-lock=//p' "$manifest")
-  new_binding=$(sed -n '6s/^new-binding=//p' "$manifest")
-  new_authority=$(sed -n '7s/^new-authority=//p' "$manifest")
-  for signature in "$old_lock" "$old_binding" "$old_authority" \
-    "$new_lock" "$new_binding" "$new_authority"; do
-    fm_session_authority_transaction_signature_valid "$signature" || return 1
+fm_session_authority_transaction_remove() {
+  local txn=$1 entry extra
+  [ -d "$txn" ] && [ ! -L "$txn" ] || return 1
+  for entry in \
+    old-checkout old-lock old-authority old-live \
+    new-checkout new-lock new-authority new-live \
+    manifest ready committed; do
+    rm -f -- "$txn/$entry" || return 1
   done
-  [ "$(fm_session_authority_transaction_file_signature \
-    "$txn/old-lock")" = "$old_lock" ] \
-    && [ "$(fm_session_authority_transaction_file_signature \
-      "$txn/old-binding")" = "$old_binding" ] \
-    && [ "$(fm_session_authority_transaction_file_signature \
-      "$txn/old-authority")" = "$old_authority" ] || return 1
-  committed=$(cat "$txn/committed" 2>/dev/null || true)
-  if [ -n "$committed" ]; then
-    [ "$committed" = "manifest=$expected" ] || return 1
-    [ "$(fm_session_authority_transaction_file_signature "$state/.lock")" \
-      = "$new_lock" ] \
-      && [ "$(fm_session_authority_transaction_file_signature \
-        "$state/.primary-checkout")" = "$new_binding" ] \
-      && [ "$(fm_session_authority_transaction_file_signature \
-        "$state/.session-authority")" = "$new_authority" ] || return 1
-  else
-    fm_session_authority_transaction_restore_file \
-      "$state" "$txn/old-binding" "$state/.primary-checkout" \
-      && fm_session_authority_transaction_restore_file \
-        "$state" "$txn/old-authority" "$state/.session-authority" \
-      && fm_session_authority_transaction_restore_file \
-        "$state" "$txn/old-lock" "$state/.lock" || return 1
-  fi
-  rm -rf -- "$txn"
+  extra=$(find "$txn" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) \
+    || return 1
+  [ -z "$extra" ] || return 1
+  rmdir -- "$txn"
+}
+
+fm_session_authority_transaction_recover_legacy() {
+  return 1
 }
 
 fm_session_authority_transaction_recover() {
   local state=$1 txn="$1/.session-authority-transaction" committed
   [ ! -e "$txn" ] && [ ! -L "$txn" ] && return 0
   [ -d "$txn" ] && [ ! -L "$txn" ] || return 1
-  if [ "$(sed -n '1p' "$txn/manifest" 2>/dev/null)" = version=2 ]; then
-    fm_session_authority_transaction_recover_legacy "$state"
-    return
-  fi
+  fm_session_authority_admission_lease_valid "$state" || return 1
   fm_session_authority_transaction_manifest_read "$state" || return 1
   committed=$(cat "$txn/committed" 2>/dev/null || true)
   if [ -n "$committed" ]; then
@@ -2563,17 +2792,63 @@ fm_session_authority_transaction_recover() {
       && [ "$(fm_session_authority_transaction_file_signature \
         "$state/.session-authority-live")" = \
         "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE" ] || return 1
+    return 0
   else
     fm_session_authority_transaction_restore "$state" || return 1
   fi
-  rm -rf -- "$txn"
+  fm_session_authority_transaction_remove "$txn"
+}
+
+fm_session_authority_transaction_finalize() {
+  local state=$1 txn="$1/.session-authority-transaction" committed
+  fm_session_authority_admission_lease_valid "$state" || return 1
+  fm_session_authority_transaction_manifest_read "$state" || return 1
+  committed=$(cat "$txn/committed" 2>/dev/null || true)
+  [ "$committed" = "manifest=$FM_SESSION_AUTHORITY_TXN_MANIFEST_HMAC" ] || return 1
+  [ "$(fm_session_authority_transaction_file_signature \
+    "$state/.primary-checkout")" = \
+    "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.lock")" = "$FM_SESSION_AUTHORITY_TXN_NEW_LOCK" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.session-authority")" = \
+      "$FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY" ] \
+    && [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.session-authority-live")" = \
+      "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE" ] || return 1
+  fm_session_authority_transaction_remove "$txn"
+}
+
+fm_session_authority_transaction_rollback() {
+  local state=$1 txn="$1/.session-authority-transaction" committed
+  fm_session_authority_admission_lease_valid "$state" || return 1
+  fm_session_authority_transaction_manifest_read "$state" || return 1
+  committed=$(cat "$txn/committed" 2>/dev/null || true)
+  if [ -n "$committed" ]; then
+    [ "$committed" = "manifest=$FM_SESSION_AUTHORITY_TXN_MANIFEST_HMAC" ] || return 1
+    [ "$(fm_session_authority_transaction_file_signature \
+      "$state/.primary-checkout")" = \
+      "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.lock")" = "$FM_SESSION_AUTHORITY_TXN_NEW_LOCK" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.session-authority")" = \
+        "$FM_SESSION_AUTHORITY_TXN_NEW_AUTHORITY" ] \
+      && [ "$(fm_session_authority_transaction_file_signature \
+        "$state/.session-authority-live")" = \
+        "$FM_SESSION_AUTHORITY_TXN_NEW_LIVE" ] || return 1
+  fi
+  fm_session_authority_transaction_restore "$state" || return 1
+  fm_session_authority_transaction_remove "$txn"
 }
 
 fm_session_authority_transaction_stage() {
   local state=$1 checkout_tmp=$2 lock_tmp=$3 authority_tmp=$4 live_tmp=${5:-}
   local txn txn_tmp old_checkout old_lock old_authority old_live
   local new_checkout new_lock new_authority new_live manifest_body manifest_hmac
+  local home state_real owner_start owner_identity broker_start broker_identity nonce
   txn="$state/.session-authority-transaction"
+  fm_session_authority_admission_lease_valid "$state" || return 1
   [ ! -e "$txn" ] && [ ! -L "$txn" ] || return 1
   for file in "$checkout_tmp" "$lock_tmp" "$authority_tmp"; do
     [ -f "$file" ] && [ ! -L "$file" ] || return 1
@@ -2624,8 +2899,23 @@ fm_session_authority_transaction_stage() {
     rm -rf -- "$txn_tmp"
     return 1
   }
-  fm_session_random_hex 48 > "$txn_tmp/key" \
-    && chmod 600 "$txn_tmp/key" || {
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || { rm -rf -- "$txn_tmp"; return 1; }
+  state_real=$(cd "$state" 2>/dev/null && pwd -P) || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  owner_start=$(fm_session_process_start "$$") || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  owner_identity=$(fm_session_process_identity "$$") || {
+    rm -rf -- "$txn_tmp"
+    return 1
+  }
+  broker_start=$owner_start
+  broker_identity=$owner_identity
+  nonce=$(fm_session_random_hex 32) || {
     rm -rf -- "$txn_tmp"
     return 1
   }
@@ -2645,14 +2935,16 @@ fm_session_authority_transaction_stage() {
     "$txn_tmp/new-authority") || { rm -rf -- "$txn_tmp"; return 1; }
   new_live=$(fm_session_authority_transaction_file_signature \
     "$txn_tmp/new-live") || { rm -rf -- "$txn_tmp"; return 1; }
-  manifest_body=$(printf 'version=3\nold-checkout=%s\nold-lock=%s\nold-authority=%s\nold-live=%s\nnew-checkout=%s\nnew-lock=%s\nnew-authority=%s\nnew-live=%s\n' \
+  manifest_body=$(printf 'version=5\nhome=%s\nstate=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nowner-pid=%s\nowner-start=%s\nowner-identity=%s\nnonce=%s\nold-checkout=%s\nold-lock=%s\nold-authority=%s\nold-live=%s\nnew-checkout=%s\nnew-lock=%s\nnew-authority=%s\nnew-live=%s\n' \
+    "$home" "$state_real" "$$" "$broker_start" "$broker_identity" \
+    "$$" "$owner_start" "$owner_identity" "$nonce" \
     "$old_checkout" "$old_lock" "$old_authority" "$old_live" \
     "$new_checkout" "$new_lock" "$new_authority" "$new_live") || {
     rm -rf -- "$txn_tmp"
     return 1
   }
   manifest_hmac=$(printf '%s\n' "$manifest_body" \
-    | fm_session_hmac_sha256_key_file "$txn_tmp/key") || {
+    | fm_session_authority_transaction_hmac) || {
     rm -rf -- "$txn_tmp"
     return 1
   }
@@ -2671,6 +2963,7 @@ fm_session_authority_transaction_stage() {
 
 fm_session_authority_transaction_commit() {
   local state=$1 txn="$1/.session-authority-transaction" commit_tmp
+  fm_session_authority_admission_lease_valid "$state" || return 1
   fm_session_authority_transaction_manifest_read "$state" || return 1
   if [ "$FM_SESSION_AUTHORITY_TXN_NEW_CHECKOUT" = absent ]; then
     rm -f "$state/.primary-checkout" || return 1
@@ -2714,7 +3007,6 @@ fm_session_authority_transaction_commit() {
     rm -f "$commit_tmp"
     return 1
   }
-  rm -rf -- "$txn"
 }
 
 fm_session_primary_root_path() {

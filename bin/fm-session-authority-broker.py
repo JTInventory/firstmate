@@ -120,6 +120,68 @@ def process_ancestry_contains(pid: int, wanted: int) -> bool:
     return False
 
 
+def trusted_wrapper_ancestor(
+    pid: int, home: str, launch_script: str, capability_fd: int = -1
+) -> bool:
+    descriptor = None
+    if capability_fd >= 0:
+        descriptor = descriptor_identity(pid, capability_fd)
+    current = pid
+    visited: set[int] = set()
+    for _ in range(MAX_ANCESTRY_DEPTH):
+        try:
+            if (
+                process_runs_script(current, launch_script)
+                and canonical(os.readlink(f"/proc/{current}/cwd")) == home
+                and (
+                    capability_fd < 0
+                    or descriptor_identity(current, capability_fd) == descriptor
+                )
+            ):
+                process_generation(current)
+                return True
+            if current <= 1 or current in visited:
+                return False
+            visited.add(current)
+            parent = parent_pid(current)
+            if parent == current or parent < 1:
+                return False
+            current = parent
+        except (OSError, UnicodeError, ValueError):
+            return False
+    return False
+
+
+def trusted_admission_ancestor(pid: int, home: str, launch_script: str) -> bool:
+    descriptor = descriptor_identity(pid, AUTHORITY_SERIALIZATION_FD)
+    current = pid
+    visited: set[int] = set()
+    lock_script = f"{home}/bin/fm-lock.sh"
+    for _ in range(MAX_ANCESTRY_DEPTH):
+        try:
+            if (
+                (
+                    process_runs_script(current, launch_script)
+                    or process_runs_script(current, lock_script)
+                )
+                and canonical(os.readlink(f"/proc/{current}/cwd")) == home
+                and descriptor_identity(current, AUTHORITY_SERIALIZATION_FD)
+                == descriptor
+            ):
+                process_generation(current)
+                return True
+            if current <= 1 or current in visited:
+                return False
+            visited.add(current)
+            parent = parent_pid(current)
+            if parent == current or parent < 1:
+                return False
+            current = parent
+        except (OSError, UnicodeError, ValueError):
+            return False
+    return False
+
+
 def read_process_fd_line(pid: int, fd: int) -> str:
     with open(f"/proc/{pid}/fd/{fd}", "rb", buffering=0) as source:
         value = source.readline()
@@ -376,7 +438,9 @@ def peer_is_authorized(
         if uid != broker_uid or gid != broker_gid:
             return False
         command = process_command(pid)
-        if len(command) < 3 or canonical(command[1]) != script or command[2] != "client":
+        if len(command) < 3 or canonical(command[1]) != script or command[2] not in {
+            "client", "lock-holder"
+        }:
             return False
         if canonical(os.readlink(f"/proc/{pid}/cwd")) != home:
             return False
@@ -390,6 +454,18 @@ def peer_is_authorized(
             or canonical(owner_home) != home
         ):
             return False
+        if command[2] == "lock-holder":
+            if (
+                len(command) != 7
+                or command[3] != "--record"
+                or command[5] != "--capability-fd"
+                or command[6] != "17"
+            ):
+                return False
+            if not trusted_wrapper_ancestor(
+                pid, home, f"{home}/bin/fm-session-authority-exec.sh", 17
+            ):
+                return False
         peer_generation = process_generation(pid)
         current = pid
         visited: set[int] = set()
@@ -844,16 +920,39 @@ def authority_admission_path(
     return state / f".session-authority-admission-{digest}.lock"
 
 
+def authority_admission_lock_contents(
+    state: Path, root_key: bytes
+) -> bytes:
+    body = f"version=1\nstate={canonical(str(state))}\n".encode("utf-8")
+    digest = hmac.new(root_key, body, hashlib.sha256).hexdigest()
+    return body + f"hmac={digest}\n".encode("ascii")
+
+
 def open_authority_admission_lock(
     state: Path, launch_evidence: tuple[bytes, int, str, str]
 ) -> tuple[int, Path] | None:
     path = authority_admission_path(state, launch_evidence)
+    expected = authority_admission_lock_contents(state, launch_evidence[0])
+    descriptor = -1
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
-        )
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+                | os.O_NOFOLLOW,
+                0o600,
+            )
+            if os.write(descriptor, expected) != len(expected):
+                os.close(descriptor)
+                return None
+            os.fsync(descriptor)
+        except FileExistsError:
+            descriptor = os.open(
+                path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            if os.read(descriptor, len(expected) + 1) != expected:
+                os.close(descriptor)
+                return None
         descriptor_stat = os.fstat(descriptor)
         if (
             not stat.S_ISREG(descriptor_stat.st_mode)
@@ -864,6 +963,11 @@ def open_authority_admission_lock(
             return None
         return descriptor, path
     except OSError:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         return None
 
 
@@ -1199,7 +1303,7 @@ def serve_locked(
                     pid, uid, gid = struct.unpack("3i", credentials)
                     header = recv_exact(connection, 5, request_deadline)
                     kind, length = struct.unpack("!cI", header)
-                    if length > MAX_BODY or kind not in (b"L", b"D"):
+                    if length > MAX_BODY or kind not in (b"L", b"D", b"K"):
                         raise ValueError("invalid broker request")
                     body = recv_exact(connection, length, request_deadline)
                     if not peer_is_authorized(
@@ -1209,6 +1313,25 @@ def serve_locked(
                         broker_gid=broker_gid
                     ):
                         connection.sendall(b"E")
+                        continue
+                    if kind == b"K":
+                        lease = open_authority_record_lock(
+                            blocking=False, state=state, home=home,
+                            task=args.task, launch_script=launch_script,
+                            launch_evidence=launch_evidence,
+                        )
+                        if lease is None:
+                            connection.sendall(b"E")
+                            continue
+                        connection.sendall(
+                            b"O" + hmac.new(durable_key, body, hashlib.sha256).hexdigest().encode()
+                        )
+                        connection.settimeout(None)
+                        try:
+                            if recv_exact(connection, len(b"RELEASE\n")) != b"RELEASE\n":
+                                return 1
+                        finally:
+                            close_record_lock(lease)
                         continue
                     key = live_key if kind == b"L" else durable_key
                     digest = hmac.new(key, body, hashlib.sha256).hexdigest().encode()
@@ -2010,6 +2133,98 @@ def client(args: argparse.Namespace) -> int:
         return 1
 
 
+def lock_holder(args: argparse.Namespace) -> int:
+    try:
+        metadata = read_record(Path(args.record))
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)
+        socket_value = metadata["socket"]
+        connection.connect(
+            f"\0{socket_value.removeprefix('abstract:')}"
+            if socket_value.startswith("abstract:")
+            else socket_value
+        )
+        if not connected_peer_matches_record(connection, metadata):
+            connection.close()
+            return 1
+        nonce = read_process_fd_line(os.getpid(), args.capability_fd)
+        body = b"firstmate/session-authority/admission/v1\0" + nonce.encode()
+        deadline = time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
+        connection.sendall(struct.pack("!cI", b"K", len(body)) + body)
+        response = recv_exact(connection, 65, deadline)
+        if response[:1] != b"O" or any(
+            value not in b"0123456789abcdef" for value in response[1:]
+        ):
+            connection.close()
+            return 1
+        print("LOCKED", flush=True)
+        print(f"PID {os.getpid()}", flush=True)
+        command = sys.stdin.buffer.readline()
+        if command != b"RELEASE\n":
+            connection.close()
+            return 1
+        connection.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)
+        connection.sendall(b"RELEASE\n")
+        connection.close()
+        return 0
+    except (OSError, UnicodeError, ValueError):
+        return 1
+
+
+def primary_lock_holder(args: argparse.Namespace) -> int:
+    descriptor = -1
+    lock: AuthorityRecordLock | None = None
+    try:
+        if args.root_fd != AUTHORITY_SERIALIZATION_FD:
+            return 1
+        caller = int(args.caller_pid)
+        caller_generation = process_generation(caller)
+        if caller_generation != (args.caller_start, args.caller_identity):
+            return 1
+        if not (
+            process_runs_script(caller, canonical(args.launch_script))
+            or process_runs_script(caller, f"{canonical(args.home)}/bin/fm-lock.sh")
+        ):
+            return 1
+        if canonical(os.readlink(f"/proc/{caller}/cwd")) != canonical(args.home):
+            return 1
+        key = read_process_fd_line(os.getpid(), args.root_fd)
+        descriptor_identity_value = descriptor_identity(os.getpid(), args.root_fd)
+        if descriptor_identity(caller, args.root_fd) != descriptor_identity_value:
+            return 1
+        opened = open_authority_admission_lock(
+            Path(canonical(args.state)),
+            (bytes.fromhex(key), os.getpid(), "", ""),
+        )
+        if opened is None:
+            return 1
+        descriptor, path = opened
+        if descriptor != AUTHORITY_SERIALIZATION_FD:
+            os.dup2(descriptor, AUTHORITY_SERIALIZATION_FD)
+            os.close(descriptor)
+            descriptor = AUTHORITY_SERIALIZATION_FD
+        lock = acquire_authority_record_lock(
+            descriptor, blocking=True, expected_path=path
+        )
+        if lock is None:
+            return 1
+        print("LOCKED", flush=True)
+        print(f"PID {os.getpid()}", flush=True)
+        if sys.stdin.buffer.readline() != b"RELEASE\n":
+            return 1
+        return 0
+    except (OSError, UnicodeError, ValueError):
+        return 1
+    finally:
+        if lock is not None:
+            close_record_lock(lock)
+        elif descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -2021,6 +2236,17 @@ def parse_args() -> argparse.Namespace:
     client_parser = subparsers.add_parser("client", add_help=False)
     client_parser.add_argument("--record", required=True)
     client_parser.add_argument("--kind", choices=("live", "durable"), required=True)
+    holder = subparsers.add_parser("lock-holder", add_help=False)
+    holder.add_argument("--record", required=True)
+    holder.add_argument("--capability-fd", type=int, required=True)
+    primary_holder = subparsers.add_parser("primary-lock-holder", add_help=False)
+    primary_holder.add_argument("--state", required=True)
+    primary_holder.add_argument("--home", required=True)
+    primary_holder.add_argument("--launch-script", required=True)
+    primary_holder.add_argument("--root-fd", type=int, required=True)
+    primary_holder.add_argument("--caller-pid", required=True)
+    primary_holder.add_argument("--caller-start", required=True)
+    primary_holder.add_argument("--caller-identity", required=True)
     server.add_argument("--launch-evidence-fd", type=int, required=True)
     server.add_argument("--launch-script", required=True)
     server.add_argument("--record-lock-fd", type=int, default=-1)
@@ -2044,6 +2270,10 @@ if __name__ == "__main__":
         result = supervise(arguments)
     elif arguments.mode == "client":
         result = client(arguments)
+    elif arguments.mode == "lock-holder":
+        result = lock_holder(arguments)
+    elif arguments.mode == "primary-lock-holder":
+        result = primary_lock_holder(arguments)
     else:
         result = recover_stale(arguments)
     raise SystemExit(result)

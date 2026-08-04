@@ -73,15 +73,28 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
-fm_session_authority_transaction_recover "$STATE" || {
-  echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
-  exit 1
-}
-
 fm_session_authority_capability_present || {
   echo "error: session authority capability is missing or invalid; operate read-only until resolved" >&2
   exit 1
 }
+
+fm_session_authority_admission_acquire || {
+  echo "error: session authority admission could not be authenticated" >&2
+  exit 1
+}
+
+fm_session_authority_transaction_recover "$STATE" || {
+  echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
+  exit 1
+}
+if [ -d "$STATE/.session-authority-transaction" ] \
+  && [ ! -L "$STATE/.session-authority-transaction" ]; then
+  fm_session_authority_transaction_finalize "$STATE" || {
+    fm_session_authority_transaction_rollback "$STATE" || true
+    echo "error: committed session authority recovery could not be finalized" >&2
+    exit 1
+  }
+fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CLAIM_LOCK="$STATE/.lock.acquire"
@@ -346,21 +359,26 @@ if ! fm_session_authority_transaction_stage \
   rm -f "$BINDING_TMP" "$LOCK_TMP" "$AUTHORITY_TMP" "$LIVE_TMP"
   exit 1
 fi
-if ! written=$(cat "$LOCK" 2>/dev/null); then
-  exit 1
-fi
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
-  echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
-  exit 1
-fi
-if ! fm_session_authority_read "$AUTHORITY" \
+if ! written=$(cat "$LOCK" 2>/dev/null) \
+  || [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ] \
+  || ! fm_session_authority_read "$AUTHORITY" \
   || [ "$FM_SESSION_AUTHORITY_OWNER" != "$owner" ] \
   || [ "$FM_SESSION_AUTHORITY_HOME" != "$HOME_REAL" ] \
   || [ "$FM_SESSION_AUTHORITY_CHECKOUT" != "$ROOT_REAL" ]; then
-  echo "error: session authority verification failed; operate read-only until resolved" >&2
+  fm_session_authority_transaction_rollback "$STATE" || true
+  echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+fm_session_authority_transaction_finalize "$STATE" || {
+  fm_session_authority_transaction_rollback "$STATE" || true
+  echo "error: session authority verification failed; operate read-only until resolved" >&2
+  exit 1
+}
 release_claim_lock
+fm_session_authority_admission_release || {
+  echo "error: session authority admission could not be released" >&2
+  exit 1
+}
 case "$owner" in
   *'|codex:'*) echo "lock acquired: Codex session owner $owner" ;;
   *) echo "lock acquired: harness pid $owner" ;;
