@@ -343,6 +343,70 @@ FM_SESSION_AUTHORITY_ADMISSION_BROKER_IDENTITY=
 FM_SESSION_AUTHORITY_ADMISSION_IN=
 FM_SESSION_AUTHORITY_ADMISSION_OUT=
 FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
+FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD=0
+FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_LOCK=
+FM_SESSION_AUTHORITY_PROVISION_LOCK_HELD=0
+FM_SESSION_AUTHORITY_PROVISION_LOCK_PATH=
+
+fm_session_authority_load_wake_lib() {
+  if ! type fm_lock_try_acquire >/dev/null 2>&1; then
+    FM_WAKE_LIB_READ_ONLY=1
+    . "$_FM_SESSION_LOCK_LIB_DIR/fm-wake-lib.sh"
+  fi
+}
+
+fm_session_authority_provision_lock_acquire() {
+  local state=$1 lock
+  [ "$FM_SESSION_AUTHORITY_PROVISION_LOCK_HELD" -eq 0 ] || return 0
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  fm_session_authority_load_wake_lib || return 1
+  lock="$state/.session-authority-broker-recovery.lock"
+  fm_lock_acquire_wait "$lock" "${FM_SESSION_AUTHORITY_PROVISION_TIMEOUT_MS:-5000}" \
+    || return 1
+  FM_SESSION_AUTHORITY_PROVISION_LOCK_HELD=1
+  FM_SESSION_AUTHORITY_PROVISION_LOCK_PATH="$lock"
+}
+
+fm_session_authority_provision_lock_release() {
+  local state=${1:-${FM_STATE_OVERRIDE:-}} lock status=0
+  [ "$FM_SESSION_AUTHORITY_PROVISION_LOCK_HELD" -eq 1 ] || return 0
+  fm_session_authority_load_wake_lib || return 1
+  if [ -n "$state" ]; then
+    lock="$state/.session-authority-broker-recovery.lock"
+  else
+    lock="$FM_SESSION_AUTHORITY_PROVISION_LOCK_PATH"
+  fi
+  [ -n "$lock" ] || return 1
+  fm_lock_release "$lock" || status=1
+  FM_SESSION_AUTHORITY_PROVISION_LOCK_HELD=0
+  FM_SESSION_AUTHORITY_PROVISION_LOCK_PATH=
+  return "$status"
+}
+
+fm_session_authority_open_inherited_capability() {
+  local fd=$1
+  case "$fd" in 20|21) ;; *) return 1 ;; esac
+  case "$fd" in
+    20) exec 20< <(fm_session_random_hex 48) ;;
+    21) exec 21< <(fm_session_random_hex 48) ;;
+  esac
+  fm_session_descriptor_channel_isolated "$fd" || {
+    case "$fd" in
+      20) exec 20<&- ;;
+      21) exec 21<&- ;;
+    esac
+    return 1
+  }
+}
+
+fm_session_authority_admission_coordination_release() {
+  [ "${FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD:-0}" -eq 1 ] \
+    || return 0
+  fm_session_authority_load_wake_lib || return 1
+  fm_lock_release "$FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_LOCK" || return 1
+  FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD=0
+  FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_LOCK=
+}
 
 fm_session_authority_admission_acquire() {
   local home state record script status broker_status broker_pid
@@ -358,20 +422,35 @@ fm_session_authority_admission_acquire() {
   if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
     && fm_session_authority_socket_broker_present; then
     record="$state/.session-authority-broker"
-    if ( : <&17 ) 2>/dev/null || ( : >&17 ) 2>/dev/null; then
+    if ( : <&21 ) 2>/dev/null || ( : >&21 ) 2>/dev/null; then
       return 1
     fi
-    exec 17< <(fm_session_random_hex 48) || return 1
-    FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=17
+    fm_session_authority_open_inherited_capability 21 || return 1
+    FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=21
     coproc FM_SESSION_AUTHORITY_ADMISSION_PROCESS {
-      python3 "$script" lock-holder --record "$record" --capability-fd 17
+      python3 "$script" lock-holder --record "$record" --capability-fd 21
     }
   else
     [ "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" = 18 ] || return 1
+    if ( : <&21 ) 2>/dev/null || ( : >&21 ) 2>/dev/null; then
+      return 1
+    fi
+    fm_session_authority_load_wake_lib || return 1
+    fm_lock_acquire_wait "$state/.session-authority-admission.lock" \
+      "${FM_SESSION_AUTHORITY_ADMISSION_TIMEOUT_MS:-5000}" || return 1
+    FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD=1
+    FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_LOCK="$state/.session-authority-admission.lock"
+    fm_session_authority_open_inherited_capability 21 || {
+      fm_lock_release "$state/.session-authority-admission.lock" || true
+      FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD=0
+      return 1
+    }
+    FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=21
     coproc FM_SESSION_AUTHORITY_ADMISSION_PROCESS {
       python3 "$script" primary-lock-holder --state "$state" \
         --home "$home" --launch-script \
         "$home/bin/fm-session-authority-exec.sh" --root-fd 18 \
+        --capability-fd 21 \
         --caller-pid "$$" --caller-start "$caller_start" \
         --caller-identity "$caller_identity"
     }
@@ -382,9 +461,10 @@ fm_session_authority_admission_acquire() {
   case "$FM_SESSION_AUTHORITY_ADMISSION_PID:$FM_SESSION_AUTHORITY_ADMISSION_IN:$FM_SESSION_AUTHORITY_ADMISSION_OUT" in
     ''|*[!0-9:]*|*::*|*:)
       if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
-        exec 17<&- 2>/dev/null || true
+        exec 21<&- 2>/dev/null || true
         FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
       fi
+      fm_session_authority_admission_coordination_release || true
       return 1
       ;;
   esac
@@ -402,9 +482,10 @@ fm_session_authority_admission_acquire() {
     FM_SESSION_AUTHORITY_ADMISSION_IN=
     FM_SESSION_AUTHORITY_ADMISSION_OUT=
     if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
-      exec 17<&- 2>/dev/null || true
+      exec 21<&- 2>/dev/null || true
       FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
     fi
+    fm_session_authority_admission_coordination_release || true
     return 1
   fi
   if ! IFS= read -r broker_status <&"$FM_SESSION_AUTHORITY_ADMISSION_OUT" \
@@ -421,9 +502,10 @@ fm_session_authority_admission_acquire() {
     FM_SESSION_AUTHORITY_ADMISSION_IN=
     FM_SESSION_AUTHORITY_ADMISSION_OUT=
     if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
-      exec 17<&- 2>/dev/null || true
+      exec 21<&- 2>/dev/null || true
       FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
     fi
+    fm_session_authority_admission_coordination_release || true
     return 1
   fi
   FM_SESSION_AUTHORITY_ADMISSION_HELD=1
@@ -477,7 +559,10 @@ fm_session_authority_admission_release() {
   wait "$FM_SESSION_AUTHORITY_ADMISSION_PID" 2>/dev/null || status=1
   exec {FM_SESSION_AUTHORITY_ADMISSION_OUT}<&- 2>/dev/null || status=1
   if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
-    exec 17<&- 2>/dev/null || status=1
+    exec 21<&- 2>/dev/null || status=1
+  fi
+  if [ "${FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD:-0}" -eq 1 ]; then
+    fm_session_authority_admission_coordination_release || status=1
   fi
   FM_SESSION_AUTHORITY_ADMISSION_HELD=0
   FM_SESSION_AUTHORITY_ADMISSION_PID=
@@ -489,6 +574,8 @@ fm_session_authority_admission_release() {
   FM_SESSION_AUTHORITY_ADMISSION_IN=
   FM_SESSION_AUTHORITY_ADMISSION_OUT=
   FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
+  FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD=0
+  FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_LOCK=
   return "$status"
 }
 
@@ -526,10 +613,10 @@ fm_session_authority_admission_lease_valid() {
     "$broker_pid" --capability-fd 2>/dev/null || true)
   if [ -n "$state_arg" ]; then
     [ "$state_arg" = "$state" ] && [ "$root_fd" = 18 ] \
-      && [ -z "$record_arg" ]
+      && [ "$capability_fd" = 21 ] && [ -z "$record_arg" ]
   else
     [ "$record_arg" = "$state/.session-authority-broker" ] \
-      && [ "$capability_fd" = 17 ] && [ -z "$root_fd" ]
+      && [ "$capability_fd" = 21 ] && [ -z "$root_fd" ]
   fi
 }
 
@@ -813,12 +900,14 @@ fm_session_authority_socket_broker_start_locked() {
     setsid python3 "$script" supervise --state "$state" --home "$home" \
       --checkout "$checkout" --task "$task" \
       --launch-evidence-fd 19 --launch-script "$launch_script" \
+      --record-lock-fd 20 \
       </dev/null >/dev/null 2>&1 &
   elif command -v perl >/dev/null 2>&1; then
     perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 1; exec @ARGV' \
       python3 "$script" supervise --state "$state" --home "$home" \
       --checkout "$checkout" --task "$task" \
       --launch-evidence-fd 19 --launch-script "$launch_script" \
+      --record-lock-fd 20 \
       </dev/null >/dev/null 2>&1 &
   else
     exec 19<&-
@@ -839,7 +928,7 @@ fm_session_authority_socket_broker_start_locked() {
 
 fm_session_authority_socket_broker_start() {
   local state=$1 home=$2 checkout=$3 task=$4 script record launch_script
-  local attempts=0
+  local attempts=0 status recovery_lock
   script="$checkout/bin/fm-session-authority-broker.py"
   record="$state/.session-authority-broker"
   launch_script="$home/bin/fm-session-authority-exec.sh"
@@ -852,10 +941,27 @@ fm_session_authority_socket_broker_start() {
     && [ -f "$home/.fm-secondmate-home" ] \
     && [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] \
     || return 1
+  fm_session_authority_load_wake_lib || return 1
+  recovery_lock="$state/.session-authority-broker-recovery.lock"
   while [ "$attempts" -lt 100 ]; do
     fm_session_authority_socket_broker_present && return 0
-    fm_session_authority_socket_broker_start_locked \
-      "$state" "$home" "$checkout" "$task" || true
+    if fm_lock_try_acquire "$recovery_lock"; then
+      status=1
+      if fm_session_authority_socket_broker_present; then
+        status=0
+      elif ! ( : <&20 ) 2>/dev/null \
+        && ! ( : >&20 ) 2>/dev/null \
+        && fm_session_authority_open_inherited_capability 20; then
+        fm_session_authority_socket_broker_start_locked \
+          "$state" "$home" "$checkout" "$task" && status=0
+        exec 20<&- 2>/dev/null || true
+      fi
+      if ( : <&20 ) 2>/dev/null || ( : >&20 ) 2>/dev/null; then
+        exec 20<&- 2>/dev/null || true
+      fi
+      fm_lock_release "$recovery_lock" || status=1
+      [ "$status" -eq 0 ] && return 0
+    fi
     fm_session_authority_socket_broker_present && return 0
     sleep 0.02
     attempts=$((attempts + 1))
@@ -928,6 +1034,8 @@ fm_session_descriptor_channel_isolated() {
           17) exec 17</dev/null ;;
           18) exec 18</dev/null ;;
           19) exec 19</dev/null ;;
+          20) exec 20</dev/null ;;
+          21) exec 21</dev/null ;;
           *) return 1 ;;
         esac
         opened=1
@@ -946,6 +1054,8 @@ fm_session_descriptor_channel_isolated() {
           17) exec 17<&- ;;
           18) exec 18<&- ;;
           19) exec 19<&- ;;
+          20) exec 20<&- ;;
+          21) exec 21<&- ;;
         esac
       fi
       return "$status"

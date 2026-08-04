@@ -92,6 +92,13 @@ lifecycle operations and ordinary `fm-<id>` selectors share one strict parser
 that rejects duplicate or malformed pane data and proves the persisted exact
 pane still belongs to the recorded window and generation before transport.
 
+Admission is never derived from an abstract socket name. A primary inherits an
+anonymous capability and a separate state-scoped coordination lease. A
+secondmate presents its anonymous capability over the broker connection, then
+proves a fresh broker challenge while the broker checks `SO_PEERCRED`, the
+process generation, and the declared home. Cold-start provisioning holds its
+coordination lease before generating either root key or publishing a broker.
+
 The declaration refuses rather than emitting a partial prefix:
 
 ```sh

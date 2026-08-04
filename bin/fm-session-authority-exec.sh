@@ -30,6 +30,17 @@ durable_recovery=
 durable_consumer_key=
 durable_consumer_digest=
 cleanup_enrollment_ticket() {
+  if type fm_session_authority_admission_release >/dev/null 2>&1 \
+    && [ "${FM_SESSION_AUTHORITY_ADMISSION_HELD:-0}" -eq 1 ]; then
+    fm_session_authority_admission_release || true
+  elif type fm_session_authority_admission_coordination_release >/dev/null 2>&1 \
+    && [ "${FM_SESSION_AUTHORITY_ADMISSION_COORDINATION_HELD:-0}" -eq 1 ]; then
+    fm_session_authority_admission_coordination_release || true
+  fi
+  if type fm_session_authority_provision_lock_release >/dev/null 2>&1 \
+    && [ "${FM_SESSION_AUTHORITY_PROVISION_LOCK_HELD:-0}" -eq 1 ]; then
+    fm_session_authority_provision_lock_release || true
+  fi
   [ -z "$enrollment_ticket" ] || rm -f -- "$enrollment_ticket"
 }
 trap cleanup_enrollment_ticket EXIT
@@ -574,6 +585,21 @@ else
     echo "error: durable session authority custodian is unavailable" >&2
     exit 1
   else
+    fm_session_authority_provision_lock_acquire "$STATE" || {
+      echo "error: session authority first-root provisioning is unavailable" >&2
+      exit 1
+    }
+    if [ -e "$STATE/.primary-checkout" ] \
+      || [ -L "$STATE/.primary-checkout" ] \
+      || [ -e "$STATE/.lock" ] || [ -L "$STATE/.lock" ] \
+      || [ -e "$authority" ] || [ -L "$authority" ] \
+      || [ -e "$STATE/.session-authority-live" ] \
+      || [ -L "$STATE/.session-authority-live" ] \
+      || [ -e "$STATE/.session-durable-authority" ] \
+      || [ -L "$STATE/.session-durable-authority" ]; then
+      echo "error: session authority was provisioned concurrently" >&2
+      exit 1
+    fi
     fm_session_authority_descriptor_create || {
       echo "error: protected session authority descriptor is unavailable" >&2
       exit 1
@@ -659,6 +685,10 @@ else
   }
   fm_session_enrollment_trace consumer-durable-custodian pass 2>/dev/null || true
 fi
+fm_session_authority_provision_lock_release "$STATE" || {
+  echo "error: session authority first-root provisioning lock could not be released" >&2
+  exit 1
+}
 fm_session_authority_admission_release || {
   echo "error: session authority admission could not be released" >&2
   exit 1

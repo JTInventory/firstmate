@@ -32,6 +32,7 @@ MAX_ANCESTRY_DEPTH = 128
 BROKER_REQUEST_TIMEOUT_SECONDS = 2.0
 RECOVERY_LAUNCH_EVIDENCE_FD = 19
 AUTHORITY_SERIALIZATION_FD = 18
+ADMISSION_CAPABILITY_FD = 21
 MAX_RECOVERY_QUARANTINES = 4
 QUARANTINE_RECEIPT_SUFFIX = ".receipt"
 QUARANTINE_PROOF_SUFFIX = ".proof"
@@ -183,12 +184,48 @@ def trusted_admission_ancestor(pid: int, home: str, launch_script: str) -> bool:
     return False
 
 
+ADMISSION_REQUEST_PREFIX = b"firstmate/session-authority/admission/v1\0"
+ADMISSION_CHALLENGE_PREFIX = (
+    b"firstmate/session-authority/admission/challenge/v1\0"
+)
+
+
 def read_process_fd_line(pid: int, fd: int) -> str:
     with open(f"/proc/{pid}/fd/{fd}", "rb", buffering=0) as source:
         value = source.readline()
     key = value.decode("ascii").strip()
     if len(key) < 64 or len(key) % 2 or any(c not in "0123456789abcdef" for c in key):
         raise ValueError("malformed primary authority key")
+    return key
+
+
+def read_inherited_capability(fd: int) -> str:
+    descriptor = os.dup(fd)
+    try:
+        os.set_blocking(descriptor, False)
+        chunks: list[bytes] = []
+        deadline = time.monotonic() + AUTHORITY_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                chunk = os.read(descriptor, 4096)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("inherited capability unavailable")
+                time.sleep(0.01)
+                continue
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk or sum(len(value) for value in chunks) > 4096:
+                break
+        value = b"".join(chunks).split(b"\n", 1)[0]
+    finally:
+        os.close(descriptor)
+    key = value.decode("ascii")
+    if len(key) < 64 or len(key) % 2 or any(
+        c not in "0123456789abcdef" for c in key
+    ):
+        raise ValueError("malformed inherited capability")
     return key
 
 
@@ -460,11 +497,12 @@ def peer_is_authorized(
                 len(command) != 7
                 or command[3] != "--record"
                 or command[5] != "--capability-fd"
-                or command[6] != "17"
+                or command[6] != str(ADMISSION_CAPABILITY_FD)
             ):
                 return False
             if not trusted_wrapper_ancestor(
-                pid, home, f"{home}/bin/fm-session-authority-exec.sh", 17
+                pid, home, f"{home}/bin/fm-session-authority-exec.sh",
+                ADMISSION_CAPABILITY_FD
             ):
                 return False
         peer_generation = process_generation(pid)
@@ -871,9 +909,8 @@ def open_record_lock(
 
 
 class AuthorityRecordLock:
-    def __init__(self, fd: int, *, socket_lock: bool = False):
+    def __init__(self, fd: int):
         self.fd = fd
-        self.socket_lock = socket_lock
         self.closed = False
 
     def fileno(self) -> int:
@@ -904,32 +941,21 @@ def close_record_lock(
     os.close(descriptor)
 
 
-def authority_admission_socket_name(root_key: bytes, home: str) -> bytes:
-    digest = hmac.new(
-        root_key,
-        b"firstmate/session-authority-broker/admission/socket/v1\0"
-        + canonical(home).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest().encode("ascii")
-    return b"\0firstmate-authority-" + digest
-
-
-def open_authority_admission_capability(
-    root_key: bytes, home: str, *, blocking: bool
+def open_inherited_authority_record_lock(
+    fd: int, *, blocking: bool
 ) -> AuthorityRecordLock | None:
-    if len(root_key) < 32 or not home or not os.path.isabs(home):
+    if fd < 3:
         return None
-    address = authority_admission_socket_name(root_key, home)
     deadline = time.monotonic() + AUTHORITY_LOCK_TIMEOUT_SECONDS
     while True:
-        descriptor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            descriptor.bind(address)
-            return AuthorityRecordLock(descriptor.detach(), socket_lock=True)
-        except OSError as error:
-            descriptor.close()
-            if error.errno != errno.EADDRINUSE:
+            lock_stat = os.fstat(fd)
+            if not stat.S_ISFIFO(lock_stat.st_mode):
                 return None
+            read_inherited_capability(fd)
+            os.set_inheritable(fd, True)
+            return AuthorityRecordLock(fd)
+        except (OSError, UnicodeError, ValueError):
             if not blocking or time.monotonic() >= deadline:
                 return None
             time.sleep(0.01)
@@ -939,11 +965,12 @@ def open_authority_record_lock(
     *, blocking: bool, state: Path | None = None, home: str | None = None,
     task: str | None = None,
     launch_script: str | None = None,
-    launch_evidence: tuple[bytes, int, str, str] | None = None
+    launch_evidence: tuple[bytes, int, str, str] | None = None,
+    capability_fd: int = -1,
 ) -> AuthorityRecordLock | None:
     if (
         state is None or home is None or task is None or launch_script is None
-        or launch_evidence is None
+        or launch_evidence is None or capability_fd < 3
     ):
         return None
     if not state.is_dir() or state.is_symlink() or canonical(str(state.parent)) != home:
@@ -952,9 +979,7 @@ def open_authority_record_lock(
         f"{home}/bin/fm-session-authority-exec.sh"
     ):
         return None
-    return open_authority_admission_capability(
-        launch_evidence[0], home, blocking=blocking
-    )
+    return open_inherited_authority_record_lock(capability_fd, blocking=blocking)
 
 
 def inherited_authority_record_lock(
@@ -962,29 +987,11 @@ def inherited_authority_record_lock(
     launch_script: str,
     launch_evidence: tuple[bytes, int, str, str]
 ) -> AuthorityRecordLock | None:
-    if fd != AUTHORITY_SERIALIZATION_FD or not task or canonical(
+    if not task or canonical(
         launch_script
     ) != canonical(f"{home}/bin/fm-session-authority-exec.sh"):
         return None
-    probe = None
-    duplicate = -1
-    try:
-        duplicate = os.dup(fd)
-        probe = socket.socket(fileno=duplicate)
-        duplicate = -1
-        expected = authority_admission_socket_name(
-            launch_evidence[0], canonical(home)
-        )
-        if probe.getsockname() != expected:
-            return None
-        return AuthorityRecordLock(fd, socket_lock=True)
-    except (OSError, ValueError):
-        return None
-    finally:
-        if probe is not None:
-            probe.close()
-        if duplicate >= 0:
-            os.close(duplicate)
+    return open_inherited_authority_record_lock(fd, blocking=False)
 
 
 def move_authority_record_lock(
@@ -996,7 +1003,7 @@ def move_authority_record_lock(
     source_fd = lock.fileno()
     os.dup2(source_fd, target_fd)
     os.close(source_fd)
-    return AuthorityRecordLock(target_fd, socket_lock=True)
+    return AuthorityRecordLock(target_fd)
 
 
 def serve(args: argparse.Namespace) -> int:
@@ -1076,16 +1083,31 @@ def install_evidence_bytes(data: bytes) -> None:
     try:
         offset = 0
         while offset < len(data):
-            offset += os.write(write_fd, data[offset:])
-    except BaseException:
-        os.close(read_fd)
-        raise
-    finally:
-        os.close(write_fd)
-    try:
+            written = os.write(write_fd, data[offset:])
+            if written <= 0:
+                raise OSError("short launch evidence write")
+            offset += written
         os.dup2(read_fd, RECOVERY_LAUNCH_EVIDENCE_FD, inheritable=True)
     finally:
-        os.close(read_fd)
+        os.close(write_fd)
+        if read_fd != RECOVERY_LAUNCH_EVIDENCE_FD:
+            os.close(read_fd)
+
+
+def install_capability_bytes(data: bytes) -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        offset = 0
+        while offset < len(data):
+            written = os.write(write_fd, data[offset:])
+            if written <= 0:
+                raise OSError("short capability write")
+            offset += written
+        os.dup2(read_fd, AUTHORITY_SERIALIZATION_FD, inheritable=True)
+    finally:
+        os.close(write_fd)
+        if read_fd != AUTHORITY_SERIALIZATION_FD:
+            os.close(read_fd)
 
 
 def supervise(args: argparse.Namespace) -> int:
@@ -1104,10 +1126,20 @@ def supervise(args: argparse.Namespace) -> int:
         state = Path(canonical(args.state))
         home = canonical(args.home)
         launch_script = canonical(args.launch_script)
-        record_lock_fd = open_authority_record_lock(
-            blocking=False, state=state, home=home, task=args.task,
-            launch_script=launch_script, launch_evidence=launch_evidence
-        )
+        record_lock_argument = getattr(args, "record_lock_fd", -1)
+        if (
+            record_lock_argument < 3
+            or record_lock_argument == AUTHORITY_SERIALIZATION_FD
+        ):
+            return 1
+        capability = read_inherited_capability(record_lock_argument)
+        if not trusted_admission_ancestor(
+            os.getpid(), home, launch_script
+        ):
+            return 1
+        install_capability_bytes((capability + "\n").encode("ascii"))
+        os.close(record_lock_argument)
+        record_lock_fd = AuthorityRecordLock(AUTHORITY_SERIALIZATION_FD)
         if record_lock_fd is None:
             return 1
         recovery_args = argparse.Namespace(
@@ -1122,9 +1154,6 @@ def supervise(args: argparse.Namespace) -> int:
             recovery_args, launch_evidence=launch_evidence, lease=record_lock_fd
         ) != 0:
             return 1
-        record_lock_fd = move_authority_record_lock(
-            record_lock_fd, AUTHORITY_SERIALIZATION_FD
-        )
         install_evidence_bytes(evidence)
         os.execv(
             sys.executable,
@@ -1305,6 +1334,38 @@ def serve_locked(
                     connection.sendall(b"E")
                     continue
                 if kind == b"K":
+                    if not body.startswith(ADMISSION_REQUEST_PREFIX):
+                        raise ValueError("invalid admission request")
+                    capability = body[len(ADMISSION_REQUEST_PREFIX):]
+                    if (
+                        len(capability) < 64
+                        or len(capability) % 2
+                        or any(
+                            value not in b"0123456789abcdef"
+                            for value in capability
+                        )
+                    ):
+                        raise ValueError("invalid admission capability")
+                    challenge = secrets.token_hex(32).encode("ascii")
+                    connection.sendall(b"C" + challenge)
+                    proof_header = recv_exact(connection, 5, request_deadline)
+                    proof_kind, proof_length = struct.unpack("!cI", proof_header)
+                    if proof_kind != b"K" or proof_length > MAX_BODY:
+                        raise ValueError("invalid admission proof")
+                    proof_body = recv_exact(
+                        connection, proof_length, request_deadline
+                    )
+                    expected_proof = hmac.new(
+                        bytes.fromhex(capability),
+                        ADMISSION_CHALLENGE_PREFIX + challenge,
+                        hashlib.sha256,
+                    ).hexdigest().encode("ascii")
+                    expected_body = (
+                        ADMISSION_REQUEST_PREFIX + capability + b"\0"
+                        + challenge + b"\0" + expected_proof
+                    )
+                    if not hmac.compare_digest(proof_body, expected_body):
+                        raise ValueError("invalid admission proof")
                     with lease_guard:
                         if active_lease is not None:
                             connection.sendall(b"E")
@@ -2173,6 +2234,20 @@ def lock_holder(args: argparse.Namespace) -> int:
         body = b"firstmate/session-authority/admission/v1\0" + nonce.encode()
         deadline = time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
         connection.sendall(struct.pack("!cI", b"K", len(body)) + body)
+        challenge_response = recv_exact(connection, 65, deadline)
+        if challenge_response[:1] != b"C" or any(
+            value not in b"0123456789abcdef"
+            for value in challenge_response[1:]
+        ):
+            return 1
+        challenge = challenge_response[1:]
+        proof = hmac.new(
+            bytes.fromhex(nonce),
+            ADMISSION_CHALLENGE_PREFIX + challenge,
+            hashlib.sha256,
+        ).hexdigest().encode("ascii")
+        proof_body = body + b"\0" + challenge + b"\0" + proof
+        connection.sendall(struct.pack("!cI", b"K", len(proof_body)) + proof_body)
         response = recv_exact(connection, 65, deadline)
         if response[:1] != b"O" or any(
             value not in b"0123456789abcdef" for value in response[1:]
@@ -2225,7 +2300,10 @@ def lock_holder(args: argparse.Namespace) -> int:
 def primary_lock_holder(args: argparse.Namespace) -> int:
     lock: AuthorityRecordLock | None = None
     try:
-        if args.root_fd != AUTHORITY_SERIALIZATION_FD:
+        if (
+            args.root_fd != AUTHORITY_SERIALIZATION_FD
+            or args.capability_fd != ADMISSION_CAPABILITY_FD
+        ):
             return 1
         state = Path(canonical(args.state))
         home = canonical(args.home)
@@ -2249,12 +2327,20 @@ def primary_lock_holder(args: argparse.Namespace) -> int:
             return 1
         if canonical(os.readlink(f"/proc/{caller}/cwd")) != home:
             return 1
-        key = read_process_fd_line(os.getpid(), args.root_fd)
-        descriptor_identity_value = descriptor_identity(os.getpid(), args.root_fd)
-        if descriptor_identity(caller, args.root_fd) != descriptor_identity_value:
+        if not trusted_wrapper_ancestor(
+            caller, home, canonical(args.launch_script), args.capability_fd
+        ):
             return 1
-        lock = open_authority_admission_capability(
-            bytes.fromhex(key), home, blocking=True
+        capability_descriptor = descriptor_identity(
+            os.getpid(), args.capability_fd
+        )
+        if descriptor_identity(caller, args.capability_fd) != capability_descriptor:
+            return 1
+        root_descriptor = descriptor_identity(os.getpid(), args.root_fd)
+        if descriptor_identity(caller, args.root_fd) != root_descriptor:
+            return 1
+        lock = open_inherited_authority_record_lock(
+            args.capability_fd, blocking=True
         )
         if lock is None:
             return 1
@@ -2289,6 +2375,7 @@ def parse_args() -> argparse.Namespace:
     primary_holder.add_argument("--home", required=True)
     primary_holder.add_argument("--launch-script", required=True)
     primary_holder.add_argument("--root-fd", type=int, required=True)
+    primary_holder.add_argument("--capability-fd", type=int, required=True)
     primary_holder.add_argument("--caller-pid", required=True)
     primary_holder.add_argument("--caller-start", required=True)
     primary_holder.add_argument("--caller-identity", required=True)
@@ -2302,6 +2389,7 @@ def parse_args() -> argparse.Namespace:
     supervisor.add_argument("--task", required=True)
     supervisor.add_argument("--launch-evidence-fd", type=int, required=True)
     supervisor.add_argument("--launch-script", required=True)
+    supervisor.add_argument("--record-lock-fd", type=int, required=True)
     recovery = subparsers.add_parser("recover-stale", add_help=False)
     recovery.add_argument("--record", required=True)
     return parser.parse_args()

@@ -263,8 +263,18 @@ test_transaction_authority_and_arbitration_controls() {
     || fail "broker admission is not bound to wrapper provenance"
   [[ "$broker_source" == *"--capability-fd"* ]] \
     || fail "broker admission lacks a protected wrapper capability"
+  [[ "$lock_source" == *"--capability-fd 21"* ]] \
+    || fail "wrapper admission capability collides with custodian descriptor"
   [[ "$broker_source" == *"--caller-start"* ]] \
     || fail "primary admission lacks caller-generation binding"
+  [[ "$broker_source" == *"ADMISSION_CHALLENGE_PREFIX"* ]] \
+    || fail "broker admission lacks a fresh authenticated challenge"
+  [[ "$lock_source" == *"fm_session_authority_provision_lock_acquire"* ]] \
+    || fail "cold-start provisioning lacks a shared serialization gate"
+  [[ "$lock_source" == *"fm_session_authority_open_inherited_capability"* ]] \
+    || fail "admission does not retain an inherited capability path"
+  [[ "$lock_source" != *"authority_admission_socket_name"* ]] \
+    || fail "admission still derives authority from a socket name"
   [[ "$lock_source" == *"FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD"* ]] \
     || fail "wrapper admission capability is not retained for cleanup"
   pass "transaction and arbitration controls retain authenticated ownership"
@@ -330,7 +340,7 @@ class FakeSocket:
     def close(self):
         self.closed = True
 
-responses = [b"O" + b"a" * 64, b"O" + b"a" * 64]
+responses = [b"C" + b"b" * 64 + b"O" + b"a" * 64, b"O" + b"a" * 64]
 broker.socket.socket = lambda *_args: FakeSocket(responses.pop(0))
 broker.read_record = lambda _path: {
     "socket": "abstract:test", "pid": "2", "uid": "0", "gid": "0",
@@ -345,6 +355,8 @@ if len(FakeSocket.instances) != 2:
     raise SystemExit("lock-holder did not open a separate release channel")
 if not FakeSocket.instances[0].sent[0].startswith(b"K"):
     raise SystemExit("lock-holder did not request an admission lease")
+if not FakeSocket.instances[0].sent[1].startswith(b"K"):
+    raise SystemExit("lock-holder did not complete the admission handshake")
 if not FakeSocket.instances[1].sent[0].startswith(b"R"):
     raise SystemExit("lock-holder did not authenticate the release channel")
 if FakeSocket.instances[1].sent[-1] != b"RELEASE\n":
@@ -726,10 +738,10 @@ if any(
 cleanup = source[source.index("def cleanup_recovery_quarantines("):source.index("def unlink_owned_record(")]
 if "AUTHORITY_SERIALIZATION_FD = 18" not in source:
     raise SystemExit("authority serialization did not use the inherited FD 18 capability")
-if "def open_authority_admission_capability(" not in source:
-    raise SystemExit("authority serialization did not use an abstract capability")
-if "def authority_admission_socket_name(" not in source:
-    raise SystemExit("authority serialization is not bound to the durable root")
+if "def open_inherited_authority_record_lock(" not in source:
+    raise SystemExit("authority serialization did not use an inherited capability")
+if "def authority_admission_socket_name(" in source:
+    raise SystemExit("authority serialization still derives authority from a socket name")
 if "def acquire_authority_record_lock(" in source:
     raise SystemExit("path-based authority flock remains reachable")
 if "def open_authority_admission_lock(" in source:
@@ -1004,14 +1016,14 @@ with TemporaryDirectory() as temporary:
     ready = state / "ready"
     release = state / "release"
     result = state / "result"
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"a" * 96 + b"\n")
+    os.close(write_fd)
 
     def hold_lock():
-        lock = broker.open_authority_record_lock(
-            blocking=False, state=state, home=str(home), task="alpha",
-            launch_script=str(script), launch_evidence=(b"k" * 32, 2, "s", "i")
-        )
+        lock = broker.open_inherited_authority_record_lock(read_fd, blocking=False)
         if lock is None:
-            raise SystemExit("wrapper-created admission lock did not acquire")
+            raise SystemExit("inherited admission capability did not validate")
         ready.write_text("ready", encoding="utf-8")
         while not release.exists():
             time.sleep(0.01)
@@ -1025,15 +1037,10 @@ with TemporaryDirectory() as temporary:
     if not ready.exists():
         holder.terminate()
         holder.join()
-        raise SystemExit("independent admission holder did not start")
-    if any(state.glob(".session-authority-admission-*")):
-        raise SystemExit("authority admission exposed a replaceable pathname")
+        raise SystemExit("inherited admission holder did not start")
 
     def contend():
-        lock = broker.open_authority_record_lock(
-            blocking=False, state=state, home=str(home), task="alpha",
-            launch_script=str(script), launch_evidence=(b"k" * 32, 3, "s", "i")
-        )
+        lock = broker.open_inherited_authority_record_lock(read_fd, blocking=False)
         result.write_text("busy" if lock is None else "forged", encoding="utf-8")
         if lock is not None:
             broker.close_record_lock(lock)
@@ -1044,9 +1051,10 @@ with TemporaryDirectory() as temporary:
     release.write_text("release", encoding="utf-8")
     holder.join(2)
     if contender.exitcode != 0 or holder.exitcode != 0 or result.read_text() != "busy":
-        raise SystemExit("independent supervisors did not share the admission lock")
+        raise SystemExit("an inherited admission capability was replayed")
 
     read_fd, write_fd = os.pipe()
+    os.close(write_fd)
     try:
         if read_fd != broker.AUTHORITY_SERIALIZATION_FD:
             os.dup2(read_fd, broker.AUTHORITY_SERIALIZATION_FD)
@@ -1056,9 +1064,8 @@ with TemporaryDirectory() as temporary:
             home=str(home), task="alpha", launch_script=str(script),
             launch_evidence=(b"k" * 32, 2, "s", "i")
         ) is not None:
-            raise SystemExit("forged pipe descriptor was accepted as admission authority")
+            raise SystemExit("empty inherited capability was accepted as admission authority")
     finally:
-        os.close(write_fd)
         try:
             os.close(broker.AUTHORITY_SERIALIZATION_FD)
         except OSError:
@@ -1210,8 +1217,8 @@ while :; do
       admission)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
-          exec 17< "\$request_home/state/.test-admission-capability"
-          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 17 \
+          exec 21< "\$request_home/state/.test-admission-capability"
+          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
             < "\$request_home/state/.test-admission-release" \
             >"\$output" 2>&1 &
           holder_pid=\$!
@@ -1235,14 +1242,14 @@ while :; do
             status=1
           fi
           wait "\$holder_pid" || status=1
-          exec 17<&-
+          exec 21<&-
         fi
         ;;
       admission-contend)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
-          exec 17< <(while :; do printf '%s\n' "$nonce"; done)
-          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 17 \
+          exec 21< <(while :; do printf '%s\n' "$nonce"; done)
+          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
             < "\$request_home/state/.test-admission-release-1" \
             >"\$output.first" 2>&1 &
           first_pid=\$!
@@ -1257,7 +1264,7 @@ while :; do
           done
           if grep -F 'LOCKED' "\$output.first" >/dev/null 2>&1; then
             printf '%s\n' locked > "\$output.locked"
-            python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 17 \
+            python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
               < /dev/null >"\$output.second" 2>&1 &
             second_pid=\$!
             second_status=0
@@ -1267,7 +1274,7 @@ while :; do
             status=1
           fi
           wait "\$first_pid" || status=1
-          exec 17<&-
+          exec 21<&-
         fi
         ;;
       rotate)
