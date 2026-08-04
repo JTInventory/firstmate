@@ -141,6 +141,67 @@ PY
   pass "broker connect and send stalls honor the request deadline"
 }
 
+test_inherited_capability_requires_anonymous_pipe() {
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location(
+    "session_authority_broker_capability_type", broker_path
+)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    named = Path(temporary) / "capability"
+    os.mkfifo(named, 0o600)
+    named_fd = os.open(named, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        os.write(named_fd, b"a" * 96 + b"\n")
+        try:
+            broker.read_inherited_capability(named_fd)
+        except ValueError:
+            pass
+        else:
+            raise SystemExit("a filesystem FIFO was accepted as authority")
+    finally:
+        os.close(named_fd)
+
+    reopened_fd = os.open(named, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        os.write(reopened_fd, b"a" * 96 + b"\n")
+        try:
+            broker.read_inherited_capability(reopened_fd)
+        except ValueError:
+            pass
+        else:
+            raise SystemExit("a named capability was replayed after reopen")
+    finally:
+        os.close(reopened_fd)
+
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"a" * 96 + b"\n")
+        os.close(write_fd)
+        write_fd = -1
+        if broker.read_inherited_capability(read_fd) != "a" * 96:
+            raise SystemExit("an anonymous capability was not accepted")
+    finally:
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+PY
+  then
+    fail "named FIFO capability was accepted or anonymous pipe was rejected"
+  fi
+  pass "admission capabilities require unnameable anonymous pipes"
+}
+
 test_primary_authority_record_and_live_descriptor_binding() {
   local fixture state authority backup
   fixture=$(fm_test_tmproot fm-primary-authority-binding)
@@ -232,6 +293,7 @@ test_primary_wrapper_rotates_dead_authority() {
 test_concurrent_primary_cold_start_has_one_winner() {
   local fixture first_output second_output first_pid second_pid
   local first_status second_status winners attempts custodian_pid status
+  local root_generations root_key_calls random_calls
   fixture=$(fm_test_tmproot fm-concurrent-primary-cold-start)
   mkdir -p "$fixture/bin" "$fixture/test-bin"
   sleep 2
@@ -241,9 +303,35 @@ test_concurrent_primary_cold_start_has_one_winner() {
   chmod 700 "$fixture/bin"/*.sh "$fixture/bin"/*.py
   cat > "$fixture/test-bin/od" <<SH
 #!/usr/bin/env bash
-if [ "\${3:-}" = 48 ] && [ ! -e "$fixture/root-generation-started" ]; then
-  : > "$fixture/root-generation-started"
-  while [ ! -e "$fixture/allow-root-generation" ]; do sleep 0.02; done
+if [ "\${3:-}" = 48 ]; then
+  owner=\${FM_TEST_ROOT_GENERATION_OWNER:-unknown}
+  counter_lock="$fixture/root-generation-counter.lock"
+  while ! mkdir "\$counter_lock" 2>/dev/null; do sleep 0.001; done
+  owner_calls="$fixture/root-generation-calls-\$owner"
+  owner_count=\$(cat "\$owner_calls" 2>/dev/null || printf 0)
+  owner_count=\$((owner_count + 1))
+  printf '%s\n' "\$owner_count" > "\$owner_calls"
+  random_calls=\$(cat "$fixture/random-48-calls" 2>/dev/null || printf 0)
+  random_calls=\$((random_calls + 1))
+  printf '%s\n' "\$random_calls" > "$fixture/random-48-calls"
+  root_generations=\$(cat "$fixture/root-generation-count" 2>/dev/null || printf 0)
+  if [ "\$owner_count" -le 2 ]; then
+    root_key_calls=\$(cat "$fixture/root-key-count" 2>/dev/null || printf 0)
+    root_key_calls=\$((root_key_calls + 1))
+    printf '%s\n' "\$root_key_calls" > "$fixture/root-key-count"
+  fi
+  if [ "\$owner_count" -eq 1 ]; then
+    root_generations=\$((root_generations + 1))
+    printf '%s\n' "\$root_generations" > "$fixture/root-generation-count"
+    if [ ! -e "$fixture/root-generation-started" ]; then
+      : > "$fixture/root-generation-started"
+      wait_for_release=1
+    fi
+  fi
+  rmdir "\$counter_lock"
+  if [ "\${wait_for_release:-0}" -eq 1 ]; then
+    while [ ! -e "$fixture/allow-root-generation" ]; do sleep 0.02; done
+  fi
 fi
 case "\${3:-}" in
   48) printf '%096d\n' 0 | tr 0 a ;;
@@ -257,16 +345,18 @@ SH
     cd "$fixture" || exit 1
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
       FM_STATE_OVERRIDE="$fixture/state" \
+      FM_TEST_ROOT_GENERATION_OWNER=first \
       PATH="$fixture/test-bin:$PATH" \
-      timeout 12 "$fixture/bin/fm-session-authority-exec.sh" bash -c ':'
+      exec "$fixture/bin/fm-session-authority-exec.sh" bash -c ':'
   ) >"$first_output" 2>&1 &
   first_pid=$!
   (
     cd "$fixture" || exit 1
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
       FM_STATE_OVERRIDE="$fixture/state" \
+      FM_TEST_ROOT_GENERATION_OWNER=second \
       PATH="$fixture/test-bin:$PATH" \
-      timeout 12 "$fixture/bin/fm-session-authority-exec.sh" bash -c ':'
+      exec "$fixture/bin/fm-session-authority-exec.sh" bash -c ':'
   ) >"$second_output" 2>&1 &
   second_pid=$!
   for _ in $(seq 1 250); do
@@ -279,7 +369,7 @@ SH
   set +e
   for pid in "$first_pid" "$second_pid"; do
     attempts=0
-    while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 250 ]; do
+    while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 600 ]; do
       sleep 0.02
       attempts=$((attempts + 1))
     done
@@ -313,79 +403,91 @@ SH
   [ -f "$fixture/state/.session-authority" ] \
     && [ -f "$fixture/state/.session-durable-authority" ] \
     || fail "cold-start winner did not publish one authenticated root"
+  root_generations=$(cat "$fixture/root-generation-count" 2>/dev/null || true)
+  [ "$root_generations" = 1 ] \
+    || fail "concurrent cold starts generated multiple roots"
+  root_key_calls=$(cat "$fixture/root-key-count" 2>/dev/null || true)
+  [ "$root_key_calls" = 2 ] \
+    || fail "cold-start root key generation was repeated"
+  random_calls=$(cat "$fixture/random-48-calls" 2>/dev/null || true)
+  [ "$random_calls" = 3 ] \
+    || fail "cold-start root generation was not serialized before admission"
   pass "concurrent cold starts serialize root provisioning"
 }
 
 test_concurrent_broker_start_has_one_publisher() {
-  local fixture first_pid second_pid first_status second_status
-  local count published
+  local fixture first_output second_output first_pid second_pid
+  local broker_pids broker_count receipt_b64 record_pid attempts
   fixture=$(fm_test_tmproot fm-concurrent-broker-start)
   mkdir -p "$fixture/bin" "$fixture/state"
-  cp "$ROOT/bin/fm-session-lock-lib.sh" "$fixture/bin/"
-  cp "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/"
-  cp "$ROOT/bin/fm-session-authority-broker.py" "$fixture/bin/"
-  cp "$ROOT/bin/fm-session-authority-exec.sh" "$fixture/bin/"
-  chmod 700 "$fixture/bin"/*
   printf '%s\n' alpha > "$fixture/.fm-secondmate-home"
-  count="$fixture/state/generation-count"
-  published="$fixture/state/broker-published"
-  (
-    cd "$fixture" || exit 1
-    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
-      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
-      FM_AGENT_OWNER_HOME="$fixture" bash -c '
-        set -u
-        . "$1/bin/fm-session-lock-lib.sh"
-        published=$2
-        count=$3
-        fm_session_authority_socket_broker_present() { [ -f "$published" ]; }
-        fm_session_authority_open_inherited_capability() { return 0; }
-        fm_session_authority_socket_broker_start_locked() {
-          current=$(cat "$count" 2>/dev/null || printf 0)
-          printf "%s\n" $((current + 1)) > "$count"
-          sleep 0.1
-          : > "$published"
-        }
-        fm_session_authority_socket_broker_start \
-          "$FM_HOME/state" "$FM_HOME" "$FM_ROOT_OVERRIDE" alpha
-      ' _ "$fixture" "$published" "$count"
-  ) >"$fixture/first.log" 2>&1 &
-  first_pid=$!
-  (
-    cd "$fixture" || exit 1
-    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
-      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
-      FM_AGENT_OWNER_HOME="$fixture" bash -c '
-        set -u
-        . "$1/bin/fm-session-lock-lib.sh"
-        published=$2
-        count=$3
-        fm_session_authority_socket_broker_present() { [ -f "$published" ]; }
-        fm_session_authority_open_inherited_capability() { return 0; }
-        fm_session_authority_socket_broker_start_locked() {
-          current=$(cat "$count" 2>/dev/null || printf 0)
-          printf "%s\n" $((current + 1)) > "$count"
-          sleep 0.1
-          : > "$published"
-        }
-        fm_session_authority_socket_broker_start \
-          "$FM_HOME/state" "$FM_HOME" "$FM_ROOT_OVERRIDE" alpha
-      ' _ "$fixture" "$published" "$count"
-  ) >"$fixture/second.log" 2>&1 &
-  second_pid=$!
-  set +e
-  wait "$first_pid"
-  first_status=$?
-  wait "$second_pid"
-  second_status=$?
-  set -e
-  [ "$first_status" -eq 0 ] && [ "$second_status" -eq 0 ] \
-    || { cat "$fixture/first.log" "$fixture/second.log" >&2; \
-      fail "concurrent broker starters did not complete"; }
-  [ -f "$published" ] || fail "broker publication gate did not publish"
-  count=$(cat "$count" 2>/dev/null || true)
-  [ "$count" = 1 ] || fail "concurrent broker starters published competing generations"
-  pass "concurrent broker starts serialize one publication"
+  prepare_launch "$fixture"
+  first_output="$fixture/state/concurrent-broker-first"
+  second_output="$fixture/state/concurrent-broker-second"
+  receipt_b64=$(openssl base64 -A < \
+    "$fixture/state/.session-authority-launch") \
+    || fail "concurrent broker fixture has no launch receipt"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$BROKER_KEY" "$receipt_b64" "$TRUSTED_TICKET_B64" \
+    "$TRUSTED_ACCEPTANCE_B64" "$TRUSTED_FINAL_B64" \
+    "$TRUSTED_CONSUMER_KEY_B64" > "$fixture/state/.test-launch-evidence"
+  printf 'broker|secondmate|%s|%s\n' "$fixture" "$first_output" \
+    > "$REQUEST_FIFO"
+  printf 'broker|secondmate|%s|%s\n' "$fixture" "$second_output" \
+    > "$REQUEST_FIFO"
+  for _ in $(seq 1 250); do
+    [ -f "$first_output" ] && [ -f "$second_output" ] \
+      && [ -f "$fixture/state/.session-authority-broker" ] && break
+    sleep 0.02
+  done
+  [ -f "$first_output" ] && [ -f "$second_output" ] \
+    && [ -f "$fixture/state/.session-authority-broker" ] \
+    || fail "real concurrent broker supervisors did not finish"
+  first_pid=$(cat "$first_output")
+  second_pid=$(cat "$second_output")
+  case "$first_pid:$second_pid" in
+    ''|*[!0-9:]*) fail "concurrent broker supervisors returned malformed pids" ;;
+  esac
+  [ "$first_pid" != "$second_pid" ] \
+    || fail "concurrent broker requests did not create independent supervisors"
+  record_pid=$(sed -n '2s/^pid=//p' \
+    "$fixture/state/.session-authority-broker")
+  case "$record_pid" in
+    ''|*[!0-9]*) fail "real concurrent broker record has no process identity" ;;
+  esac
+  attempts=0
+  while [ "$attempts" -lt 250 ]; do
+    if [ "$first_pid" = "$record_pid" ]; then
+      kill -0 "$second_pid" 2>/dev/null || break
+    elif [ "$second_pid" = "$record_pid" ]; then
+      kill -0 "$first_pid" 2>/dev/null || break
+    else
+      fail "broker record did not bind to either supervisor"
+    fi
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  if [ "$first_pid" = "$record_pid" ]; then
+    kill -0 "$second_pid" 2>/dev/null \
+      && fail "losing broker supervisor remained live"
+  else
+    kill -0 "$first_pid" 2>/dev/null \
+      && fail "losing broker supervisor remained live"
+  fi
+  broker_pids=$(ps -eo pid=,args= | awk \
+    -v script="$ROOT/bin/fm-session-authority-broker.py" \
+    -v state="$fixture/state" \
+    '$0 ~ script && $0 ~ state && $0 ~ / --state / {print $1}')
+  broker_count=$(printf '%s\n' "$broker_pids" | sed '/^$/d' | wc -l | tr -d ' ')
+  [ "$broker_count" -eq 1 ] \
+    || fail "real concurrent broker supervisors published competing brokers"
+  kill "$record_pid" 2>/dev/null || true
+  wait "$record_pid" 2>/dev/null || true
+  kill "$LAUNCH_PID" 2>/dev/null || true
+  wait "$LAUNCH_PID" 2>/dev/null || true
+  BROKER_PID=
+  LAUNCH_PID=
+  pass "concurrent broker supervisors publish one authenticated generation"
 }
 
 test_transaction_authority_and_arbitration_controls() {
@@ -519,12 +621,12 @@ test_receipt_backed_synthetic_census() {
 
 if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
   test_broker_client_deadline_is_behavioral
+  test_inherited_capability_requires_anonymous_pipe
   test_primary_authority_record_and_live_descriptor_binding
   test_primary_wrapper_rotates_dead_authority
   test_transaction_authority_and_arbitration_controls
   test_lock_rejects_ready_transaction_before_recovery
   test_concurrent_primary_cold_start_has_one_winner
-  test_concurrent_broker_start_has_one_publisher
   test_primary_bootstrap_cleans_partial_live_binding
   test_receipt_backed_synthetic_census
   if ! python3 - "$BROKER" <<'PY'
@@ -1936,6 +2038,7 @@ PY
 }
 
 if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes-integration ]; then
+  test_concurrent_broker_start_has_one_publisher
   mkdir -p "$STATE" "$FOREIGN_HOME"
   prepare_launch "$HOME_DIR"
   start_broker
@@ -2211,6 +2314,7 @@ if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = rotation ]; then
   exit 0
 fi
 
+test_inherited_capability_requires_anonymous_pipe
 mkdir -p "$STATE" "$FOREIGN_HOME"
 prepare_launch "$HOME_DIR"
 start_broker

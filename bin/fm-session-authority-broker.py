@@ -101,6 +101,17 @@ def descriptor_identity(pid: int, fd: int) -> str:
     return target
 
 
+def anonymous_pipe_identity(fd: int) -> str:
+    target = descriptor_identity(os.getpid(), fd)
+    if not (
+        target.startswith("pipe:[")
+        and target.endswith("]")
+        and target[6:-1].isdigit()
+    ):
+        raise ValueError("inherited capability is nameable")
+    return target
+
+
 def process_runs_script(pid: int, script: str) -> bool:
     command = process_command(pid)
     return len(command) >= 2 and canonical(command[1]) == canonical(script)
@@ -202,8 +213,11 @@ def read_process_fd_line(pid: int, fd: int) -> str:
 def read_inherited_capability(fd: int) -> str:
     if fd < 3 or not stat.S_ISFIFO(os.fstat(fd).st_mode):
         raise ValueError("inherited capability is not an anonymous pipe")
+    identity = anonymous_pipe_identity(fd)
     descriptor = os.dup(fd)
     try:
+        if anonymous_pipe_identity(descriptor) != identity:
+            raise ValueError("inherited capability descriptor changed")
         os.set_blocking(descriptor, False)
         chunks: list[bytes] = []
         deadline = time.monotonic() + AUTHORITY_LOCK_TIMEOUT_SECONDS
