@@ -835,7 +835,6 @@ def record_lock(
             task=authority_task,
             launch_script=launch_script,
             launch_evidence=launch_evidence,
-            unlink_path=True,
         )
     try:
         yield descriptor
@@ -936,35 +935,38 @@ def open_authority_admission_lock(
     path = authority_admission_path(state, launch_evidence)
     expected = authority_admission_lock_contents(state, launch_evidence[0])
     descriptor = -1
-    created = False
-    created_stat: os.stat_result | None = None
+    published = False
+    temporary: Path | None = None
 
-    def remove_created_path() -> None:
-        if not created or descriptor < 0 or created_stat is None:
+    def remove_published_path() -> None:
+        if not published or descriptor < 0:
             return
         try:
             current_stat = os.fstat(descriptor)
             path_stat = path.lstat()
             if (
-                current_stat.st_dev == created_stat.st_dev
-                and current_stat.st_ino == created_stat.st_ino
-                and path_stat.st_dev == created_stat.st_dev
-                and path_stat.st_ino == created_stat.st_ino
+                current_stat.st_dev == path_stat.st_dev
+                and current_stat.st_ino == path_stat.st_ino
             ):
                 path.unlink()
         except OSError:
             pass
 
+    def remove_temporary() -> None:
+        if temporary is None:
+            return
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
     try:
         try:
-            descriptor = os.open(
-                path,
-                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-                | os.O_NOFOLLOW,
-                0o600,
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", dir=str(path.parent)
             )
-            created = True
-            created_stat = os.fstat(descriptor)
+            temporary = Path(temporary_name)
+            os.fchmod(descriptor, 0o600)
             offset = 0
             while offset < len(expected):
                 written = os.write(descriptor, expected[offset:])
@@ -972,7 +974,22 @@ def open_authority_admission_lock(
                     raise OSError("short authority lock publication")
                 offset += written
             os.fsync(descriptor)
+            rename_noreplace(temporary, path)
+            temporary = None
+            published = True
+            directory = os.open(
+                path.parent,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         except FileExistsError:
+            remove_temporary()
+            if descriptor >= 0:
+                os.close(descriptor)
+                descriptor = -1
             descriptor = os.open(
                 path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
             )
@@ -988,7 +1005,8 @@ def open_authority_admission_lock(
             raise OSError("unsafe authority lock publication")
         return descriptor, path
     except (OSError, ValueError):
-        remove_created_path()
+        remove_published_path()
+        remove_temporary()
         if descriptor >= 0:
             try:
                 os.close(descriptor)
@@ -1001,8 +1019,7 @@ def open_authority_record_lock(
     *, blocking: bool, state: Path | None = None, home: str | None = None,
     task: str | None = None,
     launch_script: str | None = None,
-    launch_evidence: tuple[bytes, int, str, str] | None = None,
-    unlink_path: bool = False
+    launch_evidence: tuple[bytes, int, str, str] | None = None
 ) -> AuthorityRecordLock | None:
     if (
         state is None or home is None or task is None or launch_script is None
@@ -1027,16 +1044,6 @@ def open_authority_record_lock(
         lock = acquire_authority_record_lock(
             descriptor, blocking=blocking, expected_path=path
         )
-        if lock is not None and unlink_path:
-            descriptor_stat = os.fstat(descriptor)
-            path_stat = path.lstat()
-            if (
-                descriptor_stat.st_dev != path_stat.st_dev
-                or descriptor_stat.st_ino != path_stat.st_ino
-            ):
-                close_record_lock(lock)
-                return None
-            path.unlink()
         if lock is None:
             os.close(descriptor)
         return lock
@@ -1045,33 +1052,6 @@ def open_authority_record_lock(
             os.close(descriptor)
         except OSError:
             pass
-        return None
-
-
-def open_authority_anonymous_lock(state: Path) -> AuthorityRecordLock | None:
-    if not state.is_dir() or state.is_symlink() or not hasattr(os, "O_TMPFILE"):
-        return None
-    descriptor = -1
-    try:
-        descriptor = os.open(
-            state,
-            os.O_RDWR | os.O_CLOEXEC | os.O_TMPFILE,
-            0o600,
-        )
-        if descriptor != AUTHORITY_SERIALIZATION_FD:
-            os.dup2(descriptor, AUTHORITY_SERIALIZATION_FD)
-            os.close(descriptor)
-            descriptor = AUTHORITY_SERIALIZATION_FD
-        lock = acquire_authority_record_lock(descriptor, blocking=False)
-        if lock is None:
-            os.close(descriptor)
-        return lock
-    except OSError:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
         return None
 
 
@@ -1161,8 +1141,7 @@ def serve(args: argparse.Namespace) -> int:
     else:
         record_lock_fd = open_authority_record_lock(
             blocking=False, state=state, home=home, task=args.task,
-            launch_script=launch_script, launch_evidence=launch_evidence,
-            unlink_path=True
+            launch_script=launch_script, launch_evidence=launch_evidence
         )
     if record_lock_fd is None:
         return 1
@@ -1227,8 +1206,7 @@ def supervise(args: argparse.Namespace) -> int:
         launch_script = canonical(args.launch_script)
         record_lock_fd = open_authority_record_lock(
             blocking=False, state=state, home=home, task=args.task,
-            launch_script=launch_script, launch_evidence=launch_evidence,
-            unlink_path=True
+            launch_script=launch_script, launch_evidence=launch_evidence
         )
         if record_lock_fd is None:
             return 1
@@ -1346,9 +1324,6 @@ def serve_locked(
             durable_key,
         ):
             return 1
-        close_record_lock(lock)
-        lock = None
-
         def release_lease_control(
             connection: socket.socket, lease_info: dict[str, object]
         ) -> None:
@@ -1375,7 +1350,7 @@ def serve_locked(
             except OSError:
                 return
             finally:
-                close_record_lock(lease_info["lock"])
+                connection.close()
                 with lease_guard:
                     if active_lease is lease_info:
                         active_lease = None
@@ -1398,7 +1373,6 @@ def serve_locked(
                         > BROKER_REQUEST_TIMEOUT_SECONDS
                         or lease_generation != active_lease["generation"]
                     ):
-                        close_record_lock(active_lease["lock"])
                         active_lease = None
             try:
                 connection, _ = server.accept()
@@ -1433,10 +1407,7 @@ def serve_locked(
                         if active_lease is not None:
                             connection.sendall(b"E")
                             continue
-                        lease = open_authority_anonymous_lock(state)
-                        if lease is None:
-                            connection.sendall(b"E")
-                            continue
+                        generation = process_generation(pid)
                         digest = hmac.new(
                             durable_key, body, hashlib.sha256
                         ).hexdigest().encode()
@@ -1444,8 +1415,7 @@ def serve_locked(
                             "control": False,
                             "created": time.monotonic(),
                             "digest": digest,
-                            "generation": process_generation(pid),
-                            "lock": lease,
+                            "generation": generation,
                             "nonce": body,
                             "pid": pid,
                         }
@@ -1490,7 +1460,6 @@ def serve_locked(
     finally:
         with lease_guard:
             if active_lease is not None:
-                close_record_lock(active_lease["lock"])
                 active_lease = None
         try:
             server.close()
@@ -2384,14 +2353,6 @@ def primary_lock_holder(args: argparse.Namespace) -> int:
         )
         if lock is None:
             return 1
-        descriptor_stat = os.fstat(descriptor)
-        path_stat = path.lstat()
-        if (
-            descriptor_stat.st_dev != path_stat.st_dev
-            or descriptor_stat.st_ino != path_stat.st_ino
-        ):
-            return 1
-        path.unlink()
         print("LOCKED", flush=True)
         print(f"PID {os.getpid()}", flush=True)
         if sys.stdin.buffer.readline() != b"RELEASE\n":

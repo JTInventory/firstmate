@@ -239,11 +239,15 @@ test_transaction_authority_and_arbitration_controls() {
   [[ "$lock_source" != *'.session-authority-rotation.lock"'* ]] \
     || fail "rotation retained a caller-precreatable path mutex"
   [[ "$broker_source" == *"os.O_NOFOLLOW"* ]] \
-    || fail "authority arbitration does not reject symlinked lock paths"
-  [[ "$broker_source" == *"os.O_EXCL"* ]] \
-    || fail "authority arbitration does not reject precreated lock paths"
-  [[ "$broker_source" == *"os.O_TMPFILE"* ]] \
-    || fail "broker admission does not use an anonymous lock capability"
+    || fail "authority startup arbitration does not reject symlinked lock paths"
+  [[ "$broker_source" == *"rename_noreplace"* ]] \
+    || fail "authority lock publication is not atomic"
+  [[ "$broker_source" == *"tempfile.mkstemp"* ]] \
+    || fail "authority lock publication is not staged privately"
+  [[ "$broker_source" != *"open_authority_anonymous_lock"* ]] \
+    || fail "broker admission retains a per-call lock capability"
+  [[ "$broker_source" != *"os.O_TMPFILE"* ]] \
+    || fail "broker admission retains unrelated anonymous lock state"
   [[ "$broker_source" == *'kind not in (b"L", b"D", b"K", b"R")'* ]] \
     || fail "broker lease control channel is missing"
   [[ "$broker_source" == *"threading.Thread"* ]] \
@@ -1009,6 +1013,11 @@ with TemporaryDirectory() as temporary:
         holder.terminate()
         holder.join()
         raise SystemExit("independent admission holder did not start")
+    admission_path = broker.authority_admission_path(
+        state, (b"k", 2, "s", "i")
+    )
+    if not admission_path.exists() or admission_path.is_symlink():
+        raise SystemExit("admission lock publication was not retained")
 
     def contend():
         lock = broker.open_authority_record_lock(
@@ -1026,18 +1035,6 @@ with TemporaryDirectory() as temporary:
     holder.join(2)
     if contender.exitcode != 0 or holder.exitcode != 0 or result.read_text() != "busy":
         raise SystemExit("independent supervisors did not share the admission lock")
-
-    anonymous_state = home / "anonymous-state"
-    anonymous_state.mkdir()
-    anonymous_lock = broker.open_authority_anonymous_lock(anonymous_state)
-    if anonymous_lock is None:
-        raise SystemExit("anonymous authority lock did not acquire")
-    anonymous_path = broker.authority_admission_path(
-        anonymous_state, (b"k", 2, "s", "i")
-    )
-    if anonymous_path.exists():
-        raise SystemExit("anonymous authority lock exposed a flock path")
-    broker.close_record_lock(anonymous_lock)
 
     short_state = home / "short-state"
     short_state.mkdir()
@@ -1146,7 +1143,11 @@ SH
   mkfifo "$REQUEST_FIFO" "$PRIMARY_REQUEST_FIFO"
   printf '%s\n' "$nonce" > "$home/state/.test-admission-capability"
   rm -f "$home/state/.test-admission-release"
-  mkfifo "$home/state/.test-admission-release"
+  rm -f "$home/state/.test-admission-release-1" \
+    "$home/state/.test-admission-release-2"
+  mkfifo "$home/state/.test-admission-release" \
+    "$home/state/.test-admission-release-1" \
+    "$home/state/.test-admission-release-2"
   mkdir -p "$issuer/bin"
   cp "$ROOT/bin/fm-session-authority-exec.sh" \
     "$ROOT/bin/fm-session-enrollment-signer.sh" \
@@ -1211,6 +1212,38 @@ while :; do
             status=1
           fi
           wait "\$holder_pid" || status=1
+          exec 17<&-
+        fi
+        ;;
+      admission-contend)
+        cd "\$request_home" || status=1
+        if [ "\$status" -eq 0 ]; then
+          exec 17< <(while :; do printf '%s\n' "$nonce"; done)
+          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 17 \
+            < "\$request_home/state/.test-admission-release-1" \
+            >"\$output.first" 2>&1 &
+          first_pid=\$!
+          attempts=0
+          while [ "\$attempts" -lt 100 ] \
+            && ! grep -F 'LOCKED' "\$output.first" >/dev/null 2>&1; do
+            if ! kill -0 "\$first_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.02
+            attempts=\$((attempts + 1))
+          done
+          if grep -F 'LOCKED' "\$output.first" >/dev/null 2>&1; then
+            printf '%s\n' locked > "\$output.locked"
+            python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 17 \
+              < /dev/null >"\$output.second" 2>&1 &
+            second_pid=\$!
+            second_status=0
+            wait "\$second_pid" || second_status=\$?
+            printf '%s\n' "\$second_status" > "\$output.second.status"
+          else
+            status=1
+          fi
+          wait "\$first_pid" || status=1
           exec 17<&-
         fi
         ;;
@@ -1478,6 +1511,48 @@ test_same_home_secondmate_admission_allows_hmac_before_release() {
   pass "same-home admission serves HMAC requests before release"
 }
 
+test_same_home_secondmate_admission_serializes_independent_holders() {
+  local output attempts=0 second_status
+  output="$TMP_ROOT/admission-contend-output-$REQUEST_SEQUENCE"
+  REQUEST_SEQUENCE=$((REQUEST_SEQUENCE + 1))
+  rm -f "$output" "$output.status" "$output.locked" \
+    "$output.second.status"
+  printf 'admission-contend|secondmate|%s|%s\n' "$HOME_DIR" "$output" \
+    > "$REQUEST_FIFO"
+  while [ "$attempts" -lt 150 ] && [ ! -f "$output.second.status" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$output.locked" ] || fail "same-home admission did not hold first lease"
+  [ -f "$output.second.status" ] || \
+    fail "same-home admission did not reject the competing holder"
+  second_status=$(cat "$output.second.status")
+  [ "$second_status" -ne 0 ] || \
+    fail "same-home admission allowed competing holders"
+  printf 'RELEASE\n' > "$HOME_DIR/state/.test-admission-release-1"
+  attempts=0
+  while [ "$attempts" -lt 150 ] && [ ! -f "$output.status" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$output.status" ] && [ "$(cat "$output.status")" = 0 ] \
+    || fail "same-home admission did not release its first holder"
+  pass "same-home admission serializes independent holders"
+}
+
+test_same_home_secondmate_rotation_uses_admission_capability() {
+  local exec_source lock_source
+  exec_source=$(cat "$ROOT/bin/fm-session-authority-exec.sh")
+  lock_source=$(cat "$ROOT/bin/fm-session-lock-lib.sh")
+  [[ "$exec_source" == *'if [ "${FM_AGENT_ROLE:-}" = secondmate ]'* ]] \
+    && [[ "$exec_source" == *'fm_session_authority_live_descriptor_rotate'* ]] \
+    || fail "same-home secondmate launch does not exercise live rotation"
+  [[ "$lock_source" == *'fm_session_authority_admission_acquire'* ]] \
+    && [[ "$lock_source" == *'fm_session_authority_admission_release'* ]] \
+    || fail "live descriptor rotation is not admission-bound"
+  pass "same-home secondmate rotation uses authenticated admission"
+}
+
 broker_hmac() {
   local home=$1 role=$2 kind=$3 output status attempts=0
   output="$TMP_ROOT/request-${BASHPID:-$$}-$REQUEST_SEQUENCE"
@@ -1513,6 +1588,8 @@ start_broker
 [ "$(stat -c '%a' "$RECORD")" = 600 ] \
   || fail "authority broker record was not private"
 test_same_home_secondmate_admission_allows_hmac_before_release
+test_same_home_secondmate_admission_serializes_independent_holders
+test_same_home_secondmate_rotation_uses_admission_capability
 
 live=$(broker_hmac "$HOME_DIR" secondmate live) \
   || fail "same-home secondmate could not use live broker authority"
