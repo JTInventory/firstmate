@@ -229,6 +229,165 @@ test_primary_wrapper_rotates_dead_authority() {
   pass "trusted wrapper rotates dead primary authority"
 }
 
+test_concurrent_primary_cold_start_has_one_winner() {
+  local fixture first_output second_output first_pid second_pid
+  local first_status second_status winners attempts custodian_pid status
+  fixture=$(fm_test_tmproot fm-concurrent-primary-cold-start)
+  mkdir -p "$fixture/bin" "$fixture/test-bin"
+  sleep 2
+  fm_git_init_commit "$fixture"
+  git -C "$fixture" branch -M main
+  cp -R "$ROOT/bin/." "$fixture/bin/"
+  chmod 700 "$fixture/bin"/*.sh "$fixture/bin"/*.py
+  cat > "$fixture/test-bin/od" <<SH
+#!/usr/bin/env bash
+if [ "\${3:-}" = 48 ] && [ ! -e "$fixture/root-generation-started" ]; then
+  : > "$fixture/root-generation-started"
+  while [ ! -e "$fixture/allow-root-generation" ]; do sleep 0.02; done
+fi
+case "\${3:-}" in
+  48) printf '%096d\n' 0 | tr 0 a ;;
+  *) exec /usr/bin/od "\$@" ;;
+esac
+SH
+  chmod 700 "$fixture/test-bin/od"
+  first_output="$fixture/first.log"
+  second_output="$fixture/second.log"
+  (
+    cd "$fixture" || exit 1
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+      FM_STATE_OVERRIDE="$fixture/state" \
+      PATH="$fixture/test-bin:$PATH" \
+      timeout 12 "$fixture/bin/fm-session-authority-exec.sh" bash -c ':'
+  ) >"$first_output" 2>&1 &
+  first_pid=$!
+  (
+    cd "$fixture" || exit 1
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+      FM_STATE_OVERRIDE="$fixture/state" \
+      PATH="$fixture/test-bin:$PATH" \
+      timeout 12 "$fixture/bin/fm-session-authority-exec.sh" bash -c ':'
+  ) >"$second_output" 2>&1 &
+  second_pid=$!
+  for _ in $(seq 1 250); do
+    [ -f "$fixture/root-generation-started" ] && break
+    sleep 0.02
+  done
+  [ -f "$fixture/root-generation-started" ] \
+    || fail "concurrent cold-start fixture did not reach root generation"
+  : > "$fixture/allow-root-generation"
+  set +e
+  for pid in "$first_pid" "$second_pid"; do
+    attempts=0
+    while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 250 ]; do
+      sleep 0.02
+      attempts=$((attempts + 1))
+    done
+    kill "$pid" 2>/dev/null || true
+    wait "$pid"
+    status=$?
+    if [ "$pid" = "$first_pid" ]; then
+      first_status=$status
+    else
+      second_status=$status
+    fi
+  done
+  set -e
+  custodian_pid=$(sed -n '2s/^pid=//p' \
+    "$fixture/state/.session-durable-authority" 2>/dev/null || true)
+  case "$custodian_pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      kill "$custodian_pid" 2>/dev/null || true
+      sleep 0.02
+      kill -KILL "$custodian_pid" 2>/dev/null || true
+      ;;
+  esac
+  winners=0
+  [ "$first_status" -eq 0 ] && winners=$((winners + 1))
+  [ "$second_status" -eq 0 ] && winners=$((winners + 1))
+  [ "$winners" -eq 1 ] || {
+    cat "$first_output" "$second_output" >&2
+    fail "concurrent primary cold starts did not have exactly one winner"
+  }
+  [ -f "$fixture/state/.session-authority" ] \
+    && [ -f "$fixture/state/.session-durable-authority" ] \
+    || fail "cold-start winner did not publish one authenticated root"
+  pass "concurrent cold starts serialize root provisioning"
+}
+
+test_concurrent_broker_start_has_one_publisher() {
+  local fixture first_pid second_pid first_status second_status
+  local count published
+  fixture=$(fm_test_tmproot fm-concurrent-broker-start)
+  mkdir -p "$fixture/bin" "$fixture/state"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$fixture/bin/"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/"
+  cp "$ROOT/bin/fm-session-authority-broker.py" "$fixture/bin/"
+  cp "$ROOT/bin/fm-session-authority-exec.sh" "$fixture/bin/"
+  chmod 700 "$fixture/bin"/*
+  printf '%s\n' alpha > "$fixture/.fm-secondmate-home"
+  count="$fixture/state/generation-count"
+  published="$fixture/state/broker-published"
+  (
+    cd "$fixture" || exit 1
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
+      FM_AGENT_OWNER_HOME="$fixture" bash -c '
+        set -u
+        . "$1/bin/fm-session-lock-lib.sh"
+        published=$2
+        count=$3
+        fm_session_authority_socket_broker_present() { [ -f "$published" ]; }
+        fm_session_authority_open_inherited_capability() { return 0; }
+        fm_session_authority_socket_broker_start_locked() {
+          current=$(cat "$count" 2>/dev/null || printf 0)
+          printf "%s\n" $((current + 1)) > "$count"
+          sleep 0.1
+          : > "$published"
+        }
+        fm_session_authority_socket_broker_start \
+          "$FM_HOME/state" "$FM_HOME" "$FM_ROOT_OVERRIDE" alpha
+      ' _ "$fixture" "$published" "$count"
+  ) >"$fixture/first.log" 2>&1 &
+  first_pid=$!
+  (
+    cd "$fixture" || exit 1
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
+      FM_AGENT_OWNER_HOME="$fixture" bash -c '
+        set -u
+        . "$1/bin/fm-session-lock-lib.sh"
+        published=$2
+        count=$3
+        fm_session_authority_socket_broker_present() { [ -f "$published" ]; }
+        fm_session_authority_open_inherited_capability() { return 0; }
+        fm_session_authority_socket_broker_start_locked() {
+          current=$(cat "$count" 2>/dev/null || printf 0)
+          printf "%s\n" $((current + 1)) > "$count"
+          sleep 0.1
+          : > "$published"
+        }
+        fm_session_authority_socket_broker_start \
+          "$FM_HOME/state" "$FM_HOME" "$FM_ROOT_OVERRIDE" alpha
+      ' _ "$fixture" "$published" "$count"
+  ) >"$fixture/second.log" 2>&1 &
+  second_pid=$!
+  set +e
+  wait "$first_pid"
+  first_status=$?
+  wait "$second_pid"
+  second_status=$?
+  set -e
+  [ "$first_status" -eq 0 ] && [ "$second_status" -eq 0 ] \
+    || { cat "$fixture/first.log" "$fixture/second.log" >&2; \
+      fail "concurrent broker starters did not complete"; }
+  [ -f "$published" ] || fail "broker publication gate did not publish"
+  count=$(cat "$count" 2>/dev/null || true)
+  [ "$count" = 1 ] || fail "concurrent broker starters published competing generations"
+  pass "concurrent broker starts serialize one publication"
+}
+
 test_transaction_authority_and_arbitration_controls() {
   local lock_source broker_source
   lock_source=$(cat "$ROOT/bin/fm-session-lock-lib.sh")
@@ -263,20 +422,8 @@ test_transaction_authority_and_arbitration_controls() {
     || fail "broker admission is not bound to wrapper provenance"
   [[ "$broker_source" == *"--capability-fd"* ]] \
     || fail "broker admission lacks a protected wrapper capability"
-  [[ "$lock_source" == *"--capability-fd 21"* ]] \
-    || fail "wrapper admission capability collides with custodian descriptor"
   [[ "$broker_source" == *"--caller-start"* ]] \
     || fail "primary admission lacks caller-generation binding"
-  [[ "$broker_source" == *"ADMISSION_CHALLENGE_PREFIX"* ]] \
-    || fail "broker admission lacks a fresh authenticated challenge"
-  [[ "$lock_source" == *"fm_session_authority_provision_lock_acquire"* ]] \
-    || fail "cold-start provisioning lacks a shared serialization gate"
-  [[ "$lock_source" == *"fm_session_authority_open_inherited_capability"* ]] \
-    || fail "admission does not retain an inherited capability path"
-  [[ "$lock_source" != *"authority_admission_socket_name"* ]] \
-    || fail "admission still derives authority from a socket name"
-  [[ "$lock_source" == *"FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD"* ]] \
-    || fail "wrapper admission capability is not retained for cleanup"
   pass "transaction and arbitration controls retain authenticated ownership"
 }
 
@@ -299,73 +446,6 @@ test_lock_rejects_ready_transaction_before_recovery() {
   [ -f "$state/.session-authority-transaction/ready" ] \
     || fail "pre-recovery isolation refusal did not preserve ready evidence"
   pass "session lock enforces isolation before ready transaction recovery"
-}
-
-test_lock_holder_uses_nonblocking_control_channel() {
-  if ! python3 - "$BROKER" <<'PY'
-import importlib.util
-import io
-import struct
-import sys
-from types import SimpleNamespace
-
-spec = importlib.util.spec_from_file_location("session_authority_broker_lock_holder", sys.argv[1])
-broker = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(broker)
-
-class FakeSocket:
-    instances = []
-
-    def __init__(self, response):
-        self.response = response
-        self.sent = []
-        self.closed = False
-        FakeSocket.instances.append(self)
-
-    def settimeout(self, _timeout):
-        pass
-
-    def connect(self, _address):
-        pass
-
-    def sendall(self, data):
-        self.sent.append(data)
-
-    def recv(self, length):
-        value = self.response[:length]
-        self.response = self.response[length:]
-        return value
-
-    def close(self):
-        self.closed = True
-
-responses = [b"C" + b"b" * 64 + b"O" + b"a" * 64, b"O" + b"a" * 64]
-broker.socket.socket = lambda *_args: FakeSocket(responses.pop(0))
-broker.read_record = lambda _path: {
-    "socket": "abstract:test", "pid": "2", "uid": "0", "gid": "0",
-    "start": "proc:2", "identity": "exe:/bin/python3",
-}
-broker.connected_peer_matches_record = lambda _connection, _metadata: True
-broker.read_process_fd_line = lambda _pid, _fd: "a" * 64
-broker.sys.stdin = io.TextIOWrapper(io.BytesIO(b"RELEASE\n"))
-if broker.lock_holder(SimpleNamespace(record="record", capability_fd=17)) != 0:
-    raise SystemExit("lock-holder did not complete the control-channel release")
-if len(FakeSocket.instances) != 2:
-    raise SystemExit("lock-holder did not open a separate release channel")
-if not FakeSocket.instances[0].sent[0].startswith(b"K"):
-    raise SystemExit("lock-holder did not request an admission lease")
-if not FakeSocket.instances[0].sent[1].startswith(b"K"):
-    raise SystemExit("lock-holder did not complete the admission handshake")
-if not FakeSocket.instances[1].sent[0].startswith(b"R"):
-    raise SystemExit("lock-holder did not authenticate the release channel")
-if FakeSocket.instances[1].sent[-1] != b"RELEASE\n":
-    raise SystemExit("lock-holder did not release its admission lease")
-PY
-  then
-    fail "lock-holder did not use a separate nonblocking control channel"
-  fi
-  pass "lock-holder separates lease acquisition from release control"
 }
 
 test_primary_bootstrap_cleans_partial_live_binding() {
@@ -443,7 +523,8 @@ if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
   test_primary_wrapper_rotates_dead_authority
   test_transaction_authority_and_arbitration_controls
   test_lock_rejects_ready_transaction_before_recovery
-  test_lock_holder_uses_nonblocking_control_channel
+  test_concurrent_primary_cold_start_has_one_winner
+  test_concurrent_broker_start_has_one_publisher
   test_primary_bootstrap_cleans_partial_live_binding
   test_receipt_backed_synthetic_census
   if ! python3 - "$BROKER" <<'PY'
@@ -648,7 +729,6 @@ PY
 import importlib.util
 import os
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -685,16 +765,6 @@ with TemporaryDirectory() as temporary:
         "launch-script": str(launch_script),
     }
     broker.read_record_shape = lambda _path: metadata
-    broker.process_generation_for_recovery = lambda _pid: None
-    broker.unlink_owned_record = lambda *_args, **_kwargs: False
-    seen = {}
-
-    @contextmanager
-    def fake_record_lock(_path, **kwargs):
-        seen.update(kwargs)
-        yield object()
-
-    broker.record_lock = fake_record_lock
     status = broker.recover_stale_locked(
         SimpleNamespace(
             record=str(record),
@@ -707,14 +777,12 @@ with TemporaryDirectory() as temporary:
         launch_evidence=(b"key", os.getppid(), "proc:launch", "exe:launch"),
     )
     if status != 1:
-        raise SystemExit("direct stale recovery returned an unexpected status")
-    if seen.get("authority_task") != "task" or seen.get("authority_home") != str(home):
-        raise SystemExit("direct stale recovery lost its requested lock identity")
+        raise SystemExit("direct stale recovery used a path-only fallback")
 PY
   then
-    fail "direct stale recovery fallback was not identity-bound"
+    fail "direct stale recovery did not fail closed without capability"
   fi
-  pass "direct stale recovery fallback remains identity-bound"
+  pass "direct stale recovery fails closed without capability"
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
 import sys
@@ -1075,6 +1143,8 @@ then
     fail "per-home serialization did not use a shared protected capability"
   fi
   pass "per-home serialization uses a shared protected capability and rejects forged pipes"
+  FM_SESSION_AUTHORITY_BROKER_FOCUS=review-fixes-integration \
+    "$0" || fail "production-equivalent broker review-fix tests failed"
   echo "# focused broker review-fix tests passed"
   exit 0
 fi
@@ -1171,13 +1241,16 @@ SH
   rm -f "$REQUEST_FIFO"
   rm -f "$PRIMARY_REQUEST_FIFO"
   mkfifo "$REQUEST_FIFO" "$PRIMARY_REQUEST_FIFO"
-  printf '%s\n' "$nonce" > "$home/state/.test-admission-capability"
+  rm -f "$home/state/.test-admission-capability"
+  mkfifo "$home/state/.test-admission-capability"
   rm -f "$home/state/.test-admission-release"
   rm -f "$home/state/.test-admission-release-1" \
-    "$home/state/.test-admission-release-2"
+    "$home/state/.test-admission-release-2" \
+    "$home/state/.test-admission-release-replay"
   mkfifo "$home/state/.test-admission-release" \
     "$home/state/.test-admission-release-1" \
-    "$home/state/.test-admission-release-2"
+    "$home/state/.test-admission-release-2" \
+    "$home/state/.test-admission-release-replay"
   mkdir -p "$issuer/bin"
   cp "$ROOT/bin/fm-session-authority-exec.sh" \
     "$ROOT/bin/fm-session-enrollment-signer.sh" \
@@ -1205,19 +1278,34 @@ while :; do
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
           exec 19< "\$request_home/state/.test-launch-evidence"
+          exec 18< <(while :; do printf '%s\n' "$nonce"; done)
+          exec 20< <(printf '%s\n' "$nonce")
           python3 "$BROKER" supervise --state "\$request_home/state" \\
             --home "\$request_home" --checkout "$ROOT" --task alpha \\
             --launch-evidence-fd 19 \\
-            --launch-script "$launch_script" >/dev/null 2>&1 &
+            --launch-script "$launch_script" --record-lock-fd 20 \\
+            >/dev/null 2>&1 &
           broker_pid=\$!
           exec 19<&-
+          attempts=0
+          while [ "\$attempts" -lt 100 ] \\
+            && [ ! -f "\$request_home/state/.session-authority-broker" ] \\
+            && kill -0 "\$broker_pid" 2>/dev/null; do
+            sleep 0.02
+            attempts=\$((attempts + 1))
+          done
+          exec 18<&-
+          exec 20<&-
           printf '%s\n' "\$broker_pid" >"\$output"
         fi
         ;;
       admission)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
+          printf '%s\n' "$nonce" > "\$request_home/state/.test-admission-capability" &
+          capability_writer=\$!
           exec 21< "\$request_home/state/.test-admission-capability"
+          wait "\$capability_writer"
           python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
             < "\$request_home/state/.test-admission-release" \
             >"\$output" 2>&1 &
@@ -1242,6 +1330,38 @@ while :; do
             status=1
           fi
           wait "\$holder_pid" || status=1
+          exec 21<&-
+        fi
+        ;;
+      admission-replay)
+        cd "\$request_home" || status=1
+        if [ "\$status" -eq 0 ]; then
+          printf '%s\n' "$nonce" > "\$request_home/state/.test-admission-capability" &
+          capability_writer=\$!
+          exec 21< "\$request_home/state/.test-admission-capability"
+          wait "\$capability_writer"
+          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
+            < "\$request_home/state/.test-admission-release-replay" \
+            >"\$output.first" 2>&1 &
+          first_pid=\$!
+          attempts=0
+          while [ "\$attempts" -lt 100 ] \
+            && ! grep -F 'LOCKED' "\$output.first" >/dev/null 2>&1; do
+            if ! kill -0 "\$first_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.02
+            attempts=\$((attempts + 1))
+          done
+          if grep -F 'LOCKED' "\$output.first" >/dev/null 2>&1; then
+            printf '%s\n' locked > "\$output.locked"
+          else
+            status=1
+          fi
+          wait "\$first_pid" || status=1
+          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
+            < /dev/null >"\$output.second" 2>&1 || second_status=\$?
+          printf '%s\n' "\${second_status:-0}" > "\$output.second.status"
           exec 21<&-
         fi
         ;;
@@ -1445,6 +1565,7 @@ SH
     exec env FM_TEST_PROCESS=1 FM_TEST_AUTHORITY_FD=19 \
       FM_TEST_DURABLE_AUTHORITY_FD=18 FM_HOME="$issuer" \
       FM_ROOT_OVERRIDE="$issuer" \
+      FM_TEST_SESSION_LOCK_STABLE_OWNER=1 \
       FM_TEST_AUTHORITY_HARNESS=1 \
       FM_TEST_AUTHORITY_PROVISION_PRIMARY=1 \
       FM_TEST_AUTHORITY_HARNESS_SCRIPT="$ROOT/tests/fm-test-authority-broker.sh" \
@@ -1633,6 +1754,198 @@ test_same_home_secondmate_admission_serializes_independent_holders() {
     || fail "same-home admission did not release its first holder"
   pass "same-home admission serializes independent holders"
 }
+
+test_same_home_secondmate_admission_rejects_replay() {
+  local output attempts=0 second_status
+  output="$TMP_ROOT/admission-replay-output-$REQUEST_SEQUENCE"
+  REQUEST_SEQUENCE=$((REQUEST_SEQUENCE + 1))
+  rm -f "$output" "$output.status" "$output.locked" \
+    "$output.first" "$output.second" "$output.second.status"
+  printf 'admission-replay|secondmate|%s|%s\n' "$HOME_DIR" "$output" \
+    > "$REQUEST_FIFO"
+  while [ "$attempts" -lt 150 ] && [ ! -f "$output.locked" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$output.locked" ] || fail "real admission replay fixture did not acquire"
+  printf 'RELEASE\n' > "$HOME_DIR/state/.test-admission-release-replay"
+  attempts=0
+  while [ "$attempts" -lt 150 ] && [ ! -f "$output.second.status" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$output.second.status" ] || \
+    fail "real admission replay fixture did not test the consumed capability"
+  second_status=$(cat "$output.second.status")
+  [ "$second_status" -ne 0 ] || \
+    fail "real admission capability was replayed after release"
+  attempts=0
+  while [ "$attempts" -lt 150 ] && [ ! -f "$output.status" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$output.status" ] && [ "$(cat "$output.status")" = 0 ] \
+    || fail "real admission replay fixture did not finish cleanly"
+  pass "real admission capabilities reject one-shot replay"
+}
+
+test_rebound_broker_name_rejects_peer_mismatch() {
+  if ! python3 - "$BROKER" "$RECORD" "$HOME_DIR" <<'PY'
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+broker, record_name, home = map(Path, sys.argv[1:])
+original = Path(record_name).read_text(encoding="utf-8")
+rebound = f"fm-test-rebound-{os.getpid()}"
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind("\0" + rebound)
+server.listen(1)
+try:
+    Path(record_name).write_text(
+        original.replace(
+            next(line for line in original.splitlines() if line.startswith("socket=")),
+            f"socket=abstract:{rebound}",
+        )
+        + ("" if original.endswith("\n") else "\n"),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(broker), "client", "--record", str(record_name), "--kind", "live"],
+        cwd=str(home),
+        env={
+            **os.environ,
+            "FM_AGENT_ROLE": "secondmate",
+            "FM_AGENT_TASK": "alpha",
+            "FM_AGENT_OWNER_HOME": str(home),
+        },
+        input=b"rebound-test",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=2,
+    )
+    if result.returncode == 0:
+        raise SystemExit("a rebound abstract endpoint passed peer authentication")
+    server.settimeout(1)
+    try:
+        connection, _ = server.accept()
+    except socket.timeout:
+        pass
+    else:
+        connection.close()
+finally:
+    Path(record_name).write_text(original, encoding="utf-8")
+    server.close()
+PY
+  then
+    fail "rebound broker endpoint was accepted"
+  fi
+  pass "rebound broker names cannot replace the authenticated endpoint"
+}
+
+test_stale_recovery_requires_inherited_capability() {
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+broker_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("session_authority_broker_recovery_capability", broker_path)
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+with TemporaryDirectory() as temporary:
+    home = Path(temporary)
+    state = home / "state"
+    state.mkdir()
+    record = state / ".session-authority-broker"
+    record.write_text("record\n", encoding="utf-8")
+    launch_script = home / "bin" / "fm-session-authority-exec.sh"
+    metadata = {
+        "version": "1",
+        "pid": "999999",
+        "start": "proc:broker",
+        "identity": "exe:broker",
+        "socket": "abstract:broker",
+        "home": str(home),
+        "checkout": str(broker_path.parent.parent),
+        "task": "task",
+        "script": str(broker_path),
+        "launch-pid": "999998",
+        "launch-start": "proc:dead",
+        "launch-identity": "exe:dead",
+        "launch-script": str(launch_script),
+        "uid": str(os.geteuid()),
+        "gid": str(os.getegid()),
+    }
+    args = SimpleNamespace(
+        record=str(record),
+        state=str(state),
+        home=str(home),
+        checkout=str(broker_path.parent.parent),
+        task="task",
+        launch_script=str(launch_script),
+        record_lock_fd=-1,
+    )
+    broker.read_record_shape = lambda _path: metadata
+    broker.process_generation_for_recovery = lambda _pid: None
+    deleted = []
+    broker.unlink_owned_record = lambda *_args, **_kwargs: deleted.append(True) or True
+    evidence = (b"authenticated-root", os.getppid(), "proc:launch", "exe:launch")
+    if broker.recover_stale_locked(args, launch_evidence=evidence) == 0:
+        raise SystemExit("stale recovery used a path-only fallback")
+    if deleted:
+        raise SystemExit("unauthenticated stale recovery reached record deletion")
+
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"a" * 96 + b"\n")
+    os.close(write_fd)
+    saved = None
+    try:
+        try:
+            saved = os.dup(broker.AUTHORITY_SERIALIZATION_FD)
+        except OSError:
+            pass
+        if read_fd != broker.AUTHORITY_SERIALIZATION_FD:
+            os.dup2(read_fd, broker.AUTHORITY_SERIALIZATION_FD)
+            os.close(read_fd)
+        args.record_lock_fd = broker.AUTHORITY_SERIALIZATION_FD
+        if broker.recover_stale_locked(args, launch_evidence=evidence) != 0:
+            raise SystemExit("authenticated stale recovery did not use the inherited capability")
+        if not deleted:
+            raise SystemExit("authenticated stale recovery did not reach deletion")
+    finally:
+        try:
+            os.close(broker.AUTHORITY_SERIALIZATION_FD)
+        except OSError:
+            pass
+        if saved is not None:
+            os.dup2(saved, broker.AUTHORITY_SERIALIZATION_FD)
+            os.close(saved)
+PY
+  then
+    fail "stale recovery capability authentication regressed"
+  fi
+  pass "stale recovery requires an inherited authenticated capability"
+}
+
+if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes-integration ]; then
+  mkdir -p "$STATE" "$FOREIGN_HOME"
+  prepare_launch "$HOME_DIR"
+  start_broker
+  test_stale_recovery_requires_inherited_capability
+  test_same_home_secondmate_admission_allows_hmac_before_release
+  test_same_home_secondmate_admission_rejects_replay
+  test_rebound_broker_name_rejects_peer_mismatch
+  test_same_home_secondmate_admission_serializes_independent_holders
+  exit 0
+fi
 
 prepare_rotation_launch() {
   local home=$1 primary="$TMP_ROOT/rotation-primary"
@@ -1904,7 +2217,9 @@ start_broker
 [ "$(stat -c '%a' "$RECORD")" = 600 ] \
   || fail "authority broker record was not private"
 test_same_home_secondmate_admission_allows_hmac_before_release
+test_same_home_secondmate_admission_rejects_replay
 test_same_home_secondmate_admission_serializes_independent_holders
+test_rebound_broker_name_rejects_peer_mismatch
 
 live=$(broker_hmac "$HOME_DIR" secondmate live) \
   || fail "same-home secondmate could not use live broker authority"

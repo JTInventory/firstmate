@@ -200,6 +200,8 @@ def read_process_fd_line(pid: int, fd: int) -> str:
 
 
 def read_inherited_capability(fd: int) -> str:
+    if fd < 3 or not stat.S_ISFIFO(os.fstat(fd).st_mode):
+        raise ValueError("inherited capability is not an anonymous pipe")
     descriptor = os.dup(fd)
     try:
         os.set_blocking(descriptor, False)
@@ -860,6 +862,7 @@ def record_lock(
     authority_home: str | None = None, authority_task: str | None = None,
     launch_script: str | None = None,
     launch_evidence: tuple[bytes, int, str, str] | None = None,
+    capability_fd: int = -1,
 ):
     if authority_home is None:
         descriptor = open_record_lock(
@@ -873,6 +876,7 @@ def record_lock(
             task=authority_task,
             launch_script=launch_script,
             launch_evidence=launch_evidence,
+            capability_fd=capability_fd,
         )
     try:
         yield descriptor
@@ -987,7 +991,7 @@ def inherited_authority_record_lock(
     launch_script: str,
     launch_evidence: tuple[bytes, int, str, str]
 ) -> AuthorityRecordLock | None:
-    if not task or canonical(
+    if fd != AUTHORITY_SERIALIZATION_FD or not task or canonical(
         launch_script
     ) != canonical(f"{home}/bin/fm-session-authority-exec.sh"):
         return None
@@ -1379,7 +1383,7 @@ def serve_locked(
                             "created": time.monotonic(),
                             "digest": digest,
                             "generation": generation,
-                            "nonce": body,
+                            "nonce": capability,
                             "pid": pid,
                         }
                     connection.sendall(b"O" + digest)
@@ -2042,12 +2046,18 @@ def recover_stale(args: argparse.Namespace) -> int:
         args.state = canonical(str(record.parent))
         args.checkout = canonical(metadata.get("checkout", ""))
         args.launch_script = canonical(launch_script)
+        if getattr(args, "record_lock_fd", -1) != AUTHORITY_SERIALIZATION_FD:
+            return 1
         launch_evidence = read_launch_evidence(
             RECOVERY_LAUNCH_EVIDENCE_FD,
             home=expected_home,
             task=args.task,
             launch_script=args.launch_script,
         )
+        if not trusted_admission_ancestor(
+            os.getpid(), expected_home, args.launch_script
+        ):
+            return 1
         return recover_stale_locked(args, launch_evidence=launch_evidence)
     except FileNotFoundError:
         return 0 if not record.exists() and not record.is_symlink() else 1
@@ -2058,7 +2068,7 @@ def recover_stale(args: argparse.Namespace) -> int:
 def recover_stale_locked(
     args: argparse.Namespace,
     *, launch_evidence: tuple[bytes, int, str, str] | None = None,
-    lease: socket.socket | None = None,
+    lease: AuthorityRecordLock | None = None,
 ) -> int:
     if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
         return 1
@@ -2172,6 +2182,7 @@ def recover_stale_locked(
             authority_task=requested_task,
             launch_script=requested_launch_script,
             launch_evidence=launch_evidence,
+            capability_fd=getattr(args, "record_lock_fd", -1),
         ) as lock:
             return recover_under_lease(lock)
     except FileNotFoundError:
@@ -2230,7 +2241,7 @@ def lock_holder(args: argparse.Namespace) -> int:
         )
         if not connected_peer_matches_record(connection, metadata):
             return 1
-        nonce = read_process_fd_line(os.getpid(), args.capability_fd)
+        nonce = read_inherited_capability(args.capability_fd)
         body = b"firstmate/session-authority/admission/v1\0" + nonce.encode()
         deadline = time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
         connection.sendall(struct.pack("!cI", b"K", len(body)) + body)
@@ -2392,6 +2403,7 @@ def parse_args() -> argparse.Namespace:
     supervisor.add_argument("--record-lock-fd", type=int, required=True)
     recovery = subparsers.add_parser("recover-stale", add_help=False)
     recovery.add_argument("--record", required=True)
+    recovery.add_argument("--record-lock-fd", type=int, required=True)
     return parser.parse_args()
 
 
