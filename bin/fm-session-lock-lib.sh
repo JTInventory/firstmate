@@ -636,7 +636,7 @@ fm_session_authority_broker_bootstrap() {
   fi
   fm_session_exec_descriptor_isolation_durable || return 1
   key=$(fm_session_random_hex 48) || return 1
-  exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
+  exec 18< <(fm_session_authority_capability_writer "$key") || return 1
   unset key
   fm_session_descriptor_channel_isolated 18 || {
     exec 18<&-
@@ -1175,12 +1175,12 @@ fm_session_authority_descriptor_create() {
     return 1
   }
   fm_session_enrollment_trace authority-descriptor-key-generation pass 2>/dev/null || true
-  exec 9< <(while :; do printf '%s\n' "$key"; done) || {
+  exec 9< <(fm_session_authority_capability_writer "$key") || {
     fm_session_enrollment_trace authority-descriptor-fd9-open fail 2>/dev/null || true
     return 1
   }
   fm_session_enrollment_trace authority-descriptor-fd9-open pass 2>/dev/null || true
-  exec 18< <(while :; do printf '%s\n' "$durable_key"; done) || {
+  exec 18< <(fm_session_authority_capability_writer "$durable_key") || {
     fm_session_enrollment_trace authority-descriptor-fd18-open fail 2>/dev/null || true
     exec 9<&-
     return 1
@@ -1204,6 +1204,28 @@ fm_session_authority_descriptor_create() {
   FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
+}
+
+fm_session_authority_capability_writer() {
+  local key=$1
+  python3 - "$key" <<'PY'
+import errno
+import os
+import sys
+
+payload = (sys.argv[1] + "\n").encode()
+try:
+    while True:
+        os.write(1, payload)
+except OSError as exc:
+    if exc.errno == errno.EPIPE:
+        raise SystemExit(0)
+    print(
+        f"error: session authority capability writer failed: errno={exc.errno} {exc.strerror}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
 }
 
 fm_session_authority_live_descriptor_rotate() {
@@ -1233,7 +1255,7 @@ fm_session_authority_live_descriptor_rotate() {
     fm_session_authority_admission_release || true
     return 1
   }
-  exec 9< <(while :; do printf '%s\n' "$key"; done) || {
+  exec 9< <(fm_session_authority_capability_writer "$key") || {
     fm_session_authority_admission_release || true
     return 1
   }
@@ -1300,7 +1322,7 @@ fm_session_authority_durable_descriptor_adopt() {
   IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
   [ "${#key}" -ge 64 ] || return 1
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
-  exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
+  exec 18< <(fm_session_authority_capability_writer "$key") || return 1
   unset key
   fm_session_descriptor_channel_isolated 18 || {
     exec 18<&-
@@ -1823,7 +1845,7 @@ fm_session_durable_authority_recover() {
     return 1
   }
   rm -f "$request" "$response"
-  exec 18< <(while :; do printf '%s\n' "$key"; done) || return 1
+  exec 18< <(fm_session_authority_capability_writer "$key") || return 1
   unset key
   FM_SESSION_AUTHORITY_DURABLE_FD=18
   fm_session_durable_custodian_validate "$record" || {

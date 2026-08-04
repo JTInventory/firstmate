@@ -202,13 +202,20 @@ fm_test_session_authority_fd() {
   key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   inherited_fd=${FM_TEST_AUTHORITY_FD:-}
   inherited_durable_fd=${FM_TEST_DURABLE_AUTHORITY_FD:-}
+  if ( : <&9 ) 2>/dev/null && ( : <&18 ) 2>/dev/null; then
+    FM_SESSION_AUTHORITY_FD=9
+    FM_SESSION_AUTHORITY_DURABLE_FD=18
+    export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    return 0
+  fi
   if [ -n "$inherited_fd" ] && [ -n "$inherited_durable_fd" ]; then
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-session-lock-lib.sh"
     FM_SESSION_AUTHORITY_FD=$inherited_fd
     FM_SESSION_AUTHORITY_DURABLE_FD=$inherited_durable_fd
-    if fm_session_authority_capability_present \
-      && fm_session_authority_durable_capability_present; then
+    if fm_test_authority_descriptors_present; then
       export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
       return 0
     fi
@@ -220,21 +227,34 @@ fm_test_session_authority_fd() {
     export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-session-lock-lib.sh"
-    fm_session_authority_capability_present \
-      && fm_session_authority_durable_capability_present || {
-        echo "test setup: authority descriptors are already in use" >&2
-        return 1
+    fm_test_authority_descriptors_present || {
+      echo "test setup: authority descriptors are already in use" >&2
+      return 1
     }
     return 0
   fi
   durable_key=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
-  exec 9< <(while :; do printf '%s\n' "$key"; done)
-  exec 18< <(while :; do printf '%s\n' "$durable_key"; done)
+  exec 9< <(fm_session_authority_capability_writer "$key")
+  exec 18< <(fm_session_authority_capability_writer "$durable_key")
   FM_SESSION_AUTHORITY_FD=9
   FM_SESSION_AUTHORITY_DURABLE_FD=18
   export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-session-lock-lib.sh"
+}
+
+fm_test_authority_descriptors_present() {
+  local live_fd=${FM_SESSION_AUTHORITY_FD:-}
+  local durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-} key
+  fm_session_descriptor_channel_isolated "$live_fd" \
+    && fm_session_descriptor_channel_isolated "$durable_fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  IFS= read -r key <&"$live_fd" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  IFS= read -r key <&"$durable_fd" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

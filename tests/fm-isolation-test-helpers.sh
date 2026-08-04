@@ -102,15 +102,16 @@ fm_worker_test_primary_identity_lock_release() {
 
 fm_test_authority_live_binding_write() {
   local state=$1 pid=$2 file key digest start identity descriptor body
+  local fd=${FM_SESSION_AUTHORITY_FD:-9}
   file="$state/.session-authority-live"
   start=$(fm_session_process_start "$pid") || return 1
   identity=$(fm_session_process_identity "$pid") || return 1
-  descriptor=$(fm_session_descriptor_identity "$pid" 9) || return 1
-  IFS= read -r key <&9 || return 1
+  descriptor=$(fm_session_descriptor_identity "$pid" "$fd") || return 1
+  IFS= read -r key <&"$fd" || return 1
   digest=$(printf '%s\n' "$key" | sha256sum 2>/dev/null) || return 1
   digest=${digest%% *}
-  body=$(printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nfd=9\ndescriptor=%s\nkey-sha256=%s\n' \
-    "$pid" "$start" "$identity" "$descriptor" "$digest") || return 1
+  body=$(printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nfd=%s\ndescriptor=%s\nkey-sha256=%s\n' \
+    "$pid" "$start" "$identity" "$fd" "$descriptor" "$digest") || return 1
   fm_session_authority_record_write "$file" "$body"
 }
 
