@@ -35,6 +35,7 @@ CONCURRENT_OUTPUT_READER_TWO=
 CONCURRENT_STATUS_READER_ONE=
 CONCURRENT_STATUS_READER_TWO=
 CONCURRENT_FIXTURE_STATE=
+CONCURRENT_FIXTURE_ROOT=
 CONCURRENT_PUBLISHED_BROKER_PID=
 REQUEST_FIFO=
 PRIMARY_REQUEST_FIFO=
@@ -127,6 +128,7 @@ preserve_failure_evidence() {
   local record_checkout_hash record_task_hash record_script_hash
   local record_launch_identity_hash record_launch_script_hash known_secret
   local bundle_file bundle_base
+  local state_root process_snapshot process_rows process_row_count
   evidence_validate_decimal "$status" 3 || return 1
   mkdir -p "$parent" 2>/dev/null || return 1
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
@@ -147,7 +149,8 @@ preserve_failure_evidence() {
     return 1
   fi
   if [ -n "$CONCURRENT_FIXTURE_STATE" ]; then
-    [ "$CONCURRENT_FIXTURE_STATE" = "$TMP_ROOT/state" ] || {
+    [ -n "$CONCURRENT_FIXTURE_ROOT" ] \
+      && [ "$CONCURRENT_FIXTURE_STATE" = "$CONCURRENT_FIXTURE_ROOT/state" ] || {
       rm -rf -- "$evidence_tmp" 2>/dev/null || true
       return 1
     }
@@ -161,26 +164,68 @@ preserve_failure_evidence() {
       return 1
     }
   fi
+  process_snapshot="$evidence_tmp/process-snapshot"
+  process_rows="$evidence_tmp/process-rows"
   if ! {
     printf '%s\n' "$status" > "$evidence_tmp/exit-status" \
       && [ -f "$evidence_tmp/concurrent-state" ] \
       && [ ! -L "$evidence_tmp/concurrent-state" ] \
-      && printf 'pid ppid stat\n' > "$evidence_tmp/processes" \
-      && ps -eo pid=,ppid=,stat= \
-        | awk '
-          $1 !~ /^[0-9]{1,10}$/ ||
-          $2 !~ /^[0-9]{1,10}$/ ||
-          $3 !~ /^[[:alnum:]_+<>=~-]{1,8}$/ { exit 1 }
-          { print $1, $2, $3 }
-        ' >> "$evidence_tmp/processes"
+      && ps -eo pid=,ppid=,stat= > "$process_snapshot" 2>/dev/null \
+      && [ -f "$process_snapshot" ] \
+      && [ ! -L "$process_snapshot" ] \
+      && awk '
+        NF != 3 ||
+        $1 !~ /^[0-9][0-9]*$/ || length($1) > 10 ||
+        $2 !~ /^[0-9][0-9]*$/ || length($2) > 10 ||
+        $3 !~ /^[[:alnum:]_+<>=~-]+$/ || length($3) > 8 { exit 1 }
+        { print $1, $2, $3 }
+      ' "$process_snapshot" > "$process_rows" \
+      && [ -f "$process_rows" ] \
+      && [ ! -L "$process_rows" ]
   }; then
     rm -rf -- "$evidence_tmp" 2>/dev/null || true
     return 1
   fi
+  process_row_count=$(wc -l < "$process_rows") || {
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  }
+  process_row_count=${process_row_count//[[:space:]]/}
+  evidence_validate_decimal "$process_row_count" 10 || {
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  }
+  if [ "$process_row_count" -eq 0 ]; then
+    printf 'ps-success-zero-rows\n' > "$evidence_tmp/processes-zero-rows" || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
+  else
+    {
+      printf 'pid ppid stat\n'
+      cat -- "$process_rows"
+    } > "$evidence_tmp/processes" || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
+  fi
+  rm -f -- "$process_snapshot" "$process_rows" || {
+    rm -rf -- "$evidence_tmp" 2>/dev/null || true
+    return 1
+  }
   for state in "$CONCURRENT_FIXTURE_STATE" "$STATE"; do
     [ -n "$state" ] || continue
+    state_root=$TMP_ROOT
+    if [ -n "$CONCURRENT_FIXTURE_STATE" ] \
+      && [ "$state" = "$CONCURRENT_FIXTURE_STATE" ]; then
+      state_root=$CONCURRENT_FIXTURE_ROOT
+    fi
+    [ -n "$state_root" ] || {
+      rm -rf -- "$evidence_tmp" 2>/dev/null || true
+      return 1
+    }
     case "$state" in
-      "$TMP_ROOT"|"$TMP_ROOT"/*) ;;
+      "$state_root"|"$state_root"/*) ;;
       *)
         rm -rf -- "$evidence_tmp" 2>/dev/null || true
         return 1
@@ -191,7 +236,7 @@ preserve_failure_evidence() {
       rm -rf -- "$evidence_tmp" 2>/dev/null || true
       return 1
     }
-    state_suffix=${state#"$TMP_ROOT"}
+    state_suffix=${state#"$state_root"}
     [[ "$state_suffix" =~ ^(/[A-Za-z0-9._-]+)+$ ]] \
       && [ "${#state_suffix}" -le 512 ] || {
       rm -rf -- "$evidence_tmp" 2>/dev/null || true
@@ -489,7 +534,13 @@ preserve_failure_evidence() {
           $1 !~ /^[0-9][0-9]*$/ || length($1) > 10 ||
           $2 !~ /^[0-9][0-9]*$/ || length($2) > 10 ||
           $3 !~ /^[[:alnum:]_+<>=~-]+$/ || length($3) > 8 { invalid = 1 }
-          END { exit invalid }' "$bundle_file" || {
+          END { if (NR < 2) invalid = 1; exit invalid }' "$bundle_file" || {
+          rm -rf -- "$evidence_tmp" 2>/dev/null || true
+          return 1
+        }
+        ;;
+      processes-zero-rows)
+        [ "$(cat -- "$bundle_file" 2>/dev/null)" = "ps-success-zero-rows" ] || {
           rm -rf -- "$evidence_tmp" 2>/dev/null || true
           return 1
         }
@@ -1079,6 +1130,7 @@ test_concurrent_broker_start_has_one_publisher() {
   local first_status_capture second_status_capture
   fixture=$(fm_test_tmproot fm-concurrent-broker-start)
   CONCURRENT_FIXTURE_STATE="$fixture/state"
+  CONCURRENT_FIXTURE_ROOT="$fixture"
   CONCURRENT_PUBLISHED_BROKER_PID=
   mkdir -p "$fixture/bin" "$fixture/state"
   printf '%s\n' alpha > "$fixture/.fm-secondmate-home"
@@ -1291,6 +1343,7 @@ test_concurrent_broker_start_has_one_publisher() {
   BROKER_PID=
   LAUNCH_PID=
   CONCURRENT_FIXTURE_STATE=
+  CONCURRENT_FIXTURE_ROOT=
   pass "concurrent broker callers publish one production generation"
 }
 
