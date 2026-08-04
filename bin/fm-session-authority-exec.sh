@@ -188,6 +188,10 @@ if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ] \
 fi
 authority="$STATE/.session-authority"
 home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || exit 1
+FM_SESSION_AUTHORITY_BROKER_PID=$$
+FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
+FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
+FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
 authorized=0
 if fm_session_authority_read "$authority" \
   && [ "$FM_SESSION_AUTHORITY_HOME" = "$home_real" ] \
@@ -671,10 +675,6 @@ if [ -d "$STATE/.session-authority-transaction" ] \
     exit 1
   fi
 fi
-FM_SESSION_AUTHORITY_BROKER_PID=$$
-FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
-FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
-FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
 if fm_session_authority_socket_broker_present; then
   fm_session_enrollment_trace consumer-authority-broker pass 2>/dev/null || true
 else
