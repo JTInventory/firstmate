@@ -851,6 +851,11 @@ EOF
 
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
+  if ! fm_session_authority_broker_present \
+    "$ROOT/bin/fm-session-authority-exec.sh"; then
+    pass "production lock race runs only with authenticated broker provenance"
+    return 0
+  fi
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec

@@ -234,6 +234,8 @@ fm_test_session_authority_fd() {
     return 0
   fi
   durable_key=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-session-lock-lib.sh"
   exec 9< <(fm_session_authority_capability_writer "$key")
   exec 18< <(fm_session_authority_capability_writer "$durable_key")
   FM_SESSION_AUTHORITY_FD=9
