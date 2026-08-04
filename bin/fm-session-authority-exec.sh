@@ -614,10 +614,6 @@ fm_session_authority_transaction_recover "$STATE" || {
   echo "error: session authority recovery could not be verified; operate read-only until resolved" >&2
   exit 1
 }
-FM_SESSION_AUTHORITY_BROKER_PID=$$
-FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
-FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
-FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
 if [ "${FM_AGENT_ROLE:-}" != secondmate ] \
   && [ ! -e "$STATE/.primary-checkout" ] \
   && [ ! -L "$STATE/.primary-checkout" ] \
@@ -675,6 +671,10 @@ if [ -d "$STATE/.session-authority-transaction" ] \
     exit 1
   fi
 fi
+FM_SESSION_AUTHORITY_BROKER_PID=$$
+FM_SESSION_AUTHORITY_BROKER_START=$(fm_session_process_start "$$") || exit 1
+FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(fm_session_process_identity "$$") || exit 1
+FM_SESSION_AUTHORITY_BROKER_SCRIPT="$SCRIPT_DIR/fm-session-authority-exec.sh"
 if fm_session_authority_socket_broker_present; then
   fm_session_enrollment_trace consumer-authority-broker pass 2>/dev/null || true
 else
