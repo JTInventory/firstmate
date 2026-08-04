@@ -145,14 +145,8 @@ fm_agent_endpoint_identity_pid() {
     [ -n "$candidate" ] || continue
     fm_agent_pid_is_numeric "$candidate" || continue
     env=$(fm_agent_environ "$candidate" 2>/dev/null) || continue
-    if [ -n "${FM_TEST_AGENT_PIDS:-}" ] \
-      && [ "${FM_TEST_PROCESS:-0}" = 1 ] \
-      && fm_session_test_authority_broker_present; then
-      :
-    else
-      fm_agent_launch_receipt_matches_pid "$task" "$home" "$role" \
-        "$candidate" || continue
-    fi
+    fm_agent_launch_receipt_matches_pid "$task" "$home" "$role" \
+      "$candidate" || continue
     [ "$(fm_agent_marker_value "$env" FM_AGENT_TASK 2>/dev/null || true)" = "$task" ] || continue
     candidate_home=$(fm_agent_marker_value "$env" FM_AGENT_OWNER_HOME 2>/dev/null || true)
     candidate_home=$(fm_agent_canonical_dir "$candidate_home" 2>/dev/null || true)
@@ -203,18 +197,7 @@ fm_agent_marker_value() {
 # process declares a task.
 fm_agent_task_pid_index() {
   local pid task home role env found=1 pids comm args marker_evidence
-  if [ -n "${FM_TEST_AGENT_PIDS:-}" ]; then
-    [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
-    # A bounded process list is a test-only performance fixture. The protected
-    # broker capability prevents an ordinary same-UID worker from enabling it.
-    # shellcheck source=/dev/null
-    . "$_FM_AGENT_CWD_LIB_DIR/fm-session-lock-lib.sh"
-    fm_session_test_authority_broker_present || return 1
-    pids=$FM_TEST_AGENT_PIDS
-    for pid in $pids; do
-      fm_agent_pid_is_numeric "$pid" || return 1
-    done
-  elif [ -d /proc ]; then
+  if [ -d /proc ]; then
     pids=$(printf '%s\n' /proc/[0-9]* | sed 's#.*/##')
   else
     pids=$(LC_ALL=C ps -A -o pid= 2>/dev/null) || return 1
@@ -256,8 +239,7 @@ fm_agent_task_pid_index() {
       found=0
       continue
     }
-    if [ -z "${FM_TEST_AGENT_PIDS:-}" ] \
-      && ! fm_agent_launch_receipt_matches_pid "$task" "$home" "$role" "$pid"; then
+    if ! fm_agent_launch_receipt_matches_pid "$task" "$home" "$role" "$pid"; then
       printf '__FM_UNPROVEN__\t__FM_UNPROVEN__\tmalformed\t%s\n' "$pid"
       found=0
       continue

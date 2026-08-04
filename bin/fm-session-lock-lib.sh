@@ -372,6 +372,68 @@ fm_session_authority_wrapper_provenance_present() {
   return 1
 }
 
+fm_session_authority_live_binding_write() {
+  local state=${1:-} authority file fd=${FM_SESSION_AUTHORITY_FD:-}
+  local key digest descriptor start identity body
+  [ -n "$state" ] || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  authority="$state/.session-authority"
+  [ -f "$authority" ] && [ ! -L "$authority" ] || return 1
+  [ "$fd" = 9 ] || return 1
+  fm_session_descriptor_channel_isolated "$fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  fm_session_authority_read "$authority" || return 1
+  [ "$FM_SESSION_AUTHORITY_PID" = "$$" ] || return 1
+  start=$(fm_session_process_start "$$") || return 1
+  identity=$(fm_session_process_identity "$$") || return 1
+  descriptor=$(fm_session_descriptor_identity "$$" "$fd") || return 1
+  IFS= read -r key <&"$fd" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  digest=$(printf '%s\n' "$key" | sha256sum 2>/dev/null) || return 1
+  digest=${digest%% *}
+  [ "${#digest}" -eq 64 ] || return 1
+  body=$(printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nfd=%s\ndescriptor=%s\nkey-sha256=%s\n' \
+    "$$" "$start" "$identity" "$fd" "$descriptor" "$digest") || return 1
+  file="$state/.session-authority-live"
+  fm_session_authority_record_write "$file" "$body"
+}
+
+fm_session_authority_live_binding_validate() {
+  local state=$1 authority_pid=$2 fd=${3:-9} file
+  local start identity descriptor key digest current
+  case "$authority_pid:$fd" in ''|*[!0-9:]*|*:) return 1 ;; esac
+  [ "$fd" = 9 ] || return 1
+  state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
+  file="$state/.session-authority-live"
+  fm_session_authority_record_validate "$file" 8 || return 1
+  [ "$(sed -n '1p' "$file")" = version=1 ] || return 1
+  [ "$(sed -n '2s/^pid=//p' "$file")" = "$authority_pid" ] || return 1
+  start=$(sed -n '3s/^start=//p' "$file")
+  identity=$(sed -n '4s/^identity=//p' "$file")
+  [ "$(sed -n '5s/^fd=//p' "$file")" = "$fd" ] || return 1
+  descriptor=$(sed -n '6s/^descriptor=//p' "$file")
+  digest=$(sed -n '7s/^key-sha256=//p' "$file")
+  case "$start:$identity:$descriptor:$digest" in
+    ''|*$'\n'*|*$'\r'*|*:*:*:*:) return 1 ;;
+  esac
+  current=$(fm_session_process_start "$authority_pid" 2>/dev/null || true)
+  [ "$current" = "$start" ] || return 1
+  [ "$(fm_session_process_identity "$authority_pid" 2>/dev/null || true)" = \
+    "$identity" ] || return 1
+  [ "$(fm_session_descriptor_identity "$authority_pid" "$fd" 2>/dev/null || true)" = \
+    "$descriptor" ] || return 1
+  [ "$(fm_session_descriptor_identity "$$" "$fd" 2>/dev/null || true)" = \
+    "$descriptor" ] || return 1
+  fm_session_descriptor_channel_isolated "$fd" || return 1
+  IFS= read -r key <&"$fd" || return 1
+  [ "${#key}" -ge 64 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  current=$(printf '%s\n' "$key" | sha256sum 2>/dev/null) || return 1
+  current=${current%% *}
+  [ "$current" = "$digest" ]
+}
+
 fm_session_authority_record_capability_present() {
   local home state authority fd key expected checkout broker broker_start broker_identity
   fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
@@ -384,7 +446,10 @@ fm_session_authority_record_capability_present() {
   authority="$state/.session-authority"
   checkout=$(cd "${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}" \
     2>/dev/null && pwd -P) || return 1
-  fm_session_authority_read_shape "$authority" || return 1
+  fm_session_authority_read "$authority" || return 1
+  fm_session_authority_live_binding_validate \
+    "$state" "$FM_SESSION_AUTHORITY_PID" "${FM_SESSION_AUTHORITY_FD:-}" \
+    || return 1
   [ "$FM_SESSION_AUTHORITY_PID" != "$$" ] || return 1
   [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] || return 1
   [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$checkout" ] || return 1
@@ -442,7 +507,10 @@ fm_session_authority_primary_bootstrap_capability_present() {
   checkout=$(cd "${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}" \
     2>/dev/null && pwd -P) || return 1
   authority="$state/.session-authority"
-  fm_session_authority_read_shape "$authority" || return 1
+  fm_session_authority_read "$authority" || return 1
+  fm_session_authority_live_binding_validate \
+    "$state" "$FM_SESSION_AUTHORITY_PID" "${FM_SESSION_AUTHORITY_FD:-}" \
+    || return 1
   [ "$FM_SESSION_AUTHORITY_PID" = "$$" ] \
     && [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] \
     && [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$checkout" ] || return 1
@@ -566,9 +634,14 @@ fm_session_authority_socket_broker_start() {
 }
 
 fm_session_authority_capability_present() {
-  local key
+  local key home state authority
   fm_session_authority_socket_broker_present && return 0
   if ! fm_session_authority_production_capability_present; then
+    home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+      2>/dev/null && pwd -P) || return 1
+    state=${FM_STATE_OVERRIDE:-$home/state}
+    authority="$state/.session-authority"
+    [ ! -e "$authority" ] && [ ! -L "$authority" ] || return 1
     fm_session_authority_primary_bootstrap_descriptor_present || return 1
   fi
   fm_session_descriptor_channel_isolated \
@@ -577,39 +650,6 @@ fm_session_authority_capability_present() {
   IFS= read -r key <&"$FM_SESSION_AUTHORITY_FD" || return 1
   [ "${#key}" -ge 64 ] || return 1
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
-}
-
-fm_session_test_authority_broker_present() {
-  local broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
-  local fd=${FM_TEST_DURABLE_AUTHORITY_FD:-} live_fd=${FM_TEST_AUTHORITY_FD:-}
-  local harness=${FM_TEST_AUTHORITY_HARNESS_PID:-}
-  local expected_harness expected_exec caller_target broker_target
-  [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
-  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$broker" != "$$" ] || return 1
-  kill -0 "$broker" 2>/dev/null || return 1
-  case "$harness" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$harness" != "$$" ] || return 1
-  kill -0 "$harness" 2>/dev/null || return 1
-  expected_harness=$(cd "$_FM_SESSION_LOCK_LIB_DIR/../tests" 2>/dev/null \
-    && pwd -P)/fm-test-authority-broker.sh || return 1
-  expected_exec="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
-  [ "${FM_TEST_AUTHORITY_HARNESS:-0}" = 1 ] || return 1
-  [ "${FM_TEST_AUTHORITY_HARNESS_SCRIPT:-}" = "$expected_harness" ] || return 1
-  [ "${FM_TEST_AUTHORITY_EXEC_SCRIPT:-}" = "$expected_exec" ] || return 1
-  fm_session_process_runs_script "$harness" "$expected_harness" || return 1
-  [ "$(fm_session_process_environment_value "$harness" \
-      FM_TEST_AUTHORITY_HARNESS 2>/dev/null || true)" = 1 ] || return 1
-  [ "$(fm_session_parent_pid "$broker" 2>/dev/null || true)" = "$harness" ] || return 1
-  fm_session_descriptor_channel_isolated "$fd" || return 1
-  caller_target=$(fm_session_descriptor_identity "$$" "$fd") || return 1
-  broker_target=$(fm_session_descriptor_identity "$broker" "$fd") || return 1
-  [ "$caller_target" = "$broker_target" ] || return 1
-  if ! fm_session_descriptor_channel_isolated "$live_fd"; then
-    case "$live_fd" in ''|*[!0-9]*) return 1 ;; esac
-    eval "exec ${live_fd}<&${fd}"
-  fi
-  fm_session_descriptor_channel_isolated "$live_fd"
 }
 
 fm_session_process_runs_authority_broker() {
@@ -769,7 +809,7 @@ fm_session_authority_descriptor_create() {
 }
 
 fm_session_authority_live_descriptor_rotate() {
-  local key
+  local key home state authority
   fm_session_authority_durable_capability_present || return 1
   if ( : <&9 ) 2>/dev/null || ( : >&9 ) 2>/dev/null; then
     return 1
@@ -784,6 +824,13 @@ fm_session_authority_live_descriptor_rotate() {
   }
   FM_SESSION_AUTHORITY_DESCRIPTOR_ORIGIN=trusted
   FM_SESSION_AUTHORITY_FD=9
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  authority="$state/.session-authority"
+  if [ -f "$authority" ] && [ ! -L "$authority" ]; then
+    fm_session_authority_live_binding_write "$state" || return 1
+  fi
 }
 
 fm_session_authority_durable_descriptor_adopt() {
@@ -2508,41 +2555,11 @@ fm_codex_thread_active() {
 }
 
 fm_session_lock_owner() {
-  local pid=$$ parent fd=${FM_SESSION_AUTHORITY_FD:-} durable_fd
-  local current target harness
+  local pid=$$ parent fd=${FM_SESSION_AUTHORITY_FD:-}
+  local current target
   fm_session_authority_capability_present || return 1
-  harness=
-  if fm_session_test_authority_broker_present; then
-    if [ "${FM_TEST_SESSION_LOCK_STABLE_OWNER:-0}" = 1 ]; then
-      harness=${FM_TEST_AUTHORITY_OWNER_PID:-}
-      case "$harness" in
-        ''|*[!0-9]*) harness= ;;
-        *)
-          durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
-          if ! kill -0 "$harness" 2>/dev/null \
-            || { ! fm_session_pid_is_current_ancestor "$harness" \
-              && [ "$(fm_session_descriptor_identity \
-                    "$$" "$fd" 2>/dev/null || true)" != \
-                  "$(fm_session_descriptor_identity \
-                    "$harness" "$fd" 2>/dev/null || true)" ] \
-              && [ "$(fm_session_descriptor_identity \
-                    "$$" "$durable_fd" 2>/dev/null || true)" != \
-                  "$(fm_session_descriptor_identity \
-                    "$harness" "$durable_fd" 2>/dev/null || true)" ]; }; then
-            harness=
-          fi
-          ;;
-      esac
-    else
-      harness=$$
-    fi
-  fi
-  if [ -n "$harness" ]; then
-    pid=$harness
-  else
-    target=$(fm_session_descriptor_identity "$pid" "$fd" 2>/dev/null || true)
-  fi
-  if [ -z "$harness" ] && [ -n "$target" ]; then
+  target=$(fm_session_descriptor_identity "$pid" "$fd" 2>/dev/null || true)
+  if [ -n "$target" ]; then
     while [ "$pid" -gt 1 ]; do
       parent=$(fm_session_parent_pid "$pid") || return 1
       [ "$parent" != "$pid" ] || return 1
@@ -2554,11 +2571,7 @@ fm_session_lock_owner() {
   fm_session_process_start "$pid" >/dev/null || return 1
   fm_session_process_identity "$pid" >/dev/null || return 1
   if fm_codex_thread_active; then
-    if fm_session_test_authority_broker_present; then
-      printf '%s|codex:%s|capability\n' "$pid" "$CODEX_THREAD_ID"
-    else
-      printf '%s|codex:%s|descriptor\n' "$pid" "$CODEX_THREAD_ID"
-    fi
+    printf '%s|codex:%s|descriptor\n' "$pid" "$CODEX_THREAD_ID"
     return
   fi
   printf '%s\n' "$pid"

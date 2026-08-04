@@ -134,8 +134,46 @@ PY
   pass "broker connect and send stalls honor the request deadline"
 }
 
+test_primary_authority_record_and_live_descriptor_binding() {
+  local fixture state authority backup
+  fixture=$(fm_test_tmproot fm-primary-authority-binding)
+  state="$fixture/state"
+  authority="$state/.session-authority"
+  backup="$fixture/authority.backup"
+  mkdir -p "$state"
+  (
+    cd "$ROOT" || exit 1
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    exec 9< <(while :; do printf '%s\n' \
+      0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef; done)
+    exec 18< <(while :; do printf '%s\n' \
+      fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210; done)
+    export FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state"
+    export FM_SESSION_AUTHORITY_FD=9 FM_SESSION_AUTHORITY_DURABLE_FD=18
+    fm_session_authority_write_file "$authority" "$$" "$$" "$ROOT" "$ROOT"
+    printf '%s\n' "$ROOT" > "$state/.primary-checkout"
+    printf '%s\n' "$$" > "$state/.lock"
+    fm_session_authority_live_binding_write "$state"
+    fm_session_authority_live_binding_validate "$state" "$$" 9
+    cp "$authority" "$backup"
+    sed 's/^owner=.*/owner=forged/' "$authority" > "$authority.tmp"
+    mv "$authority.tmp" "$authority"
+    if fm_session_authority_read "$authority"; then
+      exit 1
+    fi
+    cp "$backup" "$authority"
+    exec 9< <(while :; do printf '%s\n' \
+      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done)
+    if fm_session_authority_live_binding_validate "$state" "$$" 9; then
+      exit 1
+    fi
+  )
+  pass "durable authority records reject rewrites and live descriptor substitution"
+}
+
 if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
   test_broker_client_deadline_is_behavioral
+  test_primary_authority_record_and_live_descriptor_binding
   if ! python3 - "$BROKER" <<'PY'
 import importlib.util
 import sys
@@ -284,7 +322,7 @@ PY
   if FM_TEST_PROCESS=1 FM_TEST_AUTHORITY_BROKER_PID=$$ \
     bash -c '
       . "$1"
-      fm_session_test_authority_broker_present
+      fm_session_authority_capability_present
     ' _ "$ROOT/bin/fm-session-lock-lib.sh"; then
     fail "caller-controlled test authority reached the production capability seam"
   fi

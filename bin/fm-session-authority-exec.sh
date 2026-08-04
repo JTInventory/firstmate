@@ -611,6 +611,7 @@ if [ "${FM_AGENT_ROLE:-}" != secondmate ] \
       "$bootstrap_authority_tmp"
     exit 1
   fi
+  fm_session_authority_live_binding_write "$STATE" || exit 1
 fi
 if fm_session_authority_socket_broker_present; then
   fm_session_enrollment_trace consumer-authority-broker pass 2>/dev/null || true

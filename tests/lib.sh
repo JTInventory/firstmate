@@ -32,6 +32,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export FM_TEST_PROCESS=1
 export TMPDIR=${TMPDIR:-/tmp}
 unset FM_AGENT_ROLE FM_AGENT_TASK FM_AGENT_OWNER_HOME
+# shellcheck source=/dev/null
+. "$ROOT/tests/fm-isolation-test-helpers.sh"
 
 # --- ambient Herdr isolation ------------------------------------------------
 #
