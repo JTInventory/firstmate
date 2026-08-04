@@ -18,6 +18,8 @@ SIGNER_PID=
 ROTATION_PRIMARY_SETUP_PID=
 ROTATION_CUSTODIAN_PID=
 ROTATION_DURABLE_KEY=
+CONCURRENT_EVIDENCE_WRITER_ONE=
+CONCURRENT_EVIDENCE_WRITER_TWO=
 REQUEST_FIFO=
 PRIMARY_REQUEST_FIFO=
 REQUEST_SEQUENCE=0
@@ -38,6 +40,14 @@ cleanup() {
   [ -z "$ROTATION_PRIMARY_SETUP_PID" ] || wait "$ROTATION_PRIMARY_SETUP_PID" 2>/dev/null || true
   [ -z "$ROTATION_CUSTODIAN_PID" ] || kill "$ROTATION_CUSTODIAN_PID" 2>/dev/null || true
   [ -z "$ROTATION_CUSTODIAN_PID" ] || wait "$ROTATION_CUSTODIAN_PID" 2>/dev/null || true
+  [ -z "$CONCURRENT_EVIDENCE_WRITER_ONE" ] \
+    || kill "$CONCURRENT_EVIDENCE_WRITER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_EVIDENCE_WRITER_ONE" ] \
+    || wait "$CONCURRENT_EVIDENCE_WRITER_ONE" 2>/dev/null || true
+  [ -z "$CONCURRENT_EVIDENCE_WRITER_TWO" ] \
+    || kill "$CONCURRENT_EVIDENCE_WRITER_TWO" 2>/dev/null || true
+  [ -z "$CONCURRENT_EVIDENCE_WRITER_TWO" ] \
+    || wait "$CONCURRENT_EVIDENCE_WRITER_TWO" 2>/dev/null || true
   fm_test_cleanup || true
 }
 trap cleanup EXIT
@@ -418,6 +428,7 @@ SH
 test_concurrent_broker_start_has_one_publisher() {
   local fixture first_output second_output first_pid second_pid
   local broker_pids broker_count receipt_b64 record_pid attempts
+  local evidence_barrier request_one_pid request_two_pid
   fixture=$(fm_test_tmproot fm-concurrent-broker-start)
   mkdir -p "$fixture/bin" "$fixture/state"
   printf '%s\n' alpha > "$fixture/.fm-secondmate-home"
@@ -431,10 +442,41 @@ test_concurrent_broker_start_has_one_publisher() {
     "$BROKER_KEY" "$receipt_b64" "$TRUSTED_TICKET_B64" \
     "$TRUSTED_ACCEPTANCE_B64" "$TRUSTED_FINAL_B64" \
     "$TRUSTED_CONSUMER_KEY_B64" > "$fixture/state/.test-launch-evidence"
+  evidence_barrier="$fixture/state/.concurrent-evidence-barrier"
+  mkdir -p "$evidence_barrier"
+  ( exec 3> "$fixture/state/.test-launch-evidence-1"
+    : > "$evidence_barrier/ready-1"
+    while [ ! -e "$evidence_barrier/go" ]; do sleep 0.02; done
+    cat "$fixture/state/.test-launch-evidence" >&3
+    exec 3>&-
+  ) &
+  CONCURRENT_EVIDENCE_WRITER_ONE=$!
+  ( exec 3> "$fixture/state/.test-launch-evidence-2"
+    : > "$evidence_barrier/ready-2"
+    while [ ! -e "$evidence_barrier/go" ]; do sleep 0.02; done
+    cat "$fixture/state/.test-launch-evidence" >&3
+    exec 3>&-
+  ) &
+  CONCURRENT_EVIDENCE_WRITER_TWO=$!
   printf 'broker|secondmate|%s|%s\n' "$fixture" "$first_output" \
-    > "$REQUEST_FIFO"
+    > "$REQUEST_FIFO" &
+  request_one_pid=$!
   printf 'broker|secondmate|%s|%s\n' "$fixture" "$second_output" \
-    > "$REQUEST_FIFO"
+    > "$REQUEST_FIFO" &
+  request_two_pid=$!
+  wait "$request_one_pid" \
+    || fail "first concurrent broker request was not accepted"
+  wait "$request_two_pid" \
+    || fail "second concurrent broker request was not accepted"
+  for _ in $(seq 1 250); do
+    [ -e "$evidence_barrier/ready-1" ] \
+      && [ -e "$evidence_barrier/ready-2" ] && break
+    sleep 0.02
+  done
+  [ -e "$evidence_barrier/ready-1" ] \
+    && [ -e "$evidence_barrier/ready-2" ] \
+    || fail "concurrent broker supervisors did not reach the launch barrier"
+  : > "$evidence_barrier/go"
   for _ in $(seq 1 250); do
     [ -f "$first_output" ] && [ -f "$second_output" ] \
       && [ -f "$fixture/state/.session-authority-broker" ] && break
@@ -481,6 +523,10 @@ test_concurrent_broker_start_has_one_publisher() {
   broker_count=$(printf '%s\n' "$broker_pids" | sed '/^$/d' | wc -l | tr -d ' ')
   [ "$broker_count" -eq 1 ] \
     || fail "real concurrent broker supervisors published competing brokers"
+  wait "$CONCURRENT_EVIDENCE_WRITER_ONE" 2>/dev/null || true
+  wait "$CONCURRENT_EVIDENCE_WRITER_TWO" 2>/dev/null || true
+  CONCURRENT_EVIDENCE_WRITER_ONE=
+  CONCURRENT_EVIDENCE_WRITER_TWO=
   kill "$record_pid" 2>/dev/null || true
   wait "$record_pid" 2>/dev/null || true
   kill "$LAUNCH_PID" 2>/dev/null || true
@@ -1343,8 +1389,6 @@ SH
   rm -f "$REQUEST_FIFO"
   rm -f "$PRIMARY_REQUEST_FIFO"
   mkfifo "$REQUEST_FIFO" "$PRIMARY_REQUEST_FIFO"
-  rm -f "$home/state/.test-admission-capability"
-  mkfifo "$home/state/.test-admission-capability"
   rm -f "$home/state/.test-admission-release"
   rm -f "$home/state/.test-admission-release-1" \
     "$home/state/.test-admission-release-2" \
@@ -1366,20 +1410,22 @@ SH
   cat > "$launch_script" <<SH
 #!/usr/bin/env bash
 set -u
+broker_evidence_slot=0
 while :; do
   exec 7< "$REQUEST_FIFO"
-  IFS='|' read -r kind role request_home output <&7 || {
-    exec 7<&-
-    continue
-  }
-  exec 7<&-
-  [ -n "\$output" ] || continue
-  status=0
-  case "\$kind" in
+  while IFS='|' read -r kind role request_home output <&7; do
+    [ -n "\$output" ] || continue
+    status=0
+    case "\$kind" in
       broker)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
-          exec 19< "\$request_home/state/.test-launch-evidence"
+          evidence_path="\$request_home/state/.test-launch-evidence"
+          if [ -e "\$request_home/state/.test-launch-evidence-1" ]; then
+            broker_evidence_slot=\$((broker_evidence_slot + 1))
+            evidence_path="\$request_home/state/.test-launch-evidence-\$broker_evidence_slot"
+          fi
+          exec 19< "\$evidence_path"
           exec 18< <(while :; do printf '%s\n' "$nonce"; done)
           exec 20< <(printf '%s\n' "$nonce")
           python3 "$BROKER" supervise --state "\$request_home/state" \\
@@ -1389,13 +1435,6 @@ while :; do
             >/dev/null 2>&1 &
           broker_pid=\$!
           exec 19<&-
-          attempts=0
-          while [ "\$attempts" -lt 100 ] \\
-            && [ ! -f "\$request_home/state/.session-authority-broker" ] \\
-            && kill -0 "\$broker_pid" 2>/dev/null; do
-            sleep 0.02
-            attempts=\$((attempts + 1))
-          done
           exec 18<&-
           exec 20<&-
           printf '%s\n' "\$broker_pid" >"\$output"
@@ -1404,10 +1443,7 @@ while :; do
       admission)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
-          printf '%s\n' "$nonce" > "\$request_home/state/.test-admission-capability" &
-          capability_writer=\$!
-          exec 21< "\$request_home/state/.test-admission-capability"
-          wait "\$capability_writer"
+          exec 21< <(printf '%s\n' "$nonce")
           python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
             < "\$request_home/state/.test-admission-release" \
             >"\$output" 2>&1 &
@@ -1438,10 +1474,7 @@ while :; do
       admission-replay)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
-          printf '%s\n' "$nonce" > "\$request_home/state/.test-admission-capability" &
-          capability_writer=\$!
-          exec 21< "\$request_home/state/.test-admission-capability"
-          wait "\$capability_writer"
+          exec 21< <(printf '%s\n' "$nonce")
           python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
             < "\$request_home/state/.test-admission-release-replay" \
             >"\$output.first" 2>&1 &
@@ -1588,7 +1621,9 @@ while :; do
         ) || status=1
         ;;
     esac
-  printf '%s\n' "\$status" > "\$output.status"
+    printf '%s\n' "\$status" > "\$output.status"
+  done
+  exec 7<&-
 done
 SH
   chmod 700 "$launch_script"
