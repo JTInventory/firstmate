@@ -15,8 +15,17 @@ make_fixture_root() {
   cp "$HELPER" "$fixture/bin/fm-run-behavior-tests.sh" \
     || fail "fixture could not copy the behavior-test runner"
   cp "$ROOT/bin/fm-session-authority-exec.sh" \
-    "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-procargs-lib.sh" "$fixture/bin/" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-procargs-lib.sh" \
+    "$fixture/bin/" \
     || fail "fixture could not copy the behavior authority broker"
+  cat > "$fixture/bin/fm-session-authority-exec.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+"$@" &
+child=$!
+wait "$child"
+SH
+  chmod +x "$fixture/bin/fm-session-authority-exec.sh"
   cp "$ROOT/tests/fm-test-authority-broker.sh" "$fixture/tests/" \
     || fail "fixture could not copy the authority test harness"
   cp "$ROOT/bin/fm-run-behavior-job.sh" "$fixture/bin/" \
@@ -87,6 +96,20 @@ else
   [ -z "${HERDR_SOCKET_PATH:-}" ] || exit 29
   [ "${FM_BACKEND:-}" = tmux ] || exit 26
 fi
+case "${FM_TEST_JOBS:-1}" in
+  2|[3-9]|[1-9][0-9]*)
+    parallel_ready="$FM_FIXTURE_OUTPUT_DIR/parallel-ready"
+    mkdir -p "$parallel_ready"
+    : > "$parallel_ready/$name"
+    ready_ticks=0
+    while [ ! -e "$parallel_ready/pass-a" ] \
+      || [ ! -e "$parallel_ready/fail-b" ]; do
+      [ "$ready_ticks" -lt 1000 ] || exit 125
+      sleep 0.01
+      ready_ticks=$((ready_ticks + 1))
+    done
+    ;;
+esac
 printf 'start\n' > "$FM_FIXTURE_OUTPUT_DIR/$name.started"
 if [ -n "${FM_TEST_SUPERVISOR_READY_FILE:-}" ]; then
   printf 'ready\n' > "$FM_TEST_SUPERVISOR_READY_FILE"
@@ -308,7 +331,7 @@ SH
   mkdir -p "$fallback_bin"
   for tool in awk bash basename cat cp cut date dirname diff env git grep head \
     mkdir mkfifo mktemp od perl ps python3 readlink realpath rm rmdir sed setsid sleep \
-    sort tail tmux tr wc; do
+    sort tail tmux tr uname wc; do
     target=$(command -v "$tool" || true)
     [ -n "$target" ] || fail "fallback timeout fixture could not find $tool"
     ln -s "$target" "$fallback_bin/$tool"

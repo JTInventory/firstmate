@@ -47,7 +47,6 @@ bounded_script=$8
     "$test_root/bin/fm-session-authority-exec.sh" \
     "$test_root/tests/fm-test-authority-broker.sh" <<'PY'
 import os
-import socket
 import sys
 import threading
 
@@ -58,17 +57,17 @@ keys = {
 
 writers = []
 for target_fd, key in keys.items():
-    reader, writer = socket.socketpair()
-    os.dup2(reader.fileno(), target_fd)
+    reader, writer = os.pipe()
+    os.dup2(reader, target_fd)
     os.set_inheritable(target_fd, True)
-    reader.close()
+    os.close(reader)
     writers.append((writer, key))
 
 def serve(writer, key):
     while True:
         try:
-            writer.sendall(key)
-        except (BrokenPipeError, ConnectionResetError):
+            os.write(writer, key)
+        except OSError:
             return
 
 for writer, key in writers:
@@ -96,7 +95,7 @@ status = os.spawnve(
     env,
 )
 for writer, _ in writers:
-    writer.close()
+    os.close(writer)
 sys.exit(status)
 PY
 ) >"$log_path" 2>&1

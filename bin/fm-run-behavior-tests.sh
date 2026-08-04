@@ -783,6 +783,16 @@ while (my $line = <$input>) {
         $job_status = 125 << 8 if $waited < 0 && $!{ECHILD};
         return defined $job_status;
       };
+      my $probe_transferred_job = sub {
+        return 0 unless $custody_acknowledged;
+        my $alive = $probe_fd->($job_fd);
+        return 0 unless defined $alive;
+        if (!$alive) {
+          $job_status = 125 << 8;
+          return 1;
+        }
+        return 0;
+      };
       my $terminate_job = sub {
         my $deadline = clock_gettime(CLOCK_MONOTONIC) + 4;
         my $sent = syscall($sys_pidfd_send_signal, $job_fd, 15, 0, 0, 0);
@@ -815,6 +825,7 @@ while (my $line = <$input>) {
       my $buffer = "";
       while (1) {
         $reap_job->();
+        $probe_transferred_job->() unless defined $job_status;
         if ($stop) {
           $terminate_forever->() unless defined $job_status;
           POSIX::close($job_fd);
@@ -853,7 +864,9 @@ while (my $line = <$input>) {
             print $response_w (!defined $alive ? "error\n" : $alive ? "alive\n" : "gone\n");
           } elsif ($request eq "wait") {
             my $reaped = $reap_job->();
-            if (!$reaped && $ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE}) {
+            $probe_transferred_job->() unless $reaped;
+            if (!$reaped && !$custody_acknowledged
+                && $ENV{FM_TEST_SUPERVISOR_FORCE_JOB_PIDFD_REAP_FAILURE}) {
               my $transferred = $send_custody->();
               print $response_w ($transferred ? "reap-error\n" : "error\n");
             } else {
@@ -972,6 +985,8 @@ while (my $line = <$input>) {
       print "$key|running\n";
     } elsif ($response =~ /^exit\|(\d+)$/) {
       print "$key|exit|$1\n";
+    } elsif ($response eq "reap-error") {
+      print "$key|running\n";
     } else {
       print "$key|error\n";
     }
@@ -1991,7 +2006,8 @@ if [ -f "$gate_test" ]; then
   run_bounded "$test_timeout" bash "$gate_test" || gate_status=$?
   if [ "$gate_status" -ne 0 ]; then
     printf '%s\n' 'FAIL: gate-refusal test failed; tests were not started' >&2
-    exit "$gate_status"
+    [ "$gate_status" -eq 125 ] && exit 125
+    exit 1
   fi
 fi
 
@@ -2549,6 +2565,9 @@ while [ "$index" -lt "$total" ]; do
     if [ "$test_rc" -eq 0 ]; then
       printf 'PASS: %s\n' "${batch_tests[$batch_index]}"
     elif [ "$test_rc" -eq 125 ]; then
+      if [ -s "${batch_logs[$batch_index]}" ]; then
+        cat "${batch_logs[$batch_index]}" >&2
+      fi
       printf 'FAIL: %s (fail-closed exit 125)\n' "${batch_tests[$batch_index]}" >&2
       exit 125
     else
