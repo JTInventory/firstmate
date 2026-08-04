@@ -242,6 +242,12 @@ test_transaction_authority_and_arbitration_controls() {
     || fail "authority arbitration does not reject symlinked lock paths"
   [[ "$broker_source" == *"os.O_EXCL"* ]] \
     || fail "authority arbitration does not reject precreated lock paths"
+  [[ "$broker_source" == *"os.O_TMPFILE"* ]] \
+    || fail "broker admission does not use an anonymous lock capability"
+  [[ "$broker_source" == *'kind not in (b"L", b"D", b"K", b"R")'* ]] \
+    || fail "broker lease control channel is missing"
+  [[ "$broker_source" == *"threading.Thread"* ]] \
+    || fail "broker admission control blocks its request loop"
   [[ "$broker_source" == *"trusted_wrapper_ancestor"* ]] \
     || fail "broker admission is not bound to wrapper provenance"
   [[ "$broker_source" == *"--capability-fd"* ]] \
@@ -251,6 +257,92 @@ test_transaction_authority_and_arbitration_controls() {
   [[ "$lock_source" == *"FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD"* ]] \
     || fail "wrapper admission capability is not retained for cleanup"
   pass "transaction and arbitration controls retain authenticated ownership"
+}
+
+test_lock_rejects_ready_transaction_before_recovery() {
+  local fixture state rc
+  fixture=$(fm_test_tmproot fm-lock-ready-gate)
+  state="$fixture/state"
+  mkdir -p "$state/.session-authority-transaction"
+  printf 'ready\n' > "$state/.session-authority-transaction/ready"
+  set +e
+  (
+    cd "$fixture" || exit 1
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=ready-gate \
+      FM_AGENT_OWNER_HOME="$fixture" "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1
+  )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unproven ready transaction reached session authority recovery"
+  [ -f "$state/.session-authority-transaction/ready" ] \
+    || fail "pre-recovery isolation refusal did not preserve ready evidence"
+  pass "session lock enforces isolation before ready transaction recovery"
+}
+
+test_lock_holder_uses_nonblocking_control_channel() {
+  if ! python3 - "$BROKER" <<'PY'
+import importlib.util
+import io
+import struct
+import sys
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location("session_authority_broker_lock_holder", sys.argv[1])
+broker = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(broker)
+
+class FakeSocket:
+    instances = []
+
+    def __init__(self, response):
+        self.response = response
+        self.sent = []
+        self.closed = False
+        FakeSocket.instances.append(self)
+
+    def settimeout(self, _timeout):
+        pass
+
+    def connect(self, _address):
+        pass
+
+    def sendall(self, data):
+        self.sent.append(data)
+
+    def recv(self, length):
+        value = self.response[:length]
+        self.response = self.response[length:]
+        return value
+
+    def close(self):
+        self.closed = True
+
+responses = [b"O" + b"a" * 64, b"O" + b"a" * 64]
+broker.socket.socket = lambda *_args: FakeSocket(responses.pop(0))
+broker.read_record = lambda _path: {
+    "socket": "abstract:test", "pid": "2", "uid": "0", "gid": "0",
+    "start": "proc:2", "identity": "exe:/bin/python3",
+}
+broker.connected_peer_matches_record = lambda _connection, _metadata: True
+broker.read_process_fd_line = lambda _pid, _fd: "a" * 64
+broker.sys.stdin = io.TextIOWrapper(io.BytesIO(b"RELEASE\n"))
+if broker.lock_holder(SimpleNamespace(record="record", capability_fd=17)) != 0:
+    raise SystemExit("lock-holder did not complete the control-channel release")
+if len(FakeSocket.instances) != 2:
+    raise SystemExit("lock-holder did not open a separate release channel")
+if not FakeSocket.instances[0].sent[0].startswith(b"K"):
+    raise SystemExit("lock-holder did not request an admission lease")
+if not FakeSocket.instances[1].sent[0].startswith(b"R"):
+    raise SystemExit("lock-holder did not authenticate the release channel")
+if FakeSocket.instances[1].sent[-1] != b"RELEASE\n":
+    raise SystemExit("lock-holder did not release its admission lease")
+PY
+  then
+    fail "lock-holder did not use a separate nonblocking control channel"
+  fi
+  pass "lock-holder separates lease acquisition from release control"
 }
 
 test_primary_bootstrap_cleans_partial_live_binding() {
@@ -327,6 +419,8 @@ if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = review-fixes ]; then
   test_primary_authority_record_and_live_descriptor_binding
   test_primary_wrapper_rotates_dead_authority
   test_transaction_authority_and_arbitration_controls
+  test_lock_rejects_ready_transaction_before_recovery
+  test_lock_holder_uses_nonblocking_control_channel
   test_primary_bootstrap_cleans_partial_live_binding
   test_receipt_backed_synthetic_census
   if ! python3 - "$BROKER" <<'PY'
@@ -610,7 +704,6 @@ if any(
     for marker in (
         "connection_slots",
         "BoundedSemaphore",
-        "threading.Thread",
         "lock_manager_peer_is_reserved",
         "MAX_LOCK_MANAGER_RESERVED_PENDING",
         "MAX_LOCK_MANAGER_UNAUTHENTICATED_PENDING",
@@ -934,6 +1027,35 @@ with TemporaryDirectory() as temporary:
     if contender.exitcode != 0 or holder.exitcode != 0 or result.read_text() != "busy":
         raise SystemExit("independent supervisors did not share the admission lock")
 
+    anonymous_state = home / "anonymous-state"
+    anonymous_state.mkdir()
+    anonymous_lock = broker.open_authority_anonymous_lock(anonymous_state)
+    if anonymous_lock is None:
+        raise SystemExit("anonymous authority lock did not acquire")
+    anonymous_path = broker.authority_admission_path(
+        anonymous_state, (b"k", 2, "s", "i")
+    )
+    if anonymous_path.exists():
+        raise SystemExit("anonymous authority lock exposed a flock path")
+    broker.close_record_lock(anonymous_lock)
+
+    short_state = home / "short-state"
+    short_state.mkdir()
+    real_write = broker.os.write
+    broker.os.write = lambda _fd, _data: 0
+    try:
+        if broker.open_authority_admission_lock(
+            short_state, (b"k", 2, "s", "i")
+        ) is not None:
+            raise SystemExit("short authority lock publication was accepted")
+    finally:
+        broker.os.write = real_write
+    short_path = broker.authority_admission_path(
+        short_state, (b"k", 2, "s", "i")
+    )
+    if short_path.exists() or short_path.is_symlink():
+        raise SystemExit("short authority lock publication left an inode")
+
     forged_state = home / "forged-state"
     forged_state.mkdir()
     forged_path = broker.authority_admission_path(
@@ -1022,6 +1144,9 @@ SH
   rm -f "$REQUEST_FIFO"
   rm -f "$PRIMARY_REQUEST_FIFO"
   mkfifo "$REQUEST_FIFO" "$PRIMARY_REQUEST_FIFO"
+  printf '%s\n' "$nonce" > "$home/state/.test-admission-capability"
+  rm -f "$home/state/.test-admission-release"
+  mkfifo "$home/state/.test-admission-release"
   mkdir -p "$issuer/bin"
   cp "$ROOT/bin/fm-session-authority-exec.sh" \
     "$ROOT/bin/fm-session-enrollment-signer.sh" \
@@ -1056,6 +1181,37 @@ while :; do
           broker_pid=\$!
           exec 19<&-
           printf '%s\n' "\$broker_pid" >"\$output"
+        fi
+        ;;
+      admission)
+        cd "\$request_home" || status=1
+        if [ "\$status" -eq 0 ]; then
+          exec 17< "\$request_home/state/.test-admission-capability"
+          python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 17 \
+            < "\$request_home/state/.test-admission-release" \
+            >"\$output" 2>&1 &
+          holder_pid=\$!
+          attempts=0
+          while [ "\$attempts" -lt 100 ] && ! grep -F 'LOCKED' "\$output" >/dev/null 2>&1; do
+            if ! kill -0 "\$holder_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.02
+            attempts=\$((attempts + 1))
+          done
+          if grep -F 'LOCKED' "\$output" >/dev/null 2>&1; then
+            printf 'fixed-public-test-body' | env \
+              FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
+              FM_AGENT_OWNER_HOME="\$request_home" \
+              python3 "$BROKER" client --record "$RECORD" --kind live \
+              >"\$output.probe" 2>&1
+            printf '%s\n' "\$?" >"\$output.probe.status"
+          else
+            kill "\$holder_pid" 2>/dev/null || true
+            status=1
+          fi
+          wait "\$holder_pid" || status=1
+          exec 17<&-
         fi
         ;;
       *)
@@ -1298,6 +1454,30 @@ start_broker() {
     || fail "authority broker did not publish a private regular record"
 }
 
+test_same_home_secondmate_admission_allows_hmac_before_release() {
+  local output attempts=0
+  output="$TMP_ROOT/admission-output-$REQUEST_SEQUENCE"
+  REQUEST_SEQUENCE=$((REQUEST_SEQUENCE + 1))
+  rm -f "$output" "$output.status" "$output.probe" "$output.probe.status"
+  printf 'admission|secondmate|%s|%s\n' "$HOME_DIR" "$output" > "$REQUEST_FIFO"
+  while [ "$attempts" -lt 150 ] && [ ! -f "$output.probe.status" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$output.probe.status" ] \
+    && [ "$(cat "$output.probe.status")" = 0 ] \
+    || fail "same-home admission blocked broker HMAC requests"
+  printf 'RELEASE\n' > "$HOME_DIR/state/.test-admission-release"
+  attempts=0
+  while [ "$attempts" -lt 150 ] && [ ! -f "$output.status" ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$output.status" ] && [ "$(cat "$output.status")" = 0 ] \
+    || fail "same-home admission did not release cleanly"
+  pass "same-home admission serves HMAC requests before release"
+}
+
 broker_hmac() {
   local home=$1 role=$2 kind=$3 output status attempts=0
   output="$TMP_ROOT/request-${BASHPID:-$$}-$REQUEST_SEQUENCE"
@@ -1332,6 +1512,7 @@ prepare_launch "$HOME_DIR"
 start_broker
 [ "$(stat -c '%a' "$RECORD")" = 600 ] \
   || fail "authority broker record was not private"
+test_same_home_secondmate_admission_allows_hmac_before_release
 
 live=$(broker_hmac "$HOME_DIR" secondmate live) \
   || fail "same-home secondmate could not use live broker authority"

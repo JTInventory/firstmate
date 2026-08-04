@@ -22,6 +22,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -834,6 +835,7 @@ def record_lock(
             task=authority_task,
             launch_script=launch_script,
             launch_evidence=launch_evidence,
+            unlink_path=True,
         )
     try:
         yield descriptor
@@ -934,6 +936,25 @@ def open_authority_admission_lock(
     path = authority_admission_path(state, launch_evidence)
     expected = authority_admission_lock_contents(state, launch_evidence[0])
     descriptor = -1
+    created = False
+    created_stat: os.stat_result | None = None
+
+    def remove_created_path() -> None:
+        if not created or descriptor < 0 or created_stat is None:
+            return
+        try:
+            current_stat = os.fstat(descriptor)
+            path_stat = path.lstat()
+            if (
+                current_stat.st_dev == created_stat.st_dev
+                and current_stat.st_ino == created_stat.st_ino
+                and path_stat.st_dev == created_stat.st_dev
+                and path_stat.st_ino == created_stat.st_ino
+            ):
+                path.unlink()
+        except OSError:
+            pass
+
     try:
         try:
             descriptor = os.open(
@@ -942,27 +963,32 @@ def open_authority_admission_lock(
                 | os.O_NOFOLLOW,
                 0o600,
             )
-            if os.write(descriptor, expected) != len(expected):
-                os.close(descriptor)
-                return None
+            created = True
+            created_stat = os.fstat(descriptor)
+            offset = 0
+            while offset < len(expected):
+                written = os.write(descriptor, expected[offset:])
+                if written <= 0:
+                    raise OSError("short authority lock publication")
+                offset += written
             os.fsync(descriptor)
         except FileExistsError:
             descriptor = os.open(
                 path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
             )
+            os.lseek(descriptor, 0, os.SEEK_SET)
             if os.read(descriptor, len(expected) + 1) != expected:
-                os.close(descriptor)
-                return None
+                raise OSError("invalid authority lock publication")
         descriptor_stat = os.fstat(descriptor)
         if (
             not stat.S_ISREG(descriptor_stat.st_mode)
             or descriptor_stat.st_uid != os.geteuid()
             or descriptor_stat.st_mode & 0o077
         ):
-            os.close(descriptor)
-            return None
+            raise OSError("unsafe authority lock publication")
         return descriptor, path
-    except OSError:
+    except (OSError, ValueError):
+        remove_created_path()
         if descriptor >= 0:
             try:
                 os.close(descriptor)
@@ -975,7 +1001,8 @@ def open_authority_record_lock(
     *, blocking: bool, state: Path | None = None, home: str | None = None,
     task: str | None = None,
     launch_script: str | None = None,
-    launch_evidence: tuple[bytes, int, str, str] | None = None
+    launch_evidence: tuple[bytes, int, str, str] | None = None,
+    unlink_path: bool = False
 ) -> AuthorityRecordLock | None:
     if (
         state is None or home is None or task is None or launch_script is None
@@ -1000,6 +1027,16 @@ def open_authority_record_lock(
         lock = acquire_authority_record_lock(
             descriptor, blocking=blocking, expected_path=path
         )
+        if lock is not None and unlink_path:
+            descriptor_stat = os.fstat(descriptor)
+            path_stat = path.lstat()
+            if (
+                descriptor_stat.st_dev != path_stat.st_dev
+                or descriptor_stat.st_ino != path_stat.st_ino
+            ):
+                close_record_lock(lock)
+                return None
+            path.unlink()
         if lock is None:
             os.close(descriptor)
         return lock
@@ -1008,6 +1045,33 @@ def open_authority_record_lock(
             os.close(descriptor)
         except OSError:
             pass
+        return None
+
+
+def open_authority_anonymous_lock(state: Path) -> AuthorityRecordLock | None:
+    if not state.is_dir() or state.is_symlink() or not hasattr(os, "O_TMPFILE"):
+        return None
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            state,
+            os.O_RDWR | os.O_CLOEXEC | os.O_TMPFILE,
+            0o600,
+        )
+        if descriptor != AUTHORITY_SERIALIZATION_FD:
+            os.dup2(descriptor, AUTHORITY_SERIALIZATION_FD)
+            os.close(descriptor)
+            descriptor = AUTHORITY_SERIALIZATION_FD
+        lock = acquire_authority_record_lock(descriptor, blocking=False)
+        if lock is None:
+            os.close(descriptor)
+        return lock
+    except OSError:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         return None
 
 
@@ -1025,8 +1089,9 @@ def acquire_authority_record_lock(
         ):
             return None
         if expected_path is not None:
-            fd_path = os.path.realpath(f"/proc/self/fd/{fd}")
-            if fd_path != canonical(str(expected_path)):
+            fd_path = os.readlink(f"/proc/self/fd/{fd}")
+            expected = canonical(str(expected_path))
+            if fd_path not in {expected, f"{expected} (deleted)"}:
                 return None
     except OSError:
         return None
@@ -1096,7 +1161,8 @@ def serve(args: argparse.Namespace) -> int:
     else:
         record_lock_fd = open_authority_record_lock(
             blocking=False, state=state, home=home, task=args.task,
-            launch_script=launch_script, launch_evidence=launch_evidence
+            launch_script=launch_script, launch_evidence=launch_evidence,
+            unlink_path=True
         )
     if record_lock_fd is None:
         return 1
@@ -1161,7 +1227,8 @@ def supervise(args: argparse.Namespace) -> int:
         launch_script = canonical(args.launch_script)
         record_lock_fd = open_authority_record_lock(
             blocking=False, state=state, home=home, task=args.task,
-            launch_script=launch_script, launch_evidence=launch_evidence
+            launch_script=launch_script, launch_evidence=launch_evidence,
+            unlink_path=True
         )
         if record_lock_fd is None:
             return 1
@@ -1226,6 +1293,8 @@ def serve_locked(
     broker_identity = process_identity(broker_pid)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stopping = False
+    active_lease: dict[str, object] | None = None
+    lease_guard = threading.Lock()
 
     def stop(_signum: int, _frame: object) -> None:
         nonlocal stopping
@@ -1279,6 +1348,38 @@ def serve_locked(
             return 1
         close_record_lock(lock)
         lock = None
+
+        def release_lease_control(
+            connection: socket.socket, lease_info: dict[str, object]
+        ) -> None:
+            nonlocal active_lease
+            try:
+                connection.settimeout(1.0)
+                command = b""
+                while not stopping:
+                    try:
+                        chunk = connection.recv(len(b"RELEASE\n") - len(command))
+                    except socket.timeout:
+                        if launch_process_state(
+                            launch_pid, launch_start, launch_identity, launch_script
+                        ) == "dead":
+                            break
+                        continue
+                    if not chunk:
+                        break
+                    command += chunk
+                    if len(command) >= len(b"RELEASE\n"):
+                        break
+                if command != b"RELEASE\n":
+                    return
+            except OSError:
+                return
+            finally:
+                close_record_lock(lease_info["lock"])
+                with lease_guard:
+                    if active_lease is lease_info:
+                        active_lease = None
+
         while not stopping:
             if not record.is_file() or record.is_symlink() or not Path(home).is_dir():
                 break
@@ -1286,6 +1387,19 @@ def serve_locked(
                 launch_pid, launch_start, launch_identity, launch_script
             ) == "dead":
                 break
+            with lease_guard:
+                if active_lease is not None and not bool(active_lease["control"]):
+                    try:
+                        lease_generation = process_generation(int(active_lease["pid"]))
+                    except (OSError, UnicodeError, ValueError):
+                        lease_generation = None
+                    if (
+                        time.monotonic() - float(active_lease["created"])
+                        > BROKER_REQUEST_TIMEOUT_SECONDS
+                        or lease_generation != active_lease["generation"]
+                    ):
+                        close_record_lock(active_lease["lock"])
+                        active_lease = None
             try:
                 connection, _ = server.accept()
             except socket.timeout:
@@ -1294,54 +1408,90 @@ def serve_locked(
                 if stopping:
                     break
                 raise
-            with connection:
-                try:
-                    request_deadline = time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
-                    credentials = connection.getsockopt(
-                        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-                    )
-                    pid, uid, gid = struct.unpack("3i", credentials)
-                    header = recv_exact(connection, 5, request_deadline)
-                    kind, length = struct.unpack("!cI", header)
-                    if length > MAX_BODY or kind not in (b"L", b"D", b"K"):
-                        raise ValueError("invalid broker request")
-                    body = recv_exact(connection, length, request_deadline)
-                    if not peer_is_authorized(
-                        pid, uid=uid, gid=gid, home=home, task=args.task, script=script,
-                        launch_pid=launch_pid, launch_start=launch_start,
-                        launch_identity=launch_identity, broker_uid=broker_uid,
-                        broker_gid=broker_gid
-                    ):
-                        connection.sendall(b"E")
-                        continue
-                    if kind == b"K":
-                        lease = open_authority_record_lock(
-                            blocking=False, state=state, home=home,
-                            task=args.task, launch_script=launch_script,
-                            launch_evidence=launch_evidence,
-                        )
+            keep_connection = False
+            try:
+                request_deadline = time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
+                credentials = connection.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+                )
+                pid, uid, gid = struct.unpack("3i", credentials)
+                header = recv_exact(connection, 5, request_deadline)
+                kind, length = struct.unpack("!cI", header)
+                if length > MAX_BODY or kind not in (b"L", b"D", b"K", b"R"):
+                    raise ValueError("invalid broker request")
+                body = recv_exact(connection, length, request_deadline)
+                if not peer_is_authorized(
+                    pid, uid=uid, gid=gid, home=home, task=args.task, script=script,
+                    launch_pid=launch_pid, launch_start=launch_start,
+                    launch_identity=launch_identity, broker_uid=broker_uid,
+                    broker_gid=broker_gid
+                ):
+                    connection.sendall(b"E")
+                    continue
+                if kind == b"K":
+                    with lease_guard:
+                        if active_lease is not None:
+                            connection.sendall(b"E")
+                            continue
+                        lease = open_authority_anonymous_lock(state)
                         if lease is None:
                             connection.sendall(b"E")
                             continue
-                        connection.sendall(
-                            b"O" + hmac.new(durable_key, body, hashlib.sha256).hexdigest().encode()
-                        )
-                        connection.settimeout(None)
-                        try:
-                            if recv_exact(connection, len(b"RELEASE\n")) != b"RELEASE\n":
-                                return 1
-                        finally:
-                            close_record_lock(lease)
-                        continue
-                    key = live_key if kind == b"L" else durable_key
-                    digest = hmac.new(key, body, hashlib.sha256).hexdigest().encode()
+                        digest = hmac.new(
+                            durable_key, body, hashlib.sha256
+                        ).hexdigest().encode()
+                        active_lease = {
+                            "control": False,
+                            "created": time.monotonic(),
+                            "digest": digest,
+                            "generation": process_generation(pid),
+                            "lock": lease,
+                            "nonce": body,
+                            "pid": pid,
+                        }
                     connection.sendall(b"O" + digest)
-                except (OSError, struct.error, ValueError):
-                    try:
-                        connection.sendall(b"E")
-                    except OSError:
-                        pass
+                    continue
+                if kind == b"R":
+                    with lease_guard:
+                        lease_info = active_lease
+                        if (
+                            lease_info is None
+                            or bool(lease_info["control"])
+                            or int(lease_info["pid"]) != pid
+                            or process_generation(pid) != lease_info["generation"]
+                            or body
+                            != b"firstmate/session-authority/admission/release/v1\0"
+                            + bytes(lease_info["nonce"])
+                            + b"\0"
+                            + bytes(lease_info["digest"])
+                        ):
+                            connection.sendall(b"E")
+                            continue
+                        lease_info["control"] = True
+                        connection.sendall(b"O" + bytes(lease_info["digest"]))
+                        threading.Thread(
+                            target=release_lease_control,
+                            args=(connection, lease_info),
+                            daemon=True,
+                        ).start()
+                        keep_connection = True
+                    continue
+                key = live_key if kind == b"L" else durable_key
+                digest = hmac.new(key, body, hashlib.sha256).hexdigest().encode()
+                connection.sendall(b"O" + digest)
+            except (OSError, struct.error, ValueError):
+                try:
+                    connection.sendall(b"E")
+                except OSError:
+                    pass
+            finally:
+                if not keep_connection:
+                    connection.close()
     finally:
+        with lease_guard:
+            if active_lease is not None:
+                close_record_lock(active_lease["lock"])
+                active_lease = None
         try:
             server.close()
         except OSError:
@@ -2157,15 +2307,41 @@ def lock_holder(args: argparse.Namespace) -> int:
         ):
             connection.close()
             return 1
+        connection.close()
+        release_body = (
+            b"firstmate/session-authority/admission/release/v1\0"
+            + nonce.encode()
+            + b"\0"
+            + response[1:]
+        )
+        control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        control.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)
+        control.connect(
+            f"\0{socket_value.removeprefix('abstract:')}"
+            if socket_value.startswith("abstract:")
+            else socket_value
+        )
+        if not connected_peer_matches_record(control, metadata):
+            control.close()
+            return 1
+        control.sendall(struct.pack("!cI", b"R", len(release_body)) + release_body)
+        control_response = recv_exact(
+            control, 65, time.monotonic() + BROKER_REQUEST_TIMEOUT_SECONDS
+        )
+        if control_response[:1] != b"O" or any(
+            value not in b"0123456789abcdef" for value in control_response[1:]
+        ):
+            control.close()
+            return 1
         print("LOCKED", flush=True)
         print(f"PID {os.getpid()}", flush=True)
         command = sys.stdin.buffer.readline()
         if command != b"RELEASE\n":
-            connection.close()
+            control.close()
             return 1
-        connection.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)
-        connection.sendall(b"RELEASE\n")
-        connection.close()
+        control.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)
+        control.sendall(b"RELEASE\n")
+        control.close()
         return 0
     except (OSError, UnicodeError, ValueError):
         return 1
@@ -2208,6 +2384,14 @@ def primary_lock_holder(args: argparse.Namespace) -> int:
         )
         if lock is None:
             return 1
+        descriptor_stat = os.fstat(descriptor)
+        path_stat = path.lstat()
+        if (
+            descriptor_stat.st_dev != path_stat.st_dev
+            or descriptor_stat.st_ino != path_stat.st_ino
+        ):
+            return 1
+        path.unlink()
         print("LOCKED", flush=True)
         print(f"PID {os.getpid()}", flush=True)
         if sys.stdin.buffer.readline() != b"RELEASE\n":

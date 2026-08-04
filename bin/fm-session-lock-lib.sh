@@ -675,10 +675,12 @@ fm_session_authority_durable_record_capability_present() {
 }
 
 fm_session_authority_record_capability_present() {
-  local home state authority fd key expected broker broker_start broker_identity
+  local home state authority checkout fd key expected broker broker_start broker_identity
   fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_durable_record_capability_present || return 1
   home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  checkout=$(cd "${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}" \
     2>/dev/null && pwd -P) || return 1
   state=${FM_STATE_OVERRIDE:-$home/state}
   authority="$state/.session-authority"
