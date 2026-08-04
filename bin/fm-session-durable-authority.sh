@@ -21,11 +21,29 @@ broker_script=${13}
 custodian_public=${15}
 [ "${16}" = --custodian-public-key-sha256 ] || exit 1
 custodian_public_digest=${17}
+[ "${18}" = --launch-ready-fd ] || exit 1
+launch_ready_fd=${19}
+case "$launch_ready_fd" in ''|*[!0-9]*) exit 1 ;; esac
+[ "$launch_ready_fd" -ge 3 ] 2>/dev/null || exit 1
+[ "${20}" = --launch-ready-path ] || exit 1
+launch_ready_path=${21}
+case "$launch_ready_path" in *$'\n'*|*$'\r'*) exit 1 ;; esac
 record="$state/.session-durable-authority"
 requests="$state/.session-durable-authority-requests"
 key=
 live_key=
 custodian_private=
+launch_ready_open=0
+exec {launch_ready_fd}<&- 2>/dev/null || true
+[ -p "$launch_ready_path" ] && [ ! -L "$launch_ready_path" ] || exit 1
+exec {launch_ready_fd}<>"$launch_ready_path" || exit 1
+launch_ready_open=1
+launch_ready_failure() {
+  [ "$launch_ready_open" -eq 1 ] || return 0
+  printf 'failed\n' >&"$launch_ready_fd" 2>/dev/null || true
+}
+trap launch_ready_failure EXIT
+printf 'opened\n' >&"$launch_ready_fd" || exit 1
 [ "$broker_script" = "$checkout/bin/fm-session-authority-exec.sh" ] \
   && [ "$(fm_session_parent_pid "$$" 2>/dev/null)" = "$broker_pid" ] \
   && [ "$(fm_session_process_start "$broker_pid" 2>/dev/null)" \
@@ -63,12 +81,11 @@ derived_public_digest=${derived_public_digest_output##*= }
 unset derived_public_pem derived_public derived_public_digest_output
 unset derived_public_digest
 launch="${record}.launch.$$"
-attempts=0
-while [ "$attempts" -lt 100 ] \
-  && { [ ! -f "$launch" ] || [ -L "$launch" ]; }; do
-  sleep 0.02
-  attempts=$((attempts + 1))
-done
+IFS= read -r launch_ready <&"$launch_ready_fd" || exit 1
+[ "$launch_ready" = ready ] || exit 1
+launch_ready_open=0
+trap - EXIT
+exec {launch_ready_fd}>&-
 [ -f "$launch" ] && [ ! -L "$launch" ] \
   && [ "$(wc -l < "$launch" | tr -d ' ')" -eq 17 ] \
   && [ "$(sed -n '1p' "$launch")" = version=3 ] \
