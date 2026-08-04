@@ -15,8 +15,12 @@ case "${FM_TEST_AUTHORITY_BROKER_PID:-}:${FM_TEST_AUTHORITY_OWNER_PID:-}" in
     exec 19<&9
     export FM_TEST_AUTHORITY_FD=19 FM_TEST_DURABLE_AUTHORITY_FD=18
     export FM_TEST_SESSION_LOCK_STABLE_OWNER=1
-    exec bash "$ROOT/bin/fm-session-authority-exec.sh" \
-      --behavior-test-authority-broker "$ROOT/tests/fm-concurrent-primary-identity.test.sh"
+    FM_TEST_AUTHORITY_HARNESS=1 \
+      FM_TEST_AUTHORITY_HARNESS_SCRIPT="$ROOT/tests/fm-test-authority-broker.sh" \
+      FM_TEST_AUTHORITY_EXEC_SCRIPT="$ROOT/bin/fm-session-authority-exec.sh" \
+      exec bash "$ROOT/tests/fm-test-authority-broker.sh" \
+      --authority-script "$ROOT/bin/fm-session-authority-exec.sh" \
+      "$ROOT/tests/fm-concurrent-primary-identity.test.sh"
     ;;
 esac
 

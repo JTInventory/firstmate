@@ -8,38 +8,7 @@ case "$authority_platform:$authority_arch" in
   *) exit 125 ;;
 esac
 
-if [ "${1:-}" = --behavior-test-authority-broker ]; then
-  [ "$#" -eq 2 ] && [ "${FM_TEST_PROCESS:-0}" = 1 ] \
-    && [ "${FM_TEST_AUTHORITY_FD:-}" = 19 ] \
-    && [ "${FM_TEST_DURABLE_AUTHORITY_FD:-}" = 18 ] \
-    && [ -f "$2" ] && [ ! -L "$2" ] || exit 2
-  if [ -d /proc/$$/fd ]; then
-    [ -e /proc/$$/fd/19 ] && [ -e /proc/$$/fd/18 ] || exit 1
-  elif [ -d /dev/fd ]; then
-    [ -e /dev/fd/19 ] && [ -e /dev/fd/18 ] || exit 1
-  else
-    exit 1
-  fi
-  FM_TEST_AUTHORITY_BROKER_PID=$$
-  export FM_TEST_AUTHORITY_BROKER_PID
-  behavior_test_child=
-  cleanup_behavior_test_child() {
-    [ -z "$behavior_test_child" ] \
-      || kill "$behavior_test_child" 2>/dev/null || true
-  }
-  trap cleanup_behavior_test_child EXIT HUP INT TERM
-  /usr/bin/bash -c '
-    FM_TEST_AUTHORITY_OWNER_PID=$$
-    export FM_TEST_AUTHORITY_OWNER_PID
-    exec /usr/bin/bash "$1"
-  ' fm-test-authority "$2" &
-  behavior_test_child=$!
-  behavior_test_status=0
-  wait "$behavior_test_child" || behavior_test_status=$?
-  behavior_test_child=
-  trap - EXIT HUP INT TERM
-  exit "$behavior_test_status"
-fi
+AUTHORITY_EXEC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 [ "$#" -gt 0 ] || {
   echo "usage: fm-session-authority-exec.sh command [args...]" >&2
@@ -155,8 +124,6 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ] \
   echo "error: secondmate isolation sweep is unproven" >&2
   exit 1
 fi
-FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1
-export FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
 unset FM_SESSION_ENROLLMENT_TRACE_FILE
 if [ "${FM_SESSION_ENROLLMENT_STAGE_TRACE:-0}" = 1 ] \
   && [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
@@ -199,34 +166,6 @@ fm_session_close_descriptor() {
   exec {fd}<&-
 }
 
-if [ -z "${FM_SESSION_AUTHORITY_FD:-}" ] \
-  && [ -z "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ] \
-  && fm_session_test_authority_broker_present; then
-  FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
-  FM_SESSION_AUTHORITY_DURABLE_FD=$FM_TEST_DURABLE_AUTHORITY_FD
-  export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
-fi
-if fm_session_test_authority_broker_present; then
-  if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ] \
-    && [ "$(fm_session_descriptor_identity "$$" \
-        "$FM_SESSION_AUTHORITY_FD" 2>/dev/null || true)" != \
-      "$(fm_session_descriptor_identity "$$" \
-        "$FM_TEST_AUTHORITY_FD" 2>/dev/null || true)" ]; then
-    [ -n "${FM_SESSION_AUTHORITY_BROKER_SCRIPT:-}" ] \
-      && fm_session_authority_broker_present \
-        "$FM_SESSION_AUTHORITY_BROKER_SCRIPT" || {
-        echo "error: trusted session enrollment capability is missing or invalid" >&2
-        exit 1
-      }
-  fi
-  [ "$(fm_session_descriptor_identity "$$" \
-      "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" 2>/dev/null || true)" = \
-    "$(fm_session_descriptor_identity "$$" \
-      "$FM_TEST_DURABLE_AUTHORITY_FD" 2>/dev/null || true)" ] || {
-      echo "error: trusted session enrollment capability is missing or invalid" >&2
-      exit 1
-    }
-fi
 if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ] \
   && ! fm_session_descriptor_channel_isolated "$FM_SESSION_AUTHORITY_FD"; then
   if fm_session_authority_durable_capability_present; then
@@ -437,6 +376,8 @@ fi
   echo "error: trusted session enrollment capability is missing or invalid" >&2
   exit 1
 }
+FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1
+export FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED
 mkdir -p "$STATE" && [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
   echo "error: trusted session state directory is unavailable" >&2
   exit 1

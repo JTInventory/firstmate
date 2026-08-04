@@ -44,7 +44,8 @@ bounded_script=$8
   fi
   bounded_perl=$(<"$bounded_script") || exit 125
   exec perl -e "$bounded_perl" "$test_timeout" python3 - "$test_path" \
-    "$test_root/bin/fm-session-authority-exec.sh" <<'PY'
+    "$test_root/bin/fm-session-authority-exec.sh" \
+    "$test_root/tests/fm-test-authority-broker.sh" <<'PY'
 import os
 import socket
 import sys
@@ -78,13 +79,18 @@ env["FM_TEST_AUTHORITY_FD"] = "19"
 env["FM_TEST_DURABLE_AUTHORITY_FD"] = "18"
 env["FM_TEST_PROCESS"] = "1"
 env["FM_TEST_SESSION_LOCK_STABLE_OWNER"] = "1"
+env["FM_TEST_AUTHORITY_HARNESS"] = "1"
+env["FM_TEST_AUTHORITY_PROVISION_PRIMARY"] = "1"
+env["FM_TEST_AUTHORITY_EXEC_SCRIPT"] = sys.argv[2]
+env["FM_TEST_AUTHORITY_HARNESS_SCRIPT"] = sys.argv[3]
 status = os.spawnve(
     os.P_WAIT,
     "/usr/bin/bash",
     [
         "bash",
+        sys.argv[3],
+        "--authority-script",
         sys.argv[2],
-        "--behavior-test-authority-broker",
         sys.argv[1],
     ],
     env,

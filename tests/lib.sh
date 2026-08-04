@@ -77,11 +77,17 @@ fm_test_authority_broker_ensure() {
   local broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
   local fd=${FM_TEST_DURABLE_AUTHORITY_FD:-}
   local fixture_dir=${1:-${TMPDIR:-/tmp}}
-  local caller_target broker_target fixture source_fd attempts=0
+  local caller_target broker_target fixture source_fd attempts=0 harness
   case "$broker" in ''|*[!0-9]*) broker= ;; esac
   case "$fd" in ''|*[!0-9]*) fd= ;; esac
+  harness=${FM_TEST_AUTHORITY_HARNESS_PID:-}
   if [ -n "$broker" ] && [ -n "$fd" ] \
     && kill -0 "$broker" 2>/dev/null \
+    && [ "${FM_TEST_AUTHORITY_HARNESS:-0}" = 1 ] \
+    && case "$harness" in ''|*[!0-9]*) false ;; *) kill -0 "$harness" 2>/dev/null ;; esac \
+    && [ "$(tr '\0' '\n' < "/proc/$harness/cmdline" 2>/dev/null | sed -n '2p')" = \
+      "$ROOT/tests/fm-test-authority-broker.sh" ] \
+    && [ "$(ps -o ppid= -p "$broker" 2>/dev/null | tr -d ' ')" = "$harness" ] \
     && caller_target=$(readlink "/proc/$$/fd/$fd" 2>/dev/null) \
     && broker_target=$(readlink "/proc/$broker/fd/$fd" 2>/dev/null) \
     && [ -n "$caller_target" ] && [ "$caller_target" = "$broker_target" ]; then
@@ -99,26 +105,44 @@ set -u
 while :; do sleep 60; done
 SH
   chmod 700 "$fixture"
+  broker_pid_file="$fixture.pid"
   (
     if [ "$source_fd" != 19 ]; then
       eval "exec 19<&$source_fd"
     fi
-    FM_TEST_PROCESS=1 FM_TEST_AUTHORITY_FD=19 \
+    exec env FM_TEST_PROCESS=1 FM_TEST_AUTHORITY_FD=19 \
       FM_TEST_DURABLE_AUTHORITY_FD=18 \
-      "$ROOT/bin/fm-session-authority-exec.sh" \
-      --behavior-test-authority-broker "$fixture"
+      FM_TEST_AUTHORITY_HARNESS=1 \
+      FM_TEST_AUTHORITY_HARNESS_SCRIPT="$ROOT/tests/fm-test-authority-broker.sh" \
+      FM_TEST_AUTHORITY_EXEC_SCRIPT="$ROOT/bin/fm-session-authority-exec.sh" \
+      FM_TEST_AUTHORITY_BROKER_PID_FILE="$broker_pid_file" \
+      "$ROOT/tests/fm-test-authority-broker.sh" \
+      --authority-script "$ROOT/bin/fm-session-authority-exec.sh" "$fixture"
   ) >/dev/null 2>&1 &
-  FM_TEST_AUTHORITY_BROKER_PID=$!
-  FM_TEST_AUTHORITY_BROKER_PIDS+=("$FM_TEST_AUTHORITY_BROKER_PID")
+  FM_TEST_AUTHORITY_HARNESS_PID=$!
+  FM_TEST_AUTHORITY_HARNESS=1
+  FM_TEST_AUTHORITY_HARNESS_SCRIPT="$ROOT/tests/fm-test-authority-broker.sh"
+  FM_TEST_AUTHORITY_EXEC_SCRIPT="$ROOT/bin/fm-session-authority-exec.sh"
+  export FM_TEST_AUTHORITY_HARNESS_PID FM_TEST_AUTHORITY_HARNESS
+  export FM_TEST_AUTHORITY_HARNESS_SCRIPT FM_TEST_AUTHORITY_EXEC_SCRIPT
+  FM_TEST_AUTHORITY_BROKER_PID=
   export FM_TEST_AUTHORITY_BROKER_PID
   while [ "$attempts" -lt 100 ]; do
-    if kill -0 "$FM_TEST_AUTHORITY_BROKER_PID" 2>/dev/null \
-      && [ "$(tr '\0' '\n' < "/proc/$FM_TEST_AUTHORITY_BROKER_PID/cmdline" \
-        2>/dev/null | sed -n '2p')" = "$ROOT/bin/fm-session-authority-exec.sh" ] \
-      && [ "$(tr '\0' '\n' < "/proc/$FM_TEST_AUTHORITY_BROKER_PID/cmdline" \
-        2>/dev/null | sed -n '3p')" = --behavior-test-authority-broker ]; then
-      return 0
+    if [ -s "$broker_pid_file" ]; then
+      FM_TEST_AUTHORITY_BROKER_PID=$(cat "$broker_pid_file")
+      export FM_TEST_AUTHORITY_BROKER_PID
     fi
+    case "$FM_TEST_AUTHORITY_BROKER_PID" in
+      ''|*[!0-9]*) ;;
+      *)
+        if kill -0 "$FM_TEST_AUTHORITY_BROKER_PID" 2>/dev/null \
+          && [ "$(tr '\0' '\n' < "/proc/$FM_TEST_AUTHORITY_BROKER_PID/cmdline" \
+            2>/dev/null | sed -n '2p')" = "$fixture" ]; then
+          FM_TEST_AUTHORITY_BROKER_PIDS+=("$FM_TEST_AUTHORITY_BROKER_PID")
+          return 0
+        fi
+        ;;
+    esac
     sleep 0.01
     attempts=$((attempts + 1))
   done

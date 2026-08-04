@@ -169,11 +169,59 @@ def read_primary_authority(path: Path) -> dict[str, str]:
     return fields
 
 
+def read_primary_root(path: Path) -> dict[str, str]:
+    file_stat = path.lstat()
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_mode & 0o077:
+        raise ValueError("unsafe primary root")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    ordered = (
+        "version", "task", "home", "primary-home", "primary-checkout",
+        "authority-pid", "authority-start", "authority-identity",
+        "authority-fd", "authority-descriptor", "durable-descriptor",
+        "authority-sha256", "authority-hmac",
+    )
+    if len(lines) != len(ordered) or any(not line.endswith("\n") for line in lines):
+        raise ValueError("malformed primary root")
+    fields: dict[str, str] = {}
+    for expected, line in zip(ordered, lines):
+        prefix = f"{expected}="
+        if not line.startswith(prefix) or line.count("=") != 1:
+            raise ValueError("malformed primary root")
+        value = line[len(prefix):-1]
+        if not value or "\x00" in value or "\r" in value:
+            raise ValueError("malformed primary root")
+        fields[expected] = value
+    if (
+        fields["version"] != "1"
+        or len(fields["authority-hmac"]) != 64
+        or len(fields["authority-sha256"]) != 64
+    ):
+        raise ValueError("malformed primary root")
+    if any(
+        c not in "0123456789abcdef"
+        for c in fields["authority-hmac"] + fields["authority-sha256"]
+    ):
+        raise ValueError("malformed primary root")
+    try:
+        if int(fields["authority-pid"]) <= 1 or int(fields["authority-fd"]) < 3:
+            raise ValueError
+    except ValueError as error:
+        raise ValueError("malformed primary root") from error
+    return fields
+
+
 def verify_trusted_primary_authority(
     ticket_fields: dict[str, str], *, home: str, launch_pid: int,
     launch_start: str, launch_identity: str
 ) -> None:
-    issuer_value = ticket_fields["issuer-home"]
+    primary_root = Path(home) / "state" / ".session-primary-root"
+    root_state = primary_root.parent
+    if root_state.is_symlink() or not root_state.is_dir():
+        raise ValueError("untrusted primary root")
+    root_fields = read_primary_root(primary_root)
+    root_body = primary_root.read_bytes().splitlines(keepends=True)
+    durable_descriptor = root_fields["durable-descriptor"]
+    issuer_value = root_fields["primary-home"]
     issuer = Path(issuer_value)
     if (
         not issuer.is_absolute()
@@ -184,6 +232,14 @@ def verify_trusted_primary_authority(
         or (issuer / ".fm-secondmate-home").exists()
     ):
         raise ValueError("untrusted primary home")
+    if (
+        root_fields["task"] != ticket_fields["task"]
+        or root_fields["home"] != home
+        or ticket_fields["issuer-home"] != issuer_value
+        or ticket_fields["primary-root-sha256"]
+        != hashlib.sha256(primary_root.read_bytes()).hexdigest()
+    ):
+        raise ValueError("untrusted primary root binding")
     state = issuer / "state"
     lock = state / ".lock"
     binding = state / ".primary-checkout"
@@ -193,9 +249,14 @@ def verify_trusted_primary_authority(
     if not state.is_dir() or not lock.is_file() or not binding.is_file():
         raise ValueError("untrusted primary authority")
     authority_fields = read_primary_authority(authority)
-    broker_script = ticket_fields["broker-script"]
+    broker_script = str(
+        Path(root_fields["primary-checkout"])
+        / "bin"
+        / "fm-session-authority-exec.sh"
+    )
     if (
-        not os.path.isabs(broker_script)
+        not os.path.isabs(root_fields["primary-checkout"])
+        or canonical(root_fields["primary-checkout"]) != root_fields["primary-checkout"]
         or canonical(broker_script) != broker_script
         or Path(broker_script).name != "fm-session-authority-exec.sh"
         or Path(broker_script).parent.name != "bin"
@@ -208,26 +269,44 @@ def verify_trusted_primary_authority(
     if (
         authority_fields["home"] != issuer_value
         or canonical(authority_fields["checkout"]) != checkout
+        or root_fields["primary-checkout"] != checkout
+        or root_fields["authority-sha256"]
+        != hashlib.sha256(authority.read_bytes()).hexdigest()
         or lock.read_text(encoding="utf-8") != owner + "\n"
         or binding.read_text(encoding="utf-8") != checkout + "\n"
+        or ticket_fields["broker-script"] != broker_script
+        or ticket_fields["issuer-authority"] != root_fields["authority-sha256"]
     ):
         raise ValueError("untrusted primary authority binding")
     try:
         authority_pid = int(authority_fields["pid"])
-        authority_fd = int(ticket_fields["authority-fd"])
+        authority_fd = int(root_fields["authority-fd"])
     except ValueError as error:
         raise ValueError("malformed primary authority identity") from error
-    if authority_fd < 3 or authority_pid != int(ticket_fields["broker-pid"]):
+    if authority_fd < 3 or authority_pid != int(root_fields["authority-pid"]):
         raise ValueError("untrusted primary authority identity")
+    key = read_process_fd_line(authority_pid, 18)
+    if not hmac.compare_digest(
+        root_fields["authority-hmac"],
+        authority_hmac(key, b"".join(root_body[:-1])),
+    ):
+        raise ValueError("untrusted primary root authentication")
     if (
         process_generation(authority_pid)
         != (authority_fields["start"], authority_fields["identity"])
-        or process_generation(authority_pid)
-        != (ticket_fields["broker-start"], ticket_fields["broker-identity"])
+        or (authority_fields["start"], authority_fields["identity"])
+        != (root_fields["authority-start"], root_fields["authority-identity"])
+        or descriptor_identity(authority_pid, 18)
+        != root_fields["durable-descriptor"]
+        or (ticket_fields["broker-pid"], ticket_fields["broker-start"],
+            ticket_fields["broker-identity"])
+        != (str(authority_pid), root_fields["authority-start"],
+            root_fields["authority-identity"])
+        or ticket_fields["authority-fd"] != root_fields["authority-fd"]
+        or ticket_fields["authority-descriptor"]
+        != descriptor_identity(authority_pid, authority_fd)
         or not process_runs_script(authority_pid, broker_script)
         or canonical(os.readlink(f"/proc/{authority_pid}/cwd")) != issuer_value
-        or descriptor_identity(authority_pid, authority_fd)
-        != ticket_fields["authority-descriptor"]
     ):
         raise ValueError("untrusted primary authority process")
     authority_environment = process_environment(authority_pid)
@@ -245,8 +324,6 @@ def verify_trusted_primary_authority(
         )
     ):
         raise ValueError("untrusted primary authority provenance")
-    durable_descriptor = descriptor_identity(authority_pid, 18)
-    key = read_process_fd_line(authority_pid, 18)
     authority_body = "".join(
         f"{authority_fields[field]}\n"
         for field in ("pid", "start", "identity", "owner", "home", "checkout")
@@ -267,7 +344,7 @@ def verify_trusted_primary_authority(
         or not process_ancestry_contains(signer_pid, authority_pid)
     ):
         raise ValueError("untrusted primary signer")
-    if launch_pid <= 1 or (launch_start, launch_identity) == process_generation(authority_pid):
+    if launch_pid <= 1 or launch_pid == authority_pid:
         raise ValueError("untrusted enrollment endpoint")
 
 
@@ -506,7 +583,8 @@ def read_launch_evidence(
             "broker-identity", "broker-script", "authority-fd",
             "authority-descriptor", "signer-pid", "signer-start",
             "signer-identity", "public-key", "public-key-sha256",
-            "endpoint-pid", "endpoint-start", "endpoint-identity", "signature",
+            "endpoint-pid", "endpoint-start", "endpoint-identity",
+            "primary-root-sha256", "signature",
         ),
     )
     if (
@@ -521,13 +599,15 @@ def read_launch_evidence(
         or ticket_fields["endpoint-pid"] != str(launch_pid)
         or ticket_fields["endpoint-start"] != fields["start"]
         or ticket_fields["endpoint-identity"] != fields["identity"]
+        or len(ticket_fields["primary-root-sha256"]) != 64
+        or any(c not in "0123456789abcdef" for c in ticket_fields["primary-root-sha256"])
         or ticket_fields["public-key-sha256"]
         != hashlib.sha256(
             base64.b64decode(ticket_fields["public-key"], validate=True)
         ).hexdigest()
         or not verify_embedded_signature(
             ticket_fields["public-key"], ticket_fields["signature"],
-            b"".join(ticket_lines[:21]),
+            b"".join(ticket_lines[:22]),
         )
     ):
         raise ValueError("untrusted enrollment ticket")

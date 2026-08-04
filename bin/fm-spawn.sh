@@ -2110,6 +2110,10 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 if [ "$KIND" = secondmate ]; then
   WORKER_HOME=$PROJ_ABS
   WORKER_ROLE=secondmate
+  fm_session_primary_root_write "$ID" "$PROJ_ABS" "$FM_HOME" "$FM_ROOT" || {
+    echo "error: could not publish trusted primary authority root for secondmate $ID" >&2
+    exit 1
+  }
 else
   WORKER_HOME=$(real_path_or_raw "$FM_HOME")
   WORKER_ROLE=crewmate

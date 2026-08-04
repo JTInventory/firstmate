@@ -17,6 +17,8 @@ make_fixture_root() {
   cp "$ROOT/bin/fm-session-authority-exec.sh" \
     "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-procargs-lib.sh" "$fixture/bin/" \
     || fail "fixture could not copy the behavior authority broker"
+  cp "$ROOT/tests/fm-test-authority-broker.sh" "$fixture/tests/" \
+    || fail "fixture could not copy the authority test harness"
   cp "$ROOT/bin/fm-run-behavior-job.sh" "$fixture/bin/" \
     || fail "fixture could not copy the behavior-test job helper"
   cat > "$fixture/bin/fm-no-mistakes-pr-target-guard.sh" <<'SH'
@@ -39,29 +41,28 @@ set -eu
 name=$(basename "$0" .test.sh)
 fixture_root=$(cd "$(dirname "$0")/.." && pwd -P)
 broker_script="$fixture_root/bin/fm-session-authority-exec.sh"
-expected_broker_script="$TMPDIR/issuer-checkout/bin/fm-session-authority-exec.sh"
-mkdir -p "${expected_broker_script%/*}"
-cp "$broker_script" "$expected_broker_script"
 case "${FM_TEST_AUTHORITY_BROKER_PID:-}" in
   ''|*[!0-9]*) exit 30 ;;
 esac
-env -u FM_TEST_PROCESS -u FM_TEST_AUTHORITY_FD \
-  -u FM_TEST_DURABLE_AUTHORITY_FD -u FM_TEST_AUTHORITY_BROKER_PID \
-  -u FM_TEST_AUTHORITY_OWNER_PID -u FM_TEST_SESSION_LOCK_STABLE_OWNER \
+env -u FM_SESSION_AUTHORITY_FD -u FM_SESSION_AUTHORITY_DURABLE_FD \
+  -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
+  -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
   bash -c '
     . "$1"
     fm_session_process_runs_authority_broker "$2" "$3"
   ' _ "$fixture_root/bin/fm-session-lock-lib.sh" \
-  "$FM_TEST_AUTHORITY_BROKER_PID" "$expected_broker_script" || exit 31
-printf '\n# byte-mismatch fixture\n' >> "$expected_broker_script"
-if env -u FM_TEST_PROCESS -u FM_TEST_AUTHORITY_FD \
-  -u FM_TEST_DURABLE_AUTHORITY_FD -u FM_TEST_AUTHORITY_BROKER_PID \
-  -u FM_TEST_AUTHORITY_OWNER_PID -u FM_TEST_SESSION_LOCK_STABLE_OWNER \
+  "$FM_TEST_AUTHORITY_BROKER_PID" "$broker_script" || exit 31
+wrong_broker_script="$TMPDIR/issuer-checkout/fm-session-authority-exec.sh"
+mkdir -p "${wrong_broker_script%/*}"
+cp "$broker_script" "$wrong_broker_script"
+if env -u FM_SESSION_AUTHORITY_FD -u FM_SESSION_AUTHORITY_DURABLE_FD \
+  -u FM_SESSION_AUTHORITY_BROKER_PID -u FM_SESSION_AUTHORITY_BROKER_START \
+  -u FM_SESSION_AUTHORITY_BROKER_IDENTITY -u FM_SESSION_AUTHORITY_BROKER_SCRIPT \
   bash -c '
     . "$1"
     fm_session_process_runs_authority_broker "$2" "$3"
   ' _ "$fixture_root/bin/fm-session-lock-lib.sh" \
-  "$FM_TEST_AUTHORITY_BROKER_PID" "$expected_broker_script"; then
+  "$FM_TEST_AUTHORITY_BROKER_PID" "$wrong_broker_script"; then
   exit 32
 fi
 printf '%s\n' "$TMPDIR" > "$FM_FIXTURE_OUTPUT_DIR/$name.tmpdir"

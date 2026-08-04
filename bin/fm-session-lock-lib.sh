@@ -167,36 +167,6 @@ fm_session_process_runs_script() {
   case "$args" in *" $script"|*" $script "*) return 0 ;; *) return 1 ;; esac
 }
 
-fm_session_process_runs_behavior_test_broker() {
-  local pid=$1 expected=$2 actual='' mode='' item index=0 actual_digest expected_digest
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  if [ -r "/proc/$pid/cmdline" ]; then
-    while IFS= read -r -d '' item; do
-      case "$index" in
-        1) actual=$item ;;
-        2) mode=$item; break ;;
-      esac
-      index=$((index + 1))
-    done < "/proc/$pid/cmdline"
-  elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    fm_procargs2_read "$pid" || return 1
-    [ "${#FM_PROCARGS_ARGV[@]}" -ge 3 ] || return 1
-    actual=${FM_PROCARGS_ARGV[1]}
-    mode=${FM_PROCARGS_ARGV[2]}
-  else
-    return 1
-  fi
-  [ "$mode" = --behavior-test-authority-broker ] \
-    && [ -f "$actual" ] && [ ! -L "$actual" ] && [ -x "$actual" ] \
-    && [ -f "$expected" ] && [ ! -L "$expected" ] && [ -x "$expected" ] \
-    && [ "$(fm_session_process_environment_value \
-      "$pid" FM_TEST_PROCESS 2>/dev/null || true)" = 1 ] \
-    || return 1
-  actual_digest=$(fm_session_sha256_file "$actual") || return 1
-  expected_digest=$(fm_session_sha256_file "$expected") || return 1
-  [ "$actual_digest" = "$expected_digest" ]
-}
-
 fm_session_process_environment() {
   fm_process_environment "$1"
 }
@@ -441,9 +411,51 @@ fm_session_authority_record_capability_present() {
   [ "$FM_SESSION_AUTHORITY_TOKEN" = "$expected" ]
 }
 
+fm_session_authority_primary_bootstrap_descriptor_present() {
+  local home checkout wrapper
+  fm_session_authority_wrapper_provenance_present || return 1
+  case "${FM_AGENT_ROLE:-}" in ''|primary) ;; *) return 1 ;; esac
+  [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
+  [ "${FM_SESSION_AUTHORITY_BROKER_PID:-}" = "$$" ] || return 1
+  wrapper="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
+  [ "${FM_SESSION_AUTHORITY_BROKER_SCRIPT:-}" = "$wrapper" ] || return 1
+  [ "${FM_SESSION_AUTHORITY_FD:-}" = 9 ] \
+    && [ "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" = 18 ] || return 1
+  fm_session_descriptor_channel_isolated 9 \
+    && fm_session_descriptor_channel_isolated 18 \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  checkout=$(cd "${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}" \
+    2>/dev/null && pwd -P) || return 1
+  [ "$home" = "$checkout" ] && [ "$(pwd -P)" = "$checkout" ] || return 1
+  [ ! -e "$home/.fm-secondmate-home" ] \
+    && [ ! -L "$home/.fm-secondmate-home" ]
+}
+
+fm_session_authority_primary_bootstrap_capability_present() {
+  local home state authority checkout
+  fm_session_authority_primary_bootstrap_descriptor_present || return 1
+  home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+    2>/dev/null && pwd -P) || return 1
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  checkout=$(cd "${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}" \
+    2>/dev/null && pwd -P) || return 1
+  authority="$state/.session-authority"
+  fm_session_authority_read_shape "$authority" || return 1
+  [ "$FM_SESSION_AUTHORITY_PID" = "$$" ] \
+    && [ "$FM_SESSION_AUTHORITY_HOME" = "$home" ] \
+    && [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$checkout" ] || return 1
+  fm_session_authority_process_state "$authority" || return 1
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] \
+    && [ -f "$state/.primary-checkout" ] \
+    && [ ! -L "$state/.primary-checkout" ] \
+    && [ "$(cat "$state/.primary-checkout" 2>/dev/null)" = "$checkout" ]
+}
+
 fm_session_authority_production_capability_present() {
-  fm_session_authority_wrapper_provenance_present && return 0
-  fm_session_authority_record_capability_present
+  fm_session_authority_primary_bootstrap_capability_present \
+    || fm_session_authority_record_capability_present
 }
 
 fm_session_authority_socket_broker_start_locked() {
@@ -554,18 +566,11 @@ fm_session_authority_socket_broker_start() {
 }
 
 fm_session_authority_capability_present() {
-  local key fd=${FM_SESSION_AUTHORITY_FD:-}
+  local key
   fm_session_authority_socket_broker_present && return 0
-  if fm_session_test_authority_broker_present; then
-    if ! fm_session_descriptor_channel_isolated "$fd"; then
-      FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
-      export FM_SESSION_AUTHORITY_FD
-    fi
-    fm_session_descriptor_channel_isolated \
-      "${FM_SESSION_AUTHORITY_FD:-}" || return 1
-    return 0
+  if ! fm_session_authority_production_capability_present; then
+    fm_session_authority_primary_bootstrap_descriptor_present || return 1
   fi
-  fm_session_authority_production_capability_present || return 1
   fm_session_descriptor_channel_isolated \
     "${FM_SESSION_AUTHORITY_FD:-}" \
     && fm_session_exec_descriptor_isolation_durable || return 1
@@ -577,11 +582,25 @@ fm_session_authority_capability_present() {
 fm_session_test_authority_broker_present() {
   local broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
   local fd=${FM_TEST_DURABLE_AUTHORITY_FD:-} live_fd=${FM_TEST_AUTHORITY_FD:-}
-  local caller_target broker_target
+  local harness=${FM_TEST_AUTHORITY_HARNESS_PID:-}
+  local expected_harness expected_exec caller_target broker_target
   [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
   case "$broker" in ''|*[!0-9]*) return 1 ;; esac
   [ "$broker" != "$$" ] || return 1
   kill -0 "$broker" 2>/dev/null || return 1
+  case "$harness" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$harness" != "$$" ] || return 1
+  kill -0 "$harness" 2>/dev/null || return 1
+  expected_harness=$(cd "$_FM_SESSION_LOCK_LIB_DIR/../tests" 2>/dev/null \
+    && pwd -P)/fm-test-authority-broker.sh || return 1
+  expected_exec="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
+  [ "${FM_TEST_AUTHORITY_HARNESS:-0}" = 1 ] || return 1
+  [ "${FM_TEST_AUTHORITY_HARNESS_SCRIPT:-}" = "$expected_harness" ] || return 1
+  [ "${FM_TEST_AUTHORITY_EXEC_SCRIPT:-}" = "$expected_exec" ] || return 1
+  fm_session_process_runs_script "$harness" "$expected_harness" || return 1
+  [ "$(fm_session_process_environment_value "$harness" \
+      FM_TEST_AUTHORITY_HARNESS 2>/dev/null || true)" = 1 ] || return 1
+  [ "$(fm_session_parent_pid "$broker" 2>/dev/null || true)" = "$harness" ] || return 1
   fm_session_descriptor_channel_isolated "$fd" || return 1
   caller_target=$(fm_session_descriptor_identity "$$" "$fd") || return 1
   broker_target=$(fm_session_descriptor_identity "$broker" "$fd") || return 1
@@ -595,10 +614,7 @@ fm_session_test_authority_broker_present() {
 
 fm_session_process_runs_authority_broker() {
   local pid=$1 script=$2
-  fm_session_process_runs_script "$pid" "$script" && return 0
-  fm_session_process_runs_behavior_test_broker "$pid" "$script" && return 0
-  fm_session_test_authority_broker_present \
-    && [ "$pid" = "$FM_TEST_AUTHORITY_BROKER_PID" ]
+  fm_session_process_runs_script "$pid" "$script"
 }
 
 fm_session_authority_broker_present() {
@@ -607,36 +623,6 @@ fm_session_authority_broker_present() {
   local identity=${FM_SESSION_AUTHORITY_BROKER_IDENTITY:-}
   local current caller_target broker_target
   fm_session_authority_socket_broker_present && return 0
-  if fm_session_test_authority_broker_present \
-    && { [ -z "${FM_SESSION_AUTHORITY_BROKER_PID:-}" ] \
-      || [ "$FM_SESSION_AUTHORITY_BROKER_PID" = "$FM_TEST_AUTHORITY_BROKER_PID" ]; }; then
-    if [ -n "${FM_SESSION_AUTHORITY_FD:-}" ]; then
-      [ "$(fm_session_descriptor_identity "$$" \
-          "$FM_SESSION_AUTHORITY_FD" 2>/dev/null || true)" = \
-        "$(fm_session_descriptor_identity "$$" \
-          "$FM_TEST_AUTHORITY_FD" 2>/dev/null || true)" ] || return 1
-    fi
-    if [ -n "${FM_SESSION_AUTHORITY_DURABLE_FD:-}" ]; then
-      [ "$(fm_session_descriptor_identity "$$" \
-          "$FM_SESSION_AUTHORITY_DURABLE_FD" 2>/dev/null || true)" = \
-        "$(fm_session_descriptor_identity "$$" \
-          "$FM_TEST_DURABLE_AUTHORITY_FD" 2>/dev/null || true)" ] || return 1
-    fi
-    FM_SESSION_AUTHORITY_FD=$FM_TEST_AUTHORITY_FD
-    FM_SESSION_AUTHORITY_DURABLE_FD=$FM_TEST_DURABLE_AUTHORITY_FD
-    FM_SESSION_AUTHORITY_BROKER_PID=$FM_TEST_AUTHORITY_BROKER_PID
-    FM_SESSION_AUTHORITY_BROKER_START=$(
-      fm_session_process_start "$FM_SESSION_AUTHORITY_BROKER_PID"
-    ) || return 1
-    FM_SESSION_AUTHORITY_BROKER_IDENTITY=$(
-      fm_session_process_identity "$FM_SESSION_AUTHORITY_BROKER_PID"
-    ) || return 1
-    FM_SESSION_AUTHORITY_BROKER_SCRIPT=$script
-    export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
-    export FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START
-    export FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
-    return 0
-  fi
   fm_session_authority_capability_present || return 1
   case "$broker" in ''|*[!0-9]*) return 1 ;; esac
   [ "$broker" != "$$" ] || return 1
@@ -677,7 +663,7 @@ fm_session_descriptor_channel_isolated() {
         opened=1
       fi
       if [ ! -e "/proc/$parent/fd/$fd" ] \
-        || (: < "/proc/$parent/fd/$fd") 2>/dev/null; then
+        || ! (: < "/proc/$parent/fd/$fd") 2>/dev/null; then
         status=1
       fi
       if [ "$opened" -eq 1 ]; then
@@ -690,25 +676,6 @@ fm_session_descriptor_channel_isolated() {
           17) exec 17<&- ;;
           18) exec 18<&- ;;
           19) exec 19<&- ;;
-        esac
-      fi
-      if [ "$status" -ne 0 ] && [ "$opened" -eq 0 ] \
-        && [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
-        case "${FM_TEST_AUTHORITY_BROKER_PID:-}" in
-          ''|*[!0-9]*) ;;
-          *)
-            if kill -0 "$FM_TEST_AUTHORITY_BROKER_PID" 2>/dev/null \
-              && [ -e "/proc/$parent/fd/${FM_TEST_DURABLE_AUTHORITY_FD:-18}" ] \
-              && [ "$(fm_session_descriptor_identity \
-                "$parent" "${FM_TEST_DURABLE_AUTHORITY_FD:-18}" \
-                2>/dev/null || true)" = \
-                "$(fm_session_descriptor_identity \
-                "$FM_TEST_AUTHORITY_BROKER_PID" \
-                "${FM_TEST_DURABLE_AUTHORITY_FD:-18}" \
-                2>/dev/null || true)" ]; then
-              return 0
-            fi
-            ;;
         esac
       fi
       return "$status"
@@ -1454,6 +1421,7 @@ fm_session_enrollment_signer_run() {
   local file=$1 task=$2 home=$3 issuer=$4 endpoint=$5 endpoint_start=$6
   local endpoint_identity=$7 home_real issuer_real marker private
   local authority lock binding authority_digest nonce tmp body signature
+  local primary_root primary_root_digest
   local accepted_digest
   local broker broker_start broker_identity broker_script descriptor signer_start signer_identity
   local private_key_fd=${FM_SESSION_ENROLLMENT_PRIVATE_KEY_FD:-}
@@ -1482,6 +1450,9 @@ fm_session_enrollment_signer_run() {
   marker="$home_real/.fm-secondmate-home"
   [ -f "$marker" ] && [ ! -L "$marker" ] \
     && [ "$(cat "$marker" 2>/dev/null)" = "$task" ] || return 1
+  fm_session_primary_root_validate "$home_real" "$task" || return 1
+  primary_root=$(fm_session_primary_root_path "$home_real") || return 1
+  primary_root_digest=$(fm_session_sha256_file "$primary_root") || return 1
   authority="$issuer_real/state/.session-authority"
   lock="$issuer_real/state/.lock"
   binding="$issuer_real/state/.primary-checkout"
@@ -1525,12 +1496,12 @@ fm_session_enrollment_signer_run() {
     rm -f "$body" "$signature"
     return 1
   }
-  printf 'version=5\nrole=secondmate\ntask=%s\nhome=%s\nissuer-home=%s\nissuer-authority=%s\nnonce=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nbroker-script=%s\nauthority-fd=%s\nauthority-descriptor=%s\nsigner-pid=%s\nsigner-start=%s\nsigner-identity=%s\npublic-key=%s\npublic-key-sha256=%s\nendpoint-pid=%s\nendpoint-start=%s\nendpoint-identity=%s\n' \
+  printf 'version=5\nrole=secondmate\ntask=%s\nhome=%s\nissuer-home=%s\nissuer-authority=%s\nnonce=%s\nbroker-pid=%s\nbroker-start=%s\nbroker-identity=%s\nbroker-script=%s\nauthority-fd=%s\nauthority-descriptor=%s\nsigner-pid=%s\nsigner-start=%s\nsigner-identity=%s\npublic-key=%s\npublic-key-sha256=%s\nendpoint-pid=%s\nendpoint-start=%s\nendpoint-identity=%s\nprimary-root-sha256=%s\n' \
     "$task" "$home_real" "$issuer_real" "$authority_digest" "$nonce" \
     "$broker" "$broker_start" "$broker_identity" "$broker_script" \
     "$FM_SESSION_AUTHORITY_FD" "$descriptor" "$$" "$signer_start" \
     "$signer_identity" "$public_key" "$public_digest" "$endpoint" \
-    "$endpoint_start" "$endpoint_identity" > "$body" || {
+    "$endpoint_start" "$endpoint_identity" "$primary_root_digest" > "$body" || {
       rm -f "$body" "$signature"
       return 1
     }
@@ -2025,9 +1996,9 @@ fm_session_enrollment_ticket_wait_accepted() {
 
 fm_session_enrollment_ticket_validate() {
   local file=$1 task=$2 home=$3 home_real version role ticket_task ticket_home
-  local issuer authority_digest nonce body public_key public_digest signature
+  local issuer authority_digest nonce primary_root_digest body public_key public_digest signature
   local public_file signature_file body_file signer_public_digest
-  local issuer_real authority lock binding current_digest status=1
+  local issuer_real primary_root authority lock binding current_digest status=1
   local broker broker_start broker_identity broker_script authority_fd descriptor
   local signer signer_start signer_identity signer_script current
   local endpoint endpoint_start endpoint_identity failed_stage=
@@ -2035,7 +2006,7 @@ fm_session_enrollment_ticket_validate() {
     fm_session_enrollment_trace ticket-file fail 2>/dev/null || true
     return 1
   }
-  [ "$(wc -l < "$file" | tr -d ' ')" -eq 22 ] || {
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq 23 ] || {
     fm_session_enrollment_trace ticket-lines fail 2>/dev/null || true
     return 1
   }
@@ -2060,7 +2031,8 @@ fm_session_enrollment_ticket_validate() {
   endpoint=$(sed -n '19s/^endpoint-pid=//p' "$file")
   endpoint_start=$(sed -n '20s/^endpoint-start=//p' "$file")
   endpoint_identity=$(sed -n '21s/^endpoint-identity=//p' "$file")
-  signature=$(sed -n '22s/^signature=//p' "$file")
+  primary_root_digest=$(sed -n '22s/^primary-root-sha256=//p' "$file")
+  signature=$(sed -n '23s/^signature=//p' "$file")
   if [ -n "$nonce" ]; then
     fm_session_enrollment_trace nonce-presence present 2>/dev/null || true
   else
@@ -2078,6 +2050,7 @@ fm_session_enrollment_ticket_validate() {
     && [ -n "$signer_start" ] && [ -n "$signer_identity" ] \
     && [ -n "$public_key" ] && [ "${#public_digest}" -eq 64 ] \
     && [ -n "$endpoint_start" ] && [ -n "$endpoint_identity" ] \
+    && [ "${#primary_root_digest}" -eq 64 ] \
     && [ -n "$signature" ] || {
       fm_session_enrollment_trace ticket-shape fail 2>/dev/null || true
       return 1
@@ -2088,7 +2061,7 @@ fm_session_enrollment_ticket_validate() {
       return 1
       ;;
   esac
-  case "$authority_digest:$nonce:$public_digest" in
+  case "$authority_digest:$nonce:$public_digest:$primary_root_digest" in
     *[!0-9a-f:]*)
       fm_session_enrollment_trace ticket-characters fail 2>/dev/null || true
       return 1
@@ -2102,6 +2075,14 @@ fm_session_enrollment_ticket_validate() {
     fm_session_enrollment_trace issuer-path fail 2>/dev/null || true
     return 1
   }
+  primary_root=$(fm_session_primary_root_path "$home_real") || return 1
+  [ -f "$primary_root" ] && [ ! -L "$primary_root" ] \
+    && [ "$(wc -l < "$primary_root" | tr -d ' ')" -eq 13 ] \
+    && [ "$(sed -n '1p' "$primary_root")" = version=1 ] \
+    && [ "$(sed -n '2s/^task=//p' "$primary_root")" = "$task" ] \
+    && [ "$(sed -n '3s/^home=//p' "$primary_root")" = "$home_real" ] \
+    && [ "$(sed -n '4s/^primary-home=//p' "$primary_root")" = "$issuer_real" ] \
+    && [ "$(fm_session_sha256_file "$primary_root")" = "$primary_root_digest" ] || return 1
   public_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-public.XXXXXX") || return 1
   signature_file=$(mktemp "${TMPDIR:-/tmp}/fm-session-enrollment-signature.XXXXXX") || {
     rm -f "$public_file"
@@ -2111,7 +2092,7 @@ fm_session_enrollment_ticket_validate() {
     rm -f "$public_file" "$signature_file"
     return 1
   }
-  body=$(sed -n '1,21p' "$file")$'\n'
+  body=$(sed -n '1,22p' "$file")$'\n'
   printf '%s' "$public_key" | openssl base64 -d -A > "$public_file" 2>/dev/null \
     && printf '%s' "$signature" | openssl base64 -d -A > "$signature_file" 2>/dev/null \
     && printf '%s' "$body" > "$body_file" || {
@@ -2213,13 +2194,6 @@ fm_session_authority_hmac() {
 fm_session_authority_durable_capability_present() {
   local key fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
   fm_session_authority_socket_broker_present && return 0
-  if fm_session_test_authority_broker_present; then
-    [ -n "$fd" ] || fd=$FM_TEST_DURABLE_AUTHORITY_FD
-    FM_SESSION_AUTHORITY_DURABLE_FD=$fd
-    export FM_SESSION_AUTHORITY_DURABLE_FD
-    fm_session_descriptor_channel_isolated "$fd" || return 1
-    return 0
-  fi
   fm_session_authority_production_capability_present || return 1
   if [ -z "$fd" ]; then
     return 1
@@ -2269,6 +2243,113 @@ fm_session_authority_record_validate() {
   body=$(sed -n "1,$((lines - 1))p" "$file")$'\n'
   expected=$(printf '%s' "$body" | fm_session_authority_durable_hmac) || return 1
   [ "$actual" = "$expected" ]
+}
+
+fm_session_primary_root_path() {
+  local home=$1 home_real
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  printf '%s\n' "$home_real/state/.session-primary-root"
+}
+
+fm_session_primary_root_validate() {
+  local home=$1 task=$2 root primary_home primary_checkout authority
+  local authority_sha authority_pid authority_start authority_identity
+  local authority_fd authority_descriptor durable_descriptor
+  local home_real checkout lock binding state
+  root=$(fm_session_primary_root_path "$home") || return 1
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  state=${root%/*}
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  [ -f "$root" ] && [ ! -L "$root" ] || return 1
+  [ "$(wc -l < "$root" | tr -d ' ')" -eq 13 ] || return 1
+  fm_session_authority_record_validate "$root" 13 || return 1
+  [ "$(sed -n '1p' "$root")" = version=1 ] || return 1
+  [ "$(sed -n '2s/^task=//p' "$root")" = "$task" ] || return 1
+  [ "$(sed -n '3s/^home=//p' "$root")" = "$home_real" ] || return 1
+  primary_home=$(sed -n '4s/^primary-home=//p' "$root")
+  primary_checkout=$(sed -n '5s/^primary-checkout=//p' "$root")
+  authority_pid=$(sed -n '6s/^authority-pid=//p' "$root")
+  authority_start=$(sed -n '7s/^authority-start=//p' "$root")
+  authority_identity=$(sed -n '8s/^authority-identity=//p' "$root")
+  authority_fd=$(sed -n '9s/^authority-fd=//p' "$root")
+  authority_descriptor=$(sed -n '10s/^authority-descriptor=//p' "$root")
+  durable_descriptor=$(sed -n '11s/^durable-descriptor=//p' "$root")
+  authority_sha=$(sed -n '12s/^authority-sha256=//p' "$root")
+  case "$authority_pid:$authority_fd" in ''|*[!0-9:]*|*:) return 1 ;; esac
+  [ "$authority_pid" -gt 1 ] && [ "$authority_fd" -ge 3 ] || return 1
+  case "$primary_home:$primary_checkout:$authority_start:$authority_identity:$authority_descriptor:$durable_descriptor:$authority_sha" in
+    *$'\n'*|*$'\r'*|*'='*|'' ) return 1 ;;
+  esac
+  home_real=$(cd "$primary_home" 2>/dev/null && pwd -P) || return 1
+  checkout=$(cd "$primary_checkout" 2>/dev/null && pwd -P) || return 1
+  [ "$home_real" = "$primary_home" ] || return 1
+  [ "$checkout" = "$primary_checkout" ] || return 1
+  authority="$primary_home/state/.session-authority"
+  lock="$primary_home/state/.lock"
+  binding="$primary_home/state/.primary-checkout"
+  fm_session_authority_read "$authority" || return 1
+  [ "$FM_SESSION_AUTHORITY_PID" = "$authority_pid" ] \
+    && [ "$FM_SESSION_AUTHORITY_START" = "$authority_start" ] \
+    && [ "$FM_SESSION_AUTHORITY_IDENTITY" = "$authority_identity" ] \
+    && [ "$FM_SESSION_AUTHORITY_HOME" = "$primary_home" ] \
+    && [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$primary_checkout" ] || return 1
+  fm_session_authority_process_state "$authority" || return 1
+  fm_session_pid_is_current_ancestor "$authority_pid" || return 1
+  [ -f "$lock" ] && [ ! -L "$lock" ] \
+    && [ "$(cat "$lock" 2>/dev/null)" = "$FM_SESSION_AUTHORITY_OWNER" ] || return 1
+  [ -f "$binding" ] && [ ! -L "$binding" ] \
+    && [ "$(cat "$binding" 2>/dev/null)" = "$primary_checkout" ] || return 1
+  [ "$(fm_session_sha256_file "$authority")" = "$authority_sha" ] || return 1
+  [ "$(fm_session_descriptor_identity "$authority_pid" "$authority_fd" 2>/dev/null)" = "$authority_descriptor" ] || return 1
+  [ "$(fm_session_descriptor_identity "$authority_pid" 18 2>/dev/null)" = "$durable_descriptor" ] || return 1
+}
+
+fm_session_primary_root_write() {
+  local task=$1 home=$2 primary_home=$3 primary_checkout=$4
+  local root home_real primary_real checkout authority lock binding
+  local authority_pid authority_start authority_identity authority_owner
+  local authority_fd authority_descriptor durable_descriptor authority_sha body
+  root=$(fm_session_primary_root_path "$home") || return 1
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  primary_real=$(cd "$primary_home" 2>/dev/null && pwd -P) || return 1
+  checkout=$(cd "$primary_checkout" 2>/dev/null && pwd -P) || return 1
+  [ -n "$task" ] && [ "$home_real" != "$primary_real" ] || return 1
+  [ -f "$home_real/.fm-secondmate-home" ] \
+    && [ ! -L "$home_real/.fm-secondmate-home" ] \
+    && [ "$(cat "$home_real/.fm-secondmate-home" 2>/dev/null)" = "$task" ] || return 1
+  fm_session_authority_record_capability_present || return 1
+  fm_session_authority_durable_capability_present || return 1
+  authority="$primary_real/state/.session-authority"
+  lock="$primary_real/state/.lock"
+  binding="$primary_real/state/.primary-checkout"
+  fm_session_authority_read "$authority" || return 1
+  fm_session_authority_process_state "$authority" || return 1
+  authority_pid=$FM_SESSION_AUTHORITY_PID
+  authority_start=$FM_SESSION_AUTHORITY_START
+  authority_identity=$FM_SESSION_AUTHORITY_IDENTITY
+  authority_owner=$FM_SESSION_AUTHORITY_OWNER
+  [ "$FM_SESSION_AUTHORITY_HOME" = "$primary_real" ] \
+    && [ "$FM_SESSION_AUTHORITY_CHECKOUT" = "$checkout" ] || return 1
+  fm_session_pid_is_current_ancestor "$authority_pid" || return 1
+  [ -f "$lock" ] && [ ! -L "$lock" ] \
+    && [ "$(cat "$lock" 2>/dev/null)" = "$authority_owner" ] || return 1
+  [ -f "$binding" ] && [ ! -L "$binding" ] \
+    && [ "$(cat "$binding" 2>/dev/null)" = "$checkout" ] || return 1
+  authority_fd=${FM_SESSION_AUTHORITY_FD:-}
+  case "$authority_fd" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$authority_fd" -ge 3 ] || return 1
+  authority_descriptor=$(fm_session_descriptor_identity "$authority_pid" "$authority_fd") || return 1
+  durable_descriptor=$(fm_session_descriptor_identity "$authority_pid" 18) || return 1
+  authority_sha=$(fm_session_sha256_file "$authority") || return 1
+  body=$(printf 'version=1\ntask=%s\nhome=%s\nprimary-home=%s\nprimary-checkout=%s\nauthority-pid=%s\nauthority-start=%s\nauthority-identity=%s\nauthority-fd=%s\nauthority-descriptor=%s\ndurable-descriptor=%s\nauthority-sha256=%s\n' \
+    "$task" "$home_real" "$primary_real" "$checkout" "$authority_pid" \
+    "$authority_start" "$authority_identity" "$authority_fd" \
+    "$authority_descriptor" "$durable_descriptor" "$authority_sha") || return 1
+  mkdir -p "${root%/*}" || return 1
+  [ -d "${root%/*}" ] && [ ! -L "${root%/*}" ] || return 1
+  [ ! -L "$root" ] || return 1
+  fm_session_authority_record_write "$root" "${body}"$'\n' || return 1
+  chmod 600 "$root"
 }
 
 fm_session_launch_receipt_write() {
