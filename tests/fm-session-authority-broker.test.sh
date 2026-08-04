@@ -15,6 +15,9 @@ LAUNCH_PID=
 PRIMARY_PID=
 PRIMARY_HARNESS_PID=
 SIGNER_PID=
+ROTATION_PRIMARY_SETUP_PID=
+ROTATION_CUSTODIAN_PID=
+ROTATION_DURABLE_KEY=
 REQUEST_FIFO=
 PRIMARY_REQUEST_FIFO=
 REQUEST_SEQUENCE=0
@@ -31,6 +34,10 @@ cleanup() {
   [ -z "$PRIMARY_PID" ] || wait "$PRIMARY_PID" 2>/dev/null || true
   [ -z "$PRIMARY_HARNESS_PID" ] || kill "$PRIMARY_HARNESS_PID" 2>/dev/null || true
   [ -z "$PRIMARY_HARNESS_PID" ] || wait "$PRIMARY_HARNESS_PID" 2>/dev/null || true
+  [ -z "$ROTATION_PRIMARY_SETUP_PID" ] || kill "$ROTATION_PRIMARY_SETUP_PID" 2>/dev/null || true
+  [ -z "$ROTATION_PRIMARY_SETUP_PID" ] || wait "$ROTATION_PRIMARY_SETUP_PID" 2>/dev/null || true
+  [ -z "$ROTATION_CUSTODIAN_PID" ] || kill "$ROTATION_CUSTODIAN_PID" 2>/dev/null || true
+  [ -z "$ROTATION_CUSTODIAN_PID" ] || wait "$ROTATION_CUSTODIAN_PID" 2>/dev/null || true
   fm_test_cleanup || true
 }
 trap cleanup EXIT
@@ -719,8 +726,14 @@ if any(
 cleanup = source[source.index("def cleanup_recovery_quarantines("):source.index("def unlink_owned_record(")]
 if "AUTHORITY_SERIALIZATION_FD = 18" not in source:
     raise SystemExit("authority serialization did not use the inherited FD 18 capability")
-if "fcntl.flock" not in source or "stat.S_ISREG" not in source:
-    raise SystemExit("authority serialization is not a shared kernel lock")
+if "def open_authority_admission_capability(" not in source:
+    raise SystemExit("authority serialization did not use an abstract capability")
+if "def authority_admission_socket_name(" not in source:
+    raise SystemExit("authority serialization is not bound to the durable root")
+if "def acquire_authority_record_lock(" in source:
+    raise SystemExit("path-based authority flock remains reachable")
+if "def open_authority_admission_lock(" in source:
+    raise SystemExit("visible authority lock publication remains reachable")
 if ".glob(" in cleanup:
     raise SystemExit("quarantine cleanup still scans an attacker-controlled namespace")
 handoff = source[source.index("def supervise("):source.index("def serve_locked(")]
@@ -995,7 +1008,7 @@ with TemporaryDirectory() as temporary:
     def hold_lock():
         lock = broker.open_authority_record_lock(
             blocking=False, state=state, home=str(home), task="alpha",
-            launch_script=str(script), launch_evidence=(b"k", 2, "s", "i")
+            launch_script=str(script), launch_evidence=(b"k" * 32, 2, "s", "i")
         )
         if lock is None:
             raise SystemExit("wrapper-created admission lock did not acquire")
@@ -1013,16 +1026,13 @@ with TemporaryDirectory() as temporary:
         holder.terminate()
         holder.join()
         raise SystemExit("independent admission holder did not start")
-    admission_path = broker.authority_admission_path(
-        state, (b"k", 2, "s", "i")
-    )
-    if not admission_path.exists() or admission_path.is_symlink():
-        raise SystemExit("admission lock publication was not retained")
+    if any(state.glob(".session-authority-admission-*")):
+        raise SystemExit("authority admission exposed a replaceable pathname")
 
     def contend():
         lock = broker.open_authority_record_lock(
             blocking=False, state=state, home=str(home), task="alpha",
-            launch_script=str(script), launch_evidence=(b"k", 3, "s", "i")
+            launch_script=str(script), launch_evidence=(b"k" * 32, 3, "s", "i")
         )
         result.write_text("busy" if lock is None else "forged", encoding="utf-8")
         if lock is not None:
@@ -1036,52 +1046,15 @@ with TemporaryDirectory() as temporary:
     if contender.exitcode != 0 or holder.exitcode != 0 or result.read_text() != "busy":
         raise SystemExit("independent supervisors did not share the admission lock")
 
-    short_state = home / "short-state"
-    short_state.mkdir()
-    real_write = broker.os.write
-    broker.os.write = lambda _fd, _data: 0
-    try:
-        if broker.open_authority_admission_lock(
-            short_state, (b"k", 2, "s", "i")
-        ) is not None:
-            raise SystemExit("short authority lock publication was accepted")
-    finally:
-        broker.os.write = real_write
-    short_path = broker.authority_admission_path(
-        short_state, (b"k", 2, "s", "i")
-    )
-    if short_path.exists() or short_path.is_symlink():
-        raise SystemExit("short authority lock publication left an inode")
-
-    forged_state = home / "forged-state"
-    forged_state.mkdir()
-    forged_path = broker.authority_admission_path(
-        forged_state, (b"k", 2, "s", "i")
-    )
-    forged_path.write_text("forged\n", encoding="utf-8")
-    if broker.open_authority_admission_lock(
-        forged_state, (b"k", 2, "s", "i")
-    ) is not None:
-        raise SystemExit("precreated admission lock was accepted")
-
-    symlink_state = home / "symlink-state"
-    symlink_state.mkdir()
-    symlink_path = broker.authority_admission_path(
-        symlink_state, (b"k", 2, "s", "i")
-    )
-    symlink_path.symlink_to(result)
-    if broker.open_authority_admission_lock(
-        symlink_state, (b"k", 2, "s", "i")
-    ) is not None:
-        raise SystemExit("symlinked admission lock was accepted")
-
     read_fd, write_fd = os.pipe()
     try:
         if read_fd != broker.AUTHORITY_SERIALIZATION_FD:
             os.dup2(read_fd, broker.AUTHORITY_SERIALIZATION_FD)
             os.close(read_fd)
-        if broker.acquire_authority_record_lock(
-            broker.AUTHORITY_SERIALIZATION_FD, blocking=False
+        if broker.inherited_authority_record_lock(
+            broker.AUTHORITY_SERIALIZATION_FD,
+            home=str(home), task="alpha", launch_script=str(script),
+            launch_evidence=(b"k" * 32, 2, "s", "i")
         ) is not None:
             raise SystemExit("forged pipe descriptor was accepted as admission authority")
     finally:
@@ -1100,7 +1073,7 @@ then
 fi
 
 prepare_launch() {
-  local home=$1 launch_script
+  local home=$1 provision_primary=${2:-0} launch_script real_exec
   local launch_start launch_identity receipt_body receipt_hmac nonce
   local issuer signer_private signer_public signer_public_b64 signer_digest
   local consumer_key consumer_public consumer_public_b64 consumer_digest
@@ -1108,6 +1081,7 @@ prepare_launch() {
   local primary_fixture primary_pid_file
   local primary_harness_pid
   local signer_output enrollment random_bin attempts=0
+  local primary_setup_pid= rotation_key= owner_pid=
   nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   launch_script="$home/bin/fm-session-authority-exec.sh"
   [ -z "$LAUNCH_PID" ] || kill "$LAUNCH_PID" 2>/dev/null || true
@@ -1124,8 +1098,57 @@ prepare_launch() {
   issuer="$TMP_ROOT/issuer-$REQUEST_SEQUENCE"
   primary_fixture="$issuer/primary-fixture.sh"
   primary_pid_file="$issuer/primary.pid"
+  real_exec="$home/bin/.fm-real-session-authority-exec.sh"
   mkdir -p "$home/bin" "$home/state"
-  printf '%s\n' alpha > "$home/.fm-secondmate-home"
+  if [ "$provision_primary" = 1 ]; then
+    sleep 2
+    fm_git_init_commit "$home"
+    random_bin="$home/test-bin"
+    mkdir -p "$random_bin"
+    cat > "$random_bin/od" <<'SH'
+#!/usr/bin/env bash
+case "${3:-}" in
+  48) printf '%096d\n' 0 | tr 0 a ;;
+  32) printf '%064d\n' 0 | tr 0 a ;;
+  *) exec /usr/bin/od "$@" ;;
+esac
+SH
+    chmod 700 "$random_bin/od"
+    cp "$ROOT"/bin/*.sh "$home/bin/"
+    cp "$ROOT/bin/fm-session-authority-broker.py" "$home/bin/"
+    chmod 700 "$home/bin"/*.sh "$home/bin/fm-session-authority-broker.py"
+    cp "$home/bin/fm-session-authority-exec.sh" \
+      "$home/bin/.fm-real-session-authority-exec.sh"
+    (
+      cd "$home" || exit 1
+      exec env FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+        PATH="$random_bin:$PATH" \
+        "$home/bin/fm-session-authority-exec.sh" \
+        bash -c 'while :; do sleep 60; done'
+    ) >/dev/null 2>&1 &
+    primary_setup_pid=$!
+    ROTATION_PRIMARY_SETUP_PID=$primary_setup_pid
+    attempts=0
+    while [ "$attempts" -lt 250 ] \
+      && { [ ! -f "$home/state/.session-authority" ] \
+        || [ ! -f "$home/state/.session-durable-authority" ]; }; do
+      sleep 0.02
+      attempts=$((attempts + 1))
+    done
+    [ -f "$home/state/.session-authority" ] \
+      && [ -f "$home/state/.session-durable-authority" ] \
+      || fail "production primary fixture did not provision durable authority"
+    ROTATION_CUSTODIAN_PID=$(sed -n '2s/^pid=//p' \
+      "$home/state/.session-durable-authority")
+    rotation_key=$(printf '%096d' 0 | tr 0 a)
+    ROTATION_DURABLE_KEY=$rotation_key
+    kill "$primary_setup_pid" 2>/dev/null || true
+    wait "$primary_setup_pid" 2>/dev/null || true
+    ROTATION_PRIMARY_SETUP_PID=
+    owner_pid=$(sed -n '2s/^pid=//p' "$home/state/.session-authority")
+    kill -0 "$owner_pid" 2>/dev/null \
+      && fail "production primary fixture remained live after teardown"
+  fi
   mkdir -p "$issuer/state"
   random_bin="$issuer/test-bin"
   mkdir -p "$random_bin"
@@ -1247,6 +1270,68 @@ while :; do
           exec 17<&-
         fi
         ;;
+      rotate)
+        cd "\$request_home" || status=1
+        if [ "\$status" -eq 0 ] && [ -f "$real_exec" ]; then
+          exec 18< <(printf '%s\n' "$rotation_key")
+          export FM_SESSION_AUTHORITY_DURABLE_FD=18
+          mkdir -p "\$request_home/state/.secondmate-launch-receipts"
+          . "\$request_home/bin/fm-session-lock-lib.sh"
+          start=\$(fm_session_process_start "\$\$") || status=1
+          identity=\$(fm_session_process_identity "\$\$") || status=1
+          if [ "\$status" -eq 0 ]; then
+            fm_session_launch_receipt_write \\
+              "\$request_home/state/.secondmate-launch-receipts/alpha" \\
+              alpha "\$request_home" "\$\$" "\$start" "\$identity" \\
+              "\$(sed -n '7s/^nonce=//p' "\$request_home/state/.session-authority-enrollment")" \\
+              || status=1
+          fi
+          if [ "\$status" -eq 0 ]; then
+            signer_pid=\$(sed -n 's/^signer-pid=//p' \\
+              "\$request_home/state/.session-authority-enrollment")
+            signer_start=\$(sed -n 's/^signer-start=//p' \\
+              "\$request_home/state/.session-authority-enrollment")
+            signer_identity=\$(sed -n 's/^signer-identity=//p' \\
+              "\$request_home/state/.session-authority-enrollment")
+            public_key=\$(sed -n 's/^public-key=//p' \\
+              "\$request_home/state/.session-authority-enrollment")
+            public_digest=\$(sed -n 's/^public-key-sha256=//p' \\
+              "\$request_home/state/.session-authority-enrollment")
+            consumer_key=\$(cat "\$request_home/state/.test-consumer-public")
+            consumer_digest=\$(cat "\$request_home/state/.test-consumer-digest")
+            export ROTATE_OUTPUT="\$output.started" \\
+              ROTATE_RELEASE="\$request_home/state/.test-rotation-release"
+            export FM_SESSION_ENROLLMENT_SIGNER_PID=\$signer_pid \\
+              FM_SESSION_ENROLLMENT_NONCE=\$(sed -n '7s/^nonce=//p' \\
+                "\$request_home/state/.session-authority-enrollment") \\
+              FM_SESSION_ENROLLMENT_PUBLIC_KEY=\$public_key \\
+              FM_SESSION_ENROLLMENT_PUBLIC_SHA256=\$public_digest \\
+              FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY=\$consumer_key \\
+              FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256=\$consumer_digest
+            cp "$real_exec" "\$request_home/bin/.fm-session-authority-exec.rotate"
+            mv "\$request_home/bin/.fm-session-authority-exec.rotate" \\
+              "\$request_home/bin/fm-session-authority-exec.sh"
+            confirmed=\$(openssl dgst -sha256 \\
+              "\$request_home/state/.session-authority-enrollment.accepted" \\
+              2>/dev/null | sed 's/^.*= //')
+            ticket_data=\$(openssl base64 -A < \\
+              "\$request_home/state/.session-authority-enrollment")
+            acceptance_data=\$(openssl base64 -A < \\
+              "\$request_home/state/.session-authority-enrollment.accepted")
+            nonce=\$FM_SESSION_ENROLLMENT_NONCE
+            exec "\$request_home/bin/fm-session-authority-exec.sh" \\
+              --enrollment-confirmed "\$confirmed" \\
+              --enrollment-ticket-data "\$ticket_data" \\
+              --enrollment-acceptance-data "\$acceptance_data" \\
+              --enrollment-consumer-key "\$consumer_key" \\
+              --enrollment-consumer-key-sha256 "\$consumer_digest" \\
+              --enrollment-launch "\$nonce" \\
+              bash -c 'printf started > "\$ROTATE_OUTPUT"; while [ ! -e "\$ROTATE_RELEASE" ]; do sleep 0.02; done'
+          fi
+        else
+          status=1
+        fi
+        ;;
       *)
         (
           cd "\$request_home" || exit 1
@@ -1283,7 +1368,7 @@ SH
     exec env FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
       FM_AGENT_OWNER_HOME="$home" FM_SESSION_AUTHORITY_WRAPPER_AUTHORIZED=1 \
       FM_SESSION_ENROLLMENT_NONCE="$nonce" "$launch_script"
-  ) >/dev/null 2>&1 &
+  ) > "$home/state/.test-launch.log" 2>&1 &
   LAUNCH_PID=$!
   launch_start=$(test_process_start "$LAUNCH_PID") \
     || fail "authenticated launch fixture did not start"
@@ -1451,6 +1536,8 @@ SH
   TRUSTED_ACCEPTANCE_B64=$(openssl base64 -A < "$enrollment.accepted")
   TRUSTED_FINAL_B64=$(openssl base64 -A < "$enrollment.accepted.final")
   TRUSTED_CONSUMER_KEY_B64=$consumer_public_b64
+  printf '%s\n' "$TRUSTED_CONSUMER_KEY_B64" > "$home/state/.test-consumer-public"
+  printf '%s\n' "$consumer_digest" > "$home/state/.test-consumer-digest"
   receipt_body=$(printf 'version=1\ntask=alpha\nhome=%s\npid=%s\nstart=%s\nidentity=%s\nnonce=%s' \
     "$home" "$LAUNCH_PID" "$launch_start" "$launch_identity" "$nonce")
   receipt_body="${receipt_body}"$'\n'
@@ -1540,17 +1627,234 @@ test_same_home_secondmate_admission_serializes_independent_holders() {
   pass "same-home admission serializes independent holders"
 }
 
+prepare_rotation_launch() {
+  local home=$1 primary="$TMP_ROOT/rotation-primary"
+  local state="$home/state" primary_state="$primary/state"
+  local launch_script="$home/bin/fm-session-authority-exec.sh"
+  local real_exec="$home/bin/.fm-real-session-authority-exec.sh"
+  local provisioner="$primary/bin/fm-rotation-primary-provision.sh"
+  local request="$home/state/.test-rotation-request"
+  local root_ready="$home/state/.test-rotation-root-ready"
+  local ticket_ready="$home/state/.test-rotation-ticket-ready"
+  local launch_ready="$home/.test-rotation-launch"
+  local enrollment="$state/.session-authority-enrollment"
+  local random_bin="$home/test-bin" old_pid old_start old_owner
+  local quoted_home quoted_primary quoted_root_ready
+  local signer_pid signer_public signer_digest nonce consumer_private
+  local consumer_public consumer_digest accepted_digest tmp external_custodian
+  sleep 2
+  mkdir -p "$home/bin" "$state" "$primary/bin" "$primary_state" "$random_bin"
+  fm_git_init_commit "$home"
+  fm_git_init_commit "$primary"
+  git -C "$home" branch -M main
+  git -C "$primary" branch -M main
+  cat > "$random_bin/od" <<'SH'
+#!/usr/bin/env bash
+case "${3:-}" in
+  48) printf '%096d\n' 0 | tr 0 a ;;
+  32) printf '%064d\n' 0 | tr 0 a ;;
+  *) exec /usr/bin/od "$@" ;;
+esac
+SH
+  chmod 700 "$random_bin/od"
+  cp "$ROOT"/bin/*.sh "$home/bin/"
+  cp "$ROOT/bin/fm-session-authority-broker.py" "$home/bin/"
+  cp "$ROOT"/bin/*.sh "$primary/bin/"
+  cp "$ROOT/bin/fm-session-authority-broker.py" "$primary/bin/"
+  chmod 700 "$home/bin"/*.sh "$home/bin/fm-session-authority-broker.py" \
+    "$primary/bin"/*.sh "$primary/bin/fm-session-authority-broker.py"
+  cp "$launch_script" "$real_exec"
+  printf -v quoted_home '%q' "$home"
+  printf -v quoted_primary '%q' "$primary"
+  printf -v quoted_root_ready '%q' "$root_ready"
+  awk -v home="$quoted_home" -v primary="$quoted_primary" \
+    -v root_ready="$quoted_root_ready" '
+    /^fm_session_authority_admission_release \|\| \{/ {
+      print "fm_session_primary_root_write alpha " home " " primary " " primary " bootstrap || exit 1"
+      print "printf root-ready > " root_ready
+    }
+    { print }
+  ' "$primary/bin/fm-session-authority-exec.sh" \
+    > "$primary/bin/.fm-session-authority-exec.sh.tmp"
+  chmod 700 "$primary/bin/.fm-session-authority-exec.sh.tmp"
+  mv "$primary/bin/.fm-session-authority-exec.sh.tmp" \
+    "$primary/bin/fm-session-authority-exec.sh"
+  (
+    cd "$home" || exit 1
+    exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      PATH="$random_bin:$PATH" bash "$launch_script" \
+      bash -c 'while :; do sleep 60; done'
+  ) > "$state/.test-old-primary.log" 2>&1 &
+  old_pid=$!
+  ROTATION_CUSTODIAN_PID=
+  for _ in $(seq 1 1000); do
+    [ -f "$state/.session-durable-authority" ] && break
+    sleep 0.02
+  done
+  [ -f "$state/.session-authority" ] \
+    && [ -f "$state/.session-authority-live" ] \
+    && [ -f "$state/.session-durable-authority" ] \
+    || { cat "$state/.test-old-primary.log" >&2; \
+      fail "old primary did not publish rotation authority"; }
+  printf '%s\n' alpha > "$home/.fm-secondmate-home"
+  ROTATION_CUSTODIAN_PID=$(sed -n '2s/^pid=//p' \
+    "$state/.session-durable-authority")
+  old_owner=$(sed -n '2s/^pid=//p' "$state/.session-authority")
+  kill "$old_pid" 2>/dev/null || true
+  wait "$old_pid" 2>/dev/null || true
+  kill -0 "$old_owner" 2>/dev/null \
+    && fail "old rotation authority remained live"
+  consumer_private=$(openssl ecparam -name prime256v1 -genkey -noout)
+  consumer_public=$(printf '%s\n' "$consumer_private" \
+    | openssl ec -pubout 2>/dev/null | openssl base64 -A)
+  consumer_digest=$(printf '%s' "$consumer_public" | openssl base64 -d -A \
+    | openssl dgst -sha256 | sed 's/^.*= //')
+  printf '%s\n' "$consumer_private" > "$state/.test-rotation-consumer-private"
+  printf '%s\n' "$consumer_public" > "$state/.test-rotation-consumer-public"
+  printf '%s\n' "$consumer_digest" > "$state/.test-rotation-consumer-digest"
+  chmod 600 "$state/.test-rotation-consumer-private"
+  mkfifo "$request"
+  cat > "$launch_script" <<SH
+#!/usr/bin/env bash
+set -eu
+main() {
+while [ ! -f "$launch_ready" ]; do sleep 0.02; done
+exec 18< <(while :; do printf '%s\\n' "$(printf '%096d' 0 | tr 0 a)"; done)
+export FM_SESSION_AUTHORITY_DURABLE_FD=18
+export FM_SESSION_ENROLLMENT_SIGNER_PID=\$(cat "$state/.test-rotation-signer-pid")
+export FM_SESSION_ENROLLMENT_NONCE=\$(sed -n '7s/^nonce=//p' "$enrollment")
+export FM_SESSION_ENROLLMENT_PUBLIC_KEY=\$(sed -n '17s/^public-key=//p' "$enrollment")
+export FM_SESSION_ENROLLMENT_PUBLIC_SHA256=\$(sed -n '18s/^public-key-sha256=//p' "$enrollment")
+export FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY=\$(cat "$state/.test-rotation-consumer-public")
+export FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256=\$(cat "$state/.test-rotation-consumer-digest")
+export FM_SESSION_ENROLLMENT_CONSUMER_PRIVATE_KEY=\$(cat "$state/.test-rotation-consumer-private")
+. "$home/bin/fm-session-lock-lib.sh"
+mkdir -p "$state/.secondmate-launch-receipts"
+start=\$(fm_session_process_start "\$\$")
+identity=\$(fm_session_process_identity "\$\$")
+fm_session_launch_receipt_write \\
+  "$state/.secondmate-launch-receipts/alpha" alpha "$home" "\$\$" \\
+  "\$start" "\$identity" "\$FM_SESSION_ENROLLMENT_NONCE"
+export ROTATE_OUTPUT="$state/.test-rotation.started" \\
+  ROTATE_RELEASE="$state/.test-rotation-release"
+exec "$launch_script" \\
+  --enrollment-launch "\$FM_SESSION_ENROLLMENT_NONCE" \\
+  --enrollment-consumer-key "\$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_KEY" \\
+  --enrollment-consumer-key-sha256 "\$FM_SESSION_ENROLLMENT_CONSUMER_PUBLIC_SHA256" \\
+  bash -c 'printf started > "\$ROTATE_OUTPUT"; while [ ! -e "\$ROTATE_RELEASE" ]; do sleep 0.02; done'
+}
+main "\$@"
+SH
+  chmod 700 "$launch_script"
+  cat > "$provisioner" <<SH
+#!/usr/bin/env bash
+set -eu
+. "$primary/bin/fm-session-lock-lib.sh"
+while [ ! -f "$root_ready" ]; do sleep 0.02; done
+IFS='|' read -r endpoint endpoint_start endpoint_identity < "$request"
+fm_session_enrollment_signer_prepare
+export FM_SESSION_AUTHORITY_BROKER_SCRIPT="$primary/bin/fm-session-authority-exec.sh"
+"$primary/bin/fm-session-enrollment-signer.sh" \\
+  --public-sha256 "\$FM_SESSION_ENROLLMENT_PUBLIC_SHA256" \\
+  "$enrollment" alpha "$home" "$primary" "\$endpoint" \\
+  "\$endpoint_start" "\$endpoint_identity" > "$state/.test-rotation-signer.log" 2>&1 &
+signer=\$!
+printf '%s\n' "\$signer" > "$state/.test-rotation-signer-pid"
+touch "$ticket_ready"
+wait "\$signer"
+SH
+  chmod 700 "$provisioner"
+  (
+    cd "$home" || exit 1
+    exec env FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      FM_AGENT_ROLE=secondmate FM_AGENT_TASK=alpha \
+      FM_AGENT_OWNER_HOME="$home" "$launch_script"
+  ) > "$state/.test-rotation-launch.log" 2>&1 &
+  LAUNCH_PID=$!
+  launch_start=$(test_process_start "$LAUNCH_PID") || return 1
+  launch_identity=$(test_process_identity "$LAUNCH_PID") || return 1
+  (
+    cd "$primary" || exit 1
+    exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_HOME="$primary" FM_ROOT_OVERRIDE="$primary" \
+      PATH="$primary/test-bin:$PATH" "$primary/bin/fm-session-authority-exec.sh" \
+      "$provisioner"
+  ) > "$primary_state/.test-rotation-primary.log" 2>&1 &
+  ROTATION_PRIMARY_SETUP_PID=$!
+  for _ in $(seq 1 1000); do
+    [ -f "$root_ready" ] && break
+    sleep 0.02
+  done
+  [ -f "$root_ready" ] || {
+    cat "$primary_state/.test-rotation-primary.log" >&2
+    fail "production primary did not publish the secondary root"
+  }
+  printf '%s|%s|%s\n' "$LAUNCH_PID" "$launch_start" "$launch_identity" > "$request"
+  for _ in $(seq 1 1000); do
+    [ -f "$ticket_ready" ] && [ -f "$enrollment.ready" ] && break
+    sleep 0.02
+  done
+  [ -f "$enrollment" ] && [ -f "$enrollment.ready" ] \
+    || {
+      cat "$state/.test-rotation-signer.log" >&2 2>/dev/null || true
+      fail "production signer did not publish the enrollment ticket"
+    }
+  cp "$real_exec" "$launch_script"
+  touch "$launch_ready"
+  for _ in $(seq 1 1000); do
+    [ -f "$enrollment.accepted" ] && break
+    sleep 0.02
+  done
+  [ -f "$enrollment.accepted" ] || {
+    cat "$state/.test-rotation-signer.log" >&2 2>/dev/null || true
+    fail "production signer did not publish acceptance"
+  }
+  external_custodian=$(sed -n '2s/^pid=//p' \
+    "$primary_state/.session-durable-authority" 2>/dev/null || true)
+  [ -z "$external_custodian" ] || kill "$external_custodian" 2>/dev/null || true
+}
+
 test_same_home_secondmate_rotation_uses_admission_capability() {
-  local exec_source lock_source
-  exec_source=$(cat "$ROOT/bin/fm-session-authority-exec.sh")
-  lock_source=$(cat "$ROOT/bin/fm-session-lock-lib.sh")
-  [[ "$exec_source" == *'if [ "${FM_AGENT_ROLE:-}" = secondmate ]'* ]] \
-    && [[ "$exec_source" == *'fm_session_authority_live_descriptor_rotate'* ]] \
-    || fail "same-home secondmate launch does not exercise live rotation"
-  [[ "$lock_source" == *'fm_session_authority_admission_acquire'* ]] \
-    && [[ "$lock_source" == *'fm_session_authority_admission_release'* ]] \
-    || fail "live descriptor rotation is not admission-bound"
-  pass "same-home secondmate rotation uses authenticated admission"
+  local rotation_home="$TMP_ROOT/rotation-home" output attempts=0
+  local live_pid live_start live_identity live_descriptor
+  rm -f "$rotation_home/state/.test-rotation-release" \
+    "$rotation_home/state/.test-rotation.started"
+  prepare_rotation_launch "$rotation_home"
+  output="$TMP_ROOT/rotation-output"
+  while [ "$attempts" -lt 1000 ] \
+    && { [ ! -f "$rotation_home/state/.test-rotation.started" ] \
+      || [ ! -f "$rotation_home/state/.session-authority-live" ] \
+      || [ "$(sed -n '2s/^pid=//p' \
+        "$rotation_home/state/.session-authority-live" 2>/dev/null)" \
+        != "$LAUNCH_PID" ]; }; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -f "$rotation_home/state/.test-rotation.started" ] \
+    || { [ ! -f "$rotation_home/state/.test-launch.log" ] \
+      || cat "$rotation_home/state/.test-launch.log" >&2; \
+      fail "real secondmate wrapper did not start its child"; }
+  live_pid=$(sed -n '2s/^pid=//p' "$rotation_home/state/.session-authority-live")
+  live_start=$(sed -n '3s/^start=//p' "$rotation_home/state/.session-authority-live")
+  live_identity=$(sed -n '4s/^identity=//p' \
+    "$rotation_home/state/.session-authority-live")
+  live_descriptor=$(sed -n '6s/^descriptor=//p' \
+    "$rotation_home/state/.session-authority-live")
+  [ "$live_pid" = "$LAUNCH_PID" ] \
+    && [ "$live_start" = "$(test_process_start "$LAUNCH_PID")" ] \
+    && [ "$live_identity" = "$(test_process_identity "$LAUNCH_PID")" ] \
+    && [ "$live_descriptor" = "$(readlink "/proc/$LAUNCH_PID/fd/9")" ] \
+    || fail "real secondmate rotation did not publish its live binding"
+  : > "$rotation_home/state/.test-rotation-release"
+  attempts=0
+  while [ "$attempts" -lt 250 ] && kill -0 "$LAUNCH_PID" 2>/dev/null; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  kill -0 "$LAUNCH_PID" 2>/dev/null \
+    && fail "real secondmate wrapper did not release its child"
+  pass "same-home secondmate rotation publishes an authenticated live binding"
 }
 
 broker_hmac() {
@@ -1582,6 +1886,11 @@ broker_library_hmac() {
   broker_hmac "$HOME_DIR" secondmate library
 }
 
+if [ "${FM_SESSION_AUTHORITY_BROKER_FOCUS:-}" = rotation ]; then
+  test_same_home_secondmate_rotation_uses_admission_capability
+  exit 0
+fi
+
 mkdir -p "$STATE" "$FOREIGN_HOME"
 prepare_launch "$HOME_DIR"
 start_broker
@@ -1589,7 +1898,6 @@ start_broker
   || fail "authority broker record was not private"
 test_same_home_secondmate_admission_allows_hmac_before_release
 test_same_home_secondmate_admission_serializes_independent_holders
-test_same_home_secondmate_rotation_uses_admission_capability
 
 live=$(broker_hmac "$HOME_DIR" secondmate live) \
   || fail "same-home secondmate could not use live broker authority"
@@ -1924,5 +2232,6 @@ long_home_live=$(broker_hmac "$HOME_DIR" secondmate live) \
 [ "${#long_home_live}" -eq 64 ] \
   || fail "long-home authority broker returned a malformed digest"
 pass "peer-credential broker supports homes beyond the filesystem socket path limit"
+test_same_home_secondmate_rotation_uses_admission_capability
 
 echo "# all fm-session-authority-broker tests passed"

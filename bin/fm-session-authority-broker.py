@@ -871,8 +871,9 @@ def open_record_lock(
 
 
 class AuthorityRecordLock:
-    def __init__(self, fd: int):
+    def __init__(self, fd: int, *, socket_lock: bool = False):
         self.fd = fd
+        self.socket_lock = socket_lock
         self.closed = False
 
     def fileno(self) -> int:
@@ -887,16 +888,11 @@ def close_record_lock(
     if isinstance(descriptor, AuthorityRecordLock):
         if descriptor.closed:
             return
+        descriptor.closed = True
         try:
-            fcntl.flock(descriptor.fd, fcntl.LOCK_UN)
+            os.close(descriptor.fd)
         except OSError:
             pass
-        finally:
-            descriptor.closed = True
-            try:
-                os.close(descriptor.fd)
-            except OSError:
-                pass
         return
     if isinstance(descriptor, socket.socket):
         try:
@@ -908,111 +904,35 @@ def close_record_lock(
     os.close(descriptor)
 
 
-def authority_admission_path(
-    state: Path, launch_evidence: tuple[bytes, int, str, str]
-) -> Path:
-    root_key = launch_evidence[0]
+def authority_admission_socket_name(root_key: bytes, home: str) -> bytes:
     digest = hmac.new(
         root_key,
-        b"firstmate/session-authority-broker/admission/v1\0"
-        + canonical(str(state)).encode("utf-8"),
+        b"firstmate/session-authority-broker/admission/socket/v1\0"
+        + canonical(home).encode("utf-8"),
         hashlib.sha256,
-    ).hexdigest()
-    return state / f".session-authority-admission-{digest}.lock"
+    ).hexdigest().encode("ascii")
+    return b"\0firstmate-authority-" + digest
 
 
-def authority_admission_lock_contents(
-    state: Path, root_key: bytes
-) -> bytes:
-    body = f"version=1\nstate={canonical(str(state))}\n".encode("utf-8")
-    digest = hmac.new(root_key, body, hashlib.sha256).hexdigest()
-    return body + f"hmac={digest}\n".encode("ascii")
-
-
-def open_authority_admission_lock(
-    state: Path, launch_evidence: tuple[bytes, int, str, str]
-) -> tuple[int, Path] | None:
-    path = authority_admission_path(state, launch_evidence)
-    expected = authority_admission_lock_contents(state, launch_evidence[0])
-    descriptor = -1
-    published = False
-    temporary: Path | None = None
-
-    def remove_published_path() -> None:
-        if not published or descriptor < 0:
-            return
-        try:
-            current_stat = os.fstat(descriptor)
-            path_stat = path.lstat()
-            if (
-                current_stat.st_dev == path_stat.st_dev
-                and current_stat.st_ino == path_stat.st_ino
-            ):
-                path.unlink()
-        except OSError:
-            pass
-
-    def remove_temporary() -> None:
-        if temporary is None:
-            return
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
-
-    try:
-        try:
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{path.name}.", dir=str(path.parent)
-            )
-            temporary = Path(temporary_name)
-            os.fchmod(descriptor, 0o600)
-            offset = 0
-            while offset < len(expected):
-                written = os.write(descriptor, expected[offset:])
-                if written <= 0:
-                    raise OSError("short authority lock publication")
-                offset += written
-            os.fsync(descriptor)
-            rename_noreplace(temporary, path)
-            temporary = None
-            published = True
-            directory = os.open(
-                path.parent,
-                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0),
-            )
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except FileExistsError:
-            remove_temporary()
-            if descriptor >= 0:
-                os.close(descriptor)
-                descriptor = -1
-            descriptor = os.open(
-                path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
-            )
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            if os.read(descriptor, len(expected) + 1) != expected:
-                raise OSError("invalid authority lock publication")
-        descriptor_stat = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(descriptor_stat.st_mode)
-            or descriptor_stat.st_uid != os.geteuid()
-            or descriptor_stat.st_mode & 0o077
-        ):
-            raise OSError("unsafe authority lock publication")
-        return descriptor, path
-    except (OSError, ValueError):
-        remove_published_path()
-        remove_temporary()
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+def open_authority_admission_capability(
+    root_key: bytes, home: str, *, blocking: bool
+) -> AuthorityRecordLock | None:
+    if len(root_key) < 32 or not home or not os.path.isabs(home):
         return None
+    address = authority_admission_socket_name(root_key, home)
+    deadline = time.monotonic() + AUTHORITY_LOCK_TIMEOUT_SECONDS
+    while True:
+        descriptor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            descriptor.bind(address)
+            return AuthorityRecordLock(descriptor.detach(), socket_lock=True)
+        except OSError as error:
+            descriptor.close()
+            if error.errno != errno.EADDRINUSE:
+                return None
+            if not blocking or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
 
 
 def open_authority_record_lock(
@@ -1032,60 +952,9 @@ def open_authority_record_lock(
         f"{home}/bin/fm-session-authority-exec.sh"
     ):
         return None
-    opened = open_authority_admission_lock(state, launch_evidence)
-    if opened is None:
-        return None
-    descriptor, path = opened
-    try:
-        if descriptor != AUTHORITY_SERIALIZATION_FD:
-            os.dup2(descriptor, AUTHORITY_SERIALIZATION_FD)
-            os.close(descriptor)
-            descriptor = AUTHORITY_SERIALIZATION_FD
-        lock = acquire_authority_record_lock(
-            descriptor, blocking=blocking, expected_path=path
-        )
-        if lock is None:
-            os.close(descriptor)
-        return lock
-    except OSError:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        return None
-
-
-def acquire_authority_record_lock(
-    fd: int, *, blocking: bool, expected_path: Path | None = None
-) -> AuthorityRecordLock | None:
-    if fd != AUTHORITY_SERIALIZATION_FD:
-        return None
-    try:
-        descriptor_stat = os.fstat(fd)
-        if (
-            not stat.S_ISREG(descriptor_stat.st_mode)
-            or descriptor_stat.st_uid != os.geteuid()
-            or descriptor_stat.st_mode & 0o077
-        ):
-            return None
-        if expected_path is not None:
-            fd_path = os.readlink(f"/proc/self/fd/{fd}")
-            expected = canonical(str(expected_path))
-            if fd_path not in {expected, f"{expected} (deleted)"}:
-                return None
-    except OSError:
-        return None
-    deadline = time.monotonic() + AUTHORITY_LOCK_TIMEOUT_SECONDS
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return AuthorityRecordLock(fd)
-        except OSError as error:
-            if error.errno not in {errno.EACCES, errno.EAGAIN}:
-                return None
-            if not blocking or time.monotonic() >= deadline:
-                return None
-            time.sleep(0.01)
+    return open_authority_admission_capability(
+        launch_evidence[0], home, blocking=blocking
+    )
 
 
 def inherited_authority_record_lock(
@@ -1097,13 +966,37 @@ def inherited_authority_record_lock(
         launch_script
     ) != canonical(f"{home}/bin/fm-session-authority-exec.sh"):
         return None
-    return acquire_authority_record_lock(
-        fd,
-        blocking=False,
-        expected_path=authority_admission_path(
-            Path(canonical(home)) / "state", launch_evidence
-        ),
-    )
+    probe = None
+    duplicate = -1
+    try:
+        duplicate = os.dup(fd)
+        probe = socket.socket(fileno=duplicate)
+        duplicate = -1
+        expected = authority_admission_socket_name(
+            launch_evidence[0], canonical(home)
+        )
+        if probe.getsockname() != expected:
+            return None
+        return AuthorityRecordLock(fd, socket_lock=True)
+    except (OSError, ValueError):
+        return None
+    finally:
+        if probe is not None:
+            probe.close()
+        if duplicate >= 0:
+            os.close(duplicate)
+
+
+def move_authority_record_lock(
+    lock: AuthorityRecordLock, target_fd: int
+) -> AuthorityRecordLock:
+    if lock.fileno() == target_fd:
+        os.set_inheritable(target_fd, True)
+        return lock
+    source_fd = lock.fileno()
+    os.dup2(source_fd, target_fd)
+    os.close(source_fd)
+    return AuthorityRecordLock(target_fd, socket_lock=True)
 
 
 def serve(args: argparse.Namespace) -> int:
@@ -1144,6 +1037,13 @@ def serve(args: argparse.Namespace) -> int:
             launch_script=launch_script, launch_evidence=launch_evidence
         )
     if record_lock_fd is None:
+        return 1
+    try:
+        record_lock_fd = move_authority_record_lock(
+            record_lock_fd, AUTHORITY_SERIALIZATION_FD
+        )
+    except OSError:
+        close_record_lock(record_lock_fd)
         return 1
     try:
         return serve_locked(
@@ -1222,7 +1122,9 @@ def supervise(args: argparse.Namespace) -> int:
             recovery_args, launch_evidence=launch_evidence, lease=record_lock_fd
         ) != 0:
             return 1
-        os.set_inheritable(AUTHORITY_SERIALIZATION_FD, True)
+        record_lock_fd = move_authority_record_lock(
+            record_lock_fd, AUTHORITY_SERIALIZATION_FD
+        )
         install_evidence_bytes(evidence)
         os.execv(
             sys.executable,
@@ -2253,6 +2155,8 @@ def client(args: argparse.Namespace) -> int:
 
 
 def lock_holder(args: argparse.Namespace) -> int:
+    connection: socket.socket | None = None
+    control: socket.socket | None = None
     try:
         metadata = read_record(Path(args.record))
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -2264,7 +2168,6 @@ def lock_holder(args: argparse.Namespace) -> int:
             else socket_value
         )
         if not connected_peer_matches_record(connection, metadata):
-            connection.close()
             return 1
         nonce = read_process_fd_line(os.getpid(), args.capability_fd)
         body = b"firstmate/session-authority/admission/v1\0" + nonce.encode()
@@ -2274,9 +2177,9 @@ def lock_holder(args: argparse.Namespace) -> int:
         if response[:1] != b"O" or any(
             value not in b"0123456789abcdef" for value in response[1:]
         ):
-            connection.close()
             return 1
         connection.close()
+        connection = None
         release_body = (
             b"firstmate/session-authority/admission/release/v1\0"
             + nonce.encode()
@@ -2291,7 +2194,6 @@ def lock_holder(args: argparse.Namespace) -> int:
             else socket_value
         )
         if not connected_peer_matches_record(control, metadata):
-            control.close()
             return 1
         control.sendall(struct.pack("!cI", b"R", len(release_body)) + release_body)
         control_response = recv_exact(
@@ -2300,27 +2202,41 @@ def lock_holder(args: argparse.Namespace) -> int:
         if control_response[:1] != b"O" or any(
             value not in b"0123456789abcdef" for value in control_response[1:]
         ):
-            control.close()
             return 1
         print("LOCKED", flush=True)
         print(f"PID {os.getpid()}", flush=True)
         command = sys.stdin.buffer.readline()
         if command != b"RELEASE\n":
-            control.close()
             return 1
         control.settimeout(BROKER_REQUEST_TIMEOUT_SECONDS)
         control.sendall(b"RELEASE\n")
         control.close()
+        control = None
         return 0
     except (OSError, UnicodeError, ValueError):
         return 1
+    finally:
+        if connection is not None:
+            connection.close()
+        if control is not None:
+            control.close()
 
 
 def primary_lock_holder(args: argparse.Namespace) -> int:
-    descriptor = -1
     lock: AuthorityRecordLock | None = None
     try:
         if args.root_fd != AUTHORITY_SERIALIZATION_FD:
+            return 1
+        state = Path(canonical(args.state))
+        home = canonical(args.home)
+        if (
+            state.name != "state"
+            or canonical(str(state.parent)) != home
+            or not state.is_dir()
+            or state.is_symlink()
+            or canonical(args.launch_script)
+            != canonical(f"{home}/bin/fm-session-authority-exec.sh")
+        ):
             return 1
         caller = int(args.caller_pid)
         caller_generation = process_generation(caller)
@@ -2328,28 +2244,17 @@ def primary_lock_holder(args: argparse.Namespace) -> int:
             return 1
         if not (
             process_runs_script(caller, canonical(args.launch_script))
-            or process_runs_script(caller, f"{canonical(args.home)}/bin/fm-lock.sh")
+            or process_runs_script(caller, f"{home}/bin/fm-lock.sh")
         ):
             return 1
-        if canonical(os.readlink(f"/proc/{caller}/cwd")) != canonical(args.home):
+        if canonical(os.readlink(f"/proc/{caller}/cwd")) != home:
             return 1
         key = read_process_fd_line(os.getpid(), args.root_fd)
         descriptor_identity_value = descriptor_identity(os.getpid(), args.root_fd)
         if descriptor_identity(caller, args.root_fd) != descriptor_identity_value:
             return 1
-        opened = open_authority_admission_lock(
-            Path(canonical(args.state)),
-            (bytes.fromhex(key), os.getpid(), "", ""),
-        )
-        if opened is None:
-            return 1
-        descriptor, path = opened
-        if descriptor != AUTHORITY_SERIALIZATION_FD:
-            os.dup2(descriptor, AUTHORITY_SERIALIZATION_FD)
-            os.close(descriptor)
-            descriptor = AUTHORITY_SERIALIZATION_FD
-        lock = acquire_authority_record_lock(
-            descriptor, blocking=True, expected_path=path
+        lock = open_authority_admission_capability(
+            bytes.fromhex(key), home, blocking=True
         )
         if lock is None:
             return 1
@@ -2363,11 +2268,6 @@ def primary_lock_holder(args: argparse.Namespace) -> int:
     finally:
         if lock is not None:
             close_record_lock(lock)
-        elif descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
 
 
 def parse_args() -> argparse.Namespace:

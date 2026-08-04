@@ -839,7 +839,7 @@ fm_session_authority_socket_broker_start_locked() {
 
 fm_session_authority_socket_broker_start() {
   local state=$1 home=$2 checkout=$3 task=$4 script record launch_script
-  local recovery_lock status
+  local attempts=0
   script="$checkout/bin/fm-session-authority-broker.py"
   record="$state/.session-authority-broker"
   launch_script="$home/bin/fm-session-authority-exec.sh"
@@ -852,18 +852,15 @@ fm_session_authority_socket_broker_start() {
     && [ -f "$home/.fm-secondmate-home" ] \
     && [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] \
     || return 1
-  if ! type fm_lock_try_acquire >/dev/null 2>&1; then
-    FM_WAKE_LIB_READ_ONLY=1
-    # shellcheck source=/dev/null
-    . "$_FM_SESSION_LOCK_LIB_DIR/fm-wake-lib.sh"
-  fi
-  recovery_lock="$state/.session-authority-broker-recovery.lock"
-  fm_lock_try_acquire "$recovery_lock" '' "$home" "$launch_script" || return 1
-  status=0
-  fm_session_authority_socket_broker_start_locked \
-    "$state" "$home" "$checkout" "$task" || status=$?
-  fm_lock_release "$recovery_lock" || status=1
-  return "$status"
+  while [ "$attempts" -lt 100 ]; do
+    fm_session_authority_socket_broker_present && return 0
+    fm_session_authority_socket_broker_start_locked \
+      "$state" "$home" "$checkout" "$task" || true
+    fm_session_authority_socket_broker_present && return 0
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  return 1
 }
 
 fm_session_authority_capability_present() {
@@ -3072,6 +3069,7 @@ fm_session_primary_root_validate() {
 
 fm_session_primary_root_write() {
   local task=$1 home=$2 primary_home=$3 primary_checkout=$4
+  local capability_mode=${5:-}
   local root home_real primary_real checkout authority lock binding
   local authority_pid authority_start authority_identity authority_owner
   local authority_fd authority_descriptor durable_descriptor authority_sha body
@@ -3083,7 +3081,11 @@ fm_session_primary_root_write() {
   [ -f "$home_real/.fm-secondmate-home" ] \
     && [ ! -L "$home_real/.fm-secondmate-home" ] \
     && [ "$(cat "$home_real/.fm-secondmate-home" 2>/dev/null)" = "$task" ] || return 1
-  fm_session_authority_record_capability_present || return 1
+  case "$capability_mode" in
+    '') fm_session_authority_record_capability_present || return 1 ;;
+    bootstrap) fm_session_authority_primary_bootstrap_capability_present || return 1 ;;
+    *) return 1 ;;
+  esac
   fm_session_authority_durable_capability_present || return 1
   authority="$primary_real/state/.session-authority"
   lock="$primary_real/state/.lock"
