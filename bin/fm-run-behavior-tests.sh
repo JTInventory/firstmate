@@ -2051,6 +2051,12 @@ if ! copy_worktree_delta; then
   printf 'FAIL: could not overlay current working-tree contents\n' >&2
   exit 1
 fi
+runner_job="$suite_tmp/fm-run-behavior-job.sh"
+if ! cp -a -- "$ROOT/bin/fm-run-behavior-job.sh" "$runner_job" \
+  || [ ! -f "$runner_job" ] || [ -L "$runner_job" ]; then
+  printf 'FAIL: could not provision the private behavior-test job runner\n' >&2
+  exit 125
+fi
 if [ -f "$test_root/bin/fm-gate-refuse-lib.sh" ]; then
   cat > "$test_root/bin/fm-gate-refuse-lib.sh" <<'SH'
 FM_GATE_REFUSE_EXIT=3
@@ -2514,7 +2520,7 @@ while [ "$index" -lt "$total" ]; do
     bounded_script="$job_root/bounded-group.pl"
     printf '%s' "$FM_TEST_BOUNDED_GROUP_PERL" >"$bounded_script" || exit 125
     printf 'START: %s (TMPDIR=%s GOTMPDIR=%s)\n' "$test_path" "$job_root/tmp" "$job_root/gotmp"
-    if ! supervisor_handle_launch "$test_id" "$test_root/bin/fm-run-behavior-job.sh" \
+    if ! supervisor_handle_launch "$test_id" "$runner_job" \
       "$test_path" "$job_root" "$log_path" "$start_gate" "$abort_gate" \
       "$test_root" "$test_timeout" "$bounded_script"; then
       printf 'FAIL: could not bind an active behavior-test supervisor (%s)\n' "$SUPERVISOR_HANDLE_RESPONSE" >&2

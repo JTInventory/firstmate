@@ -46,18 +46,26 @@ set -u
 LOG="${FM_HERDR_LOG:?}"
 RESP="${FM_HERDR_RESPONSES:?}"
 COUNT_FILE="$RESP/.count"
-next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
-{
-  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
-  for a in "$@"; do printf '\x1f%s' "$a"; done
-  printf '\n'
-} >> "$LOG"
+COUNT_LOCK="$RESP/.count.lock"
+log_line="HERDR_SESSION=${HERDR_SESSION:-}"
+for a in "$@"; do log_line+=$'\x1f'"$a"; done
+printf '%s\n' "$log_line" >> "$LOG"
+if [ "${1:-}" = --session ]; then
+  [ "$#" -ge 2 ] || exit 2
+  shift 2
+fi
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
-n=$next
-echo "$n" > "$COUNT_FILE"
+attempt=0
+while ! mkdir "$COUNT_LOCK" 2>/dev/null; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 1000 ] || exit 125
+done
+n=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$COUNT_FILE"
+rmdir "$COUNT_LOCK"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -96,12 +104,14 @@ make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state fi
 set -u
 LOG="${FM_HERDR_LOG:?}"
 STATE="${FM_FAKE_HERDR_STATE:?}"
-{
-  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
-  for a in "$@"; do printf '\x1f%s' "$a"; done
-  printf '\n'
-} >> "$LOG"
+log_line="HERDR_SESSION=${HERDR_SESSION:-}"
+for a in "$@"; do log_line+=$'\x1f'"$a"; done
+printf '%s\n' "$log_line" >> "$LOG"
 
+if [ "${1:-}" = --session ]; then
+  [ "$#" -ge 2 ] || exit 2
+  shift 2
+fi
 jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 
@@ -297,7 +307,7 @@ test_workspace_label_different_secondmates_get_different_labels() {
 
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
-test_cli_helper_sets_env_and_appends_trailing_session_flag() {
+test_cli_helper_sets_env_and_leading_session_flag() {
   local dir log resp fb
   dir="$TMP_ROOT/cli-helper"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
@@ -305,11 +315,11 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
     bash -c '# shellcheck source=/dev/null
 . "${!FM_TEST_HERDR_VAR}"; fm_backend_herdr_cli fmtest workspace list' "$ROOT"
   expect_code 0 $? "fm_backend_herdr_cli should succeed"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''workspace'$'\x1f''list' \
+  assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest" \
     "fm_backend_herdr_cli did not set the HERDR_SESSION env var"
-  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list'$'\x1f''--session'$'\x1f''fmtest' \
-    "fm_backend_herdr_cli did not append a trailing --session <name> flag (the fix for the env-var-alone routing bug)"
-  pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''--session'$'\x1f''fmtest'$'\x1f''workspace'$'\x1f''list' \
+    "fm_backend_herdr_cli did not prepend a --session <name> flag (the fix for the env-var-alone routing bug)"
+  pass "fm_backend_herdr_cli: sets HERDR_SESSION AND prepends a --session flag on every call"
 }
 
 # --- container_ensure / create_task ------------------------------------------
@@ -334,7 +344,7 @@ test_container_ensure_starts_server_and_workspace() {
     bash -c '# shellcheck source=/dev/null
 . "${!FM_TEST_HERDR_VAR}"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w1\tw1:t9' ] || fail "container_ensure should echo '<session>:<workspace_id>\\t<seeded_default_tab_id>', got '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''server' "container_ensure did not start the herdr server"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''--session'$'\x1f''fmtest'$'\x1f''server' "container_ensure did not start the herdr server"
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate' \
     "container_ensure did not create the firstmate workspace with the given cwd"
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
@@ -903,7 +913,7 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
         "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" \
         "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
         "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
-    ' "$ROOT" "$state") || fail "projection create should succeed from complete exact responses"
+    ' "$ROOT" "$state") || fail "projection create should succeed from complete exact responses (calls: $(cat "$log"))"
   [ "$out" = "w9 w9:t1 w9:p1 w9:t2 w9:p2" ] || fail "projection create did not retain exact response IDs: $out"
   journal="$state/task-p2.herdr-presentation"
   token=$(bash -c '# shellcheck source=/dev/null
@@ -1574,7 +1584,7 @@ test_projected_abort_cleanup_holds_presentation_lock() {
   lock="$dir/presentation.lock"
   started="$dir/cleanup-started"
   proceed="$dir/cleanup-proceed"
-  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  function_source=$(sed -n '/^spawn_herdr_flat_uncertainty_record()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
   ROOT="$ROOT" LOCK="$lock" STARTED="$started" PROCEED="$proceed" FUNCTION_SOURCE="$function_source" bash -c '
     . "${!FM_TEST_WAKE_VAR}"
     eval "$FUNCTION_SOURCE"
@@ -1589,6 +1599,13 @@ test_projected_abort_cleanup_holds_presentation_lock() {
     HERDR_PROJECTION_ABORT_SESSION=fmtest
     HERDR_PROJECTION_ABORT_TASK_PANE=w9:p2
     HERDR_PROJECTION_ABORT_SEEDED_PANE=w9:p1
+    BACKEND=herdr
+    HERDR_SES=fmtest
+    HERDR_WORKSPACE_ID=w9
+    HERDR_TAB_ID=w9:t2
+    HERDR_PANE_ID=w9:p2
+    ENDPOINT_GENERATION=test-generation
+    fm_backend_endpoint_identity_matches() { return 0; }
     ORCA_ABORT_CLEANUP=0
     SPAWN_TASK_LOCK_HELD=0
     spawn_abort_cleanup
@@ -1638,6 +1655,13 @@ test_flat_abort_cleanup_is_locked_focus_safe_and_durable() {
     HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
     HERDR_FLAT_ABORT_UNCERTAIN=0
     HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/task-a.herdr-cleanup-uncertain"
+    BACKEND=herdr
+    HERDR_SES=fmtest
+    HERDR_WORKSPACE_ID=w9
+    HERDR_TAB_ID=w9:t4
+    HERDR_PANE_ID=w9:p4
+    ENDPOINT_GENERATION=test-generation
+    fm_backend_endpoint_identity_matches() { return 0; }
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     ORCA_ABORT_CLEANUP=0
     SPAWN_TASK_LOCK_HELD=0
@@ -1666,6 +1690,13 @@ test_flat_abort_cleanup_is_locked_focus_safe_and_durable() {
     HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
     HERDR_FLAT_ABORT_UNCERTAIN=0
     HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/task-a.herdr-cleanup-uncertain"
+    BACKEND=herdr
+    HERDR_SES=fmtest
+    HERDR_WORKSPACE_ID=w9
+    HERDR_TAB_ID=w9:t4
+    HERDR_PANE_ID=w9:p4
+    ENDPOINT_GENERATION=test-generation
+    fm_backend_endpoint_identity_matches() { return 0; }
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     ORCA_ABORT_CLEANUP=0
     SPAWN_TASK_LOCK_HELD=0
@@ -1830,7 +1861,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   close_line=$(grep -n $'pane\x1fclose\x1fw2:p2' "$log" | cut -d: -f1)
   [ -n "$create_line" ] && [ -n "$close_line" ] && [ "$create_line" -lt "$close_line" ] \
     || fail "reclaim did not create the exact replacement before closing the old husk"
-  [ "$(sed -n "$((close_line - 1))p" "$log")" = $'HERDR_SESSION=fmtest\x1fagent\x1fget\x1fw2:p2\x1f--session\x1ffmtest' ] \
+  [ "$(sed -n "$((close_line - 1))p" "$log")" = $'HERDR_SESSION=fmtest\x1f--session\x1ffmtest\x1fagent\x1fget\x1fw2:p2' ] \
     || fail "reclaim did not recheck the old pane agent state at the exact close boundary"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
   assert_not_contains "$calls" $'workspace\x1frename' "reclaim renamed the projected workspace"
@@ -2047,7 +2078,7 @@ test_capture_calls_pane_read() {
     bash -c '# shellcheck source=/dev/null
 . "${!FM_TEST_HERDR_VAR}"; fm_backend_herdr_capture default:w1:p2 250' "$ROOT" )
   [ "$out" = $'line one\nline two\nline three' ] || fail "capture did not pass through pane read output, got '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''--session'$'\x1f''default'$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
     "capture did not call pane read with the right pane id and line bound"
   pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N' with the session set"
 }
@@ -2081,7 +2112,7 @@ test_capture_preserves_pane_read_failure() {
 . "${!FM_TEST_HERDR_VAR}"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "capture should fail when pane read fails, got output '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''--session'$'\x1f''default'$'\x1f''status'$'\x1f''--json' \
     "capture did not ensure the herdr server before reading the pane"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
     "capture did not try to read the requested pane"
@@ -3268,7 +3299,7 @@ test_dispatch_composer_state_routes_by_backend() {
 }
 
 test_scripts_route_explicit_target_through_meta_backend() {
-  local dir state log resp fb neutral script_root out
+  local dir state log resp fb neutral out send_out send_status
   dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   neutral="$dir/neutral-root"
@@ -3276,12 +3307,18 @@ test_scripts_route_explicit_target_through_meta_backend() {
   printf 'neutral\n' > "$neutral/README.md"
   git -C "$neutral" add README.md
   git -C "$neutral" commit -qm neutral
-  script_root="$dir/repo"
-  mkdir -p "$script_root"
-  cp -a "$ROOT/bin" "$script_root/bin"
-  fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
+  cp -a "$ROOT/bin" "$neutral/bin"
+  fm_write_meta "$state/herdr-stale.meta" \
+    "window=default:w1:p2" "backend=herdr" \
+    "endpoint_generation=endpoint-herdr-stale" \
+    "herdr_session=default" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2" \
+    "worktree=$neutral" "project=$neutral" "kind=secondmate" \
+    "task=herdr-stale" "home=$neutral"
   touch "$state/.last-watcher-beat"
   printf 'captured herdr pane\n' > "$resp/1.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -3299,16 +3336,19 @@ SH
     "fm-peek did not route the explicit stale target through herdr capture"
 
   : > "$log"
-  # fm-send deliberately refuses every fleet mutation from a no-mistakes gate
-  # worktree. Run this positive routing fixture from a normal temporary source
-  # copy so the gate-path safety contract cannot mask the selector assertion.
-  (
+  fm_test_primary_authority_setup "$dir/authority" \
+    || fail "could not provision the explicit-target primary authority fixture"
+  fm_test_primary_identity_bind "$neutral" "$neutral" "$state" \
+    || fail "could not bind the explicit-target primary authority fixture"
+  send_out=$( (
     cd "$neutral" || exit 1
     env -u NO_MISTAKES_GATE PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" \
       FM_STATE_OVERRIDE="$state" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-      "$script_root/bin/fm-send.sh" default:w1:p2 --key Escape >/dev/null 2>&1
-  )
-  expect_code 0 $? "fm-send --key should route an explicit metadata-matched target through herdr"
+      "$ROOT/bin/fm-send.sh" default:w1:p2 --key Escape >/dev/null
+  ) 2>&1 )
+  send_status=$?
+  expect_code 0 "$send_status" \
+    "fm-send --key should route an explicit metadata-matched target through herdr (output: ${send_out:-<none>})"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''escape' \
     "fm-send did not route the explicit stale target through herdr send-key"
 
@@ -3570,6 +3610,10 @@ make_herdr_eventfake() {  # <dir> -> echoes fakebin dir
 set -u
 LOG="${FM_HERDR_LOG:-/dev/null}"
 { printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$LOG"
+if [ "${1:-}" = --session ]; then
+  [ "$#" -ge 2 ] || exit 2
+  shift 2
+fi
 cmd=${1:-}; sub=${2:-}
 case "$cmd $sub" in
   "status --json")
@@ -3896,7 +3940,7 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
-test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_cli_helper_sets_env_and_leading_session_flag
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag

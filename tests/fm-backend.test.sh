@@ -44,6 +44,7 @@ case "${1:-}" in
   display-message)
     for arg in "$@"; do
       case "$arg" in
+        *pane_pid*) printf '%s\n' "${FM_FAKE_TMUX_PANE_PID:?}"; exit 0 ;;
         *pane_id*) printf '%%1\n'; exit 0 ;;
         *window_id*) printf '@1\n'; exit 0 ;;
         *cursor_y*) printf '0\n'; exit 0 ;;
@@ -56,7 +57,7 @@ case "${1:-}" in
   list-panes) printf '%%1\n' ;;
   show-options)
     case "$*" in
-      *firstmate_endpoint_generation*) printf 'endpoint-kill-fail\n' ;;
+      *firstmate_endpoint_generation*) printf '%s\n' "${FM_FAKE_TMUX_GENERATION:-endpoint-demo}" ;;
     esac
     ;;
   kill-window)
@@ -67,6 +68,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '-o tpgid= -p '*|'-o pgid= -p '* )
+    printf '%s\n' "${FM_FAKE_TMUX_PANE_PID:?}"
+    ;;
+  *)
+    exec /usr/bin/ps "$@"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
   printf '%s\n' "$fakebin"
 }
 
@@ -93,6 +106,8 @@ test_selection_and_metadata() {
 test_spawn_rejects_unknown_selection() {
   local config="$TMP_ROOT/spawn-selection-config" out
   mkdir -p "$config"
+  fm_test_primary_authority_setup "$TMP_ROOT/spawn-selection-authority" \
+    || fail "could not provision the spawn-selection authority fixture"
 
   out=$(FM_SPAWN_NO_GUARD=1 FM_BACKEND=orca "$ROOT/bin/fm-spawn.sh" 2>&1) \
     && fail "FM_BACKEND=orca should stop spawn before argument/project validation"
@@ -116,17 +131,22 @@ test_selector_and_dispatch() {
   fakebin=$(make_fake_tmux "$dir")
   log="$dir/tmux.log"; : > "$log"
   state="$dir/state"
-  fm_write_meta "$state/demo.meta" "window=firstmate:fm-demo"
-  fm_write_meta "$state/foo.meta" "window=firstmate:fm-foo"
-  fm_write_meta "$state/fm-foo.meta" "window=firstmate:fm-fm-foo"
+  fm_write_meta "$state/demo.meta" "window=@1" "tmux_pane_id=%1" \
+    "endpoint_generation=endpoint-demo"
+  fm_write_meta "$state/foo.meta" "window=@1" "tmux_pane_id=%1" \
+    "endpoint_generation=endpoint-demo"
+  fm_write_meta "$state/fm-foo.meta" "window=@1" "tmux_pane_id=%1" \
+    "endpoint_generation=endpoint-demo"
+  FM_TMUX_LOG="$log"
+  PATH="$fakebin:$PATH"; export PATH FM_TMUX_LOG
 
   [ "$(fm_backend_resolve_selector sess:win "$state")" = sess:win ] \
     || fail "explicit session:window selector changed"
-  [ "$(fm_backend_resolve_selector fm-demo "$state")" = firstmate:fm-demo ] \
+  [ "$(fm_backend_resolve_selector fm-demo "$state")" = %1 ] \
     || fail "fm-<id> selector did not use metadata"
-  [ "$(fm_backend_resolve_selector fm-foo "$state")" = firstmate:fm-foo ] \
+  [ "$(fm_backend_resolve_selector fm-foo "$state")" = %1 ] \
     || fail "fm-<id> selector did not retain its stripped-id meaning"
-  [ "$(fm_backend_resolve_selector fm-fm-foo "$state")" = firstmate:fm-fm-foo ] \
+  [ "$(fm_backend_resolve_selector fm-fm-foo "$state")" = %1 ] \
     || fail "fm-prefixed task id was not addressable through its canonical selector"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_resolve_selector adhoc "$state")
   [ "$out" = firstmate:adhoc ] || fail "bare selector did not use fake tmux inventory"
@@ -251,7 +271,8 @@ test_backend_failures_propagate() {
 }
 
 test_teardown_preserves_state_on_kill_failure() {
-  local dir fakebin fake_root log project state treehouse_log worktree out
+  local dir fakebin fake_root log project state treehouse_log worktree out worker_pid
+  local worker_start worker_identity
   dir="$TMP_ROOT/teardown-kill-failure"
   fake_root="$dir/root"
   project="$dir/project"
@@ -279,13 +300,19 @@ SH
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake_root/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake_root/bin/fm-pr-lib.sh"
   ln -s "$ROOT/bin/fm-worker-isolation-lib.sh" "$fake_root/bin/fm-worker-isolation-lib.sh"
-  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake_root/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-isolation-sweep.sh" "$fake_root/bin/fm-isolation-sweep.sh"
+  ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake_root/bin/fm-agent-cwd-lib.sh"
   ln -s "$ROOT/bin/fm-procargs-lib.sh" "$fake_root/bin/fm-procargs-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake_root/bin/fm-wake-lib.sh"
   ln -s "$ROOT/bin/fm-slot-owner-lib.sh" "$fake_root/bin/fm-slot-owner-lib.sh"
-  ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake_root/bin/fm-agent-cwd-lib.sh"
   : > "$fake_root/bin/fm-pending-reply-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake_root/bin/fm-gate-refuse-lib.sh"
+  cat > "$fake_root/bin/fm-session-lock-lib.sh" <<SH
+. "$ROOT/bin/fm-session-lock-lib.sh"
+# This fixture isolates endpoint retirement after the worker-sweep gate; the
+# production authority gate is covered by the dedicated session-authority tests.
+fm_session_authority_capability_present() { return 0; }
+SH
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -315,13 +342,31 @@ SH
     "mode=no-mistakes"
   printf 'working\n' > "$state/kill-fail.status"
 
+  (
+    cd "$worktree" || exit 1
+    exec setsid env FM_AGENT_TASK=kill-fail FM_AGENT_OWNER_HOME="$fake_root" \
+      FM_AGENT_ROLE=crewmate sleep 900
+  ) &
+  worker_pid=$!
+  worker_start=$(fm_session_process_start "$worker_pid")
+  worker_identity=$(fm_session_process_identity "$worker_pid")
+  mkdir -p "$state/.worker-launch-receipts"
+  fm_session_launch_receipt_write \
+    "$state/.worker-launch-receipts/kill-fail" kill-fail "$fake_root" \
+    "$worker_pid" "$worker_start" "$worker_identity" \
+    || fail "could not record the fake worker launch receipt"
   if out=$(cd "$fake_root" && PATH="$fakebin:$PATH" FM_HOME="$fake_root" \
     FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" \
     FM_TMUX_LOG="$log" FM_TREEHOUSE_LOG="$treehouse_log" \
-    FM_FAKE_TMUX_KILL_FAIL=1 \
+    FM_FAKE_TMUX_KILL_FAIL=1 FM_FAKE_TMUX_PANE_PID="$worker_pid" \
+    FM_FAKE_TMUX_GENERATION=endpoint-kill-fail \
     "$fake_root/bin/fm-teardown.sh" kill-fail --force 2>&1); then
+    kill "$worker_pid" 2>/dev/null || true
+    wait "$worker_pid" 2>/dev/null || true
     fail "teardown swallowed a backend kill failure"
   fi
+  kill "$worker_pid" 2>/dev/null || true
+  wait "$worker_pid" 2>/dev/null || true
   assert_contains "$out" \
     "error: endpoint retirement failed; preserving recoverable transaction evidence" \
     "teardown did not report the failed backend kill"

@@ -368,7 +368,12 @@ test_afk_transition_lock_fails_on_io_error() {
   mkdir -p "$state" "$fakebin"
   cat > "$fakebin/mktemp" <<'SH'
 #!/usr/bin/env bash
-exit 1
+for arg in "$@"; do
+  case "$arg" in
+    */.afk-transition.lock.owner.*) exit 1 ;;
+  esac
+done
+exec /usr/bin/mktemp "$@"
 SH
   chmod +x "$fakebin/mktemp"
   if out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \

@@ -426,7 +426,9 @@ test_bounded_runner_uses_stable_containment() {
     "behavior runner must record the released job identity"
   assert_contains "$source" 'FM_TEST_SUPERVISOR_JOB_REAPER_PID_FILE' \
     "behavior runner must record the released-job reaper identity"
-  assert_contains "$source" 'supervisor_handle_launch "$test_id" "$test_root/bin/fm-run-behavior-job.sh"' \
+  assert_contains "$source" 'runner_job="$suite_tmp/fm-run-behavior-job.sh"' \
+    "behavior runner must provision private job control"
+  assert_contains "$source" 'supervisor_handle_launch "$test_id" "$runner_job"' \
     "behavior runner must retain each supervisor pidfd before launch"
   assert_contains "$source" 'supervisor_handle_request "signal|$key"' \
     "behavior runner must signal supervisors through retained pidfds"
@@ -867,6 +869,32 @@ test_serial_mode_remains_serial() {
   pass "FM_TEST_JOBS=1 preserves serial fixture execution"
 }
 
+test_runner_control_survives_fixture_repo_mutation() {
+  local fixture output fixture_output rc
+  fixture=$(make_fixture_root control-mutation)
+  rm -f "$fixture/tests/fail-b.test.sh"
+  cat > "$fixture/tests/mutate-runner.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+rm -f -- "$ROOT/bin/fm-run-behavior-job.sh"
+printf '%s\n' deleted > "$FM_FIXTURE_OUTPUT_DIR/runner-job-deleted"
+SH
+  chmod +x "$fixture/tests/mutate-runner.test.sh"
+  output="$TMP_ROOT/control-mutation.out"
+  set +e
+  fixture_output=$(run_fixture "$fixture" 1 "$output")
+  rc=$?
+  set -u
+  expect_code 0 "$rc" "a fixture must not be able to delete the runner job"
+  assert_grep 'PASS: tests/mutate-runner.test.sh' "$output" \
+    "the destructive fixture did not run"
+  assert_grep 'PASS: tests/pass-a.test.sh' "$output" \
+    "the runner did not launch a job after fixture control-file mutation"
+  [ "$(cat "$fixture_output/runner-job-deleted")" = deleted ] \
+    || fail "the control-file mutation fixture did not delete its clone copy"
+  pass "behavior runner keeps its job control outside the mutable fixture repo"
+}
+
 test_supported_linux_test_reports_completion_and_reaps_cleanly() {
   if [ "$(uname -s)" != Linux ]; then
     pass "skip supported Linux behavior-test lifecycle regression outside Linux"
@@ -982,6 +1010,7 @@ test_pre_control_open_teardown_is_bounded
 test_pidfd_handles_do_not_follow_stale_pids
 test_gate_refusal_has_a_hard_timeout
 test_serial_mode_remains_serial
+test_runner_control_survives_fixture_repo_mutation
 test_supported_linux_test_reports_completion_and_reaps_cleanly
 test_unsupported_platform_exits_125_before_tool_checks
 test_delta_overlay_contract_is_checked_and_portable
