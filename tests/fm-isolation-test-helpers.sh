@@ -32,7 +32,7 @@ fm_session_test_authority_broker_present() {
 }
 
 fm_worker_test_authority_capability_present() {
-  local live_fd durable_fd key live_identity test_live_identity
+  local live_fd durable_fd key live_key durable_key live_identity test_live_identity
   [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   . "$ROOT/bin/fm-session-lock-lib.sh"
@@ -54,12 +54,17 @@ fm_worker_test_authority_capability_present() {
   [ "$(fm_session_descriptor_identity "$$" "$durable_fd" 2>/dev/null || true)" = \
     "$(fm_session_descriptor_identity "$$" "$FM_TEST_DURABLE_AUTHORITY_FD" 2>/dev/null || true)" ] \
     || return 1
-  IFS= read -r key <&"$live_fd" || return 1
-  [ "${#key}" -ge 64 ] || return 1
-  case "$key" in *[!0-9a-f]*) return 1 ;; esac
-  IFS= read -r key <&"$durable_fd" || return 1
-  [ "${#key}" -ge 64 ] || return 1
-  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  fm_worker_test_primary_identity_lock_acquire || return 1
+  if ! IFS= read -r live_key <&"$live_fd" \
+    || ! IFS= read -r durable_key <&"$durable_fd"; then
+    fm_worker_test_primary_identity_lock_release || true
+    return 1
+  fi
+  fm_worker_test_primary_identity_lock_release || return 1
+  for key in "$live_key" "$durable_key"; do
+    [ "${#key}" -ge 64 ] || return 1
+    case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  done
   FM_WORKER_TEST_AUTHORITY_FD=$live_fd
   FM_WORKER_TEST_DURABLE_AUTHORITY_FD=$durable_fd
 }
@@ -98,6 +103,17 @@ fm_worker_test_primary_identity_lock_release() {
     && [ "$(cat "$lock/owner" 2>/dev/null)" = "$owner" ] || return 1
   rm -f "$lock/owner" && rmdir "$lock" || return 1
   FM_WORKER_TEST_PRIMARY_IDENTITY_LOCK=
+}
+
+fm_worker_test_primary_identity_lock_validate() {
+  local broker=${FM_TEST_AUTHORITY_BROKER_PID:-} tmp lock
+  case "$broker" in ''|*[!0-9]*) return 1 ;; esac
+  tmp=$(fm_worker_canonical_path "${TMPDIR:-/tmp}") || return 1
+  [ -d "$tmp" ] && [ ! -L "$tmp" ] || return 1
+  lock="$tmp/.fm-test-primary-identity-$broker.lock"
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  fi
 }
 
 fm_test_authority_live_binding_write() {

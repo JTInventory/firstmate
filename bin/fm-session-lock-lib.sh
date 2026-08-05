@@ -3567,11 +3567,41 @@ fm_codex_thread_active() {
 }
 
 fm_session_lock_owner() {
-  local pid=$$ parent fd=${FM_SESSION_AUTHORITY_FD:-}
-  local current target
+  local pid=$$ parent fd=${FM_SESSION_AUTHORITY_FD:-} durable_fd
+  local current target harness
   fm_session_authority_capability_present || return 1
-  target=$(fm_session_descriptor_identity "$pid" "$fd" 2>/dev/null || true)
-  if [ -n "$target" ]; then
+  harness=
+  if fm_session_test_authority_broker_present; then
+    if [ "${FM_TEST_SESSION_LOCK_STABLE_OWNER:-0}" = 1 ]; then
+      harness=${FM_TEST_AUTHORITY_OWNER_PID:-}
+      case "$harness" in
+        ''|*[!0-9]*) harness= ;;
+        *)
+          durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+          if ! kill -0 "$harness" 2>/dev/null \
+            || { ! fm_session_pid_is_current_ancestor "$harness" \
+              && [ "$(fm_session_descriptor_identity \
+                    "$$" "$fd" 2>/dev/null || true)" != \
+                  "$(fm_session_descriptor_identity \
+                    "$harness" "$fd" 2>/dev/null || true)" ] \
+              && [ "$(fm_session_descriptor_identity \
+                    "$$" "$durable_fd" 2>/dev/null || true)" != \
+                  "$(fm_session_descriptor_identity \
+                    "$harness" "$durable_fd" 2>/dev/null || true)" ]; }; then
+            harness=
+          fi
+          ;;
+      esac
+    else
+      harness=$$
+    fi
+  fi
+  if [ -n "$harness" ]; then
+    pid=$harness
+  else
+    target=$(fm_session_descriptor_identity "$pid" "$fd" 2>/dev/null || true)
+  fi
+  if [ -z "$harness" ] && [ -n "$target" ]; then
     while [ "$pid" -gt 1 ]; do
       parent=$(fm_session_parent_pid "$pid") || return 1
       [ "$parent" != "$pid" ] || return 1
@@ -3583,7 +3613,11 @@ fm_session_lock_owner() {
   fm_session_process_start "$pid" >/dev/null || return 1
   fm_session_process_identity "$pid" >/dev/null || return 1
   if fm_codex_thread_active; then
-    printf '%s|codex:%s|descriptor\n' "$pid" "$CODEX_THREAD_ID"
+    if fm_session_test_authority_broker_present; then
+      printf '%s|codex:%s|capability\n' "$pid" "$CODEX_THREAD_ID"
+    else
+      printf '%s|codex:%s|descriptor\n' "$pid" "$CODEX_THREAD_ID"
+    fi
     return
   fi
   printf '%s\n' "$pid"

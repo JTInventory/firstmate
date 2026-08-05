@@ -282,6 +282,7 @@ fm_worker_primary_bootstrap_matches() {
 fm_worker_primary_authority_matches_unlocked() {
   local operation=${1:-} root home root_real home_real cwd branch default ref
   local pid ppid env binding lock authority old marker authority_state binding_bound=0
+  local test_tmp test_state test_bind_state='' legacy_test_state root_top
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
@@ -289,6 +290,69 @@ fm_worker_primary_authority_matches_unlocked() {
   root_real=$(fm_worker_canonical_path "$root") || return 1
   home_real=$(fm_worker_canonical_path "$home") || return 1
   cwd=$(pwd -P) || return 1
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
+    test_tmp=$(fm_worker_canonical_path "${TMPDIR:-}") || return 1
+    if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+      test_state=$(fm_worker_canonical_path "$FM_STATE_OVERRIDE") || return 1
+      case "$test_state" in "$test_tmp"/*) ;; *) return 1 ;; esac
+      test_bind_state=$test_state
+      if [ -z "${FM_HOME:-}" ]; then
+        home_real=$(fm_worker_canonical_path "${test_state%/*}") || return 1
+      fi
+    fi
+    case "$root_real:$home_real" in
+      "$cwd:$cwd"|"$cwd:$test_tmp"|"$cwd:$test_tmp"/*|\
+      "$test_tmp"/*:"$test_tmp"/*|*:"$test_tmp"/*) ;;
+      *) return 1 ;;
+    esac
+    root_top=$(git -C "$root_real" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ "$root_real" = "$home_real" ] \
+      && [ "$(fm_worker_canonical_path "$root_top" 2>/dev/null || true)" \
+        = "$root_real" ] \
+      && [ -z "${FM_ROOT_OVERRIDE:-}" ] \
+      && [ -z "${FM_HOME:-}" ] \
+      && [ -z "${FM_STATE_OVERRIDE:-}" ]; then
+      fm_worker_test_authority_capability_present
+      return
+    fi
+    legacy_test_state=${test_bind_state:-$home_real/state}
+    if [ "$operation" = "session lock acquisition" ] \
+      && [ -f "$legacy_test_state/.primary-checkout" ] \
+      && [ ! -L "$legacy_test_state/.primary-checkout" ] \
+      && [ "$(cat "$legacy_test_state/.primary-checkout" 2>/dev/null)" \
+        = "$root_real" ] \
+      && [ -f "$legacy_test_state/.lock" ] \
+      && [ ! -L "$legacy_test_state/.lock" ] \
+      && [ ! -e "$legacy_test_state/.session-authority" ] \
+      && [ ! -L "$legacy_test_state/.session-authority" ]; then
+      . "$_FM_WORKER_ISOLATION_LIB_DIR/fm-session-lock-lib.sh"
+      fm_session_test_authority_broker_present
+      return
+    fi
+    if [ -n "$test_bind_state" ] || [ "$root_real" != "$home_real" ] \
+      || [ "$(fm_worker_canonical_path "$root_top" 2>/dev/null || true)" \
+        != "$root_real" ]; then
+      [ -n "$test_bind_state" ] || test_bind_state="$home_real/state"
+      fm_worker_test_authority_capability_present || return 1
+      if [ ! -e "$test_bind_state" ] && [ ! -L "$test_bind_state" ]; then
+        return 1
+      fi
+      if [ -e "$test_bind_state" ] || [ -L "$test_bind_state" ]; then
+        if [ -f "$test_bind_state" ] && [ ! -L "$test_bind_state" ]; then
+          return 0
+        fi
+        [ -d "$test_bind_state" ] && [ ! -L "$test_bind_state" ] || return 1
+      fi
+      FM_SESSION_AUTHORITY_FD=$FM_WORKER_TEST_AUTHORITY_FD
+      FM_SESSION_AUTHORITY_DURABLE_FD=$FM_WORKER_TEST_DURABLE_AUTHORITY_FD
+      export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD
+      if fm_worker_test_primary_identity_bind \
+        "$root_real" "$home_real" "$test_bind_state"; then
+        return 0
+      fi
+      [ "$operation" = "session lock acquisition" ] || return 1
+    fi
+  fi
   git -C "$root_real" rev-parse --git-dir >/dev/null 2>&1 || return 1
   branch=$(git -C "$root_real" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   ref=$(git -C "$root_real" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -389,6 +453,19 @@ fm_worker_isolation_sweep_current() {
 fm_worker_primary_authority_matches() {
   local operation=${1:-}
   fm_worker_isolation_sweep_current || return 2
+  if [ "${FM_TEST_PROCESS:-0}" != 1 ]; then
+    fm_worker_primary_authority_matches_unlocked "$operation"
+    return
+  fi
+  case "${FM_TEST_AUTHORITY_BROKER_PID:-}" in
+    ''|*[!0-9]*)
+      fm_worker_primary_authority_matches_unlocked "$operation"
+      return
+      ;;
+  esac
+  # Keep the hostile lock-path check, but leave the short capability-read lock
+  # inside the test-only helper. Do not hold it across the /proc proof.
+  fm_worker_test_primary_identity_lock_validate || return 1
   fm_worker_primary_authority_matches_unlocked "$operation"
 }
 

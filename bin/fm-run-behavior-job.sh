@@ -27,6 +27,8 @@ bounded_script=$8
   done
   [ -f "$start_gate" ] || exit 125
   cd "$test_root" || exit 1
+  export ROOT="$test_root"
+  export BASH_ENV="$test_root/tests/fm-isolation-test-helpers.sh"
   unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
     FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
   if [ "${FM_HERDR_ALLOW_AMBIENT:-0}" != 1 ]; then
