@@ -260,10 +260,10 @@ fm_worker_primary_bootstrap_matches() {
   common=$(git -C "$root_real" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
     || return 1
   common_real=$(fm_worker_canonical_path "$common") || return 1
-  common_birth=$(fm_session_path_birth_epoch "$common_real") || return 1
+  common_birth=$(fm_session_path_birth_epoch_nanos "$common_real") || return 1
   sid=$(fm_session_process_session_id "$$") || return 1
   [ "$sid" != "$$" ] || return 1
-  sid_start=$(fm_session_process_start_epoch "$sid") || return 1
+  sid_start=$(fm_session_process_start_epoch_nanos "$sid") || return 1
   [ "$sid_start" -lt "$common_birth" ] || return 1
   pid=$$
   while [ "$pid" -gt 1 ]; do

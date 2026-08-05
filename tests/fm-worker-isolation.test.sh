@@ -1031,9 +1031,6 @@ test_fresh_primary_requires_durable_session_binding() {
 
 test_fresh_primary_session_lock_enrolls_atomically() {
   local primary_home out status=0
-  # The bootstrap proof uses whole-second process and filesystem birth times.
-  # Keep the fresh repository strictly newer than this test session.
-  sleep 1
   primary_home=$(make_primary_home "$TMP_ROOT/fresh-enrollment")
   cp -R "$ROOT/bin/." "$primary_home/bin/"
   rm -rf "$primary_home/state"

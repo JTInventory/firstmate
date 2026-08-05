@@ -129,6 +129,50 @@ fm_session_path_birth_epoch() {
   printf '%s\n' "$value"
 }
 
+fm_session_process_start_epoch_nanos() {
+  local pid=$1 stat start ticks boot raw seconds
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -r "/proc/$pid/stat" ] && [ -r /proc/stat ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    stat=${stat##*) }
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    start=${20}
+    ticks=$(getconf CLK_TCK 2>/dev/null) || return 1
+    boot=$(sed -n 's/^btime //p' /proc/stat | head -n 1) || return 1
+    case "$start:$ticks:$boot" in *[!0-9:]*|:*|*::*|*:) return 1 ;; esac
+    [ "$ticks" -gt 0 ] || return 1
+    printf '%s\n' "$((boot * 1000000000 + start * 1000000000 / ticks))"
+    return
+  fi
+  raw=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  seconds=$(date -j -f '%a %b %e %T %Y' "$raw" '+%s' 2>/dev/null) || return 1
+  printf '%s\n' "$((seconds * 1000000000))"
+}
+
+fm_session_path_birth_epoch_nanos() {
+  local path=$1 value human
+  [ -e "$path" ] || return 1
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    value=$(stat -f '%B' "$path" 2>/dev/null) || return 1
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$value" -gt 0 ] || return 1
+    printf '%s\n' "$((value * 1000000000))"
+    return
+  fi
+  human=$(stat -c '%w' "$path" 2>/dev/null) || return 1
+  if [ "$human" != '-' ]; then
+    value=$(date -d "$human" '+%s%N' 2>/dev/null) || return 1
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#value}" -eq 19 ] || return 1
+    printf '%s\n' "$value"
+    return
+  fi
+  value=$(fm_session_path_birth_epoch "$path") || return 1
+  printf '%s\n' "$((value * 1000000000))"
+}
+
 fm_session_ancestry_reaches_session_leader() {
   local pid=$$ sid ppid
   sid=$(fm_session_process_session_id "$pid") || return 1
