@@ -177,11 +177,9 @@ if [ "${FM_TEST_AUTHORITY_PROVISION_PRIMARY:-0}" = 1 ]; then
   if ( : <&17 ) 2>/dev/null || ( : >&17 ) 2>/dev/null; then
     exec 17<&-
   fi
-  if ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
-    exec 18<&-
-  fi
-  broker_command='unset FM_TEST_AUTHORITY_PROVISION_PRIMARY; FM_TEST_AUTHORITY_BROKER_PID=$$ FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID; exec /usr/bin/bash "$1" /usr/bin/bash "$2"'
-  bash -c "$broker_command" fm-test-authority "$authority_real" "$fixture" &
+  broker_command='unset FM_TEST_AUTHORITY_PROVISION_PRIMARY; FM_TEST_AUTHORITY_BROKER_PID=$$ FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID; ROOT=$3; export ROOT; . "$3/bin/fm-session-lock-lib.sh"; exec 9<&19; FM_SESSION_AUTHORITY_FD=9 FM_SESSION_AUTHORITY_DURABLE_FD=18 FM_TEST_AUTHORITY_FD=9 FM_TEST_DURABLE_AUTHORITY_FD=18; export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD; fm_worker_test_primary_identity_bind "$3" "$4" "$5" || exit 1; exec 19<&-; exec /usr/bin/bash "$1" /usr/bin/bash "$2"'
+  bash -c "$broker_command" fm-test-authority "$authority_real" "$fixture" \
+    "$authority_checkout" "$authority_home" "$authority_state" &
 else
   broker_command='unset FM_TEST_AUTHORITY_PROVISION_PRIMARY; FM_TEST_AUTHORITY_BROKER_PID=$$ FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID; exec /usr/bin/bash "$1"'
   bash -c "$broker_command" fm-test-authority "$fixture" &

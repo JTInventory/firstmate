@@ -130,7 +130,7 @@ fm_test_authority_live_binding_write() {
   digest=${digest%% *}
   body=$(printf 'version=1\npid=%s\nstart=%s\nidentity=%s\nfd=%s\ndescriptor=%s\nkey-sha256=%s\n' \
     "$pid" "$start" "$identity" "$fd" "$descriptor" "$digest") || return 1
-  fm_session_authority_record_write "$file" "$body"
+  fm_session_authority_record_write "$file" "${body}"$'\n'
 }
 
 fm_worker_test_primary_identity_bind() {
