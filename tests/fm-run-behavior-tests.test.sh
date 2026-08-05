@@ -162,7 +162,8 @@ else
 fi
 printf 'working-tree fixture pass\n'
 SH
-  chmod +x "$fixture/tests/working-tree.test.sh"
+# Keep this fixture non-executable: the authority launch must run shell tests
+# through Bash rather than requiring executable mode bits.
   printf '%s\n' "$fixture"
 }
 
