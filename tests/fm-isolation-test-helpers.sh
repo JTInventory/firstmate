@@ -5,7 +5,6 @@ fm_session_test_authority_broker_present() {
   local expected_harness expected_exec caller_target broker_target
   [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
   case "$broker" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$broker" != "$$" ] || return 1
   kill -0 "$broker" 2>/dev/null || return 1
   case "$harness" in ''|*[!0-9]*) return 1 ;; esac
   [ "$harness" != "$$" ] || return 1
@@ -13,6 +12,9 @@ fm_session_test_authority_broker_present() {
   expected_harness=$(cd "$_FM_SESSION_LOCK_LIB_DIR/../tests" 2>/dev/null \
     && pwd -P)/fm-test-authority-broker.sh || return 1
   expected_exec="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
+  if [ "$broker" = "$$" ]; then
+    fm_session_process_runs_script "$$" "$expected_exec" || return 1
+  fi
   [ "${FM_TEST_AUTHORITY_HARNESS:-0}" = 1 ] || return 1
   [ "${FM_TEST_AUTHORITY_HARNESS_SCRIPT:-}" = "$expected_harness" ] || return 1
   [ "${FM_TEST_AUTHORITY_EXEC_SCRIPT:-}" = "$expected_exec" ] || return 1
@@ -37,8 +39,8 @@ fm_worker_test_authority_capability_present() {
   case "${FM_AGENT_ROLE:-}" in ""|primary) ;; *) return 1 ;; esac
   . "$ROOT/bin/fm-session-lock-lib.sh"
   fm_session_test_authority_broker_present || return 1
-  live_fd=${FM_SESSION_AUTHORITY_FD:-${FM_TEST_AUTHORITY_FD:-}}
-  durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-${FM_TEST_DURABLE_AUTHORITY_FD:-}}
+  live_fd=${FM_TEST_AUTHORITY_FD:-${FM_SESSION_AUTHORITY_FD:-}}
+  durable_fd=${FM_TEST_DURABLE_AUTHORITY_FD:-${FM_SESSION_AUTHORITY_DURABLE_FD:-}}
   fm_session_descriptor_channel_isolated "$live_fd" \
     && fm_session_descriptor_channel_isolated "$durable_fd" \
     && fm_session_exec_descriptor_isolation_durable || return 1
