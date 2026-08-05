@@ -180,13 +180,7 @@ if [ "${FM_TEST_AUTHORITY_PROVISION_PRIMARY:-0}" = 1 ]; then
   if ( : <&18 ) 2>/dev/null || ( : >&18 ) 2>/dev/null; then
     exec 18<&-
   fi
-  # Preserve executable fixture identity; only working-tree shell fixtures
-  # without the mode bit need an explicit Bash interpreter.
-  if [ -x "$fixture" ]; then
-    broker_command='unset FM_TEST_AUTHORITY_PROVISION_PRIMARY; FM_TEST_AUTHORITY_BROKER_PID=$$ FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID; exec /usr/bin/bash "$1" "$2"'
-  else
-    broker_command='unset FM_TEST_AUTHORITY_PROVISION_PRIMARY; FM_TEST_AUTHORITY_BROKER_PID=$$ FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID; exec /usr/bin/bash "$1" /usr/bin/bash "$2"'
-  fi
+  broker_command='unset FM_TEST_AUTHORITY_PROVISION_PRIMARY; FM_TEST_AUTHORITY_BROKER_PID=$$ FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID; exec /usr/bin/bash "$1" /usr/bin/bash "$2"'
   bash -c "$broker_command" fm-test-authority "$authority_real" "$fixture" &
 else
   broker_command='unset FM_TEST_AUTHORITY_PROVISION_PRIMARY; FM_TEST_AUTHORITY_BROKER_PID=$$ FM_TEST_AUTHORITY_OWNER_PID=$$; export FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID; exec /usr/bin/bash "$1"'
