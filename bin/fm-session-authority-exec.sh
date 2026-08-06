@@ -8,8 +8,6 @@ case "$authority_platform:$authority_arch" in
   *) exit 125 ;;
 esac
 
-AUTHORITY_EXEC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-
 [ "$#" -gt 0 ] || {
   echo "usage: fm-session-authority-exec.sh command [args...]" >&2
   exit 2
