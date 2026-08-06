@@ -62,7 +62,7 @@
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
 #          numeric override, while non-numeric values fall back to 20s.
 #          When the override is unset or blank, the timeout is
-#          max(20, 5 + 3 * origin-backed project clone count). A timed-out
+#          max(20, 5 + 9 * origin-backed project clone count). A timed-out
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
@@ -127,7 +127,7 @@ fleet_sync_bootstrap_timeout() {
   fi
 
   count=$(fleet_sync_origin_backed_project_count)
-  timeout=$((5 + (3 * count)))
+  timeout=$((5 + (9 * count)))
   [ "$timeout" -ge 20 ] || timeout=20
   echo "$timeout"
 }

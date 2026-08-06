@@ -487,6 +487,92 @@ test_already_current_unchanged() {
   pass "already-current clone is reported unchanged"
 }
 
+test_incomplete_upstream_config_uses_resolved_origin_base() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" incomplete-upstream)
+  git -C "$clone" config branch.main.remote missing-fork
+  git -C "$clone" config --unset branch.main.merge
+  advance_origin "$home" incomplete-upstream C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "incomplete-upstream: synced" "incomplete upstream config falls back to origin base"
+  assert_not_contains "$out" "missing-fork" "incomplete upstream config does not select its remote"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "incomplete upstream config did not sync from origin/main"
+  pass "incomplete upstream config follows the resolved origin base"
+}
+
+test_local_upstream_with_slash_uses_local_base() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" local-upstream)
+  git -C "$clone" checkout -q -b release/main
+  commit_file "$clone" local.txt local "local release"
+  git -C "$clone" checkout -q main
+  git -C "$clone" config branch.main.remote .
+  git -C "$clone" config branch.main.merge refs/heads/release/main
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "local-upstream: synced" "local upstream branch is a valid sync base"
+  assert_not_contains "$out" "configured upstream remote" "local upstream does not require a remote fetch"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse release/main)" ] \
+    || fail "local upstream branch was not used as the sync base"
+  pass "local upstream with a slash uses its local branch base"
+}
+
+# Controlled-fork shape: main tracks fork/main (delivery) while origin still
+# fetches a diverged upstream owner. Sync must follow fork/main, not false-STUCK
+# against origin/main.
+test_controlled_fork_tracks_fork_not_stuck() {
+  local home clone out before delivery_tip up_work up_bare
+  home=$(new_home)
+  clone=$(build_pair "$home" forktrack)
+  # build_pair's bare origin is the delivery tip; rename it to "fork".
+  git -C "$clone" remote rename origin fork
+  git -C "$clone" branch --set-upstream-to=fork/main main
+
+  # Diverged upstream owner attached as origin (unrelated history).
+  up_work="$home/work-forktrack-up"
+  up_bare="$home/remotes/forktrack-up.git"
+  git init -q "$up_work"
+  git -C "$up_work" symbolic-ref HEAD refs/heads/main
+  commit_file "$up_work" upstream.txt v0 "upstream C0"
+  git clone --quiet --bare "$up_work" "$up_bare"
+  git -C "$clone" remote add origin "file://$(cd "$up_bare" && pwd)"
+  git -C "$clone" fetch -q origin
+
+  before=$(head_sha "$clone")
+  [ "$(git -C "$clone" rev-parse main)" = "$(git -C "$clone" rev-parse fork/main)" ] \
+    || fail "fixture main must equal fork/main"
+  [ "$(git -C "$clone" rev-parse main)" != "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "fixture origin/main must diverge from delivery"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forktrack: already current" "delivery-current fork reports already current"
+  assert_not_contains "$out" "STUCK" "delivery-current fork is not STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "delivery-current fork was moved"
+
+  git -C "$clone" config --unset-all remote.fork.fetch
+  git -C "$clone" config --add remote.fork.fetch '+refs/heads/main:refs/remotes/fork/release'
+  git -C "$clone" update-ref -d refs/remotes/fork/main
+  advance_origin "$home" forktrack C1
+  delivery_tip=$(git -C "$home/work-forktrack" rev-parse HEAD)
+  [ "$delivery_tip" != "$before" ] || fail "delivery remote did not advance"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forktrack: synced" "delivery-behind fork syncs from fork/main"
+  assert_not_contains "$out" "STUCK" "controlled-fork delivery match is not STUCK"
+  [ "$(head_sha "$clone")" = "$delivery_tip" ] || fail "controlled-fork clone did not follow delivery tip"
+  [ "$(git -C "$clone" rev-parse fork/main)" = "$delivery_tip" ] \
+    || fail "controlled-fork tracking ref was not refreshed"
+  pass "controlled-fork main follows a refreshed fork/main instead of origin"
+}
+
 test_no_origin_skipped() {
   local home clone out
   home=$(new_home)
@@ -625,6 +711,9 @@ test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
+test_incomplete_upstream_config_uses_resolved_origin_base
+test_local_upstream_with_slash_uses_local_base
+test_controlled_fork_tracks_fork_not_stuck
 test_no_origin_skipped
 test_local_only_skipped
 test_single_project_by_bare_name_resolves

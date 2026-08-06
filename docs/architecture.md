@@ -237,7 +237,7 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 ## Local clones stay fresh
 
 Bootstrap and PR-based teardown refresh remote-backed project clones when the clone is safe to move; `fm-fleet-sync.sh <name>` and `fm-fleet-sync.sh projects/<name>` resolve that one clone against the active home's projects directory without depending on the caller's working directory.
-Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
+Clean default-branch clones fast-forward to the local default branch's configured upstream (for example, `fork/main` in a controlled-fork checkout), falling back to `origin/<default>` when no upstream is configured. A clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs, using that sync base.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; the recovery emits a `recovered:` summary for bootstrap to relay.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
