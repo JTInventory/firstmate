@@ -561,7 +561,7 @@ The local behavior-test runner is `bin/fm-run-behavior-tests.sh`; its guard, par
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
-Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
+Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; `checks-passed` is done; a passed run is unknown and UNLANDED when `pr` or `ci` was skipped, done with a merged/closed claim only when `ci` completed and no delivery step was skipped, and otherwise done without a merge claim; failed or cancelled is failed.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
@@ -569,7 +569,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 - While fixing, `fm-crew-state.sh` exposes a defensively parsed `convergence-round=N` when the v1.37 status schema proves one and always reports `convergence-fingerprint=unavailable`; an unrecognized schema stays `convergence-round=unknown`. The read-only supervision model emits one medium captain decision when the configured round ceiling is reached, but never responds to, aborts, updates, or merges a run.
 - `awaiting_approval`/`fix_review` - the run is parked waiting on the agent, surfaced as a top-level `awaiting_agent: parked <duration>` line right after `status:` in `axi status`.
   The crewmate owes a response; if it is idle-waiting for the run to advance on its own, steer it to follow no-mistakes' active-gate help.
-- `outcome: passed` or `checks-passed` - the helper reports `done`; `passed` means the PR is already merged or closed, while `checks-passed` means it is ready for PR review.
+- `outcome: passed` - if the `pr` or `ci` step is `skipped`, the helper reports `unknown` and marks the work UNLANDED, so do not claim a merge; if `ci` is `completed` and no delivery step is skipped, it reports `done` with the PR merged/closed claim; with no delivery-step evidence, it reports `done` without inventing a merge. `checks-passed` reports `done` and means the PR is ready for review.
 - `outcome: failed` or `cancelled` - the helper reports `failed`; inspect the run details and recover or report failure with evidence.
 - Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns.
   Steer it back to no-mistakes' respond flow; the pipeline, not the crewmate, applies validation fixes.
