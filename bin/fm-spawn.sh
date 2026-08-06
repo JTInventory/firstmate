@@ -243,6 +243,9 @@ SPAWN_WORKTREE_PROVEN=0
 SPAWN_WORKTREE_PATH_SOURCE=
 SPAWN_META_PUBLISHED=0
 SPAWN_SLOT_STAMPED=0
+SPAWN_SLOT_LOCK_HELD=0
+SPAWN_SLOT_LOCK_PATH=
+SPAWN_WORKTREE_PATH=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -399,9 +402,16 @@ spawn_abort_cleanup() {
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
      && [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] \
      && [ "${SPAWN_SLOT_STAMPED:-0}" != 1 ] \
-     && [ -n "${WT:-}" ] \
-     && fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null; then
-    SPAWN_SLOT_STAMPED=1
+     && [ -n "${WT:-}" ]; then
+    if [ "${SPAWN_SLOT_LOCK_HELD:-0}" != 1 ] \
+       && fm_slot_lock_acquire "$WT"; then
+      SPAWN_SLOT_LOCK_PATH=$FM_SLOT_LOCK_PATH
+      SPAWN_SLOT_LOCK_HELD=1
+    fi
+    if [ "${SPAWN_SLOT_LOCK_HELD:-0}" = 1 ] \
+       && fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null; then
+      SPAWN_SLOT_STAMPED=1
+    fi
   fi
   if [ "$status" -ne 0 ] \
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
@@ -411,7 +421,7 @@ spawn_abort_cleanup() {
      && [ -n "${PROJ_ABS:-}" ] \
      && spawn_slot_stamp_owned; then
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
-      if fm_slot_stamp_clear "$WT"; then
+      if fm_slot_stamp_clear_after_return "$WT" "$ID"; then
         slot_returned=1
         if [ "${SPAWN_META_PUBLISHED:-0}" = 1 ]; then
           rm -f "$STATE/$ID.meta" || slot_returned=0
@@ -439,6 +449,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$SPAWN_SLOT_LOCK_HELD" = 1 ]; then
+    SPAWN_SLOT_LOCK_HELD=0
+    fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH" || true
   fi
   return "$status"
 }
@@ -1458,15 +1472,16 @@ esac
 SPAWN_ENDPOINT_CREATED=1
 spawn_settle_path() {  # <target>
   local record
+  SPAWN_WORKTREE_PATH=
   SPAWN_WORKTREE_PATH_SOURCE=
   record=$(fm_agent_cwd_verdict "" "$BACKEND" "$1")
   if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
     SPAWN_WORKTREE_PATH_SOURCE=proc
-    fm_agent_verdict_field "$record" cwd
+    SPAWN_WORKTREE_PATH=$(fm_agent_verdict_field "$record" cwd)
     return 0
   fi
   SPAWN_WORKTREE_PATH_SOURCE=hint
-  fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true
+  SPAWN_WORKTREE_PATH=$(fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true)
 }
 
 if [ "$KIND" != secondmate ]; then
@@ -1480,7 +1495,8 @@ if [ "$KIND" != secondmate ]; then
   # transient foreign cwd is retained only for the eventual diagnostic.
   WT_CANDIDATE=
   for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
-    p=$(spawn_settle_path "$WID")
+    spawn_settle_path "$WID"
+    p=$SPAWN_WORKTREE_PATH
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then
@@ -1645,6 +1661,12 @@ mkdir -p "$STATE"
 # worktree. Ordinary task workers must always have a stamp; linked secondmate
 # homes get the same proof when a pooled slot is actually involved.
 if [ -n "${WT:-}" ] && fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
+  if ! fm_slot_lock_acquire "$WT"; then
+    echo "error: could not serialize pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
+    exit 1
+  fi
+  SPAWN_SLOT_LOCK_PATH=$FM_SLOT_LOCK_PATH
+  SPAWN_SLOT_LOCK_HELD=1
   if ! fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null; then
     echo "error: could not prove pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
     exit 1
@@ -1755,6 +1777,12 @@ fi
 HERDR_FLAT_ABORT_CLEANUP=0
 fm_backend_send_key "$BACKEND" "$WID" Enter
 
+  if [ "$SPAWN_SLOT_LOCK_HELD" = 1 ]; then
+    if ! fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH"; then
+      exit 1
+    fi
+    SPAWN_SLOT_LOCK_HELD=0
+  fi
 trap - EXIT
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

@@ -165,6 +165,41 @@ fm_slot_stamp_clear() {
   [ ! -e "$path" ] && [ ! -L "$path" ]
 }
 
+fm_slot_lock_path() {
+  local wt=$1 stamp_path
+  stamp_path=$(fm_slot_stamp_path "$wt") || return 1
+  printf '%s.lock' "$stamp_path"
+}
+
+fm_slot_lock_acquire() {
+  local wt=$1 path
+  command -v fm_lock_acquire_wait >/dev/null 2>&1 || return 1
+  path=$(fm_slot_lock_path "$wt") || return 1
+  fm_lock_acquire_wait "$path" || return 1
+  FM_SLOT_LOCK_PATH=$path
+}
+
+fm_slot_lock_release() {
+  local path=${1:-${FM_SLOT_LOCK_PATH:-}}
+  [ -n "$path" ] || return 0
+  command -v fm_lock_release >/dev/null 2>&1 || return 1
+  fm_lock_release "$path"
+}
+
+fm_slot_stamp_clear_after_return() {
+  local wt=$1 task=$2 path
+  if [ ! -e "$wt" ] && [ ! -L "$wt" ]; then
+    return 0
+  fi
+  path=$(fm_slot_stamp_path "$wt") || return 1
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+  fm_slot_stamp_record "$wt" || return 1
+  [ "$FM_SLOT_STAMP_TASK" = "$task" ] || return 0
+  fm_slot_stamp_clear "$wt"
+}
+
 # fm_slot_meta_worktree <meta-file>: the recorded worktree path, or empty.
 fm_slot_meta_worktree() {
   local meta=$1
@@ -360,7 +395,7 @@ fm_slot_stamp_relinquish() {  # <worktree> <task-id> <verdict>
     "$FM_SLOT_RETAIN_META_PREFIX"*) ;;
     *) return 0 ;;
   esac
-  stamp_task=$(fm_slot_stamp_field "$wt" task) || return 0
+  stamp_task=$(fm_slot_stamp_field "$wt" task) || return 1
   [ "$stamp_task" = "$self" ] || return 0
   fm_slot_stamp_clear "$wt"
 }

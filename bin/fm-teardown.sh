@@ -79,6 +79,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-task-identity-lib.sh
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -249,6 +251,85 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   grep "^$key=" "$meta" | cut -d= -f2- || true
+}
+
+TOP_SLOT_RETURNED=
+TOP_SLOT_RETURNING=
+TOP_SLOT_RETURNED=$(meta_value "$META" slot_returned)
+TOP_SLOT_RETURNING=$(meta_value "$META" slot_returning)
+if [ "$TOP_SLOT_RETURNING" = 1 ]; then
+  echo "REFUSED: durable return for $ID is incomplete; preserving task state and lease" >&2
+  exit 1
+fi
+
+teardown_meta_set_slot_state() {
+  local meta=$1 state=$2 dir tmp rc
+  [ -f "$meta" ] || return 1
+  dir=$(dirname "$meta")
+  tmp=$(mktemp "$dir/.$(basename "$meta").slot-state.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  grep -vE '^slot_(returned|returning)=' "$meta" > "$tmp" || {
+    rc=$?
+    if [ "$rc" -ne 1 ]; then
+      rm -f "$tmp"
+      return 1
+    fi
+  }
+  printf 'slot_%s=1\n' "$state" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+}
+
+teardown_meta_mark_slot_returning() {
+  teardown_meta_set_slot_state "$1" returning
+}
+
+teardown_meta_mark_slot_returned() {
+  teardown_meta_set_slot_state "$1" returned
+}
+
+teardown_meta_backup_create() {
+  local meta=$1 dir
+  TEARDOWN_META_BACKUP=
+  [ -f "$meta" ] || return 1
+  dir=$(dirname "$meta")
+  TEARDOWN_META_BACKUP=$(mktemp "$dir/.$(basename "$meta").recovery.XXXXXX") || return 1
+  chmod 600 "$TEARDOWN_META_BACKUP" || {
+    rm -f "$TEARDOWN_META_BACKUP"
+    TEARDOWN_META_BACKUP=
+    return 1
+  }
+  if ! cp -p "$meta" "$TEARDOWN_META_BACKUP"; then
+    rm -f "$TEARDOWN_META_BACKUP"
+    TEARDOWN_META_BACKUP=
+    return 1
+  fi
+}
+
+teardown_meta_backup_restore() {
+  local meta=$1
+  [ -n "${TEARDOWN_META_BACKUP:-}" ] || return 1
+  mv "$TEARDOWN_META_BACKUP" "$meta" || return 1
+  TEARDOWN_META_BACKUP=
+}
+
+teardown_meta_backup_discard() {
+  if [ -n "${TEARDOWN_META_BACKUP:-}" ]; then
+    rm -f "$TEARDOWN_META_BACKUP" || return 1
+    TEARDOWN_META_BACKUP=
+  fi
+}
+
+teardown_cleanup_returned_slot() {
+  local wt=$1 id=$2 lock_path
+  [ -e "$wt" ] || [ -L "$wt" ] || return 0
+  fm_slot_stamp_path "$wt" >/dev/null 2>&1 || return 0
+  fm_slot_lock_acquire "$wt" || return 1
+  lock_path=$FM_SLOT_LOCK_PATH
+  if ! fm_slot_stamp_clear_after_return "$wt" "$id"; then
+    fm_slot_lock_release "$lock_path" || true
+    return 1
+  fi
+  fm_slot_lock_release "$lock_path"
 }
 
 teardown_herdr_endpoint_focus_safe() {
@@ -800,8 +881,22 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <label
 }
 
 remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scope]
-  local home=$1 label=$2 expected_id=${3:-} state_scope=${4:-$STATE} home_scope=${5:-$FM_HOME} abs_home_path
+  local home=$1 label=$2 expected_id=${3:-} state_scope=${4:-$STATE} home_scope=${5:-$FM_HOME} abs_home_path meta_id meta_path lock_path
   [ -n "$home" ] || return 0
+  meta_id=$expected_id
+  [ -n "$meta_id" ] || meta_id=$ID
+  meta_path="$state_scope/$meta_id.meta"
+  if [ "$(meta_value "$meta_path" slot_returning)" = 1 ]; then
+    echo "error: durable return for $label $home is incomplete; preserving task state" >&2
+    return 1
+  fi
+  if [ "$(meta_value "$meta_path" slot_returned)" = 1 ]; then
+    teardown_cleanup_returned_slot "$home" "${expected_id:-$ID}" || {
+      echo "error: could not clear the ownership stamp for returned $label $home; preserving task state" >&2
+      return 1
+    }
+    return 0
+  fi
   if [ ! -e "$home" ] && [ ! -L "$home" ]; then
     slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$home" \
       "$home_scope" "$label" refuse unknown "" "" "$home" secondmate || return 1
@@ -814,16 +909,37 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
-      "$home_scope" "$label" refuse closed "" "" "$abs_home_path" secondmate || return 1
+    fm_slot_lock_acquire "$abs_home_path" || {
+      echo "error: could not serialize return for $label $abs_home_path; preserving task state" >&2
+      return 1
+    }
+    lock_path=$FM_SLOT_LOCK_PATH
+    if ! slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
+      "$home_scope" "$label" refuse closed "" "" "$abs_home_path" secondmate; then
+      fm_slot_lock_release "$lock_path" || true
+      return 1
+    fi
+    teardown_meta_mark_slot_returning "$meta_path" || {
+      fm_slot_lock_release "$lock_path" || true
+      echo "error: could not record pending return for $label $abs_home_path; preserving task state" >&2
+      return 1
+    }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+      fm_slot_lock_release "$lock_path" || true
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
-    fm_slot_stamp_clear "$abs_home_path" || {
+    teardown_meta_mark_slot_returned "$meta_path" || {
+      fm_slot_lock_release "$lock_path" || true
+      echo "error: could not record successful return for $label $abs_home_path; preserving task state" >&2
+      return 1
+    }
+    fm_slot_stamp_clear_after_return "$abs_home_path" "${expected_id:-$ID}" || {
+      fm_slot_lock_release "$lock_path" || true
       echo "error: could not clear the ownership stamp for $label $abs_home_path; preserving task state" >&2
       return 1
     }
+    fm_slot_lock_release "$lock_path" || return 1
     return 0
   fi
   safe_rm_rf "$abs_home_path" "$label"
@@ -831,6 +947,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
 
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home
+  local child_slot_returned child_slot_returning
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -841,21 +958,31 @@ validate_firstmate_home_children_removal() {
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    child_slot_returned=$(meta_value "$child_meta" slot_returned)
+    child_slot_returning=$(meta_value "$child_meta" slot_returning)
+    if [ "$child_slot_returning" = 1 ]; then
+      echo "REFUSED: child $child_id has an incomplete durable return; preserving child state." >&2
+      return 1
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      if [ -z "$child_home" ] || { [ ! -e "$child_home" ] && [ ! -L "$child_home" ]; }; then
+      if [ "$child_slot_returned" != 1 ] && { [ -z "$child_home" ] || { [ ! -e "$child_home" ] && [ ! -L "$child_home" ]; }; }; then
         slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" \
           "child firstmate home" refuse unknown "$child_backend" "" "$home" secondmate \
           || return 1
       fi
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      if [ "$child_slot_returned" != 1 ]; then
+        validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      fi
       if ! fm_pending_reply_task_force_retirable "$sub_state" "$child_id"; then
         echo "REFUSED: child secondmate $child_id has a pending reply that has not reached escalation." >&2
         return 1
       fi
-      validate_firstmate_home_children_removal "$child_home" || return 1
-    elif [ -n "$child_wt" ]; then
+      if [ "$child_slot_returned" != 1 ]; then
+        validate_firstmate_home_children_removal "$child_home" || return 1
+      fi
+    elif [ -n "$child_wt" ] && [ "$child_slot_returned" != 1 ]; then
       [ -d "$child_wt" ] || {
         slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" \
           "child worktree" refuse unknown "$child_backend" "" "$home" crewmate \
@@ -880,6 +1007,7 @@ validate_child_backend() {
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
+  local child_slot_returned child_slot_returning child_slot_lock_path
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -891,6 +1019,12 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    child_slot_returned=$(meta_value "$child_meta" slot_returned)
+    child_slot_returning=$(meta_value "$child_meta" slot_returning)
+    if [ "$child_slot_returning" = 1 ]; then
+      echo "REFUSED: child $child_id has an incomplete durable return; preserving child state" >&2
+      return 1
+    fi
     child_retire_staged=0
     child_retire_source=
     child_resolved_handoff=0
@@ -898,12 +1032,12 @@ cleanup_firstmate_home_children() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      if [ -z "$child_home" ] || { [ ! -e "$child_home" ] && [ ! -L "$child_home" ]; }; then
+      if [ "$child_slot_returned" != 1 ] && { [ -z "$child_home" ] || { [ ! -e "$child_home" ] && [ ! -L "$child_home" ]; }; }; then
         slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" \
           "child firstmate home" refuse unknown "$child_backend" "$child_t" "$home" secondmate \
           || return 1
       fi
-    elif [ -n "$child_wt" ] && [ ! -d "$child_wt" ]; then
+    elif [ -n "$child_wt" ] && [ "$child_slot_returned" != 1 ] && [ ! -d "$child_wt" ]; then
       slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" \
         "child worktree" refuse unknown "$child_backend" "$child_t" "$home" crewmate \
         || return 1
@@ -924,7 +1058,7 @@ cleanup_firstmate_home_children() {
       fi
       [ "$child_resolved_handoff" = 0 ] || child_retire_staged=1
     fi
-    if [ -n "$child_t" ]; then
+    if [ -n "$child_t" ] && [ "$child_slot_returned" != 1 ]; then
       if ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
         echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
         return 1
@@ -933,7 +1067,9 @@ cleanup_firstmate_home_children() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+      if [ "$child_slot_returned" = 1 ] && [ -n "$child_home" ]; then
+        teardown_cleanup_returned_slot "$child_home" "$child_id" || return 1
+      elif [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return 1
         # Nested homes belong to their immediate parent home's state and stamp
         # scope, not to the top-level primary.
@@ -947,32 +1083,88 @@ cleanup_firstmate_home_children() {
         return 1
       fi
     elif [ -n "$child_wt" ]; then
-      if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "child worktree" retire; then
+      if [ "$child_slot_returned" = 1 ]; then
+        teardown_cleanup_returned_slot "$child_wt" "$child_id" || {
+          echo "error: could not clear the ownership stamp for returned child $child_id; preserving child state" >&2
+          return 1
+        }
+      elif slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "child worktree" retire; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
         [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1 || {
           echo "REFUSED: cannot prove durable return for child worktree $child_wt; preserving child state" >&2
           return 1
         }
-        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || return 1
-        fm_slot_stamp_clear "$child_wt" || {
-          echo "error: could not clear the ownership stamp for child worktree $child_wt; preserving child state" >&2
+        fm_slot_lock_acquire "$child_wt" || {
+          echo "error: could not serialize return for child worktree $child_wt; preserving child state" >&2
           return 1
         }
+        child_slot_lock_path=$FM_SLOT_LOCK_PATH
+        if ! slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "child worktree" retire; then
+          child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
+          fm_slot_lock_release "$child_slot_lock_path" || true
+        else
+          rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+          teardown_meta_mark_slot_returning "$child_meta" || {
+            fm_slot_lock_release "$child_slot_lock_path" || true
+            echo "error: could not record pending return for child worktree $child_wt; preserving child state" >&2
+            return 1
+          }
+          if ! teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+            fm_slot_lock_release "$child_slot_lock_path" || true
+            echo "error: treehouse return failed for child worktree $child_wt; lease may still be held" >&2
+            return 1
+          fi
+          teardown_meta_mark_slot_returned "$child_meta" || {
+            fm_slot_lock_release "$child_slot_lock_path" || true
+            echo "error: could not record successful return for child worktree $child_wt; preserving child state" >&2
+            return 1
+          }
+          fm_slot_stamp_clear_after_return "$child_wt" "$child_id" || {
+            fm_slot_lock_release "$child_slot_lock_path" || true
+            echo "error: could not clear the ownership stamp for child worktree $child_wt; preserving child state" >&2
+            return 1
+          }
+          fm_slot_lock_release "$child_slot_lock_path" || return 1
+        fi
       else
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
-    if [ -n "$child_slot_retain_verdict" ] \
-       && ! fm_slot_stamp_relinquish "$child_wt" "$child_id" "$child_slot_retain_verdict"; then
-      echo "error: could not relinquish the ownership stamp for child $child_id; preserving child state" >&2
+    if [ -n "$child_slot_retain_verdict" ]; then
+      teardown_meta_backup_create "$child_meta" || {
+        echo "error: could not preserve recovery metadata for child $child_id" >&2
+        return 1
+      }
+    fi
+    if ! rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
+      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.grok-turnend-token"; then
+      if [ -n "$child_slot_retain_verdict" ]; then
+        teardown_meta_backup_restore "$child_meta" || true
+      fi
       return 1
     fi
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.grok-turnend-token" || return 1
+    if [ -n "$child_slot_retain_verdict" ]; then
+      fm_slot_lock_acquire "$child_wt" || {
+        teardown_meta_backup_restore "$child_meta" || true
+        echo "error: could not serialize ownership cleanup for child $child_id; preserving child state" >&2
+        return 1
+      }
+      child_slot_lock_path=$FM_SLOT_LOCK_PATH
+      if ! fm_slot_stamp_relinquish "$child_wt" "$child_id" "$child_slot_retain_verdict"; then
+        fm_slot_lock_release "$child_slot_lock_path" || true
+        teardown_meta_backup_restore "$child_meta" || true
+        echo "error: could not relinquish the ownership stamp for child $child_id; preserving child state" >&2
+        return 1
+      fi
+      if ! fm_slot_lock_release "$child_slot_lock_path"; then
+        teardown_meta_backup_restore "$child_meta" || true
+        return 1
+      fi
+      teardown_meta_backup_discard || true
+    fi
   done
 }
 
@@ -986,9 +1178,11 @@ remove_secondmate_registry_entry() {
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
-  if [ "$FORCE" = "--force" ]; then
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+  if [ "$TOP_SLOT_RETURNED" != 1 ]; then
+    validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+    if [ "$FORCE" = "--force" ]; then
+      validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+    fi
   fi
   if fm_pending_reply_task_has_open "$STATE" "$ID"; then
     FORCE_RETIRE_SOURCE=$(fm_pending_reply_source_identity "$STATE") || exit 1
@@ -1003,7 +1197,8 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ] \
+   && [ "$TOP_SLOT_RETURNED" != 1 ]; then
   SUB_STATE="$HOME_PATH/state"
   if [ -d "$SUB_STATE" ]; then
     for child_meta in "$SUB_STATE"/*.meta; do
@@ -1015,7 +1210,8 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ] \
+   && [ "$TOP_SLOT_RETURNED" != 1 ]; then
   if [ "$KIND" = secondmate ]; then
     :
   elif [ "$KIND" = scout ]; then
@@ -1084,7 +1280,7 @@ validate_direct_pr_ref_cleanup || exit 1
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_WORKSPACE=
-if [ "$BACKEND" = herdr ]; then
+  if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || {
     echo "REFUSED: could not load Herdr teardown support for $ID; preserving task state and worktree" >&2
     exit 1
@@ -1094,7 +1290,7 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   }
 fi
-if [ "$BACKEND" = herdr ] \
+if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   HERDR_META_SESSION=$(meta_value "$META" herdr_session)
   HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
@@ -1133,26 +1329,55 @@ teardown_slot_endpoint_state() {
 TOP_SLOT_RELEASE_AUTHORIZED=0
 TOP_SLOT_RETAIN_VERDICT=
 TOP_SLOT_ENDPOINT_STATE=closed
-if [ "$KIND" != secondmate ]; then
-  if [ -d "$WT" ]; then
-    TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
-  else
-    TOP_SLOT_ENDPOINT_STATE=unknown
+TOP_SLOT_LOCK_HELD=0
+TOP_SLOT_LOCK_PATH=
+teardown_release_top_slot_lock() {
+  if [ "$TOP_SLOT_LOCK_HELD" = 1 ]; then
+    fm_slot_lock_release "$TOP_SLOT_LOCK_PATH" || return 1
+    TOP_SLOT_LOCK_HELD=0
   fi
-  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
-    "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
-    "$FM_HOME" crewmate; then
+}
+trap 'teardown_release_top_slot_lock || true' EXIT
+if [ "$KIND" != secondmate ]; then
+  if [ "$TOP_SLOT_RETURNED" = 1 ]; then
+    if fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
+      fm_slot_lock_acquire "$WT" || {
+        echo "error: could not serialize cleanup for returned worktree $WT; preserving task state" >&2
+        exit 1
+      }
+      TOP_SLOT_LOCK_PATH=$FM_SLOT_LOCK_PATH
+      TOP_SLOT_LOCK_HELD=1
+    fi
     TOP_SLOT_RELEASE_AUTHORIZED=1
   else
-    TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
-  fi
-  if [ "$TOP_SLOT_ENDPOINT_STATE" = unknown ]; then
-    slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
-      "worktree" refuse "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
-      "$FM_HOME" crewmate || {
-      echo "REFUSED: exact endpoint occupancy for $ID could not be proved; preserving task state, worktree, and lease" >&2
-      exit 1
-    }
+    if fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
+      fm_slot_lock_acquire "$WT" || {
+        echo "error: could not serialize teardown for worktree $WT; preserving task state" >&2
+        exit 1
+      }
+      TOP_SLOT_LOCK_PATH=$FM_SLOT_LOCK_PATH
+      TOP_SLOT_LOCK_HELD=1
+    fi
+    if [ -d "$WT" ]; then
+      TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
+    else
+      TOP_SLOT_ENDPOINT_STATE=unknown
+    fi
+    if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
+      "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
+      "$FM_HOME" crewmate; then
+      TOP_SLOT_RELEASE_AUTHORIZED=1
+    else
+      TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
+    fi
+    if [ "$TOP_SLOT_ENDPOINT_STATE" = unknown ]; then
+      slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
+        "worktree" refuse "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
+        "$FM_HOME" crewmate || {
+        echo "REFUSED: exact endpoint occupancy for $ID could not be proved; preserving task state, worktree, and lease" >&2
+        exit 1
+      }
+    fi
   fi
 fi
 
@@ -1166,7 +1391,7 @@ if [ "$BACKEND" = herdr ]; then
   elif [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
     echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" != orca ]; then
   if ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
     echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
     exit 1
@@ -1182,32 +1407,44 @@ fi
 
 # Ownership gate first. A retained lease leaves the slot untouched while the
 # rest of teardown retires this task's endpoint and records.
-if [ -d "$WT" ] && [ "$KIND" != secondmate ] \
+if [ "$KIND" != secondmate ] \
    && [ "$TOP_SLOT_RELEASE_AUTHORIZED" -eq 1 ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+  if [ "$TOP_SLOT_RETURNED" = 1 ]; then
+    fm_slot_stamp_clear_after_return "$WT" "$ID" || {
+      echo "error: could not clear the ownership stamp for returned worktree $WT; preserving task state" >&2
+      exit 1
+    }
+  elif [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
     fi
+    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+    post_lock_cleanup_check=
+    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+      post_lock_cleanup_check=validate_worktree_teardown_safety
+    fi
+    teardown_meta_mark_slot_returning "$META" || {
+      echo "error: could not record pending return for worktree $WT; preserving task state" >&2
+      exit 1
+    }
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+    teardown_meta_mark_slot_returned "$META" || {
+      echo "error: could not record successful return for worktree $WT; preserving task state" >&2
+      exit 1
+    }
+    TOP_SLOT_RETURNED=1
+    fm_slot_stamp_clear_after_return "$WT" "$ID" || {
+      echo "error: could not clear the ownership stamp for worktree $WT; preserving task state" >&2
+      exit 1
+    }
   fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
-  fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
-  fm_slot_stamp_clear "$WT" || {
-    echo "error: could not clear the ownership stamp for worktree $WT; preserving task state" >&2
-    exit 1
-  }
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -1230,15 +1467,40 @@ cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
   exit 1
 }
-if [ -n "$TOP_SLOT_RETAIN_VERDICT" ] \
-   && ! fm_slot_stamp_relinquish "$WT" "$ID" "$TOP_SLOT_RETAIN_VERDICT"; then
-  echo "error: could not relinquish the ownership stamp for $ID; preserving task state" >&2
+if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+  teardown_meta_backup_create "$META" || {
+    echo "error: could not preserve recovery metadata for $ID" >&2
+    exit 1
+  }
+fi
+if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then
+  if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+    teardown_meta_backup_restore "$META" || true
+  fi
+  echo "error: could not remove task records for $ID; ownership evidence was preserved" >&2
   exit 1
 fi
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp" || {
-  echo "error: could not remove task records for $ID; ownership evidence was preserved" >&2
+if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+  if [ "$TOP_SLOT_LOCK_HELD" != 1 ]; then
+    fm_slot_lock_acquire "$WT" || {
+      teardown_meta_backup_restore "$META" || true
+      echo "error: could not serialize ownership cleanup for $ID; preserving task state" >&2
+      exit 1
+    }
+    TOP_SLOT_LOCK_PATH=$FM_SLOT_LOCK_PATH
+    TOP_SLOT_LOCK_HELD=1
+  fi
+  if ! fm_slot_stamp_relinquish "$WT" "$ID" "$TOP_SLOT_RETAIN_VERDICT"; then
+    teardown_meta_backup_restore "$META" || true
+    echo "error: could not relinquish the ownership stamp for $ID; preserving task state" >&2
+    exit 1
+  fi
+  teardown_meta_backup_discard || true
+fi
+teardown_release_top_slot_lock || {
+  echo "error: could not release the ownership lock for $ID" >&2
   exit 1
 }
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

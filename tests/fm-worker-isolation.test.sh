@@ -595,6 +595,26 @@ test_missing_ownership_stamp_retains() {
   pass "a missing ownership stamp retains the pooled slot"
 }
 
+test_relinquish_refuses_without_ownership_evidence() {
+  local rec verdict
+  rec=$(make_slot_world slot-missing-relinquish)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-missing-relinquish.meta" \
+    "window=firstmate:fm-task-missing-relinquish" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fm_write_meta "$WORLD/home/state/other-missing-relinquish.meta" \
+    "window=firstmate:fm-other-missing-relinquish" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  verdict=$(slot_verdict "$WORLD/home/state" task-missing-relinquish "$WT_DIR" "$WORLD/home")
+  if ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_relinquish "$WT_DIR" task-missing-relinquish "$verdict" ); then
+    fail "relinquish accepted a metadata-retained slot without a readable stamp"
+  fi
+  [ -f "$WORLD/home/state/task-missing-relinquish.meta" ] \
+    || fail "missing-stamp recovery metadata was not preserved"
+  pass "relinquish refuses a retained slot without ownership evidence"
+}
+
 test_missing_recorded_worktree_retains() {
   local rec verdict
   rec=$(make_slot_world slot-missing-worktree)
@@ -946,6 +966,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
 test_missing_ownership_stamp_retains
+test_relinquish_refuses_without_ownership_evidence
 test_missing_recorded_worktree_retains
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
