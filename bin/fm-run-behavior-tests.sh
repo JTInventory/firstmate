@@ -2089,7 +2089,7 @@ supervisor_handle_broker_state() {
   if [ -s "$SUPERVISOR_HANDLE_BROKER_EXIT_FILE" ]; then
     IFS='|' read -r exit_identity exit_state <"$SUPERVISOR_HANDLE_BROKER_EXIT_FILE" || return 2
     [ "$exit_identity" = "$SUPERVISOR_HANDLE_BROKER_IDENTITY" ] || return 2
-    [ "$exit_state" = done ] || return 2
+    [ "$exit_state" = 'done' ] || return 2
     return 3
   fi
   if [ ! -e "/proc/$SUPERVISOR_HANDLE_BROKER_PID/stat" ]; then
@@ -2217,7 +2217,7 @@ supervisor_handle_launch() {
   local key=$1 runner=$2 test_path=$3 job_root=$4 log_path=$5
   local start_gate=$6 abort_gate=$7 test_root=$8 timeout=$9 bounded_script=${10}
   local request response_key response_state
-  printf -v request 'launch\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+  printf -v request 'launch\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
     "$key" "$runner" "$test_path" "$job_root" "$log_path" "$start_gate" \
     "$abort_gate" "$test_root" "$timeout" "$bounded_script"
   if ! supervisor_handle_request "$request"; then
