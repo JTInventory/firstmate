@@ -28,7 +28,8 @@ FM_TEST_LIB_SOURCED=1
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
-export ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd) || return 1
+export ROOT
 # Child bash processes must receive the test-only authority seams too.
 export BASH_ENV="$ROOT/tests/fm-isolation-test-helpers.sh"
 export FM_TEST_PROCESS=1

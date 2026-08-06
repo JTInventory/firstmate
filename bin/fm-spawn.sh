@@ -1511,7 +1511,6 @@ case "$BACKEND" in
   tmux)
     SES=$(fm_backend_container_ensure "$BACKEND" "$PROJ_ABS")
     T="$SES:$W"
-    WINDOW_IDS_BEFORE=$(fm_backend_list_task_ids "$BACKEND" "$SES" 2>/dev/null || true)
     WID=$(fm_backend_create_task "$BACKEND" "$SES" "$W" "$PROJ_ABS") || exit 1
     if [[ ! "$WID" =~ ^@[0-9]+$ ]]; then
       cleanup_unidentified_spawn_window || true

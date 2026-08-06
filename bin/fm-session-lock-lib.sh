@@ -511,7 +511,7 @@ fm_session_authority_admission_acquire() {
   FM_SESSION_AUTHORITY_ADMISSION_IN=${FM_SESSION_AUTHORITY_ADMISSION_PROCESS[1]:-}
   FM_SESSION_AUTHORITY_ADMISSION_OUT=${FM_SESSION_AUTHORITY_ADMISSION_PROCESS[0]:-}
   case "$FM_SESSION_AUTHORITY_ADMISSION_PID:$FM_SESSION_AUTHORITY_ADMISSION_IN:$FM_SESSION_AUTHORITY_ADMISSION_OUT" in
-    ''|*[!0-9:]*|*::*|*:)
+    :*|*[!0-9:]*|*::*|*:)
       if [ -n "${FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD:-}" ]; then
         exec 21<&- 2>/dev/null || true
         FM_SESSION_AUTHORITY_ADMISSION_CAPABILITY_FD=
@@ -611,7 +611,8 @@ fm_session_authority_admission_release() {
     FM_SESSION_AUTHORITY_ADMISSION_TEST=0
     return 0
   fi
-  printf '%s\n' RELEASE >&"$FM_SESSION_AUTHORITY_ADMISSION_IN" 2>/dev/null || status=1
+  { printf '%s\n' RELEASE >&"$FM_SESSION_AUTHORITY_ADMISSION_IN"; } \
+    2>/dev/null || status=1
   exec {FM_SESSION_AUTHORITY_ADMISSION_IN}>&- 2>/dev/null || status=1
   wait "$FM_SESSION_AUTHORITY_ADMISSION_PID" 2>/dev/null || status=1
   exec {FM_SESSION_AUTHORITY_ADMISSION_OUT}<&- 2>/dev/null || status=1
@@ -753,7 +754,7 @@ fm_session_authority_live_binding_write() {
 fm_session_authority_live_binding_validate() {
   local state=$1 authority_pid=$2 fd=${3:-9} file
   local start identity descriptor key digest current
-  case "$authority_pid:$fd" in ''|*[!0-9:]*|*:) return 1 ;; esac
+  case "$authority_pid:$fd" in :*|*[!0-9:]*|*:) return 1 ;; esac
   [ "$fd" = 9 ] || return 1
   state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
   file="$state/.session-authority-live"
@@ -765,9 +766,9 @@ fm_session_authority_live_binding_validate() {
   [ "$(sed -n '5s/^fd=//p' "$file")" = "$fd" ] || return 1
   descriptor=$(sed -n '6s/^descriptor=//p' "$file")
   digest=$(sed -n '7s/^key-sha256=//p' "$file")
-  case "$start:$identity:$descriptor:$digest" in
-    ''|*$'\n'*|*$'\r'*|*:*:*:*:) return 1 ;;
-  esac
+  for value in "$start" "$identity" "$descriptor" "$digest"; do
+    case "$value" in ''|*$'\n'*|*$'\r'*) return 1 ;; esac
+  done
   current=$(fm_session_process_start "$authority_pid" 2>/dev/null || true)
   [ "$current" = "$start" ] || return 1
   [ "$(fm_session_process_identity "$authority_pid" 2>/dev/null || true)" = \
@@ -3073,10 +3074,12 @@ fm_session_authority_transaction_manifest_read() {
   owner_start=$(sed -n '8s/^owner-start=//p' "$manifest")
   owner_identity=$(sed -n '9s/^owner-identity=//p' "$manifest")
   nonce=$(sed -n '10s/^nonce=//p' "$manifest")
-  case "$broker_pid:$owner_pid" in *[!0-9:]*|:) return 1 ;; esac
-  case "$broker_start:$broker_identity:$owner_start:$owner_identity:$nonce" in
-    ''|*$'\n'*|*$'\r'*) return 1 ;;
-  esac
+  case "$broker_pid:$owner_pid" in :*|*[!0-9:]*|*:) return 1 ;; esac
+  for value in \
+    "$broker_start" "$broker_identity" "$owner_start" "$owner_identity" \
+    "$nonce"; do
+    case "$value" in ''|*$'\n'*|*$'\r'*) return 1 ;; esac
+  done
   [ -n "$broker_start" ] && [ -n "$broker_identity" ] \
     && [ -n "$owner_start" ] && [ -n "$owner_identity" ] || return 1
   [ -n "$owner_start" ] && [ -n "$owner_identity" ] || return 1
@@ -3095,13 +3098,13 @@ fm_session_authority_transaction_manifest_read() {
         "$owner_identity" ] || return 1
   fi
   FM_SESSION_AUTHORITY_TXN_MANIFEST_HMAC=$expected
-  FM_SESSION_AUTHORITY_TXN_BROKER_PID=$broker_pid
-  FM_SESSION_AUTHORITY_TXN_BROKER_START=$broker_start
-  FM_SESSION_AUTHORITY_TXN_BROKER_IDENTITY=$broker_identity
-  FM_SESSION_AUTHORITY_TXN_OWNER_PID=$owner_pid
-  FM_SESSION_AUTHORITY_TXN_OWNER_START=$owner_start
-  FM_SESSION_AUTHORITY_TXN_OWNER_IDENTITY=$owner_identity
-  FM_SESSION_AUTHORITY_TXN_NONCE=$nonce
+  _FM_SESSION_AUTHORITY_TXN_BROKER_PID=$broker_pid
+  _FM_SESSION_AUTHORITY_TXN_BROKER_START=$broker_start
+  _FM_SESSION_AUTHORITY_TXN_BROKER_IDENTITY=$broker_identity
+  _FM_SESSION_AUTHORITY_TXN_OWNER_PID=$owner_pid
+  _FM_SESSION_AUTHORITY_TXN_OWNER_START=$owner_start
+  _FM_SESSION_AUTHORITY_TXN_OWNER_IDENTITY=$owner_identity
+  _FM_SESSION_AUTHORITY_TXN_NONCE=$nonce
   FM_SESSION_AUTHORITY_TXN_OLD_CHECKOUT=$(sed -n '11s/^old-checkout=//p' "$manifest")
   FM_SESSION_AUTHORITY_TXN_OLD_LOCK=$(sed -n '12s/^old-lock=//p' "$manifest")
   FM_SESSION_AUTHORITY_TXN_OLD_AUTHORITY=$(sed -n '13s/^old-authority=//p' "$manifest")
@@ -3459,11 +3462,14 @@ fm_session_primary_root_validate() {
   authority_descriptor=$(sed -n '10s/^authority-descriptor=//p' "$root")
   durable_descriptor=$(sed -n '11s/^durable-descriptor=//p' "$root")
   authority_sha=$(sed -n '12s/^authority-sha256=//p' "$root")
-  case "$authority_pid:$authority_fd" in ''|*[!0-9:]*|*:) return 1 ;; esac
+  case "$authority_pid:$authority_fd" in :*|*[!0-9:]*|*:) return 1 ;; esac
   [ "$authority_pid" -gt 1 ] && [ "$authority_fd" -ge 3 ] || return 1
-  case "$primary_home:$primary_checkout:$authority_start:$authority_identity:$authority_descriptor:$durable_descriptor:$authority_sha" in
-    *$'\n'*|*$'\r'*|*'='*|'' ) return 1 ;;
-  esac
+  for value in \
+    "$primary_home" "$primary_checkout" "$authority_start" \
+    "$authority_identity" "$authority_descriptor" "$durable_descriptor" \
+    "$authority_sha"; do
+    case "$value" in ''|*$'\n'*|*$'\r'*|*'='*) return 1 ;; esac
+  done
   home_real=$(cd "$primary_home" 2>/dev/null && pwd -P) || return 1
   checkout=$(cd "$primary_checkout" 2>/dev/null && pwd -P) || return 1
   [ "$home_real" = "$primary_home" ] || return 1

@@ -38,8 +38,8 @@ cleanup_primary_authority() {
     return 1
   }
   durable_group_has_running_process() {
-    local process_pid process_pgid process_stat
-    while read -r process_pid process_pgid process_stat; do
+    local _process_pid process_pgid process_stat
+    while read -r _process_pid process_pgid process_stat; do
       [ "$process_pgid" = "$pgid" ] || continue
       case "$process_stat" in
         Z*) ;;
@@ -72,7 +72,7 @@ cleanup_primary_authority() {
     session=$(sed -n '5s/^session-pid=//p' "$record")
     session_start=$(sed -n '6s/^session-start=//p' "$record")
     case "$pid:$session" in
-      ''|*[!0-9:]*|*:*:*)
+      :*|*[!0-9:]*|*:*:*|*:)
         cleanup_primary_authority_fail 'durable process identity is invalid'
         return 1
         ;;

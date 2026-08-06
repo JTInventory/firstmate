@@ -254,11 +254,11 @@ preserve_failure_evidence() {
         rm -rf -- "$evidence_tmp" 2>/dev/null || true
         return 1
       }
-      record_version= record_pid= record_start= record_identity=
-      record_socket= record_home= record_checkout= record_task=
-      record_script= record_uid= record_gid= record_launch_pid=
-      record_launch_start= record_launch_identity= record_launch_script=
-      seen_keys= record_count=0 record_invalid=0
+      record_version='' record_pid='' record_start='' record_identity=''
+      record_socket='' record_home='' record_checkout='' record_task=''
+      record_script='' record_uid='' record_gid='' record_launch_pid=''
+      record_launch_start='' record_launch_identity='' record_launch_script=''
+      seen_keys='' record_count=0 record_invalid=0
       while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
           *=*)
@@ -1326,7 +1326,7 @@ test_concurrent_broker_start_has_one_publisher() {
   first_pid=$(cat "$first_output_capture")
   second_pid=$(cat "$second_output_capture")
   case "$first_pid:$second_pid" in
-    ''|*[!0-9:]*) fail "concurrent broker callers returned malformed pids" ;;
+    :*|*[!0-9:]*|*:) fail "concurrent broker callers returned malformed pids" ;;
   esac
   [ "$first_pid" = "$second_pid" ] \
     || fail "concurrent broker callers did not join one broker"
@@ -1452,7 +1452,7 @@ test_receipt_backed_synthetic_census() {
   fixture=$(fm_test_tmproot fm-receipt-census)
   home="$fixture/home"
   state="$home/state"
-  task=receipt-census-task
+  task='receipt-census-task'
   mkdir -p "$state"
   (
     cd "$home" || exit 1
@@ -2122,9 +2122,8 @@ prepare_launch() {
   local consumer_key consumer_public consumer_public_b64 consumer_digest
   local accepted_body accepted_digest final_body final_signature
   local primary_fixture primary_pid_file
-  local primary_harness_pid
   local signer_output enrollment random_bin attempts=0
-  local primary_setup_pid= rotation_key= owner_pid=
+  local primary_setup_pid='' rotation_key='' owner_pid=''
   local quoted_home quoted_issuer
   nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   launch_script="$home/bin/fm-session-authority-exec.sh"
@@ -2713,11 +2712,10 @@ SH
     python3 -c 'import hashlib, hmac, os; print(hmac.new(bytes.fromhex(os.environ["BROKER_KEY"]), os.environ["RECEIPT_BODY"].encode(), hashlib.sha256).hexdigest())')
   printf '%sauthority-hmac=%s\n' "$receipt_body" "$receipt_hmac" \
     > "$home/state/.session-authority-launch"
-  LAUNCH_SCRIPT="$launch_script"
 }
 
 start_broker() {
-  local evidence_fd receipt_b64 attempts=0 broker_output
+  local receipt_b64 attempts=0 broker_output
   receipt_b64=$(openssl base64 -A < "$HOME_DIR/state/.session-authority-launch") \
     || fail "could not encode authenticated launch evidence"
   printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
@@ -2999,9 +2997,9 @@ prepare_rotation_launch() {
   local ticket_ready="$home/state/.test-rotation-ticket-ready"
   local launch_ready="$home/.test-rotation-launch"
   local enrollment="$state/.session-authority-enrollment"
-  local random_bin="$home/test-bin" old_pid old_start old_owner
+  local random_bin="$home/test-bin" old_pid old_owner
   local quoted_home quoted_primary quoted_root_ready
-  local signer_pid signer_public signer_digest nonce consumer_private
+  local signer_public signer_digest nonce consumer_private
   local consumer_public consumer_digest accepted_digest tmp external_custodian
   sleep 2
   mkdir -p "$home/bin" "$state" "$primary/bin" "$primary_state" "$random_bin"

@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+
 fm_session_test_authority_broker_present() {
   local broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
   local fd=${FM_TEST_DURABLE_AUTHORITY_FD:-} live_fd=${FM_TEST_AUTHORITY_FD:-}
@@ -87,6 +89,7 @@ fm_worker_test_authority_capability_present() {
   done
   FM_WORKER_TEST_AUTHORITY_FD=$live_fd
   FM_WORKER_TEST_DURABLE_AUTHORITY_FD=$durable_fd
+  export FM_WORKER_TEST_AUTHORITY_FD FM_WORKER_TEST_DURABLE_AUTHORITY_FD
 }
 
 fm_worker_test_primary_identity_lock_acquire() {
