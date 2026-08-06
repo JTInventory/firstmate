@@ -267,18 +267,33 @@ fi
 
 # --- 2. bootstrap --------------------------------------------------------
 subsection "BOOTSTRAP"
+BOOT_RC=0
 if [ "$READ_ONLY" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1) || BOOT_RC=$?
 else
   BOOT_OUT=$(
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
     "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
-  )
+  ) || BOOT_RC=$?
 fi
 if [ -n "$BOOT_OUT" ]; then
   printf '%s\n' "$BOOT_OUT"
 else
   printf '(silent - all good)\n'
+fi
+ISOLATION_BLOCKED=0
+if [ "$BOOT_RC" -ne 0 ] \
+  && printf '%s\n' "$BOOT_OUT" | grep -Fq 'ISOLATION: bootstrap mutations blocked'; then
+  ISOLATION_BLOCKED=1
+  READ_ONLY=1
+  BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '%s\n' "$BAR"
+    printf '●  READ-ONLY SESSION - WORKER ISOLATION WAS NOT VERIFIED\n'
+    printf '●  Bootstrap refused mutating sweeps because worker isolation was actionable or unproven.\n'
+    printf '●  Skipping the wake-queue drain and every further fleet mutation from this session.\n'
+    printf '%s\n' "$BAR"
+  }
 fi
 
 # --- 3. wake-drain -------------------------------------------------------
@@ -293,7 +308,11 @@ subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
   [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
-  printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified fleet-lock ownership.\n' "$QLEN"
+  if [ "$ISOLATION_BLOCKED" -eq 1 ]; then
+    printf 'skipped (read-only session) - %s record(s) remain queued because worker isolation was not verified.\n' "$QLEN"
+  else
+    printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified fleet-lock ownership.\n' "$QLEN"
+  fi
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else

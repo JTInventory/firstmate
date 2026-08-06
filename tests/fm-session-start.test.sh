@@ -679,6 +679,41 @@ EOF
   pass "session start stays read-only when lock ownership cannot be published"
 }
 
+test_isolation_gate_keeps_wake_queue_untouched() {
+  local rec root home fakebin out status
+  rec=$(new_world isolation-gate)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  cat > "$home/state/isolation-gate.meta" <<EOF
+window=firstmate:fm-isolation-gate
+worktree=$home/worker
+project=$root
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  append_wake "$home/state" signal isolation-gate.status "done: remain queued" || fail "seed wake failed"
+
+  status=0
+  out=$(FM_BACKEND=tmux run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "session start must complete its read-only digest after an isolation gate"
+  assert_contains "$out" "ISOLATION: bootstrap mutations blocked until worker isolation is clean" \
+    "session start did not surface bootstrap's isolation gate"
+  assert_contains "$out" "READ-ONLY SESSION - WORKER ISOLATION WAS NOT VERIFIED" \
+    "session start did not enter its isolation read-only mode"
+  assert_contains "$out" "skipped (read-only session)" \
+    "session start did not skip the wake queue after an isolation gate"
+  assert_not_contains "$out" "signal$(printf '\t')isolation-gate.status" \
+    "session start drained the wake queue after an isolation gate"
+  [ -s "$home/state/.wake-queue" ] || fail "isolation gate allowed the wake queue to mutate"
+  pass "session start stays read-only when bootstrap blocks on worker isolation"
+}
+
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
   rec=$(new_world lock-concurrency)
@@ -1364,6 +1399,7 @@ EOF
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
+test_isolation_gate_keeps_wake_queue_untouched
 test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start

@@ -301,6 +301,13 @@ spawn_abort_recovery_meta() {
   }
 }
 
+spawn_slot_stamp_owned() {
+  [ -n "${WT:-}" ] && [ -n "${ID:-}" ] || return 1
+  fm_slot_stamp_record "$WT" || return 1
+  [ "$FM_SLOT_STAMP_TASK" = "$ID" ] || return 1
+  fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$(real_path_or_raw "$FM_HOME")"
+}
+
 spawn_abort_cleanup() {
   local status=$? cleanup_session endpoint_cleanup_status=1 slot_returned=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -397,7 +404,8 @@ spawn_abort_cleanup() {
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
      && [ "$endpoint_cleanup_status" -eq 0 ] \
      && [ -n "${WT:-}" ] \
-     && [ -n "${PROJ_ABS:-}" ]; then
+     && [ -n "${PROJ_ABS:-}" ] \
+     && spawn_slot_stamp_owned; then
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
       slot_returned=1
       if [ "${SPAWN_SLOT_STAMPED:-0}" = 1 ]; then
@@ -1481,8 +1489,8 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
   SPAWN_WORKTREE_LEASED=1
+  validate_spawn_worktree "treehouse get" "$T"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

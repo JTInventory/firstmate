@@ -1225,6 +1225,9 @@ EOF
   [ -d "$subhome" ] || fail "teardown removed a leased home after return failed"
   [ -e "$home/state/domain.meta" ] || fail "teardown cleared meta after leased home return failed"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null || fail "teardown removed registry route after leased home return failed"
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$subhome" task || printf 'none' )
+  [ "$stamp" = domain ] || fail "teardown cleared the ownership stamp after leased home return failed: $stamp"
   pass "secondmate teardown refuses to hide failed leased-home return"
 }
 
