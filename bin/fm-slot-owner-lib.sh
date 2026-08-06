@@ -27,8 +27,10 @@
 # waived by --force: --force is the captain's authority to discard THIS task's
 # work, never authority to release another task's slot.
 #
-# Absence of evidence is not evidence: a slot with no stamp (every task spawned
-# before stamping existed) and no conflicting reference still disposes normally.
+# Absence of evidence is not evidence: a slot with no stamp, or a stamp whose
+# ownership record cannot be proved, retains its lease. This is deliberately
+# fail-closed: a missing or ambiguous stamp must never expose a pooled slot to
+# a different task.
 #
 # Retention must not be a one-way door either. A task that retains on rule 1 AND
 # still completes its own teardown gives up its own stamp as it goes
@@ -82,23 +84,72 @@ fm_slot_stamp_path() {
 }
 
 # fm_slot_stamp_write <worktree> <task-id> <home>: record current ownership of
-# the slot. Best-effort by design - a slot that cannot be stamped simply has no
-# stamp evidence later, which is the pre-existing behavior.
+# the slot without replacing another owner's evidence.
 fm_slot_stamp_write() {
-  local wt=$1 id=$2 home=$3 path
+  local wt=$1 id=$2 home=$3 path tmp
   [ -n "$id" ] && [ -n "$home" ] || return 1
   path=$(fm_slot_stamp_path "$wt") || return 1
-  printf 'task=%s\nhome=%s\n' "$id" "$home" > "$path" 2>/dev/null || return 1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    fm_slot_stamp_record "$wt" || return 1
+    [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+      && [ "$FM_SLOT_STAMP_HOME" = "$home" ] || return 1
+    return 0
+  fi
+  tmp="$path.$$"
+  if ! { umask 077 && printf 'task=%s\nhome=%s\n' "$id" "$home" > "$tmp"; }; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! ( set -C; : > "$path" ) 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! cat "$tmp" > "$path" 2>/dev/null; then
+    rm -f "$tmp" "$path" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  fm_slot_stamp_record "$wt"
+}
+
+# fm_slot_stamp_record <worktree>: load one exact, regular ownership record.
+# Returns 1 for a missing record and 2 for a present malformed record.
+fm_slot_stamp_record() {
+  local wt=$1 path line task_seen=0 home_seen=0 invalid=0
+  FM_SLOT_STAMP_TASK=
+  FM_SLOT_STAMP_HOME=
+  path=$(fm_slot_stamp_path "$wt") || return 1
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 2
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      task=*)
+        [ "$task_seen" -eq 0 ] || invalid=1
+        FM_SLOT_STAMP_TASK=${line#task=}
+        task_seen=1
+        ;;
+      home=*)
+        [ "$home_seen" -eq 0 ] || invalid=1
+        FM_SLOT_STAMP_HOME=${line#home=}
+        home_seen=1
+        ;;
+      *) invalid=1 ;;
+    esac
+  done < "$path" 2>/dev/null || return 2
+  [ "$task_seen" -eq 1 ] && [ "$home_seen" -eq 1 ] \
+    && [ -n "$FM_SLOT_STAMP_TASK" ] && [ -n "$FM_SLOT_STAMP_HOME" ] \
+    && [ "$invalid" -eq 0 ] || return 2
 }
 
 # fm_slot_stamp_field <worktree> <task|home>: the stamped value, or 1.
 fm_slot_stamp_field() {
-  local wt=$1 field=$2 path value
-  path=$(fm_slot_stamp_path "$wt") || return 1
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  value=$(sed -n "s/^$field=//p" "$path" 2>/dev/null | head -1)
-  [ -n "$value" ] || return 1
-  printf '%s' "$value"
+  local wt=$1 field=$2
+  fm_slot_stamp_record "$wt" || return 1
+  case "$field" in
+    task) printf '%s' "$FM_SLOT_STAMP_TASK" ;;
+    home) printf '%s' "$FM_SLOT_STAMP_HOME" ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_slot_stamp_clear <worktree>: drop the stamp once the slot is released.
@@ -169,15 +220,50 @@ fm_slot_live_occupant_tasks() {
   printf '%s' "$hits" | LC_ALL=C sort -u
 }
 
+# fm_slot_endpoint_occupant_tasks <worktree> <task-id> <home> <role> <backend> <target>:
+# inspect only the process bound to this task's already-validated backend
+# endpoint. A durable task lease prevents Treehouse from assigning the slot to
+# another task, so a host-wide process census adds no ownership proof and lets
+# unrelated unreadable /proc entries block every clean teardown.
+#
+# Returns 0 with a foreign or unidentified occupant proven inside the slot, 1
+# when the endpoint process is this exact task or is proven outside the slot,
+# and 2 when the endpoint-bound process cannot be proved stably.
+fm_slot_endpoint_occupant_tasks() {
+  local wt=$1 self=$2 self_home=$3 self_role=$4 backend=$5 target=$6
+  local wt_real pid current cwd env task home role
+  wt_real=$(fm_agent_canonical_dir "$wt") || return 2
+  command -v fm_backend_foreground_process_pid >/dev/null 2>&1 || return 2
+  pid=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  fm_agent_pid_is_numeric "$pid" || return 2
+  cwd=$(fm_agent_proc_cwd "$pid") || return 2
+  cwd=$(fm_agent_canonical_dir "$cwd") || return 2
+  env=$(fm_agent_environ "$pid" 2>/dev/null || true)
+  current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  [ "$current" = "$pid" ] || return 2
+  fm_agent_path_within "$wt_real" "$cwd" || return 1
+  task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+  home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+  role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+  if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
+     && fm_slot_same_path "$home" "$self_home"; then
+    return 1
+  fi
+  printf '%s\n' "${task:-unidentified-process-$pid}"
+}
+
 # fm_slot_join_ids <newline-separated>: comma-joined single line.
 fm_slot_join_ids() {
   printf '%s' "$1" | LC_ALL=C sort -u | tr '\n' ',' | sed 's/,$//'
 }
 
-# fm_slot_disposal_verdict <state-dir> <task-id> <worktree> <home>
+# fm_slot_disposal_verdict <state-dir> <task-id> <worktree> <stamp-home> <worker-home> <role> <endpoint-state> <backend> <target>
 # Print exactly `dispose` or `retain: <reason>`.
 fm_slot_disposal_verdict() {
-  local state=$1 self=$2 wt=$3 home=$4 stamp_task stamp_home refs occupants
+  local state=$1 self=$2 wt=$3 stamp_owner_home=${4:-}
+  local worker_home=${5:-$stamp_owner_home} role=${6:-crewmate}
+  local endpoint_state=${7:-unknown} backend=${8:-} target=${9:-}
+  local stamp_task stamp_home stamp_path refs occupants
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     printf 'dispose'
     return 0
@@ -186,22 +272,47 @@ fm_slot_disposal_verdict() {
     printf '%s%s in this home' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"
     return 0
   fi
-  if stamp_task=$(fm_slot_stamp_field "$wt" task); then
-    if [ "$stamp_task" != "$self" ]; then
-      printf 'retain: slot ownership stamp names task %s, not %s' "$stamp_task" "$self"
-      return 0
-    fi
-    if stamp_home=$(fm_slot_stamp_field "$wt" home); then
-      if [ -n "$home" ] && ! fm_slot_same_path "$stamp_home" "$home"; then
-        printf 'retain: slot ownership stamp names home %s, not %s' "$stamp_home" "$home"
-        return 0
-      fi
-    fi
-  fi
-  if occupants=$(fm_slot_live_occupant_tasks "$wt" "$self"); then
-    printf 'retain: a live agent for task(s) %s is running in the slot' "$(fm_slot_join_ids "$occupants")"
+  stamp_path=$(fm_slot_stamp_path "$wt" 2>/dev/null || true)
+  if [ -z "$stamp_path" ]; then
+    printf 'retain: slot ownership stamp path is unavailable'
     return 0
   fi
+  if [ ! -e "$stamp_path" ] && [ ! -L "$stamp_path" ]; then
+    printf 'retain: slot ownership stamp is missing'
+    return 0
+  fi
+  if ! fm_slot_stamp_record "$wt"; then
+    printf 'retain: slot ownership stamp is present but malformed'
+    return 0
+  fi
+  stamp_task=$FM_SLOT_STAMP_TASK
+  stamp_home=$FM_SLOT_STAMP_HOME
+  if [ "$stamp_task" != "$self" ]; then
+    printf 'retain: slot ownership stamp names task %s, not %s' "$stamp_task" "$self"
+    return 0
+  fi
+  if [ -n "$stamp_owner_home" ] && ! fm_slot_same_path "$stamp_home" "$stamp_owner_home"; then
+    printf 'retain: slot ownership stamp names home %s, not %s' "$stamp_home" "$stamp_owner_home"
+    return 0
+  fi
+  case "$endpoint_state" in
+    closed) ;;
+    live)
+      if occupants=$(fm_slot_endpoint_occupant_tasks \
+        "$wt" "$self" "$worker_home" "$role" "$backend" "$target"); then
+        printf 'retain: the endpoint-bound process for task(s) %s is running in the slot' \
+          "$(fm_slot_join_ids "$occupants")"
+        return 0
+      elif [ "$?" -eq 2 ]; then
+        printf 'retain: authoritative endpoint-occupant evidence is unavailable'
+        return 0
+      fi
+      ;;
+    *)
+      printf 'retain: authoritative endpoint-occupant evidence is unavailable'
+      return 0
+      ;;
+  esac
   printf 'dispose'
 }
 

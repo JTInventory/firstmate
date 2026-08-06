@@ -65,6 +65,23 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Minimal endpoint inventory for the exact task window used by these fixtures.
+if [ "${1:-}" = list-windows ]; then
+  case " $* " in
+    *"#{window_id}|#{session_name}:#{window_name}"*) printf '%s\n' '@1|firstmate:fm-task-x1' ;;
+    *"#{window_id} #{window_name}"*) printf '%s\n' '@1 fm-task-x1' ;;
+    *"#{window_name}"*) printf '%s\n' 'fm-task-x1' ;;
+  esac
+  exit 0
+fi
+if [ "${1:-}" = display-message ]; then
+  case " $* " in
+    *"#{pane_pid}"*) printf '%s\n' "$$" ;;
+    *"#{pane_current_command}"*) printf '%s\n' bash ;;
+    *"#{pane_current_path}"*) pwd ;;
+  esac
+  exit 0
+fi
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
@@ -124,13 +141,16 @@ SH
 
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
+  local case_dir=$1 mode=$2 kind=$3 stamp_home=${FM_HOME:-$ROOT}
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$case_dir/wt" task-x1 "$stamp_home" ) \
+    || fail "could not stamp the task worktree ownership fixture"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -749,6 +769,9 @@ test_forced_secondmate_teardown_retries_child_index_lock() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$child" child-x1 "$home" ) \
+    || fail "forced-child-index-lock: could not stamp child worktree ownership"
 
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash

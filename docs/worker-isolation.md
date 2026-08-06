@@ -114,9 +114,16 @@ A stamp naming a *different* task is always preserved, because it is the evidenc
 A caller that refuses outright preserves the stamp too, because a refused operation mutates nothing: its records all stay, ownership did not change, and stripping the evidence there would set up exactly that same destructive sequence once those records are reconciled away.
 Each call site therefore states which of the two it is, so a new caller cannot silently inherit the wrong behaviour.
 The live-occupant check stays a blocking condition and is never weakened to compensate.
+The ownership stamp is required and must be one exact regular record. A missing,
+malformed, or unreadable stamp retains the lease; no teardown may expose a slot
+when current ownership cannot be proved. Ordinary spawn holds a task-bound
+durable Treehouse lease from acquisition through teardown, so a worker exit
+cannot return and reissue the stamped slot behind Firstmate's back.
+When the endpoint is live, teardown inspects only that endpoint's foreground
+process, cwd, and worker declaration. An unavailable exact endpoint proof retains
+the durable lease; unrelated host processes are not occupancy evidence.
 If authoritative cwd or process-identity capability is unavailable, the slot is retained.
 Once a process is proven inside the slot, unreadable, partial, undeclared, or mixed-version identity is contested ownership rather than absence of an occupant.
-Ordinary spawn holds a task-bound durable Treehouse lease from acquisition through teardown. A worker exit therefore cannot return and reissue the stamped slot behind Firstmate's back; an unprovable teardown retains that lease instead of exposing the slot to reuse.
 
 The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode and refuses every later mutation until the sweep is clean.
 

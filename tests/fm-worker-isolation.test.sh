@@ -533,7 +533,17 @@ EOF
 }
 
 slot_verdict() {  # <state> <id> <wt> <home>
-  ( . "$ROOT/bin/fm-slot-owner-lib.sh" && fm_slot_disposal_verdict "$@" )
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "$4" crewmate closed "" "" )
+}
+
+slot_live_verdict() {  # <pid> <state> <id> <wt> <home>
+  local pid=$1
+  shift
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh"
+    FM_TEST_ENDPOINT_PID="$pid"
+    fm_backend_foreground_process_pid() { printf '%s' "$FM_TEST_ENDPOINT_PID"; }
+    fm_slot_disposal_verdict "$1" "$2" "$3" "$4" "$4" crewmate live test test:pane )
 }
 
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout() {
@@ -572,6 +582,19 @@ test_clean_ownership_disposes() {
   pass "a slot this task alone records and stamps disposes normally"
 }
 
+test_missing_ownership_stamp_retains() {
+  local rec verdict
+  rec=$(make_slot_world slot-missing-stamp)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-missing.meta" \
+    "window=firstmate:fm-task-missing" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  verdict=$(slot_verdict "$WORLD/home/state" task-missing "$WT_DIR" "$WORLD/home")
+  assert_contains "$verdict" "retain: slot ownership stamp is missing" \
+    "an unstamped pooled slot was authorized for disposal"
+  pass "a missing ownership stamp retains the pooled slot"
+}
+
 test_a_second_recorded_task_retains_the_slot() {
   local rec verdict
   rec=$(make_slot_world slot-shared)
@@ -608,7 +631,7 @@ test_a_stamp_naming_another_task_retains_the_slot() {
 }
 
 test_a_live_agent_of_another_task_retains_the_slot() {
-  local rec verdict occupant
+  local rec verdict occupant pid
   require_procfs || { pass "skip: this host has no readable procfs for occupancy proof"; return 0; }
   rec=$(make_slot_world slot-occupied)
   read_slot_world "$rec"
@@ -616,10 +639,13 @@ test_a_live_agent_of_another_task_retains_the_slot() {
   fm_write_meta "$WORLD/home/state/task-e5.meta" \
     "window=firstmate:fm-task-e5" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  start_declared_agent "$WT_DIR" "$occupant" "$WORLD/home" >/dev/null
-  verdict=$(slot_verdict "$WORLD/home/state" task-e5 "$WT_DIR" "$WORLD/home")
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e5 "$WORLD/home" ) \
+    || fail "the live-occupant fixture could not be stamped"
+  pid=$(start_declared_agent "$WT_DIR" "$occupant" "$WORLD/home")
+  verdict=$(slot_live_verdict "$pid" "$WORLD/home/state" task-e5 "$WT_DIR" "$WORLD/home")
   case "$verdict" in
-    "retain: a live agent for task(s) $occupant"*) : ;;
+    "retain: the endpoint-bound process for task(s) $occupant"*) : ;;
     *) fail "a slot occupied by another task's live agent did not retain: $verdict" ;;
   esac
   pass "a slot occupied by another task's live agent retains its lease"
@@ -656,9 +682,9 @@ test_a_relinquished_slot_is_releasable_by_its_remaining_holder() {
   rm -f "$WORLD/home/state/owner-e7.meta"
 
   verdict=$(slot_verdict "$WORLD/home/state" paused-e7 "$WT_DIR" "$WORLD/home")
-  [ "$verdict" = dispose ] \
-    || fail "the last holder could not release a slot nothing else references: $verdict"
-  pass "a retiring owner gives up its own stamp so the remaining holder can still release the slot"
+  assert_contains "$verdict" "retain: slot ownership stamp is missing" \
+    "an unstamped remaining holder was allowed to release the slot"
+  pass "a retiring owner cannot grant unstamped disposal authority to a remaining holder"
 }
 
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
@@ -877,6 +903,7 @@ test_one_proc_walk_answers_every_task_in_a_sweep
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
+test_missing_ownership_stamp_retains
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot

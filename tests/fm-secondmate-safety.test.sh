@@ -1027,6 +1027,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "could not stamp secondmate home ownership"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-fake")
   log="$TMP_ROOT/teardown-fake/tmux.log"
   lease="$TMP_ROOT/teardown-fake/lease"
@@ -1203,6 +1206,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "the failed-return secondmate fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-return-fail-fake")
   log="$TMP_ROOT/teardown-return-fail-fake/tmux.log"
 
@@ -1286,6 +1292,9 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$childwt" child "$subhome" ) \
+    || fail "force teardown child worktree fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \

@@ -771,8 +771,10 @@ EOF
 }
 
 TEARDOWN_SLOT_RETAINED=0
-slot_release_allowed() {  # <state-dir> <task-id> <worktree> <home> <label> <retire|refuse>
-  local state=$1 id=$2 wt=$3 home=$4 label=$5 disposition=$6 verdict
+slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <label> <retire|refuse> [endpoint-state] [backend] [target] [worker-home] [role]
+  local state=$1 id=$2 wt=$3 stamp_home=$4 label=$5 disposition=$6
+  local endpoint_state=${7:-closed} backend=${8:-} target=${9:-}
+  local worker_home=${10:-$stamp_home} role=${11:-crewmate} verdict
   case "$disposition" in
     retire|refuse) ;;
     *)
@@ -780,7 +782,8 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <home> <label> <ret
       return 1
       ;;
   esac
-  verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$home")
+  verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$stamp_home" \
+    "$worker_home" "$role" "$endpoint_state" "$backend" "$target")
   [ "$verdict" = dispose ] && return 0
   TEARDOWN_SLOT_RETAINED=1
   echo "teardown: $label $wt lease RETAINED, not returned to the pool: ${verdict#retain: }" >&2
@@ -805,7 +808,8 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" "$home_scope" "$label" refuse || return 1
+    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" \
+      "$home_scope" "$label" refuse closed "" "" "$abs_home_path" secondmate || return 1
     fm_slot_stamp_clear "$abs_home_path"
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
@@ -1066,6 +1070,34 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
+# Prove pooled-slot occupancy against the exact task endpoint before closing it.
+# Once the endpoint is gone, a closed endpoint needs no live-process census; an
+# endpoint that is live but whose pid/cwd cannot be proved retains the lease.
+teardown_slot_endpoint_state() {
+  local backend=$1 target=$2 state
+  if fm_backend_foreground_process_pid "$backend" "$target" >/dev/null 2>&1; then
+    printf 'live'
+    return 0
+  fi
+  state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+  case "$state" in
+    dead|missing|no-agent) printf 'closed' ;;
+    alive) printf 'live' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+TOP_SLOT_RELEASE_AUTHORIZED=0
+TOP_SLOT_ENDPOINT_STATE=closed
+if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
+  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
+    "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
+    "$FM_HOME" crewmate; then
+    TOP_SLOT_RELEASE_AUTHORIZED=1
+  fi
+fi
+
 if [ "$BACKEND" = herdr ]; then
   if ! teardown_herdr_endpoint_focus_safe "$T"; then
     echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
@@ -1092,30 +1124,29 @@ fi
 
 # Ownership gate first. A retained lease leaves the slot untouched while the
 # rest of teardown retires this task's endpoint and records.
-if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "worktree" retire; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
+if [ -d "$WT" ] && [ "$KIND" != secondmate ] \
+   && [ "$TOP_SLOT_RELEASE_AUTHORIZED" -eq 1 ]; then
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  if [ "$branch" != "HEAD" ]; then
+    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
-    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-    fm_slot_stamp_clear "$WT"
-    # Kills remaining processes in the worktree (including the agent), resets, returns
-    # to pool. treehouse resolves the pool from the working directory, so run it from
-    # the project. teardown_treehouse_return tolerates transient and stale git locks
-    # left by a killed crew process; see the script header for retry and stale-lock proof.
-    post_lock_cleanup_check=
-    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-      post_lock_cleanup_check=validate_worktree_teardown_safety
-    fi
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-      exit 1
-    }
   fi
+  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  fm_slot_stamp_clear "$WT"
+  # Kills remaining processes in the worktree (including the agent), resets, returns
+  # to pool. treehouse resolves the pool from the working directory, so run it from
+  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # left by a killed crew process; see the script header for retry and stale-lock proof.
+  post_lock_cleanup_check=
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+    post_lock_cleanup_check=validate_worktree_teardown_safety
+  fi
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
 fi
 
 if [ "$KIND" = secondmate ]; then

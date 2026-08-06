@@ -247,6 +247,20 @@ fm_agent_backend_shell_pid() {
   esac
 }
 
+# fm_backend_foreground_process_pid <backend> <target>: the process bound to a
+# task endpoint, or 1 when this provider cannot expose an authoritative pid.
+# A provider path or pane hint is never promoted to occupancy evidence.
+fm_backend_foreground_process_pid() {
+  local backend=$1 target=$2 shell_pid pid
+  shell_pid=$(fm_agent_backend_shell_pid "$backend" "$target") || return 1
+  pid=$(fm_agent_harness_pid_below "$shell_pid" 2>/dev/null) \
+    || pid=$(fm_agent_foreground_pid "$shell_pid" 2>/dev/null) \
+    || pid=$shell_pid
+  fm_agent_pid_is_numeric "$pid" || return 1
+  fm_agent_proc_cwd "$pid" >/dev/null 2>&1 || return 1
+  printf '%s' "$pid"
+}
+
 # fm_agent_foreground_pid <pid>: the deepest descendant of <pid> - the process
 # actually running in the foreground of that shell. This is what makes a tmux
 # reading track `treehouse get`'s subshell, exactly as herdr's foreground_cwd

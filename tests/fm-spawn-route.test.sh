@@ -145,7 +145,7 @@ run_spawn_case() {
 }
 
 test_ordinary_spawn_records_route_fields() {
-  local home proj wt fakebin id out status meta brief launch window_name
+  local home proj wt fakebin id out status meta brief launch tmux_log window_name
   IFS='|' read -r home proj wt fakebin <<EOF
 $(make_case ordinary)
 EOF
@@ -169,9 +169,10 @@ EOF
   window_name=$(cat "$home/tmux-window-name")
   assert_contains "$window_name" "fm-$id" "ordinary spawn did not restore the canonical window name after locking renames"
   launch=$(cat "$home/launch.log")
-  assert_contains "$launch" "treehouse get --lease --lease-holder '$id'" \
+  tmux_log=$(cat "$home/tmux.log")
+  assert_contains "$tmux_log" "treehouse get --lease --lease-holder '$id'" \
     "ordinary spawn did not hold a durable Treehouse lease until teardown"
-  assert_contains "$launch" 'cd -- "$fm_wt"' \
+  assert_contains "$tmux_log" 'cd -- "$fm_wt"' \
     "ordinary spawn did not enter the durably leased worktree"
   assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"medium\"' --dangerously-bypass-approvals-and-sandbox" \
     "ordinary route did not thread model and effort into launch"

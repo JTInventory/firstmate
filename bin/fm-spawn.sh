@@ -1543,7 +1543,18 @@ fi
 mkdir -p "$STATE"
 # Record current ownership in the linked worktree's private git directory.
 # Metadata is historical; teardown uses this stamp as independent evidence.
-fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null || true
+# A seeded secondmate home may be a plain directory rather than a pooled git
+# worktree. Ordinary task workers must always have a stamp; linked secondmate
+# homes get the same proof when a pooled slot is actually involved.
+if [ -n "${WT:-}" ] && fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
+  if ! fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null; then
+    echo "error: could not prove pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
+    exit 1
+  fi
+elif [ "$KIND" != secondmate ]; then
+  echo "error: could not prove pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
+  exit 1
+fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 {

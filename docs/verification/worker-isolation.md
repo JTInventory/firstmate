@@ -127,3 +127,9 @@ Redirections are applied left to right, so a trailing `2>/dev/null` on the same 
 The group form is what suppresses it, and `fm_agent_environ` is the single reader that applies it.
 
 Regression: `tests/fm-worker-isolation.test.sh`'s isolated-worker sweep case captures the sweep with stderr folded into stdout and requires it to be completely empty, so an unreadable `/proc` entry anywhere on the host fails the suite.
+
+Pooled-slot occupancy is endpoint-scoped by `tests/fm-slot-occupant-proof.test.sh`:
+the proof follows the exact backend endpoint, rejects a foreign declared process
+inside the slot, retains on unavailable endpoint evidence, and permits disposal
+after the endpoint is proven closed. It never performs a host-wide process census
+for normal teardown.
