@@ -185,8 +185,9 @@ fm_agent_marker_value() {
 
 # fm_agent_task_pid_index: one
 # `<task-id>\t<owner-home>\t<role>\t<pid>` line per live declared process,
-# built from a SINGLE process-list walk (/proc/[0-9]* on Linux or ps on macOS),
-# with environment data read from procfs or kern.procargs2.
+# built from one bulk procfs marker scan plus a SINGLE process-list walk on
+# Linux, or ps on macOS, with environment data read from procfs or
+# kern.procargs2.
 #
 # Reading one process's environment costs several processes of its own, so a
 # caller that asks about MANY tasks builds this index once and hands it back to
@@ -195,17 +196,41 @@ fm_agent_marker_value() {
 # exists for had 17 concurrent tasks.
 # Returns 1 when no supported process list/identity can be read or no live
 # process declares a task.
+fm_agent_task_pid_candidates() {
+  local marker_paths marker_status=0 marker_pids harness_pids process_list
+  if [ -d /proc ]; then
+    marker_paths=$(grep -a -l -z -E 'FM_AGENT_(TASK|OWNER_HOME|ROLE)=' \
+      /proc/[0-9]*/environ 2>/dev/null) || marker_status=$?
+    case "$marker_status" in
+      0|1) ;;
+      2) # A process may exit while grep walks procfs; validate returned paths below.
+        ;;
+      *) return 1 ;;
+    esac
+    marker_pids=$(printf '%s\n' "$marker_paths" \
+      | sed -n 's#^/proc/\([0-9][0-9]*\)/environ$#\1#p') || return 1
+    process_list=$(LC_ALL=C ps -A -o pid= -o comm= -o args= 2>/dev/null) || return 1
+    harness_pids=$(printf '%s\n' "$process_list" \
+      | awk -v re="$FM_HARNESS_RE" '$2 ~ re || $0 ~ re {print $1}') || return 1
+    printf '%s\n%s\n' "$marker_pids" "$harness_pids" | awk 'NF' | sort -nu
+    return 0
+  fi
+  LC_ALL=C ps -A -o pid= 2>/dev/null
+}
+
 fm_agent_task_pid_index() {
   local pid task home role env found=1 pids comm args marker_evidence
-  if [ -d /proc ]; then
-    pids=$(printf '%s\n' /proc/[0-9]* | sed 's#.*/##')
-  else
-    pids=$(LC_ALL=C ps -A -o pid= 2>/dev/null) || return 1
-  fi
+  pids=$(fm_agent_task_pid_candidates) || return 1
+  [ -n "$pids" ] || return 1
   for pid in $pids; do
     if ! env=$(fm_agent_environ "$pid"); then
-      comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-      args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+      if [ -r "/proc/$pid/comm" ]; then
+        IFS= read -r comm < "/proc/$pid/comm" || comm=
+        args=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+      else
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+        args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+      fi
       if printf '%s %s' "${comm##*/}" "$args" | grep -qE "$FM_HARNESS_RE"; then
         printf '__FM_UNPROVEN__\t__FM_UNPROVEN__\tunreadable\t%s\n' "$pid"
         found=0

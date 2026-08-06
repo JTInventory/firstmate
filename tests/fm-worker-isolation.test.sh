@@ -3018,6 +3018,7 @@ test_unreadable_agent_candidate_is_indexed_as_unproven() {
   out=$(bash -c '
     # shellcheck source=/dev/null
 . "${!FM_TEST_ROOT_VAR}/bin/fm-agent-cwd-lib.sh"
+    fm_agent_task_pid_candidates() { printf '%s\n' "$$"; }
     fm_agent_environ() { return 1; }
     ps() {
       case " $* " in

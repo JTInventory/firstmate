@@ -69,6 +69,9 @@ pass "lifecycle scan scopes complete declarations to their operational home"
 
 scan_with_one_ambiguous_lifecycle_pid() {
   local expected_live=$1 ambiguous_pid=$$
+  fm_spawn_legacy_lifecycle_candidate_pids() {
+    printf '%s\n' "$ambiguous_pid"
+  }
   fm_lifecycle_process_script() {
     [ "$1" = "$ambiguous_pid" ] || return 1
     return 2

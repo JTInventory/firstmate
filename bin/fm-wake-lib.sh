@@ -464,33 +464,33 @@ fm_lifecycle_identity_result_busy() {
   esac
 }
 
+fm_spawn_legacy_lifecycle_candidate_pids() {
+  local process_list pid comm args padded
+  process_list=$(LC_ALL=C ps -A -o pid= -o comm= -o args= 2>/dev/null) || return 1
+  [ -n "$process_list" ] || return 0
+  while read -r pid comm args; do
+    case "$comm" in
+      bash|sh|dash|zsh|ksh|env|fm-spawn.sh|fm-teardown.sh) ;;
+      *) continue ;;
+    esac
+    padded=" $args "
+    case "$padded" in
+      *"fm-spawn.sh "*|*"fm-teardown.sh "*)
+        printf '%s\n' "$pid"
+        ;;
+    esac
+  done <<< "$process_list"
+}
+
 fm_spawn_legacy_lifecycle_process_busy() {
-  local target_home=$1 target_state=$2 exclude_pids=${3:-} entry pid script rc process_list
+  local target_home=$1 target_state=$2 exclude_pids=${3:-} pid script rc candidate_pids
   target_home=$(fm_lifecycle_canonical_path "$target_home") || return 0
   target_state=$(fm_lifecycle_canonical_path "$target_state") || return 0
-  if [ -d /proc ]; then
-    for entry in /proc/[0-9]*; do
-      pid=${entry#/proc/}
-      fm_pid_list_contains "$exclude_pids" "$pid" && continue
-      if fm_lifecycle_process_script "$pid"; then rc=0; else rc=$?; fi
-      if fm_lifecycle_identity_result_busy "$rc"; then
-        fm_lifecycle_process_live "$pid" || continue
-        return 0
-      fi
-      [ "$rc" -eq 0 ] || continue
-      script=$FM_LIFECYCLE_SCRIPT
-      if fm_spawn_legacy_process_matches_scope \
-        "$pid" "$script" "$target_home" "$target_state"; then rc=0; else rc=$?; fi
-      if [ "$rc" -ne 1 ]; then
-        fm_lifecycle_process_live "$pid" || continue
-        return 0
-      fi
-    done
-    return 1
-  fi
-  process_list=$(LC_ALL=C ps -A -o pid= -o args= 2>/dev/null) || return 0
-  [ -n "$process_list" ] || return 0
-  while read -r pid _; do
+  candidate_pids=$(fm_spawn_legacy_lifecycle_candidate_pids) || return 0
+  [ -n "$candidate_pids" ] || return 1
+  # Candidate selection only avoids opening /proc for unrelated processes.
+  # The identity and scope checks below remain authoritative.
+  while read -r pid; do
     fm_pid_list_contains "$exclude_pids" "$pid" && continue
     if fm_lifecycle_process_script "$pid"; then rc=0; else rc=$?; fi
     if fm_lifecycle_identity_result_busy "$rc"; then
@@ -505,7 +505,7 @@ fm_spawn_legacy_lifecycle_process_busy() {
       fm_lifecycle_process_live "$pid" || continue
       return 0
     fi
-  done <<< "$process_list"
+  done <<< "$candidate_pids"
   return 1
 }
 
