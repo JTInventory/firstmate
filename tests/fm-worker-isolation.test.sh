@@ -595,6 +595,20 @@ test_missing_ownership_stamp_retains() {
   pass "a missing ownership stamp retains the pooled slot"
 }
 
+test_missing_recorded_worktree_retains() {
+  local rec verdict
+  rec=$(make_slot_world slot-missing-worktree)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/task-missing-worktree.meta" \
+    "window=firstmate:fm-task-missing-worktree" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  rm -rf "$WT_DIR"
+  verdict=$(slot_verdict "$WORLD/home/state" task-missing-worktree "$WT_DIR" "$WORLD/home")
+  assert_contains "$verdict" "retain: recorded worktree is missing" \
+    "a missing recorded worktree was authorized for disposal"
+  pass "a missing recorded worktree retains the pooled slot"
+}
+
 test_a_second_recorded_task_retains_the_slot() {
   local rec verdict
   rec=$(make_slot_world slot-shared)
@@ -932,6 +946,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
 test_missing_ownership_stamp_retains
+test_missing_recorded_worktree_retains
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot

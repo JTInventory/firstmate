@@ -155,8 +155,14 @@ fm_slot_stamp_field() {
 # fm_slot_stamp_clear <worktree>: drop the stamp once the slot is released.
 fm_slot_stamp_clear() {
   local wt=$1 path
-  path=$(fm_slot_stamp_path "$wt") || return 0
-  rm -f "$path" 2>/dev/null || true
+  if [ ! -e "$wt" ] && [ ! -L "$wt" ]; then
+    return 0
+  fi
+  path=$(fm_slot_stamp_path "$wt") || return 1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    rm -f "$path" || return 1
+  fi
+  [ ! -e "$path" ] && [ ! -L "$path" ]
 }
 
 # fm_slot_meta_worktree <meta-file>: the recorded worktree path, or empty.
@@ -265,7 +271,7 @@ fm_slot_disposal_verdict() {
   local endpoint_state=${7:-unknown} backend=${8:-} target=${9:-}
   local stamp_task stamp_home stamp_path refs occupants
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    printf 'dispose'
+    printf 'retain: recorded worktree is missing; lease ownership cannot be proved'
     return 0
   fi
   if refs=$(fm_slot_meta_referencing_tasks "$state" "$self" "$wt"); then
@@ -347,8 +353,7 @@ fm_slot_disposal_verdict() {
 # fm_slot_disposal_verdict; that ordering is what protects a live-but-paused
 # task from having its slot reissued, and nothing here weakens it.
 #
-# Always succeeds: a slot with no stamp, or one stamped for someone else, simply
-# keeps whatever evidence it has.
+# Returns nonzero when clearing this task's current stamp cannot be verified.
 fm_slot_stamp_relinquish() {  # <worktree> <task-id> <verdict>
   local wt=$1 self=$2 verdict=$3 stamp_task
   case "$verdict" in
@@ -358,5 +363,4 @@ fm_slot_stamp_relinquish() {  # <worktree> <task-id> <verdict>
   stamp_task=$(fm_slot_stamp_field "$wt" task) || return 0
   [ "$stamp_task" = "$self" ] || return 0
   fm_slot_stamp_clear "$wt"
-  return 0
 }

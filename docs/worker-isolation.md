@@ -101,6 +101,7 @@ Writing is refused for anything that is not a linked worktree, so a primary chec
 
 Two boundaries are deliberate.
 Absence of evidence is not evidence: a slot with no stamp retains its lease, even without a conflicting reference, because current ownership cannot be proved safely.
+The same fail-closed rule applies when a recorded worktree path is missing: teardown preserves the task record and lease because it cannot prove which slot, if any, remains held.
 `--force` does not waive the gate: it is the captain's authority to discard *this* task's work, never authority to release another task's slot.
 
 Retaining means the lease is retired rather than returned.
@@ -146,7 +147,7 @@ It is the captain's authority to discard *this* task's work, never authority to 
 It is read-only, returns nonzero for an actionable finding or unproven required process evidence, and prints one `ISOLATION:` line per blocked task.
 `bin/fm-bootstrap.sh` runs it before any mutating sweep, surfaces those lines in the session-start digest, and refuses later mutation until the sweep is clean; the `bootstrap-diagnostics` skill owns what the agent does about each shape.
 
-It reports only from an authoritative process reading.
+Positive location and identity findings come only from an authoritative process reading.
 A task with no such reading is reported as unproven `ISOLATION:` evidence and blocks mutation. `FM_ISOLATION_VERBOSE=1` adds the matching `BOOTSTRAP_INFO` fact; a pane path remains a hint and is never promoted to a violation.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.

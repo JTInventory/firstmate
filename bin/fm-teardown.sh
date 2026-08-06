@@ -802,7 +802,11 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <stamp-home> <label
 remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scope]
   local home=$1 label=$2 expected_id=${3:-} state_scope=${4:-$STATE} home_scope=${5:-$FM_HOME} abs_home_path
   [ -n "$home" ] || return 0
-  [ -e "$home" ] || return 0
+  if [ ! -e "$home" ] && [ ! -L "$home" ]; then
+    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$home" \
+      "$home_scope" "$label" refuse unknown "" "" "$home" secondmate || return 1
+    return 1
+  fi
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
   if firstmate_home_has_treehouse_slot "$abs_home_path"; then
@@ -816,7 +820,10 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       return 1
     }
-    fm_slot_stamp_clear "$abs_home_path"
+    fm_slot_stamp_clear "$abs_home_path" || {
+      echo "error: could not clear the ownership stamp for $label $abs_home_path; preserving task state" >&2
+      return 1
+    }
     return 0
   fi
   safe_rm_rf "$abs_home_path" "$label"
@@ -837,13 +844,23 @@ validate_firstmate_home_children_removal() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
+      if [ -z "$child_home" ] || { [ ! -e "$child_home" ] && [ ! -L "$child_home" ]; }; then
+        slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" \
+          "child firstmate home" refuse unknown "$child_backend" "" "$home" secondmate \
+          || return 1
+      fi
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       if ! fm_pending_reply_task_force_retirable "$sub_state" "$child_id"; then
         echo "REFUSED: child secondmate $child_id has a pending reply that has not reached escalation." >&2
         return 1
       fi
       validate_firstmate_home_children_removal "$child_home" || return 1
-    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+    elif [ -n "$child_wt" ]; then
+      [ -d "$child_wt" ] || {
+        slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" \
+          "child worktree" refuse unknown "$child_backend" "" "$home" crewmate \
+          || return 1
+      }
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
@@ -878,6 +895,19 @@ cleanup_firstmate_home_children() {
     child_retire_source=
     child_resolved_handoff=0
     child_slot_retain_verdict=
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      if [ -z "$child_home" ] || { [ ! -e "$child_home" ] && [ ! -L "$child_home" ]; }; then
+        slot_release_allowed "$sub_state" "$child_id" "$child_home" "$home" \
+          "child firstmate home" refuse unknown "$child_backend" "$child_t" "$home" secondmate \
+          || return 1
+      fi
+    elif [ -n "$child_wt" ] && [ ! -d "$child_wt" ]; then
+      slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" \
+        "child worktree" refuse unknown "$child_backend" "$child_t" "$home" crewmate \
+        || return 1
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_retire_source=$(fm_pending_reply_source_identity "$sub_state") || return 1
       if fm_pending_reply_task_has_open "$sub_state" "$child_id"; then
@@ -916,33 +946,33 @@ cleanup_firstmate_home_children() {
         echo "REFUSED: could not hand off pending replies for child secondmate $child_id." >&2
         return 1
       fi
-    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+    elif [ -n "$child_wt" ]; then
       if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "child worktree" retire; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-        if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-          if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" \
-            || safe_rm_rf_child_worktree "$child_wt" "$child_proj"; then
-            fm_slot_stamp_clear "$child_wt"
-          else
-            return 1
-          fi
-        else
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return 1
-          fm_slot_stamp_clear "$child_wt"
-        fi
+        [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1 || {
+          echo "REFUSED: cannot prove durable return for child worktree $child_wt; preserving child state" >&2
+          return 1
+        }
+        teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" || return 1
+        fm_slot_stamp_clear "$child_wt" || {
+          echo "error: could not clear the ownership stamp for child worktree $child_wt; preserving child state" >&2
+          return 1
+        }
       else
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
+    if [ -n "$child_slot_retain_verdict" ] \
+       && ! fm_slot_stamp_relinquish "$child_wt" "$child_id" "$child_slot_retain_verdict"; then
+      echo "error: could not relinquish the ownership stamp for child $child_id; preserving child state" >&2
+      return 1
+    fi
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" || return 1
-    if [ -n "$child_slot_retain_verdict" ]; then
-      fm_slot_stamp_relinquish "$child_wt" "$child_id" "$child_slot_retain_verdict"
-    fi
   done
 }
 
@@ -1103,8 +1133,12 @@ teardown_slot_endpoint_state() {
 TOP_SLOT_RELEASE_AUTHORIZED=0
 TOP_SLOT_RETAIN_VERDICT=
 TOP_SLOT_ENDPOINT_STATE=closed
-if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
+if [ "$KIND" != secondmate ]; then
+  if [ -d "$WT" ]; then
+    TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
+  else
+    TOP_SLOT_ENDPOINT_STATE=unknown
+  fi
   if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
     "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
     "$FM_HOME" crewmate; then
@@ -1170,7 +1204,10 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ] \
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-  fm_slot_stamp_clear "$WT"
+  fm_slot_stamp_clear "$WT" || {
+    echo "error: could not clear the ownership stamp for worktree $WT; preserving task state" >&2
+    exit 1
+  }
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -1193,15 +1230,17 @@ cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
   exit 1
 }
+if [ -n "$TOP_SLOT_RETAIN_VERDICT" ] \
+   && ! fm_slot_stamp_relinquish "$WT" "$ID" "$TOP_SLOT_RETAIN_VERDICT"; then
+  echo "error: could not relinquish the ownership stamp for $ID; preserving task state" >&2
+  exit 1
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp" || {
   echo "error: could not remove task records for $ID; ownership evidence was preserved" >&2
   exit 1
 }
-if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
-  fm_slot_stamp_relinquish "$WT" "$ID" "$TOP_SLOT_RETAIN_VERDICT"
-fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

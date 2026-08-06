@@ -43,10 +43,9 @@
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          An ISOLATION line means a task's live agent process is provably not
-#          in its recorded worktree - a restore that collapsed the worktree onto
-#          the primary checkout, or an agent declared for another home. It is
-#          read-only, runs in detect-only mode too, and reports only from an
-#          authoritative process reading, never from a pane path.
+#          in its recorded worktree, is declared for another home, or required
+#          live process evidence is unproven. It is read-only, runs in
+#          detect-only mode too, and blocks later mutation in every case.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.

@@ -239,6 +239,8 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 SPAWN_ENDPOINT_CREATED=0
 SPAWN_WORKTREE_LEASED=0
+SPAWN_WORKTREE_PROVEN=0
+SPAWN_WORKTREE_PATH_SOURCE=
 SPAWN_META_PUBLISHED=0
 SPAWN_SLOT_STAMPED=0
 
@@ -278,14 +280,14 @@ spawn_herdr_flat_uncertainty_record() {
 
 spawn_abort_recovery_meta() {
   local tmp
-  [ -n "${WT:-}" ] && [ -n "${T:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
+  [ -n "${T:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
   [ -e "$STATE/$ID.meta" ] || {
     mkdir -p "$STATE" 2>/dev/null || return 1
     tmp=$(mktemp "$STATE/.$ID.spawn-abort.XXXXXX") || return 1
     chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
     {
       echo "window=$T"
-      echo "worktree=$WT"
+      echo "worktree=${WT:-unknown}"
       echo "project=$PROJ_ABS"
       echo "harness=${HARNESS:-unknown}"
       echo "kind=${KIND:-ship}"
@@ -395,6 +397,7 @@ spawn_abort_cleanup() {
   fi
   if [ "$status" -ne 0 ] \
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
+     && [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] \
      && [ "${SPAWN_SLOT_STAMPED:-0}" != 1 ] \
      && [ -n "${WT:-}" ] \
      && fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null; then
@@ -402,17 +405,19 @@ spawn_abort_cleanup() {
   fi
   if [ "$status" -ne 0 ] \
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
+     && [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] \
      && [ "$endpoint_cleanup_status" -eq 0 ] \
      && [ -n "${WT:-}" ] \
      && [ -n "${PROJ_ABS:-}" ] \
      && spawn_slot_stamp_owned; then
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
-      slot_returned=1
-      if [ "${SPAWN_SLOT_STAMPED:-0}" = 1 ]; then
-        fm_slot_stamp_clear "$WT"
-      fi
-      if [ "${SPAWN_META_PUBLISHED:-0}" = 1 ]; then
-        rm -f "$STATE/$ID.meta"
+      if fm_slot_stamp_clear "$WT"; then
+        slot_returned=1
+        if [ "${SPAWN_META_PUBLISHED:-0}" = 1 ]; then
+          rm -f "$STATE/$ID.meta" || slot_returned=0
+        fi
+      else
+        echo "warning: spawn abort returned $WT but could not clear its ownership stamp; preserving recovery metadata" >&2
       fi
     else
       echo "warning: spawn abort could not return leased worktree $WT; preserving its metadata and ownership stamp for teardown" >&2
@@ -1225,7 +1230,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
       echo "error: $1 did not yield an isolated worktree of the target project; refusing to launch. $SPAWN_WT_FAIL"
       echo "  resolved: '$WT'"
       echo "  expected: a linked worktree of '$PROJ_ABS' (git common dir '$(proj_git_common_real)')"
-      echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $2 before respawning. The just-created window is killed and no meta is recorded."
+      echo "  hint: a raced or stale treehouse lease, or an rc-driven cd in the pane's shell, can leave the pane cwd in an unrelated repo; inspect the pool state ('treehouse status' in the project; ~/.treehouse/*/treehouse-state.json) and target $2 before respawning. The just-created window is killed and any uncertain lease is retained in recovery metadata."
     } >&2
     cleanup_spawn_window "$WID"
     exit 1
@@ -1453,16 +1458,20 @@ esac
 SPAWN_ENDPOINT_CREATED=1
 spawn_settle_path() {  # <target>
   local record
+  SPAWN_WORKTREE_PATH_SOURCE=
   record=$(fm_agent_cwd_verdict "" "$BACKEND" "$1")
   if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
+    SPAWN_WORKTREE_PATH_SOURCE=proc
     fm_agent_verdict_field "$record" cwd
     return 0
   fi
+  SPAWN_WORKTREE_PATH_SOURCE=hint
   fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true
 }
 
 if [ "$KIND" != secondmate ]; then
   TREEHOUSE_LEASE_COMMAND=$(fm_worker_treehouse_lease_command "$ID") || exit 1
+  SPAWN_WORKTREE_LEASED=1
   fm_backend_send_text_line "$BACKEND" "$WID" "$TREEHOUSE_LEASE_COMMAND"
 
   # Prefer the live process cwd through /proc. Provider pane cwd remains a hint
@@ -1476,6 +1485,7 @@ if [ "$KIND" != secondmate ]; then
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then
         WT="$p"
+        [ "$SPAWN_WORKTREE_PATH_SOURCE" = proc ] && SPAWN_WORKTREE_PROVEN=1
         break
       fi
     fi
@@ -1489,7 +1499,6 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 
-  SPAWN_WORKTREE_LEASED=1
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
