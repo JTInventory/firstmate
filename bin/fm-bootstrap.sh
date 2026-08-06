@@ -847,11 +847,17 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
+isolation_sweep_status=0
+isolation_sweep_output=$("$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null) \
+  || isolation_sweep_status=$?
+[ -z "$isolation_sweep_output" ] || printf '%s\n' "$isolation_sweep_output"
+
 # This is the first mutating sweep at a locked session boundary. It pauses an
 # identity-matched watcher, holds its lock, and neutralizes legacy PR checks
 # before any tool detection or later bootstrap mutation can leave old artifacts
 # runnable. Detect-only sessions never touch state.
-if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] \
+  && [ "$isolation_sweep_status" -eq 0 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
 fi
 
@@ -882,11 +888,6 @@ gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
-# Worker-isolation sweep: the spawn-time assertion does not survive a restore,
-# so every session re-establishes it from live process evidence. Read-only, so
-# it runs in detect-only mode too. bin/fm-isolation-sweep.sh owns the evidence
-# discipline and the exact ISOLATION line shapes.
-"$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null || true
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
@@ -907,6 +908,10 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  if [ "$isolation_sweep_status" -ne 0 ]; then
+    echo "ISOLATION: bootstrap mutations blocked until worker isolation is clean"
+    exit 1
+  fi
   secondmate_liveness_sweep
   secondmate_sync || exit 1
   x_mode_setup

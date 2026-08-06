@@ -237,6 +237,10 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_ENDPOINT_CREATED=0
+SPAWN_WORKTREE_LEASED=0
+SPAWN_META_PUBLISHED=0
+SPAWN_SLOT_STAMPED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -272,8 +276,33 @@ spawn_herdr_flat_uncertainty_record() {
   mv "$tmp" "$file"
 }
 
+spawn_abort_recovery_meta() {
+  local tmp
+  [ -n "${WT:-}" ] && [ -n "${T:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
+  [ -e "$STATE/$ID.meta" ] || {
+    mkdir -p "$STATE" 2>/dev/null || return 1
+    tmp=$(mktemp "$STATE/.$ID.spawn-abort.XXXXXX") || return 1
+    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+    {
+      echo "window=$T"
+      echo "worktree=$WT"
+      echo "project=$PROJ_ABS"
+      echo "harness=${HARNESS:-unknown}"
+      echo "kind=${KIND:-ship}"
+      echo "mode=${MODE:-no-mistakes}"
+      echo "yolo=${YOLO:-off}"
+      echo "tasktmp=${TASK_TMP:-}"
+      echo "model=${MODEL:-default}"
+      echo "effort=${EFFORT:-default}"
+      [ "${BACKEND:-tmux}" = tmux ] || echo "backend=${BACKEND:-tmux}"
+      echo "spawn_state=aborted"
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$STATE/$ID.meta" || { rm -f "$tmp"; return 1; }
+  }
+}
+
 spawn_abort_cleanup() {
-  local status=$? cleanup_session
+  local status=$? cleanup_session endpoint_cleanup_status=1 slot_returned=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -283,10 +312,12 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
+    if fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
+      endpoint_cleanup_status=0
+    fi
   fi
   if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
     cleanup_session=${HERDR_FLAT_ABORT_TARGET%%:*}
@@ -298,6 +329,7 @@ spawn_abort_cleanup() {
     elif fm_backend_herdr_parse_target "$HERDR_FLAT_ABORT_TARGET" \
          && fm_backend_herdr_projection_teardown_close \
            "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+      endpoint_cleanup_status=0
       rm -f "${HERDR_FLAT_ABORT_UNCERTAINTY_FILE:-"$STATE/$ID.herdr-cleanup-uncertain"}"
     else
       spawn_herdr_flat_uncertainty_record \
@@ -343,6 +375,53 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  if [ "$status" -ne 0 ] \
+     && [ "${SPAWN_ENDPOINT_CREATED:-0}" = 1 ] \
+     && [ "$endpoint_cleanup_status" -ne 0 ] \
+     && [ "${BACKEND:-}" != herdr ] \
+     && [ "${BACKEND:-}" != orca ] \
+     && [ -n "${WID:-}" ]; then
+    if cleanup_spawn_window "$WID"; then
+      endpoint_cleanup_status=0
+    fi
+  fi
+  if [ "$status" -ne 0 ] \
+     && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
+     && [ "${SPAWN_SLOT_STAMPED:-0}" != 1 ] \
+     && [ -n "${WT:-}" ] \
+     && fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null; then
+    SPAWN_SLOT_STAMPED=1
+  fi
+  if [ "$status" -ne 0 ] \
+     && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
+     && [ "$endpoint_cleanup_status" -eq 0 ] \
+     && [ -n "${WT:-}" ] \
+     && [ -n "${PROJ_ABS:-}" ]; then
+    if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
+      slot_returned=1
+      if [ "${SPAWN_SLOT_STAMPED:-0}" = 1 ]; then
+        fm_slot_stamp_clear "$WT"
+      fi
+      if [ "${SPAWN_META_PUBLISHED:-0}" = 1 ]; then
+        rm -f "$STATE/$ID.meta"
+      fi
+    else
+      echo "warning: spawn abort could not return leased worktree $WT; preserving its metadata and ownership stamp for teardown" >&2
+    fi
+  fi
+  if [ "$status" -ne 0 ] \
+     && [ "$slot_returned" -ne 1 ] \
+     && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
+     && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ]; then
+    if spawn_abort_recovery_meta; then
+      echo "warning: spawn abort left a recoverable task record for leased worktree ${WT:-unknown}" >&2
+    else
+      echo "error: spawn abort could not publish a recoverable task record for leased worktree ${WT:-unknown}" >&2
+    fi
+  fi
+  if [ -n "${META_TMP:-}" ] && [ -e "$META_TMP" ]; then
+    rm -f "$META_TMP"
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1034,7 +1113,7 @@ cleanup_spawn_window() {
   if [ "$BACKEND" = herdr ] && [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ]; then
     return 0
   fi
-  fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1 || true
+  fm_backend_kill "$BACKEND" "$1" >/dev/null 2>&1
 }
 
 cleanup_unidentified_spawn_window() {
@@ -1363,6 +1442,7 @@ EOF
     WID="$T"
     ;;
 esac
+SPAWN_ENDPOINT_CREATED=1
 spawn_settle_path() {  # <target>
   local record
   record=$(fm_agent_cwd_verdict "" "$BACKEND" "$1")
@@ -1402,6 +1482,7 @@ if [ "$KIND" != secondmate ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  SPAWN_WORKTREE_LEASED=1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -1551,6 +1632,7 @@ if [ -n "${WT:-}" ] && fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
     echo "error: could not prove pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
     exit 1
   fi
+  SPAWN_SLOT_STAMPED=1
 elif [ "$KIND" != secondmate ]; then
   echo "error: could not prove pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
   exit 1
@@ -1592,6 +1674,7 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   fi
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
+SPAWN_META_PUBLISHED=1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
   if [ "$HERDR_LABEL_LOCK_HELD" = 1 ]; then

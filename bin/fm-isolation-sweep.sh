@@ -10,17 +10,16 @@
 # checkout. Isolation therefore has to be re-established from live evidence on
 # every resume, not assumed from the launch that happened before the reboot.
 #
-# This sweep is READ-ONLY and always exits 0. It prints one actionable
-# `ISOLATION:` line per task whose live agent process is provably not where its
-# record says it is, so bin/fm-bootstrap.sh can surface it in the session-start
-# digest exactly like TANGLE.
+# This sweep is READ-ONLY and exits nonzero when isolation is actionable or its
+# required process evidence is unproven. It prints one `ISOLATION:` line per
+# such task so bin/fm-bootstrap.sh can block mutation until the home is safe.
 #
 # Evidence discipline (bin/fm-agent-cwd-lib.sh owns the method of record): a
 # collapse is reported only from an AUTHORITATIVE /proc reading of the agent
 # process. A provider's pane cwd is never promoted to evidence here, because a
 # pane field naming the wrong process is precisely what produced a false
 # isolation violation on 2026-07-25. A task with no authoritative reading is
-# reported only under FM_ISOLATION_VERBOSE=1, as a BOOTSTRAP_INFO fact.
+# an unproven isolation finding; verbose mode adds a BOOTSTRAP_INFO fact.
 #
 # docs/worker-isolation.md owns how this mechanism fits with the other three.
 #
@@ -57,6 +56,7 @@ ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 # sweep exists for had 17 concurrent tasks. An empty index is a real answer (no
 # live process declares a task), not a missing one.
 PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
+sweep_status=0
 
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
@@ -69,9 +69,11 @@ for meta in "$STATE"/*.meta; do
   record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX")
   source=$(fm_agent_verdict_field "$record" source)
   if [ "$source" != proc ]; then
+    echo "ISOLATION: task $id isolation is unproven: no live agent process could be identified, and a pane path is only a hint; block mutation until the endpoint and worker identity are re-established"
     if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
       echo "BOOTSTRAP_INFO: isolation for $id is unproven: no live agent process could be identified, and a pane path is only a hint"
     fi
+    sweep_status=1
     continue
   fi
   pid=$(fm_agent_verdict_field "$record" pid)
@@ -100,6 +102,7 @@ for meta in "$STATE"/*.meta; do
     declared_real=$(fm_agent_canonical_dir "$declared_home") || declared_real=$declared_home
     if [ "$declared_real" != "$expected_home" ]; then
       echo "ISOLATION: task $id is running as a worker of home $declared_real, not the home that owns it ($expected_home); stop it before it acts on that home's records"
+      sweep_status=1
       continue
     fi
   fi
@@ -114,9 +117,11 @@ for meta in "$STATE"/*.meta; do
 
   if fm_agent_path_within "$ROOT_REAL" "$cwd_real" || fm_agent_path_within "$HOME_REAL" "$cwd_real"; then
     echo "ISOLATION: task $id collapsed onto the primary checkout - agent process $pid is running in $cwd_real instead of its worktree $recorded_real; stop that worker before it writes, then relaunch it in an isolated worktree"
+    sweep_status=1
     continue
   fi
   echo "ISOLATION: task $id is not in its recorded worktree - agent process $pid is running in $cwd_real instead of $recorded_real; reconcile the record before any disposal or steer"
+  sweep_status=1
 done
 
-exit 0
+exit "$sweep_status"

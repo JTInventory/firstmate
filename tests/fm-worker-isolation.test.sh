@@ -775,6 +775,26 @@ SH
   pass "teardown retires a contested lease, leaves the slot untouched, and --force does not waive it"
 }
 
+test_teardown_endpoint_state_prefers_backend_agent_state() {
+  local function_source out
+  function_source=$(sed -n '/^teardown_slot_endpoint_state()/,/^}/p' "$TEARDOWN")
+  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_backend_foreground_process_pid() { printf 4242; }
+    fm_backend_agent_state() { printf dead; }
+    teardown_slot_endpoint_state tmux firstmate:fm-dead-shell
+  ')
+  [ "$out" = closed ] || fail "a dead backend endpoint was classified live from its remaining shell: $out"
+  out=$(FUNCTION_SOURCE="$function_source" bash -c '
+    eval "$FUNCTION_SOURCE"
+    fm_backend_foreground_process_pid() { return 1; }
+    fm_backend_agent_state() { printf alive; }
+    teardown_slot_endpoint_state herdr fmtest:pane-a
+  ')
+  [ "$out" = unknown ] || fail "a live endpoint without exact process proof was not fail-closed: $out"
+  pass "teardown consults backend state before process proof and retains unproven live endpoints"
+}
+
 # --- F. restore-time re-assertion -------------------------------------------
 
 make_sweep_home() {
@@ -800,6 +820,7 @@ test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout() {
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
   start_declared_agent "$world/project" "$id" "$world/home" >/dev/null
   out=$(run_sweep "$world")
+  expect_code 1 "$?" "the collapsed-worktree sweep must fail closed"
   assert_contains "$out" "ISOLATION: task $id collapsed onto the primary checkout" \
     "the resume sweep did not report a collapsed worktree"
   pass "the resume sweep re-asserts isolation and reports a worktree that collapsed onto the primary checkout"
@@ -818,22 +839,26 @@ test_sweep_is_silent_for_a_correctly_isolated_worker() {
   # and a /proc entry it may not read must stay silent rather than surfacing a
   # permission error as if it were a finding.
   out=$(run_sweep "$world")
+  expect_code 0 "$?" "the isolated-worker sweep should be clean"
   [ -z "$out" ] || fail "the resume sweep reported a correctly isolated worker: $out"
   pass "the resume sweep stays silent for a worker that is genuinely in its worktree"
 }
 
-test_sweep_never_promotes_a_pane_path_to_evidence() {
-  local world out
+test_sweep_fails_closed_without_process_evidence() {
+  local world out status
   world=$(make_sweep_home sweep-hint)
   fm_write_meta "$world/home/state/task-f3.meta" \
     "window=firstmate:fm-task-f3" "worktree=$world/wt" "project=$world/project" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
   out=$(run_sweep "$world")
-  [ -z "$out" ] || fail "the resume sweep reported a violation with no live process to prove it: $out"
+  status=$?
+  expect_code 1 "$status" "the sweep must fail closed when required process evidence is unproven"
+  assert_contains "$out" "ISOLATION: task task-f3 isolation is unproven" \
+    "the sweep did not report unproven required evidence"
   out=$(FM_ISOLATION_VERBOSE=1 run_sweep "$world")
   assert_contains "$out" "BOOTSTRAP_INFO: isolation for task-f3 is unproven" \
     "an unprovable task was not reported as unproven under verbose facts"
-  pass "an unprovable task is never reported as a violation from a pane path alone"
+  pass "unproven process evidence blocks restore-time mutation without using a pane path"
 }
 
 test_sweep_reports_an_agent_declared_for_another_home() {
@@ -847,6 +872,7 @@ test_sweep_reports_an_agent_declared_for_another_home() {
   mkdir -p "$world/other-home"
   start_declared_agent "$world/wt" "$id" "$world/other-home" >/dev/null
   out=$(run_sweep "$world")
+  expect_code 1 "$?" "the foreign-home sweep must fail closed"
   assert_contains "$out" "ISOLATION: task $id is running as a worker of home" \
     "the resume sweep did not report an agent declared for another home"
   pass "the resume sweep reports an agent that declares another home as its owner"
@@ -866,6 +892,7 @@ test_sweep_is_silent_for_a_healthy_secondmate() {
   fm_write_secondmate_meta "$world/home/state/$id.meta" "$sub_home" "firstmate:fm-$id"
   start_declared_agent "$sub_home" "$id" "$sub_home" secondmate >/dev/null
   out=$(run_sweep "$world")
+  expect_code 0 "$?" "a healthy secondmate sweep should be clean"
   [ -z "$out" ] || fail "the resume sweep reported a healthy live secondmate: $out"
   pass "the resume sweep stays silent for a secondmate that declares its own home"
 }
@@ -880,6 +907,7 @@ test_sweep_still_reports_a_secondmate_running_for_a_foreign_home() {
   fm_write_secondmate_meta "$world/home/state/$id.meta" "$sub_home" "firstmate:fm-$id"
   start_declared_agent "$sub_home" "$id" "$world/other-home" secondmate >/dev/null
   out=$(run_sweep "$world")
+  expect_code 1 "$?" "a foreign secondmate must fail closed"
   assert_contains "$out" "ISOLATION: task $id is running as a worker of home" \
     "the resume sweep excused a secondmate declaring a home its record does not name"
   pass "the resume sweep still reports a secondmate whose declared home is not the one it owns"
@@ -910,9 +938,10 @@ test_a_live_agent_of_another_task_retains_the_slot
 test_a_relinquished_slot_is_releasable_by_its_remaining_holder
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks
 test_teardown_retires_a_contested_lease_even_with_force
+test_teardown_endpoint_state_prefers_backend_agent_state
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
-test_sweep_never_promotes_a_pane_path_to_evidence
+test_sweep_fails_closed_without_process_evidence
 test_sweep_reports_an_agent_declared_for_another_home
 test_sweep_is_silent_for_a_healthy_secondmate
 test_sweep_still_reports_a_secondmate_running_for_a_foreign_home

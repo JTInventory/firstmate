@@ -279,7 +279,33 @@ test_bootstrap_discovers_home_nvm_tasks_axi() {
   pass "bootstrap discovers HOME NVM tasks-axi in a clean non-interactive PATH"
 }
 
+test_bootstrap_blocks_mutation_on_unproven_isolation() {
+  local case_dir fakebin out status
+  case_dir="$TMP_ROOT/bootstrap-isolation-gate"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/config"
+  cat > "$case_dir/home/state/isolation-gate.meta" <<EOF
+window=firstmate:fm-isolation-gate
+worktree=$case_dir/worktree
+project=$case_dir/project
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_tasks_axi "$fakebin" "0.1.1"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  status=$?
+  expect_code 1 "$status" "bootstrap must refuse mutation on unproven worker isolation"
+  assert_contains "$out" "ISOLATION: bootstrap mutations blocked until worker isolation is clean" \
+    "bootstrap did not report the isolation mutation gate"
+  pass "bootstrap blocks mutating sweeps when restore-time isolation is unproven"
+}
+
 test_bootstrap_reporting
 test_gh_pr_checks_json_compatibility
 test_no_mistakes_min_version
 test_bootstrap_discovers_home_nvm_tasks_axi
+test_bootstrap_blocks_mutation_on_unproven_isolation

@@ -100,7 +100,7 @@ The stamp is written by `bin/fm-spawn.sh` into the worktree's private git direct
 Writing is refused for anything that is not a linked worktree, so a primary checkout can never be marked as a disposable slot.
 
 Two boundaries are deliberate.
-Absence of evidence is not evidence: a slot with no stamp and no conflicting reference disposes normally, which is what keeps every task spawned before stamping existed working unchanged.
+Absence of evidence is not evidence: a slot with no stamp retains its lease, even without a conflicting reference, because current ownership cannot be proved safely.
 `--force` does not waive the gate: it is the captain's authority to discard *this* task's work, never authority to release another task's slot.
 
 Retaining means the lease is retired rather than returned.
@@ -143,11 +143,11 @@ It is the captain's authority to discard *this* task's work, never authority to 
 ### Restore-time re-assertion
 
 `bin/fm-isolation-sweep.sh` re-establishes at session start what spawn could only assert at launch.
-It is read-only, always exits 0, and prints one `ISOLATION:` line per task whose live agent is provably not where its record says it is.
-`bin/fm-bootstrap.sh` runs it in the same place as the worktree-tangle check and surfaces those lines in the session-start digest; the `bootstrap-diagnostics` skill owns what the agent does about each shape.
+It is read-only, returns nonzero for an actionable finding or unproven required process evidence, and prints one `ISOLATION:` line per blocked task.
+`bin/fm-bootstrap.sh` runs it before any mutating sweep, surfaces those lines in the session-start digest, and refuses later mutation until the sweep is clean; the `bootstrap-diagnostics` skill owns what the agent does about each shape.
 
 It reports only from an authoritative process reading.
-A task with no such reading is silent by default and reported as an unproven `BOOTSTRAP_INFO` fact under `FM_ISOLATION_VERBOSE=1`, because reporting a violation from a pane path is precisely the false positive that corrected the method in the first place.
+A task with no such reading is reported as unproven `ISOLATION:` evidence and blocks mutation. `FM_ISOLATION_VERBOSE=1` adds the matching `BOOTSTRAP_INFO` fact; a pane path remains a hint and is never promoted to a violation.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.
 A secondmate declares its own home while its record lives in the launching primary's state directory, so comparing every declaration against this home would report every healthy secondmate in the fleet as a foreign worker on every session start.

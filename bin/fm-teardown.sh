@@ -1075,14 +1075,16 @@ fi
 # endpoint that is live but whose pid/cwd cannot be proved retains the lease.
 teardown_slot_endpoint_state() {
   local backend=$1 target=$2 state
-  if fm_backend_foreground_process_pid "$backend" "$target" >/dev/null 2>&1; then
-    printf 'live'
-    return 0
-  fi
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
   case "$state" in
     dead|missing|no-agent) printf 'closed' ;;
-    alive) printf 'live' ;;
+    alive)
+      if fm_backend_foreground_process_pid "$backend" "$target" >/dev/null 2>&1; then
+        printf 'live'
+      else
+        printf 'unknown'
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1095,6 +1097,14 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
     "$FM_HOME" crewmate; then
     TOP_SLOT_RELEASE_AUTHORIZED=1
+  fi
+  if [ "$TOP_SLOT_ENDPOINT_STATE" = unknown ]; then
+    slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
+      "worktree" refuse "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
+      "$FM_HOME" crewmate || {
+      echo "REFUSED: exact endpoint occupancy for $ID could not be proved; preserving task state, worktree, and lease" >&2
+      exit 1
+    }
   fi
 fi
 
