@@ -26,7 +26,10 @@
 #      diverged, or missing run heads do not match.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. A valid
+#      checks-passed -> done, failed/cancelled -> failed. Terminal passed ->
+#      done, claiming a merge only when the ci step ran to completion; passed
+#      with its pr or ci steps skipped -> unknown, because the pipeline
+#      observed no merge and the work must be treated as UNLANDED. A valid
 #      paused: <reason> event paired with a gate-free parked awaiting_agent run is the
 #      declared external-wait exception: report paused while retaining the
 #      run-step source and parked gate detail.
@@ -299,6 +302,20 @@ log_reports_ci_ready() {
     *) return 1 ;;
   esac
 }
+
+# Status token of one named step from the steps[N]{step,status,...} table in
+# $RUN_OUT; empty when the step (or the whole table) is absent. This reads any
+# status, including terminal completed/skipped, because the passed-outcome
+# mapping must know whether delivery actually ran.
+nm_step_status() {  # <step>
+  local row rest
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E "^[[:space:]]*$1,[[:space:]]*[^,]+," | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  rest=${row#*,}
+  strip_quotes "$(trim "${rest%%,*}")"
+}
+
 # A no-mistakes run remains active after checks turn green while it waits for the
 # captain's merge. The CI log is the durable distinction between that ready
 # state and checks that are still running; the most recent marker wins.
@@ -416,7 +433,23 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_DETAIL=""
   if [ -n "$outcome" ]; then
     case "$outcome" in
-      passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+      passed)
+        pr_step=$(nm_step_status pr)
+        ci_step=$(nm_step_status ci)
+        skipped_steps=""
+        [ "$pr_step" = skipped ] && skipped_steps="pr"
+        [ "$ci_step" = skipped ] && skipped_steps="${skipped_steps:+$skipped_steps,}ci"
+        if [ -n "$skipped_steps" ]; then
+          RUN_STATE=unknown
+          RUN_DETAIL="run passed but delivery steps skipped ($skipped_steps): pipeline observed no merge - treat work as UNLANDED"
+        elif [ "$ci_step" = completed ]; then
+          RUN_STATE="done"
+          RUN_DETAIL="run passed: PR merged/closed"
+        else
+          RUN_STATE="done"
+          RUN_DETAIL="run passed (merge not observed by pipeline steps)"
+        fi
+        ;;
       checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
       failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
       cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
