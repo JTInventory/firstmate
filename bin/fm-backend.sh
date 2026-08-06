@@ -665,10 +665,10 @@ fm_backend_recorded_endpoint_identity_of_meta() {  # <meta-file>
       ;;
     *) return 1 ;;
   esac
-  FM_BACKEND_RECORDED_ENDPOINT_BACKEND=$backend
-  FM_BACKEND_RECORDED_ENDPOINT_TARGET=$target
-  FM_BACKEND_RECORDED_ENDPOINT_GENERATION=$generation
-  FM_BACKEND_RECORDED_ENDPOINT_IDENTITY=$identity
+  export FM_BACKEND_RECORDED_ENDPOINT_BACKEND="$backend"
+  export FM_BACKEND_RECORDED_ENDPOINT_TARGET="$target"
+  export FM_BACKEND_RECORDED_ENDPOINT_GENERATION="$generation"
+  export FM_BACKEND_RECORDED_ENDPOINT_IDENTITY="$identity"
   printf '%s' "$identity"
 }
 
