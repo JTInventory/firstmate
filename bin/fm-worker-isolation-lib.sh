@@ -447,7 +447,7 @@ fm_worker_isolation_sweep_current() {
   home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$root}}
   state=${FM_STATE_OVERRIDE:-$home/state}
   FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    "$script"
+    "$script" >&2
 }
 
 fm_worker_primary_authority_matches() {

@@ -269,6 +269,7 @@ SPAWN_AUTHORITY_ENROLLMENT_SIGNER=
 SPAWN_AUTHORITY_ENROLLMENT_OWNED=0
 SPAWN_AUTHORITY_LAUNCH_RECEIPT=
 SPAWN_ABORT_ENDPOINT_RETIRED=0
+SPAWN_LAUNCH_SUBMITTED=0
 
 claim_spawn_slot() {
   local home
@@ -567,6 +568,7 @@ spawn_abort_retire_unpublished_endpoint() {
 }
 
 spawn_submit_final_enter() {
+  [ "${SPAWN_LAUNCH_SUBMITTED:-0}" = 1 ] && return 0
   fm_backend_send_key "$BACKEND" "$WID" Enter
 }
 
@@ -2173,7 +2175,12 @@ if [ "$KIND" != secondmate ] && fm_cbm_project_eligible "$PROJ_ABS" \
   LAUNCH="${cbm_prefix}${LAUNCH}"
 fi
 if [ "$KIND" != secondmate ]; then
-  fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
+  if [ "$BACKEND" = herdr ]; then
+    fm_backend_send_text_line "$BACKEND" "$WID" "$LAUNCH" || exit 1
+    SPAWN_LAUNCH_SUBMITTED=1
+  else
+    fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
+  fi
 fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

@@ -137,11 +137,12 @@ fm_agent_launch_receipt_matches_pid() {
 
 fm_agent_endpoint_identity_pid() {
   local task=$1 home=$2 role=$3 endpoint_pid=$4 candidate env candidate_home
+  local descendants matches='' match_count=0
   fm_agent_pid_is_numeric "$endpoint_pid" || return 2
   [ -n "$task" ] && [ -n "$home" ] && [ -n "$role" ] || return 2
   home=$(fm_agent_canonical_dir "$home" 2>/dev/null) || return 2
-  for candidate in "$endpoint_pid" \
-    "$(fm_agent_harness_pid_below "$endpoint_pid" 2>/dev/null || true)"; do
+  descendants=$(fm_agent_descendant_pids "$endpoint_pid" 2>/dev/null) || return 2
+  while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     fm_agent_pid_is_numeric "$candidate" || continue
     env=$(fm_agent_environ "$candidate" 2>/dev/null) || continue
@@ -152,10 +153,11 @@ fm_agent_endpoint_identity_pid() {
     candidate_home=$(fm_agent_canonical_dir "$candidate_home" 2>/dev/null || true)
     [ "$candidate_home" = "$home" ] || continue
     [ "$(fm_agent_marker_value "$env" FM_AGENT_ROLE 2>/dev/null || true)" = "$role" ] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 2
+    match_count=$((match_count + 1))
+    matches="${matches:+$matches }$candidate"
+  done <<<"$descendants"
+  [ "$match_count" -eq 1 ] || return 2
+  printf '%s\n' "$matches"
 }
 
 # fm_agent_proc_env <pid> <var>: one environment value of a live process, or 1
@@ -416,6 +418,38 @@ fm_agent_harness_pid_below() {
   done
   [ -n "$best" ] || return 1
   printf '%s' "$best"
+}
+
+# fm_agent_descendant_pids <pid>: the bounded process tree rooted at <pid>,
+# including <pid>. Endpoint identity is a process-tree fact, not a command or
+# prompt-text fact: an Herdr endpoint may carry the authenticated marker on a
+# child shell while its foreground process-group leader is unmarked. Every
+# candidate is still checked by fm_agent_endpoint_identity_pid against the
+# exact launch receipt and marker, and multiple matches remain ambiguous.
+fm_agent_descendant_pids() {
+  local root=$1 table queue next pid child depth=0 seen
+  fm_agent_pid_is_numeric "$root" || return 1
+  table=$(ps -eo pid=,ppid= 2>/dev/null) || return 1
+  queue=$root
+  seen=" $root "
+  printf '%s\n' "$root"
+  while [ -n "$queue" ] && [ "$depth" -lt "$FM_AGENT_CWD_MAX_DESCEND" ]; do
+    next=
+    for pid in $queue; do
+      while IFS= read -r child; do
+        [ -n "$child" ] || continue
+        fm_agent_pid_is_numeric "$child" || return 1
+        case "$seen" in
+          *" $child "*) continue ;;
+        esac
+        seen="$seen$child "
+        printf '%s\n' "$child"
+        next="${next:+$next }$child"
+      done < <(printf '%s\n' "$table" | awk -v p="$pid" '$2 == p {print $1}')
+    done
+    queue=$next
+    depth=$((depth + 1))
+  done
 }
 
 # fm_agent_cwd_verdict <task-id> <owner-home> <role> [backend] [target] [pid-index]

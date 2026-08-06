@@ -3033,6 +3033,39 @@ test_unreadable_agent_candidate_is_indexed_as_unproven() {
   pass "unreadable candidate agents remain visible as unproven"
 }
 
+test_endpoint_identity_requires_one_authenticated_process_tree_match() {
+  local out status=0
+  out=$(bash -c '
+    # shellcheck source=/dev/null
+. "$1/bin/fm-agent-cwd-lib.sh"
+    fm_agent_canonical_dir() { printf "%s" "$1"; }
+    fm_agent_launch_receipt_matches_pid() { return 0; }
+    fm_agent_environ() {
+      case "$1" in
+        100|201|301) printf "FM_AGENT_TASK=endpoint\nFM_AGENT_OWNER_HOME=/tmp/endpoint-home\nFM_AGENT_ROLE=crewmate\n" ;;
+        102) printf "PS1=FM_AGENT_TASK=endpoint FM_AGENT_OWNER_HOME=/tmp/endpoint-home\n" ;;
+        302) printf "FM_AGENT_TASK=endpoint\nFM_AGENT_OWNER_HOME=/tmp/endpoint-home\nFM_AGENT_ROLE=crewmate\n" ;;
+        *) : ;;
+      esac
+    }
+    fm_agent_descendant_pids() {
+      case "$1" in
+        100) printf "100\n" ;;
+        200) printf "200\n201\n202\n" ;;
+        300) printf "300\n301\n302\n" ;;
+      esac
+    }
+    [ "$(fm_agent_endpoint_identity_pid endpoint /tmp/endpoint-home crewmate 100)" = 100 ] || exit 10
+    [ "$(fm_agent_endpoint_identity_pid endpoint /tmp/endpoint-home crewmate 200)" = 201 ] || exit 11
+    status=0
+    out=$(fm_agent_endpoint_identity_pid endpoint /tmp/endpoint-home crewmate 300) || status=$?
+    [ "$status" -eq 2 ] && [ -z "$out" ] || exit 12
+  ' _ "$ROOT") || status=$?
+  expect_code 0 "$status" \
+    "endpoint proof accepted an unbound, prompt-text, or ambiguous process"
+  pass "Herdr endpoint proof accepts one exact marker descendant and rejects ambiguity"
+}
+
 test_sweep_binds_unreadable_candidates_to_the_recorded_endpoint() {
   local function_source out status=0
   function_source=$(sed -n '/^fm_isolation_unreadable_candidate_matches_endpoint()/,/^}/p' \
@@ -4977,6 +5010,7 @@ test_tmux_pane_pid_comes_from_the_stable_window_id
 test_a_lost_window_name_never_answers_with_firstmates_own_pane
 test_one_proc_walk_answers_every_task_in_a_sweep
 test_unreadable_agent_candidate_is_indexed_as_unproven
+test_endpoint_identity_requires_one_authenticated_process_tree_match
 test_sweep_binds_unreadable_candidates_to_the_recorded_endpoint
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 FM_TEST_AGENT_PIDS=$$
