@@ -62,7 +62,7 @@ fi
 FM_TEST_BOUNDED_GROUP_PERL='
 use Config;
 use Errno qw(ECHILD ESRCH);
-use POSIX qw(:signal_h :sys_wait_h setpgid);
+use POSIX qw(:signal_h :sys_wait_h setpgid setsid);
 use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 my $arch = $Config{archname} // "";
 my $sys_prctl;
@@ -193,6 +193,7 @@ defined($pid) or exit 125;
 if (!$pid) {
   close $ready_r;
   close $release_w;
+  setsid() >= 0 or exit 125;
   setpgid(0, 0) == 0 or exit 125;
   syswrite($ready_w, "1") == 1 or exit 125;
   close $ready_w;

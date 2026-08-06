@@ -32,8 +32,7 @@ unset CODEX_THREAD_ID 2>/dev/null || true
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
-fm_test_session_authority_fd "$TMP_ROOT"
-fm_test_authority_broker_ensure "$TMP_ROOT" \
+fm_test_primary_authority_setup "$TMP_ROOT" \
   || fail "could not provision the session-start authority broker fixture"
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
@@ -392,6 +391,10 @@ state=${FM_FAKE_HERDR_STATE:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 killed="${state}.killed"
 spawned="${state}.spawned"
+if [ "${1:-}" = --session ]; then
+  [ "$#" -ge 2 ] || exit 1
+  shift 2
+fi
 printf '%s\n' "$*" >> "$log"
 case "${1:-} ${2:-}" in
   "status --json")
@@ -425,16 +428,25 @@ case "${1:-} ${2:-}" in
   "pane get")
     pane=${3:-}
     if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","tab_id":"t-new","tokens":{"firstmate_endpoint_generation":"endpoint-'"$mate_id"'"}}}}'
     elif [ "$pane" = p-old ] && [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","tab_id":"t-old","tokens":{"firstmate_endpoint_generation":"endpoint-'"$mate_id"'"}}}}'
     else
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
     ;;
+  "tab get")
+    tab=${3:-}
+    case "$tab" in
+      t-old|t-new) printf '%s\n' '{"result":{"tab":{"tab_id":"'"$tab"'","workspace_id":"ws1"}}}' ;;
+      *) printf '%s\n' '{"error":{"code":"tab_not_found"}}' >&2; exit 1 ;;
+    esac
+    ;;
   "agent get")
     if [ "${3:-}" = p-new ] && [ -e "$spawned" ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+    elif [ "${3:-}" = p-old ] && [ ! -e "$killed" ]; then
       printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
     else
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -464,11 +476,29 @@ make_fake_herdr() {
   cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
-if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
-  [ "\${3:-}" = "$live" ] && exit 0
-  exit 1
+if [ "\${1:-}" = --session ]; then
+  [ "\$#" -ge 2 ] || exit 1
+  shift 2
 fi
-exit 1
+case "\${1:-} \${2:-}" in
+  "pane get")
+    [ "\${3:-}" = "$live" ] || {
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    }
+    printf '%s\n' '{"result":{"pane":{"pane_id":"'"$live"'","tab_id":"t-live","tokens":{"firstmate_endpoint_generation":"endpoint-live"}}}}'
+    ;;
+  "tab get")
+    [ "\${3:-}" = t-live ] || exit 1
+    printf '%s\n' '{"result":{"tab":{"tab_id":"t-live","workspace_id":"ws1"}}}'
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+exit 0
 SH
   chmod +x "$fakebin/herdr"
 }
@@ -532,7 +562,7 @@ EOF
 
 run_session_start_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 spawned=$6 mode=$7
-  local proof_pid proof_start proof_identity receipt out rc
+  local proof_pid proof_start proof_identity receipt wrapper output_file out rc primary_pid
   . "$ROOT/bin/fm-worker-isolation-lib.sh"
   fm_worker_test_authority_capability_present || return 1
   FM_SESSION_AUTHORITY_FD=$FM_WORKER_TEST_AUTHORITY_FD
@@ -546,8 +576,33 @@ run_session_start_secondmate() {
   export FM_SESSION_AUTHORITY_FD FM_SESSION_AUTHORITY_DURABLE_FD \
     FM_SESSION_AUTHORITY_BROKER_PID FM_SESSION_AUTHORITY_BROKER_START \
     FM_SESSION_AUTHORITY_BROKER_IDENTITY FM_SESSION_AUTHORITY_BROKER_SCRIPT
-  FM_TEST_PRIMARY_AUTHORITY_PID=${BASHPID:-$$} \
-    fm_worker_test_primary_identity_bind "$root" "$home" "$home/state" || return 1
+  primary_pid=${FM_TEST_AUTHORITY_OWNER_PID:-${BASHPID:-$$}}
+  if [ ! -f "$home/state/.session-authority" ]; then
+    FM_TEST_PRIMARY_AUTHORITY_PID=$primary_pid \
+      fm_worker_test_primary_identity_bind "$root" "$home" "$home/state" \
+      || return 1
+  elif [ ! -f "$home/state/.primary-checkout" ] \
+    || [ -L "$home/state/.primary-checkout" ]; then
+    return 1
+  fi
+  wrapper="$home/.session-start-test-wrapper"
+  cat > "$wrapper" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$1 home=$2 fakebin=$3 path=$4 mode=$5 log=$6 spawned=$7 mate=$8 id=$9 primary_pid=${10}
+. "$ROOT/bin/fm-session-lock-lib.sh"
+. "$ROOT/bin/fm-worker-isolation-lib.sh"
+export FM_TEST_PRIMARY_AUTHORITY_PID=$primary_pid
+cd "$root" || exit 1
+exec env -u CLAUDECODE -u PI_CODING_AGENT -u CODEX_THREAD_ID -u GROK_AGENT \
+  FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+  FM_TEST_PRIMARY_AUTHORITY_PID="$primary_pid" \
+  FM_SESSION_AUTHORITY_BROKER_SCRIPT="$root/bin/fm-session-authority-exec.sh" \
+  PATH="$path" FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
+  FM_FAKE_TMUX_SPAWNED="$spawned" FM_FAKE_SECOND_MATE_HOME="$mate" \
+  FM_FAKE_SECOND_MATE_ID="$id" "$ROOT/bin/fm-session-start.sh"
+SH
+  chmod +x "$wrapper" || return 1
   (
     cd "$mate"
     exec env FM_AGENT_TASK="$SESSION_START_SECOND_MATE_ID" \
@@ -578,12 +633,14 @@ run_session_start_secondmate() {
       return 1
     }
   set +e
-  out=$(cd "$root" && \
-    FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
-      FM_FAKE_TMUX_SPAWNED="$spawned" FM_FAKE_SECOND_MATE_HOME="$mate" \
-      FM_FAKE_SECOND_MATE_ID="$SESSION_START_SECOND_MATE_ID" \
-      run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  output_file="$home/.session-start-output"
+  "$wrapper" "$root" "$home" "$fakebin" "$fakebin:$BASE_PATH" "$mode" \
+    "$log" "$spawned" "$mate" "$SESSION_START_SECOND_MATE_ID" \
+    "$primary_pid" \
+    >"$output_file" 2>&1
   rc=$?
+  out=$(<"$output_file")
+  rm -f "$output_file"
   set -e
   kill "$proof_pid" 2>/dev/null || true
   wait "$proof_pid" 2>/dev/null || true
@@ -638,6 +695,19 @@ EOF
 
 run_session_start_herdr_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6
+  local primary_pid
+  . "$ROOT/bin/fm-worker-isolation-lib.sh"
+  fm_worker_test_authority_capability_present || return 1
+  primary_pid=${FM_TEST_AUTHORITY_OWNER_PID:-${BASHPID:-$$}}
+  if [ ! -f "$home/state/.session-authority" ]; then
+    FM_TEST_PRIMARY_AUTHORITY_PID=$primary_pid \
+      fm_worker_test_primary_identity_bind "$root" "$home" "$home/state" \
+      || return 1
+  elif [ ! -f "$home/state/.primary-checkout" ] \
+    || [ -L "$home/state/.primary-checkout" ]; then
+    return 1
+  fi
+  export FM_TEST_PRIMARY_AUTHORITY_PID=$primary_pid
   FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
@@ -851,8 +921,7 @@ EOF
 
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
-  if ! fm_session_authority_broker_present \
-    "$ROOT/bin/fm-session-authority-exec.sh"; then
+  if ! fm_session_authority_socket_broker_present; then
     pass "production lock race runs only with authenticated broker provenance"
     return 0
   fi
@@ -1199,8 +1268,10 @@ EOF
   make_fake_ps_claude "$fakebin"
   make_fake_herdr "$fakebin" "p-live"
 
-  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
-  printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
+  printf 'window=sess:p-live\nkind=secondmate\nbackend=herdr\nhome=%s\nworktree=%s\nendpoint_generation=endpoint-live\nherdr_session=sess\nherdr_workspace_id=ws1\nherdr_tab_id=t-live\nherdr_pane_id=p-live\n' \
+    "$root" "$root" > "$home/state/task-live.meta"
+  printf 'window=sess:p-dead\nkind=secondmate\nbackend=herdr\nhome=%s\nworktree=%s\nendpoint_generation=endpoint-dead\nherdr_session=sess\nherdr_workspace_id=ws1\nherdr_tab_id=t-dead\nherdr_pane_id=p-dead\n' \
+    "$root" "$root" > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"

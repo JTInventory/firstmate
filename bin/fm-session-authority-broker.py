@@ -1403,7 +1403,7 @@ def serve_locked(
                         connection, proof_length, request_deadline
                     )
                     expected_proof = hmac.new(
-                        bytes.fromhex(capability),
+                        bytes.fromhex(capability.decode("ascii")),
                         ADMISSION_CHALLENGE_PREFIX + challenge,
                         hashlib.sha256,
                     ).hexdigest().encode("ascii")

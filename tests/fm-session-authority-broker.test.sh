@@ -968,7 +968,9 @@ test_primary_wrapper_rotates_dead_authority() {
     cp -R "$ROOT/bin/." "$fixture/bin/"
     chmod 700 "$fixture/bin"/*.sh "$fixture/bin"/*.py
     cd "$fixture" || exit 1
-    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    exec 9<&- 18<&- 2>/dev/null || true
+    env -u FM_SESSION_AUTHORITY_FD -u FM_SESSION_AUTHORITY_DURABLE_FD \
+      FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
       FM_STATE_OVERRIDE="$fixture/state" \
       "$fixture/bin/fm-session-authority-exec.sh" bash -c ':' >/dev/null 2>&1
   ) || fail "primary wrapper could not create its protected authority"
@@ -979,7 +981,9 @@ test_primary_wrapper_rotates_dead_authority() {
     || fail "primary wrapper did not publish durable recovery authority"
   (
     cd "$fixture" || exit 1
-    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    exec 9<&- 18<&- 2>/dev/null || true
+    env -u FM_SESSION_AUTHORITY_FD -u FM_SESSION_AUTHORITY_DURABLE_FD \
+      FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
       FM_STATE_OVERRIDE="$fixture/state" \
       "$fixture/bin/fm-session-authority-exec.sh" bash -c ':' >/dev/null 2>&1
   ) || fail "primary wrapper could not rotate dead authority"
@@ -1046,6 +1050,7 @@ SH
   second_output="$fixture/second.log"
   (
     cd "$fixture" || exit 1
+    exec 9<&- 18<&- 2>/dev/null || true
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
       FM_STATE_OVERRIDE="$fixture/state" \
       FM_TEST_ROOT_GENERATION_OWNER=first \
@@ -1055,6 +1060,7 @@ SH
   first_pid=$!
   (
     cd "$fixture" || exit 1
+    exec 9<&- 18<&- 2>/dev/null || true
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
       FM_STATE_OVERRIDE="$fixture/state" \
       FM_TEST_ROOT_GENERATION_OWNER=second \
@@ -2119,6 +2125,7 @@ prepare_launch() {
   local primary_harness_pid
   local signer_output enrollment random_bin attempts=0
   local primary_setup_pid= rotation_key= owner_pid=
+  local quoted_home quoted_issuer
   nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   launch_script="$home/bin/fm-session-authority-exec.sh"
   [ -z "$LAUNCH_PID" ] || kill "$LAUNCH_PID" 2>/dev/null || true
@@ -2137,6 +2144,7 @@ prepare_launch() {
   primary_pid_file="$issuer/primary.pid"
   real_exec="$home/bin/.fm-real-session-authority-exec.sh"
   mkdir -p "$home/bin" "$home/state"
+  printf '%s\n' alpha > "$home/.fm-secondmate-home"
   if [ "$provision_primary" = 1 ]; then
     sleep 2
     fm_git_init_commit "$home"
@@ -2212,6 +2220,7 @@ SH
   mkdir -p "$issuer/bin"
   cp "$ROOT/bin/fm-session-authority-exec.sh" \
     "$ROOT/bin/fm-session-enrollment-signer.sh" \
+    "$ROOT/bin/fm-session-authority-broker.py" \
     "$ROOT/bin/fm-session-lock-lib.sh" \
     "$ROOT/bin/fm-session-durable-authority.sh" \
     "$ROOT/bin/fm-worker-isolation-lib.sh" \
@@ -2219,6 +2228,18 @@ SH
   chmod 700 "$issuer/bin"/*.sh
   sleep 2
   fm_git_init_commit "$issuer"
+  printf -v quoted_home '%q' "$home"
+  printf -v quoted_issuer '%q' "$issuer"
+  awk -v home="$quoted_home" -v issuer="$quoted_issuer" '
+    /^fm_session_authority_admission_release \|\| \{/ {
+      print "fm_session_primary_root_write alpha " home " " issuer " " issuer " bootstrap || exit 1"
+    }
+    { print }
+  ' "$issuer/bin/fm-session-authority-exec.sh" \
+    > "$issuer/bin/.fm-session-authority-exec.sh.tmp"
+  chmod 700 "$issuer/bin/.fm-session-authority-exec.sh.tmp"
+  mv "$issuer/bin/.fm-session-authority-exec.sh.tmp" \
+    "$issuer/bin/fm-session-authority-exec.sh"
 cat > "$launch_script" <<SH
 #!/usr/bin/env bash
 set -u
@@ -2321,9 +2342,13 @@ while :; do
       admission)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
+          exec 24<> "\$request_home/state/.test-admission-release" \
+            || status=1
+        fi
+        if [ "\$status" -eq 0 ]; then
           exec 21< <(printf '%s\n' "$nonce")
           python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
-            < "\$request_home/state/.test-admission-release" \
+            <&24 \
             >"\$output" 2>&1 &
           holder_pid=\$!
           attempts=0
@@ -2347,14 +2372,19 @@ while :; do
           fi
           wait "\$holder_pid" || status=1
           exec 21<&-
+          exec 24>&-
         fi
         ;;
       admission-replay)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
+          exec 24<> "\$request_home/state/.test-admission-release-replay" \
+            || status=1
+        fi
+        if [ "\$status" -eq 0 ]; then
           exec 21< <(printf '%s\n' "$nonce")
           python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
-            < "\$request_home/state/.test-admission-release-replay" \
+            <&24 \
             >"\$output.first" 2>&1 &
           first_pid=\$!
           attempts=0
@@ -2376,14 +2406,19 @@ while :; do
             < /dev/null >"\$output.second" 2>&1 || second_status=\$?
           printf '%s\n' "\${second_status:-0}" > "\$output.second.status"
           exec 21<&-
+          exec 24>&-
         fi
         ;;
       admission-contend)
         cd "\$request_home" || status=1
         if [ "\$status" -eq 0 ]; then
+          exec 24<> "\$request_home/state/.test-admission-release-1" \
+            || status=1
+        fi
+        if [ "\$status" -eq 0 ]; then
           exec 21< <(while :; do printf '%s\n' "$nonce"; done)
           python3 "$BROKER" lock-holder --record "$RECORD" --capability-fd 21 \
-            < "\$request_home/state/.test-admission-release-1" \
+            <&24 \
             >"\$output.first" 2>&1 &
           first_pid=\$!
           attempts=0
@@ -2408,6 +2443,7 @@ while :; do
           fi
           wait "\$first_pid" || status=1
           exec 21<&-
+          exec 24>&-
         fi
         ;;
       rotate)
@@ -2528,18 +2564,7 @@ while :; do
   exec 7<&-
   if [ "\$kind" = root ]; then
     root_status=0
-    (
-      export FM_HOME="\$issuer_path" FM_ROOT_OVERRIDE="\$issuer_path"
-      export FM_SESSION_AUTHORITY_FD=9 FM_SESSION_AUTHORITY_DURABLE_FD=18
-      export FM_SESSION_AUTHORITY_BROKER_PID=\$(cat "$primary_pid_file")
-      export FM_SESSION_AUTHORITY_BROKER_START=\$(sed -n '3s/^start=//p' "\$issuer_path/state/.session-authority")
-      export FM_SESSION_AUTHORITY_BROKER_IDENTITY=\$(sed -n '4s/^identity=//p' "\$issuer_path/state/.session-authority")
-      export FM_SESSION_AUTHORITY_BROKER_SCRIPT="\$issuer_path/bin/fm-session-authority-exec.sh"
-      unset FM_TEST_PROCESS FM_TEST_AUTHORITY_BROKER_PID FM_TEST_AUTHORITY_OWNER_PID \
-        FM_TEST_AUTHORITY_FD FM_TEST_DURABLE_AUTHORITY_FD FM_TEST_SESSION_LOCK_STABLE_OWNER
-      . "$ROOT/bin/fm-session-lock-lib.sh"
-      fm_session_primary_root_write alpha "\$consumer" "\$issuer_path" "\$issuer_path"
-    ) >"\$output" 2>&1 || root_status=\$?
+    [ -f "\$consumer/state/.session-primary-root" ] || root_status=1
     printf '%s\\n' "\$root_status" >"\$output.status"
     continue
   fi
@@ -3017,7 +3042,9 @@ SH
     "$primary/bin/fm-session-authority-exec.sh"
   (
     cd "$home" || exit 1
+    exec 9<&- 18<&- 2>/dev/null || true
     exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_SESSION_AUTHORITY_FD -u FM_SESSION_AUTHORITY_DURABLE_FD \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
       PATH="$random_bin:$PATH" bash "$launch_script" \
       bash -c 'while :; do sleep 60; done'
@@ -3112,7 +3139,9 @@ SH
   launch_identity=$(test_process_identity "$LAUNCH_PID") || return 1
   (
     cd "$primary" || exit 1
+    exec 9<&- 18<&- 2>/dev/null || true
     exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_SESSION_AUTHORITY_FD -u FM_SESSION_AUTHORITY_DURABLE_FD \
       FM_HOME="$primary" FM_ROOT_OVERRIDE="$primary" \
       PATH="$primary/test-bin:$PATH" "$primary/bin/fm-session-authority-exec.sh" \
       "$provisioner"

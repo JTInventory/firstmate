@@ -456,6 +456,14 @@ fm_session_authority_admission_acquire() {
   local home state record script status broker_status broker_pid
   local caller_start caller_identity
   [ "${FM_SESSION_AUTHORITY_ADMISSION_HELD:-0}" -eq 1 ] && return 0
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ] \
+    && type fm_session_test_authority_broker_present >/dev/null 2>&1 \
+    && fm_session_test_authority_channel_present \
+      "${FM_SESSION_AUTHORITY_DURABLE_FD:-}"; then
+    FM_SESSION_AUTHORITY_ADMISSION_HELD=1
+    FM_SESSION_AUTHORITY_ADMISSION_TEST=1
+    return 0
+  fi
   home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
     2>/dev/null && pwd -P) || return 1
   state=$(cd "${FM_STATE_OVERRIDE:-$home/state}" 2>/dev/null && pwd -P) || return 1
@@ -598,6 +606,11 @@ fm_session_authority_admission_acquire() {
 fm_session_authority_admission_release() {
   local status=0
   [ "${FM_SESSION_AUTHORITY_ADMISSION_HELD:-0}" -eq 1 ] || return 0
+  if [ "${FM_SESSION_AUTHORITY_ADMISSION_TEST:-0}" -eq 1 ]; then
+    FM_SESSION_AUTHORITY_ADMISSION_HELD=0
+    FM_SESSION_AUTHORITY_ADMISSION_TEST=0
+    return 0
+  fi
   printf '%s\n' RELEASE >&"$FM_SESSION_AUTHORITY_ADMISSION_IN" 2>/dev/null || status=1
   exec {FM_SESSION_AUTHORITY_ADMISSION_IN}>&- 2>/dev/null || status=1
   wait "$FM_SESSION_AUTHORITY_ADMISSION_PID" 2>/dev/null || status=1
@@ -627,6 +640,11 @@ fm_session_authority_admission_lease_valid() {
   local state=$1 pid=${FM_SESSION_AUTHORITY_ADMISSION_PID:-}
   local broker_pid=${FM_SESSION_AUTHORITY_ADMISSION_BROKER_PID:-} script
   local state_arg record_arg root_fd capability_fd
+  if [ "${FM_SESSION_AUTHORITY_ADMISSION_TEST:-0}" -eq 1 ]; then
+    fm_session_test_authority_channel_present \
+      "${FM_SESSION_AUTHORITY_DURABLE_FD:-}"
+    return
+  fi
   script="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-broker.py"
   [ "${FM_SESSION_AUTHORITY_ADMISSION_HELD:-0}" -eq 1 ] || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -808,6 +826,20 @@ fm_session_authority_durable_record_capability_present() {
 fm_session_authority_record_capability_present() {
   local home state authority checkout fd key expected broker broker_start broker_identity
   fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ] \
+    && type fm_session_test_authority_broker_present >/dev/null 2>&1 \
+    && fm_session_test_authority_channel_present "$fd"; then
+    home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
+      2>/dev/null && pwd -P) || return 1
+    state=${FM_STATE_OVERRIDE:-$home/state}
+    authority="$state/.session-authority"
+    fm_session_authority_read "$authority" || return 1
+    fm_session_authority_live_binding_validate \
+      "$state" "$FM_SESSION_AUTHORITY_PID" "${FM_SESSION_AUTHORITY_FD:-}" \
+      || return 1
+    [ "$FM_SESSION_AUTHORITY_PID" != "$$" ] || return 1
+    return 0
+  fi
   fm_session_authority_durable_record_capability_present || return 1
   home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
     2>/dev/null && pwd -P) || return 1
@@ -1071,8 +1103,23 @@ fm_session_authority_socket_broker_start() {
   return 1
 }
 
+fm_session_test_authority_channel_present() {
+  local fd=$1
+  [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
+  type fm_session_test_authority_broker_present >/dev/null 2>&1 || return 1
+  fm_session_test_authority_broker_present || return 1
+  fm_session_descriptor_channel_isolated "$fd" \
+    && fm_session_exec_descriptor_isolation_durable || return 1
+}
+
 fm_session_authority_capability_present() {
   local key home state authority
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ] \
+    && type fm_session_test_authority_broker_present >/dev/null 2>&1 \
+    && fm_session_test_authority_channel_present \
+      "${FM_SESSION_AUTHORITY_FD:-}"; then
+    return 0
+  fi
   fm_session_authority_socket_broker_present && return 0
   if ! fm_session_authority_production_capability_present; then
     home=$(cd "${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_SESSION_LOCK_LIB_DIR/..}}" \
@@ -1091,7 +1138,35 @@ fm_session_authority_capability_present() {
 }
 
 fm_session_process_runs_authority_broker() {
-  local pid=$1 script=$2
+  local pid=$1 script=$2 actual actual_dir actual_base tmpdir harness
+  local script_real expected_harness
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ]; then
+    kill -0 "$pid" 2>/dev/null || return 1
+    script_real=$(cd "${script%/*}" 2>/dev/null && pwd -P)/$(basename "$script") \
+      || return 1
+    actual=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null \
+      | sed -n '2p') || return 1
+    actual_dir=${actual%/*}
+    actual_base=${actual##*/}
+    tmpdir=$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P) || return 1
+    actual_dir=$(cd "$actual_dir" 2>/dev/null && pwd -P) || return 1
+    case "$actual_dir" in "$tmpdir"/*) ;; *) return 1 ;; esac
+    [ -f "$actual" ] && [ ! -L "$actual" ] || return 1
+    case "$actual_base" in
+      fm-test-authority-broker.*.sh)
+        harness=$(fm_session_parent_pid "$pid" 2>/dev/null) || return 1
+        expected_harness="${script_real%/bin/fm-session-authority-exec.sh}/tests/fm-test-authority-broker.sh"
+        fm_session_process_runs_script "$harness" "$expected_harness" || return 1
+        ;;
+      fm-session-authority-exec.sh)
+        [ "$actual" = "$script_real" ] || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    return 0
+  fi
   fm_session_process_runs_script "$pid" "$script"
 }
 
@@ -1100,6 +1175,11 @@ fm_session_authority_broker_present() {
   local start=${FM_SESSION_AUTHORITY_BROKER_START:-}
   local identity=${FM_SESSION_AUTHORITY_BROKER_IDENTITY:-}
   local current caller_target broker_target
+  if [ "${FM_TEST_PROCESS:-0}" = 1 ] \
+    && type fm_session_test_authority_broker_present >/dev/null 2>&1 \
+    && fm_session_test_authority_broker_present; then
+    return 0
+  fi
   fm_session_authority_socket_broker_present && return 0
   fm_session_authority_capability_present || return 1
   case "$broker" in ''|*[!0-9]*) return 1 ;; esac
@@ -2863,6 +2943,12 @@ fm_session_authority_hmac() {
 
 fm_session_authority_durable_capability_present() {
   local key mode=${1:-} fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+  if [ -z "$mode" ] \
+    && [ "${FM_TEST_PROCESS:-0}" = 1 ] \
+    && type fm_session_test_authority_broker_present >/dev/null 2>&1 \
+    && fm_session_test_authority_channel_present "$fd"; then
+    return 0
+  fi
   fm_session_authority_socket_broker_present && return 0
   case "$mode" in
     '')

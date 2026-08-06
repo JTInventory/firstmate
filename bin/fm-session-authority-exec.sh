@@ -422,6 +422,7 @@ if [ "$enrollment_final_pending" -eq 1 ]; then
 fi
 enrollment_fd=${FM_SESSION_AUTHORITY_FD:-}
 durable_fd=${FM_SESSION_AUTHORITY_DURABLE_FD:-}
+primary_bootstrap=0
 if [ "$enrollment_fd" != 9 ] && ( : <&9 ) 2>/dev/null; then
   echo "error: session authority descriptor 9 is already in use" >&2
   exit 1
@@ -497,7 +498,19 @@ if [ "${FM_AGENT_ROLE:-}" = secondmate ]; then
   fm_session_enrollment_trace consumer-authority-descriptor pass 2>/dev/null || true
 elif [ "$enrollment_fd" = 9 ] \
   && fm_session_authority_capability_present; then
-  if ! fm_session_authority_durable_capability_present; then
+  if fm_session_authority_primary_bootstrap_descriptor_present \
+    && [ "${FM_SESSION_AUTHORITY_PID:-}" = "$$" ] \
+    && [ "${FM_SESSION_AUTHORITY_HOME:-}" = "$home_real" ] \
+    && [ "${FM_SESSION_AUTHORITY_CHECKOUT:-}" = "$FM_ROOT" ] \
+    && fm_session_authority_process_state "$authority"; then
+    primary_bootstrap=1
+  fi
+  if [ "$primary_bootstrap" -eq 1 ]; then
+    fm_session_authority_durable_capability_present || {
+      echo "error: primary session authority durable capability is unavailable" >&2
+      exit 1
+    }
+  elif ! fm_session_authority_durable_capability_present; then
     unset FM_SESSION_AUTHORITY_DURABLE_FD
     if [ -e "$STATE/.session-durable-authority" ] \
       || [ -L "$STATE/.session-durable-authority" ]; then
@@ -530,12 +543,14 @@ elif [ "$enrollment_fd" = 9 ] \
       }
     fi
   fi
-  exec 9<&-
-  unset FM_SESSION_AUTHORITY_FD
-  fm_session_authority_live_descriptor_rotate || {
-    echo "error: protected session authority rotation failed" >&2
-    exit 1
-  }
+  if [ "$primary_bootstrap" -eq 0 ]; then
+    exec 9<&-
+    unset FM_SESSION_AUTHORITY_FD
+    fm_session_authority_live_descriptor_rotate || {
+      echo "error: protected session authority rotation failed" >&2
+      exit 1
+    }
+  fi
 elif [ "$durable_fd" = 18 ] \
   && { [ "$enrollment_fd" = 9 ] \
     && fm_session_authority_durable_capability_present \

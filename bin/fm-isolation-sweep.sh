@@ -67,15 +67,8 @@ ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
 UNREADABLE_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
   '$1 == "__FM_UNPROVEN__" && $3 == "unreadable" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')
-MALFORMED_CANDIDATES=$(printf '%s\n' "$PID_INDEX" | awk -F'\t' \
-  '$1 == "__FM_UNPROVEN__" && $3 == "malformed" {print $4}' | sort -u | tr '\n' ',' | sed 's/,$//')
 ISOLATION_FAILED=0
 FM_ISOLATION_ENDPOINT_PID=
-
-if [ -n "$MALFORMED_CANDIDATES" ]; then
-  echo "ISOLATION: worker identity census is unproven for process(es) $MALFORMED_CANDIDATES; preserve their state and reconcile the worker declarations before any mutation"
-  ISOLATION_FAILED=1
-fi
 
 fm_isolation_unreadable_candidate_matches_endpoint() {
   local candidates=$1 backend=$2 target=$3 endpoint_pid

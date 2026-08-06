@@ -446,7 +446,7 @@ spawn_treehouse_return_unknown_record() {
 }
 
 spawn_abort_endpoint_identity_matches() {
-  local target expected
+  local target expected topology
   case "$BACKEND" in
     tmux)
       target=${SPAWN_ENDPOINT_TARGET:-}
@@ -457,14 +457,23 @@ spawn_abort_endpoint_identity_matches() {
     herdr)
       [ -n "${HERDR_SES:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] \
         && [ -n "${HERDR_TAB_ID:-}" ] && [ -n "${HERDR_PANE_ID:-}" ] \
-        && [ -n "${ENDPOINT_GENERATION:-}" ] || return 1
+        || return 1
       target="$HERDR_SES:$HERDR_PANE_ID"
-      expected="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|$ENDPOINT_GENERATION"
+      expected="$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID|${ENDPOINT_GENERATION:-}"
       if [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ] \
         && { [ "${HERDR_PROJECTION_ABORT_SESSION:-}" != "$HERDR_SES" ] \
           || [ "${HERDR_PROJECTION_ABORT_TASK_PANE:-}" != "$HERDR_PANE_ID" ]; }; then
         return 1
       fi
+      if [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ] \
+        && [ -z "${ENDPOINT_GENERATION:-}" ]; then
+        topology=$(fm_backend_herdr_pane_topology_identity "$target") || return 1
+        [ "$topology" = \
+          "$HERDR_SES|$HERDR_WORKSPACE_ID|$HERDR_TAB_ID|$HERDR_PANE_ID" ] \
+          || return 1
+        return 0
+      fi
+      [ -n "${ENDPOINT_GENERATION:-}" ] || return 1
       if [ "${HERDR_FLAT_ABORT_CLEANUP:-0}" = 1 ] \
         && [ "${HERDR_FLAT_ABORT_TARGET:-}" != "$target" ]; then
         return 1
@@ -1632,9 +1641,13 @@ EOF
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$DISPLAY_LABEL"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+                HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
+                HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+                HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+                HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_CLEANUP=1
-                HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
-                HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+                HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+                HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
               fi
               exit 1
@@ -2130,8 +2143,8 @@ if [ "$KIND" = secondmate ]; then
     rm -f -- "$PROJ_ABS/state/.session-enrollment-stage.trace" || exit 1
     SPAWN_AUTHORITY_TRACE_PREFIX="FM_SESSION_ENROLLMENT_STAGE_TRACE=1 FM_SESSION_ENROLLMENT_ENDPOINT_GENERATION_PRESENT=1 "
   fi
-  SPAWN_AUTHORITY_COMMAND="${WORKER_ENV_PREFIX}${SPAWN_AUTHORITY_TRACE_PREFIX}PATH=$(shell_quote "$PATH") GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") exec $(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") sh -c $(shell_quote "$LAUNCH")"
-  LAUNCH="sh -c $(shell_quote "$SPAWN_AUTHORITY_COMMAND")"
+  SPAWN_AUTHORITY_COMMAND="${WORKER_ENV_PREFIX}${SPAWN_AUTHORITY_TRACE_PREFIX}PATH=$(shell_quote "$PATH") GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") exec $(shell_quote "$PROJ_ABS/bin/fm-session-authority-exec.sh") --enrollment-launch $(shell_quote "$SPAWN_AUTHORITY_LAUNCH") bash -c $(shell_quote "$LAUNCH")"
+  LAUNCH="exec bash -c $(shell_quote "$SPAWN_AUTHORITY_COMMAND")"
 else
   LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 fi

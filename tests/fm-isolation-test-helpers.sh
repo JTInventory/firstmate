@@ -2,16 +2,20 @@ fm_session_test_authority_broker_present() {
   local broker=${FM_TEST_AUTHORITY_BROKER_PID:-}
   local fd=${FM_TEST_DURABLE_AUTHORITY_FD:-} live_fd=${FM_TEST_AUTHORITY_FD:-}
   local harness=${FM_TEST_AUTHORITY_HARNESS_PID:-}
-  local expected_harness expected_exec caller_target broker_target
+  local expected_harness expected_exec caller_target broker_target authority_pid
   [ "${FM_TEST_PROCESS:-0}" = 1 ] || return 1
   case "$broker" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$broker" 2>/dev/null || return 1
   case "$harness" in ''|*[!0-9]*) return 1 ;; esac
   [ "$harness" != "$$" ] || return 1
   kill -0 "$harness" 2>/dev/null || return 1
-  expected_harness=$(cd "$_FM_SESSION_LOCK_LIB_DIR/../tests" 2>/dev/null \
-    && pwd -P)/fm-test-authority-broker.sh || return 1
-  expected_exec="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
+  expected_harness=${FM_TEST_AUTHORITY_HARNESS_SCRIPT:-}
+  expected_exec=${FM_TEST_AUTHORITY_EXEC_SCRIPT:-}
+  if [ -z "$expected_harness" ] || [ -z "$expected_exec" ]; then
+    expected_harness=$(cd "$_FM_SESSION_LOCK_LIB_DIR/../tests" 2>/dev/null \
+      && pwd -P)/fm-test-authority-broker.sh || return 1
+    expected_exec="$_FM_SESSION_LOCK_LIB_DIR/fm-session-authority-exec.sh"
+  fi
   if [ "$broker" = "$$" ]; then
     fm_session_process_runs_script "$$" "$expected_exec" || return 1
   fi
@@ -26,11 +30,25 @@ fm_session_test_authority_broker_present() {
   caller_target=$(fm_session_descriptor_identity "$$" "$fd") || return 1
   broker_target=$(fm_session_descriptor_identity "$broker" "$fd") || return 1
   [ "$caller_target" = "$broker_target" ] || return 1
-  if ! fm_session_descriptor_channel_isolated "$live_fd"; then
+  if ! live_identity=$(fm_session_descriptor_identity "$$" "$live_fd" 2>/dev/null); then
     case "$live_fd" in ''|*[!0-9]*) return 1 ;; esac
-    eval "exec ${live_fd}<&${fd}"
+    authority_pid=${FM_SESSION_AUTHORITY_PID:-}
+    case "$authority_pid" in ''|*[!0-9]*)
+      authority_pid=$(sed -n '2s/^pid=//p' \
+        "${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}/.session-authority" \
+        2>/dev/null || true)
+      ;;
+    esac
+    case "$authority_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -e "/proc/$authority_pid/fd/$live_fd" ] || return 1
+    eval "exec ${live_fd}</proc/${authority_pid}/fd/${live_fd}"
+    live_identity=$(fm_session_descriptor_identity "$$" "$live_fd" 2>/dev/null) \
+      || return 1
+    [ "$live_identity" = \
+      "$(fm_session_descriptor_identity "$authority_pid" "$live_fd" 2>/dev/null)" ] \
+      || return 1
   fi
-  fm_session_descriptor_channel_isolated "$live_fd"
+  [ -n "$live_identity" ]
 }
 
 fm_worker_test_authority_capability_present() {
