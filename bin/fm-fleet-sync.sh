@@ -355,7 +355,7 @@ sync_project() {
   resolve_sync_base
   # When main tracks fork/main (etc.), also fetch that delivery remote so the
   # base ref is not a stale local cache while origin was the only fetch target.
-  if [ -n "$SYNC_REMOTE" ]; then
+  if [ -n "$SYNC_REMOTE" ] && [ "$SYNC_REMOTE" != "origin" ]; then
     if ! git -C "$PROJ" remote get-url "$SYNC_REMOTE" >/dev/null 2>&1; then
       echo "$label: skipped: configured upstream remote $SYNC_REMOTE does not exist"
       return 0
@@ -373,7 +373,7 @@ sync_project() {
     if [ -n "$FETCH_RECOVERY" ]; then
       echo "$label: recovered: $FETCH_RECOVERY"
     fi
-    FETCH_REFSPEC="$SYNC_MERGE_REF:refs/remotes/$SYNC_REMOTE/$SYNC_BRANCH"
+    FETCH_REFSPEC="+$SYNC_MERGE_REF:refs/remotes/$SYNC_REMOTE/$SYNC_BRANCH"
     if ! fetch_with_packed_refs_lock_guard; then
       reason="fetch $SYNC_REMOTE/$SYNC_BRANCH failed"
       if [ -n "$FETCH_ERROR" ]; then
