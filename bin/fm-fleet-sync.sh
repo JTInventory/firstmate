@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Refresh project clones: fast-forward the checked-out local default branch to
-# origin/<default> when safe, and prune local branches whose upstream tracking
+# its sync base when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
+# Sync base preference: the local default branch's configured upstream (for
+# example fork/main on a controlled-fork checkout) when set; otherwise
+# origin/<default>. This avoids false STUCK on delivery forks whose origin still
+# fetches a diverged upstream owner.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
+# no unique commits (it is an ancestor of the sync base) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
 # Every other off-default state - a non-default named branch, a detached HEAD with
 # unique commits, a dirty tree, or a diverged default - may hold real work, so it
@@ -205,8 +209,9 @@ git_common_dir_abs() {
 
 # Globals FETCH_ERROR and FETCH_RECOVERY carry the result without swallowing
 # recovery summaries that bootstrap relays on stdout.
+# FETCH_REMOTE selects which remote the guarded fetch talks to (default origin).
 fetch_with_packed_refs_lock_guard() {
-  local git_common_dir lock output attempt=0
+  local git_common_dir lock output attempt=0 remote=${FETCH_REMOTE:-origin}
   FETCH_ERROR=
   FETCH_RECOVERY=
   git_common_dir=$(git_common_dir_abs) || {
@@ -216,7 +221,7 @@ fetch_with_packed_refs_lock_guard() {
   lock="$git_common_dir/packed-refs.lock"
 
   while :; do
-    if output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
+    if output=$(git -C "$PROJ" fetch "$remote" --prune --quiet 2>&1); then
       if [ "$attempt" -gt 0 ]; then
         FETCH_RECOVERY='packed-refs lock cleared on its own'
       fi
@@ -238,7 +243,7 @@ fetch_with_packed_refs_lock_guard() {
   if fm_lock_is_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
     if fm_lock_remove_if_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
       fm_lock_log "removed provably-stale packed-refs lock $lock (no live holder); retrying fetch"
-      if output=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); then
+      if output=$(git -C "$PROJ" fetch "$remote" --prune --quiet 2>&1); then
         FETCH_RECOVERY='removed a stale packed-refs lock (no live holder)'
         return 0
       fi
@@ -252,8 +257,22 @@ fetch_with_packed_refs_lock_guard() {
   return 1
 }
 
+# Prefer the local default branch's configured upstream as the sync base so
+# controlled-fork checkouts (main tracks fork/main while origin still fetches
+# the upstream owner) are not false-STUCK against a diverged origin/main.
+# Falls back to origin/<default> when no upstream is configured.
+resolve_sync_base() {
+  local upstream
+  upstream=$(git -C "$PROJ" rev-parse --abbrev-ref "${DEFAULT}@{upstream}" 2>/dev/null || true)
+  if [ -n "$upstream" ] && git -C "$PROJ" rev-parse --verify --quiet "$upstream^{commit}" >/dev/null; then
+    printf '%s\n' "$upstream"
+    return 0
+  fi
+  printf 'origin/%s\n' "$DEFAULT"
+}
+
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
-# how far behind origin/<default> it is, so a chronically-stuck clone is visibly
+# how far behind the sync base it is, so a chronically-stuck clone is visibly
 # distinct from a benign one-off skip.
 report_stuck() {
   local state=$1 behind
@@ -284,6 +303,10 @@ sync_project() {
     return 0
   fi
 
+  # Always refresh origin first (default remote for clones without a custom
+  # upstream). A controlled-fork home may still need a second fetch for the
+  # delivery remote (fork) once DEFAULT is known.
+  FETCH_REMOTE=origin
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
     if [ -n "$FETCH_ERROR" ]; then
@@ -293,6 +316,7 @@ sync_project() {
     return 0
   fi
   [ -n "$FETCH_RECOVERY" ] && echo "$label: recovered: $FETCH_RECOVERY"
+  origin_fetch_recovery=$FETCH_RECOVERY
 
   prune_gone_branches || true
 
@@ -300,7 +324,29 @@ sync_project() {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
-  BASE="origin/$DEFAULT"
+  BASE=$(resolve_sync_base)
+  # When main tracks fork/main (etc.), also fetch that delivery remote so the
+  # base ref is not a stale local cache while origin was the only fetch target.
+  tracking_remote=${BASE%%/*}
+  if [ -n "$tracking_remote" ] && [ "$tracking_remote" != "origin" ] \
+      && git -C "$PROJ" remote get-url "$tracking_remote" >/dev/null 2>&1; then
+    FETCH_REMOTE=$tracking_remote
+    if ! fetch_with_packed_refs_lock_guard; then
+      reason="fetch $tracking_remote failed"
+      if [ -n "$FETCH_ERROR" ]; then
+        reason="$reason: $(first_line "$FETCH_ERROR")"
+      fi
+      echo "$label: skipped: $reason"
+      return 0
+    fi
+    if [ -n "$FETCH_RECOVERY" ]; then
+      echo "$label: recovered: $FETCH_RECOVERY"
+    fi
+  fi
+  # Prefer the first recovery line if only origin recovered.
+  if [ -z "${FETCH_RECOVERY:-}" ] && [ -n "${origin_fetch_recovery:-}" ]; then
+    FETCH_RECOVERY=$origin_fetch_recovery
+  fi
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0

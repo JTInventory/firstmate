@@ -487,6 +487,45 @@ test_already_current_unchanged() {
   pass "already-current clone is reported unchanged"
 }
 
+# Controlled-fork shape: main tracks fork/main (delivery) while origin still
+# fetches a diverged upstream owner. Sync must follow fork/main, not false-STUCK
+# against origin/main.
+test_controlled_fork_tracks_fork_not_stuck() {
+  local home clone out before delivery_bare up_work up_bare
+  home=$(new_home)
+  clone=$(build_pair "$home" forktrack)
+  # build_pair's bare origin is the delivery tip; rename it to "fork".
+  delivery_bare=$(git -C "$clone" remote get-url origin)
+  git -C "$clone" remote rename origin fork
+  git -C "$clone" branch --set-upstream-to=fork/main main
+
+  # Diverged upstream owner attached as origin (unrelated history).
+  up_work="$home/work-forktrack-up"
+  up_bare="$home/remotes/forktrack-up.git"
+  git init -q "$up_work"
+  git -C "$up_work" symbolic-ref HEAD refs/heads/main
+  commit_file "$up_work" upstream.txt v0 "upstream C0"
+  git clone --quiet --bare "$up_work" "$up_bare"
+  git -C "$clone" remote add origin "file://$(cd "$up_bare" && pwd)"
+  git -C "$clone" fetch -q origin
+  git -C "$clone" fetch -q fork
+
+  before=$(head_sha "$clone")
+  [ "$(git -C "$clone" rev-parse main)" = "$(git -C "$clone" rev-parse fork/main)" ] \
+    || fail "fixture main must equal fork/main"
+  [ "$(git -C "$clone" rev-parse main)" != "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "fixture origin/main must diverge from delivery"
+  # silence unused
+  : "$delivery_bare"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forktrack: already current" "delivery-current fork reports already current"
+  assert_not_contains "$out" "STUCK" "controlled-fork delivery match is not STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "controlled-fork clone was moved"
+  pass "controlled-fork main tracking fork/main is current against delivery, not STUCK on origin"
+}
+
 test_no_origin_skipped() {
   local home clone out
   home=$(new_home)
@@ -625,6 +664,7 @@ test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
+test_controlled_fork_tracks_fork_not_stuck
 test_no_origin_skipped
 test_local_only_skipped
 test_single_project_by_bare_name_resolves
