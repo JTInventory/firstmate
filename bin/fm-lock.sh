@@ -275,12 +275,12 @@ fi
 ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || exit 1
 HOME_REAL=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || exit 1
 BINDING="$STATE/.primary-checkout"
-OLD_LOCK_PRESENT=0
-OLD_BINDING_PRESENT=0
-OLD_AUTHORITY_PRESENT=0
+_OLD_LOCK_PRESENT=0
+_OLD_BINDING_PRESENT=0
+_OLD_AUTHORITY_PRESENT=0
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   cat "$LOCK" >/dev/null || exit 1
-  OLD_LOCK_PRESENT=1
+  _OLD_LOCK_PRESENT=1
 fi
 if [ -e "$BINDING" ] || [ -L "$BINDING" ]; then
   if [ ! -f "$BINDING" ] || [ -L "$BINDING" ]; then
@@ -288,14 +288,14 @@ if [ -e "$BINDING" ] || [ -L "$BINDING" ]; then
     exit 1
   fi
   cat "$BINDING" >/dev/null || exit 1
-  OLD_BINDING_PRESENT=1
+  _OLD_BINDING_PRESENT=1
 fi
 if [ -e "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then
   if [ ! -f "$AUTHORITY" ] || [ -L "$AUTHORITY" ]; then
     echo "error: session authority record is ambiguous; operate read-only until resolved" >&2
     exit 1
   fi
-  OLD_AUTHORITY_PRESENT=1
+  _OLD_AUTHORITY_PRESENT=1
 fi
 restore_session_authority() {
   restore_session_authority_from_transaction
