@@ -262,21 +262,18 @@ fetch_with_packed_refs_lock_guard() {
 # the upstream owner) are not false-STUCK against a diverged origin/main.
 # Falls back to origin/<default> when no upstream is configured.
 resolve_sync_base() {
-  local upstream remote merge
-  upstream=$(git -C "$PROJ" rev-parse --abbrev-ref "${DEFAULT}@{upstream}" 2>/dev/null || true)
-  if [ -z "$upstream" ]; then
-    remote=$(git -C "$PROJ" config --get "branch.$DEFAULT.remote" 2>/dev/null || true)
-    merge=$(git -C "$PROJ" config --get "branch.$DEFAULT.merge" 2>/dev/null || true)
-    case "$merge" in
-      refs/heads/*)
-        if [ "$remote" = "." ]; then
-          upstream=${merge#refs/heads/}
-        elif [ -n "$remote" ]; then
-          upstream="$remote/${merge#refs/heads/}"
-        fi
-        ;;
-    esac
-  fi
+  local upstream= remote merge
+  remote=$(git -C "$PROJ" config --get "branch.$DEFAULT.remote" 2>/dev/null || true)
+  merge=$(git -C "$PROJ" config --get "branch.$DEFAULT.merge" 2>/dev/null || true)
+  case "$merge" in
+    refs/heads/*)
+      if [ "$remote" = "." ]; then
+        upstream=${merge#refs/heads/}
+      elif [ -n "$remote" ]; then
+        upstream="$remote/${merge#refs/heads/}"
+      fi
+      ;;
+  esac
   if [ -n "$upstream" ]; then
     printf '%s\n' "$upstream"
     return 0
@@ -331,8 +328,6 @@ sync_project() {
   [ -n "$FETCH_RECOVERY" ] && echo "$label: recovered: $FETCH_RECOVERY"
   origin_fetch_recovery=$FETCH_RECOVERY
 
-  prune_gone_branches || true
-
   DEFAULT=$(default_branch) || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -340,8 +335,8 @@ sync_project() {
   BASE=$(resolve_sync_base)
   # When main tracks fork/main (etc.), also fetch that delivery remote so the
   # base ref is not a stale local cache while origin was the only fetch target.
-  tracking_remote=$(git -C "$PROJ" config --get "branch.$DEFAULT.remote" 2>/dev/null || true)
-  [ -n "$tracking_remote" ] || tracking_remote=${BASE%%/*}
+  tracking_remote=${BASE%%/*}
+  [ "$tracking_remote" != "$BASE" ] || tracking_remote=.
   if [ -n "$tracking_remote" ] && [ "$tracking_remote" != "origin" ] \
       && [ "$tracking_remote" != "." ]; then
     if ! git -C "$PROJ" remote get-url "$tracking_remote" >/dev/null 2>&1; then
@@ -361,6 +356,7 @@ sync_project() {
       echo "$label: recovered: $FETCH_RECOVERY"
     fi
   fi
+  prune_gone_branches || true
   # Prefer the first recovery line if only origin recovered.
   if [ -z "${FETCH_RECOVERY:-}" ] && [ -n "${origin_fetch_recovery:-}" ]; then
     FETCH_RECOVERY=$origin_fetch_recovery

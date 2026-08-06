@@ -487,6 +487,23 @@ test_already_current_unchanged() {
   pass "already-current clone is reported unchanged"
 }
 
+test_incomplete_upstream_config_uses_resolved_origin_base() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" incomplete-upstream)
+  git -C "$clone" config branch.main.remote missing-fork
+  git -C "$clone" config --unset branch.main.merge
+  advance_origin "$home" incomplete-upstream C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "incomplete-upstream: synced" "incomplete upstream config falls back to origin base"
+  assert_not_contains "$out" "missing-fork" "incomplete upstream config does not select its remote"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "incomplete upstream config did not sync from origin/main"
+  pass "incomplete upstream config follows the resolved origin base"
+}
+
 # Controlled-fork shape: main tracks fork/main (delivery) while origin still
 # fetches a diverged upstream owner. Sync must follow fork/main, not false-STUCK
 # against origin/main.
@@ -666,6 +683,7 @@ test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
+test_incomplete_upstream_config_uses_resolved_origin_base
 test_controlled_fork_tracks_fork_not_stuck
 test_no_origin_skipped
 test_local_only_skipped
