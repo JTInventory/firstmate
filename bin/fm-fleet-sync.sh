@@ -262,9 +262,22 @@ fetch_with_packed_refs_lock_guard() {
 # the upstream owner) are not false-STUCK against a diverged origin/main.
 # Falls back to origin/<default> when no upstream is configured.
 resolve_sync_base() {
-  local upstream
+  local upstream remote merge
   upstream=$(git -C "$PROJ" rev-parse --abbrev-ref "${DEFAULT}@{upstream}" 2>/dev/null || true)
-  if [ -n "$upstream" ] && git -C "$PROJ" rev-parse --verify --quiet "$upstream^{commit}" >/dev/null; then
+  if [ -z "$upstream" ]; then
+    remote=$(git -C "$PROJ" config --get "branch.$DEFAULT.remote" 2>/dev/null || true)
+    merge=$(git -C "$PROJ" config --get "branch.$DEFAULT.merge" 2>/dev/null || true)
+    case "$merge" in
+      refs/heads/*)
+        if [ "$remote" = "." ]; then
+          upstream=${merge#refs/heads/}
+        elif [ -n "$remote" ]; then
+          upstream="$remote/${merge#refs/heads/}"
+        fi
+        ;;
+    esac
+  fi
+  if [ -n "$upstream" ]; then
     printf '%s\n' "$upstream"
     return 0
   fi
@@ -327,9 +340,14 @@ sync_project() {
   BASE=$(resolve_sync_base)
   # When main tracks fork/main (etc.), also fetch that delivery remote so the
   # base ref is not a stale local cache while origin was the only fetch target.
-  tracking_remote=${BASE%%/*}
+  tracking_remote=$(git -C "$PROJ" config --get "branch.$DEFAULT.remote" 2>/dev/null || true)
+  [ -n "$tracking_remote" ] || tracking_remote=${BASE%%/*}
   if [ -n "$tracking_remote" ] && [ "$tracking_remote" != "origin" ] \
-      && git -C "$PROJ" remote get-url "$tracking_remote" >/dev/null 2>&1; then
+      && [ "$tracking_remote" != "." ]; then
+    if ! git -C "$PROJ" remote get-url "$tracking_remote" >/dev/null 2>&1; then
+      echo "$label: skipped: configured upstream remote $tracking_remote does not exist"
+      return 0
+    fi
     FETCH_REMOTE=$tracking_remote
     if ! fetch_with_packed_refs_lock_guard; then
       reason="fetch $tracking_remote failed"

@@ -491,11 +491,10 @@ test_already_current_unchanged() {
 # fetches a diverged upstream owner. Sync must follow fork/main, not false-STUCK
 # against origin/main.
 test_controlled_fork_tracks_fork_not_stuck() {
-  local home clone out before delivery_bare up_work up_bare
+  local home clone out before delivery_tip up_work up_bare
   home=$(new_home)
   clone=$(build_pair "$home" forktrack)
   # build_pair's bare origin is the delivery tip; rename it to "fork".
-  delivery_bare=$(git -C "$clone" remote get-url origin)
   git -C "$clone" remote rename origin fork
   git -C "$clone" branch --set-upstream-to=fork/main main
 
@@ -508,22 +507,25 @@ test_controlled_fork_tracks_fork_not_stuck() {
   git clone --quiet --bare "$up_work" "$up_bare"
   git -C "$clone" remote add origin "file://$(cd "$up_bare" && pwd)"
   git -C "$clone" fetch -q origin
-  git -C "$clone" fetch -q fork
 
   before=$(head_sha "$clone")
   [ "$(git -C "$clone" rev-parse main)" = "$(git -C "$clone" rev-parse fork/main)" ] \
     || fail "fixture main must equal fork/main"
   [ "$(git -C "$clone" rev-parse main)" != "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "fixture origin/main must diverge from delivery"
-  # silence unused
-  : "$delivery_bare"
+  git -C "$clone" update-ref -d refs/remotes/fork/main
+  advance_origin "$home" forktrack C1
+  delivery_tip=$(git -C "$home/work-forktrack" rev-parse HEAD)
+  [ "$delivery_tip" != "$before" ] || fail "delivery remote did not advance"
 
   out=$(run_sync "$home" "$clone")
 
-  assert_contains "$out" "forktrack: already current" "delivery-current fork reports already current"
+  assert_contains "$out" "forktrack: synced" "delivery-behind fork syncs from fork/main"
   assert_not_contains "$out" "STUCK" "controlled-fork delivery match is not STUCK"
-  [ "$(head_sha "$clone")" = "$before" ] || fail "controlled-fork clone was moved"
-  pass "controlled-fork main tracking fork/main is current against delivery, not STUCK on origin"
+  [ "$(head_sha "$clone")" = "$delivery_tip" ] || fail "controlled-fork clone did not follow delivery tip"
+  [ "$(git -C "$clone" rev-parse fork/main)" = "$delivery_tip" ] \
+    || fail "controlled-fork tracking ref was not refreshed"
+  pass "controlled-fork main follows a refreshed fork/main instead of origin"
 }
 
 test_no_origin_skipped() {
