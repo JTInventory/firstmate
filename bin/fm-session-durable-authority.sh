@@ -40,7 +40,7 @@ exec {launch_ready_output_fd}>"$launch_ready_output_path" || exit 1
 launch_ready_output_open=1
 launch_ready_failure() {
   [ "$launch_ready_output_open" -eq 1 ] || return 0
-  printf 'failed\n' >&"$launch_ready_output_fd" 2>/dev/null || true
+  { printf 'failed\n' >&"$launch_ready_output_fd"; } 2>/dev/null || true
 }
 trap launch_ready_failure EXIT
 printf 'opened\n' >&"$launch_ready_output_fd" || exit 1
