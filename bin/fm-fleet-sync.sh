@@ -209,9 +209,18 @@ git_common_dir_abs() {
 
 # Globals FETCH_ERROR and FETCH_RECOVERY carry the result without swallowing
 # recovery summaries that bootstrap relays on stdout.
-# FETCH_REMOTE selects which remote the guarded fetch talks to (default origin).
+# FETCH_REMOTE and FETCH_REFSPEC select the guarded fetch target.
+fetch_remote() {
+  local remote=$1 refspec=$2
+  if [ -n "$refspec" ]; then
+    git -C "$PROJ" fetch "$remote" --prune --quiet "$refspec"
+  else
+    git -C "$PROJ" fetch "$remote" --prune --quiet
+  fi
+}
+
 fetch_with_packed_refs_lock_guard() {
-  local git_common_dir lock output attempt=0 remote=${FETCH_REMOTE:-origin}
+  local git_common_dir lock output attempt=0 remote=${FETCH_REMOTE:-origin} refspec=${FETCH_REFSPEC:-}
   FETCH_ERROR=
   FETCH_RECOVERY=
   git_common_dir=$(git_common_dir_abs) || {
@@ -221,7 +230,7 @@ fetch_with_packed_refs_lock_guard() {
   lock="$git_common_dir/packed-refs.lock"
 
   while :; do
-    if output=$(git -C "$PROJ" fetch "$remote" --prune --quiet 2>&1); then
+    if output=$(fetch_remote "$remote" "$refspec" 2>&1); then
       if [ "$attempt" -gt 0 ]; then
         FETCH_RECOVERY='packed-refs lock cleared on its own'
       fi
@@ -243,7 +252,7 @@ fetch_with_packed_refs_lock_guard() {
   if fm_lock_is_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
     if fm_lock_remove_if_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
       fm_lock_log "removed provably-stale packed-refs lock $lock (no live holder); retrying fetch"
-      if output=$(git -C "$PROJ" fetch "$remote" --prune --quiet 2>&1); then
+      if output=$(fetch_remote "$remote" "$refspec" 2>&1); then
         FETCH_RECOVERY='removed a stale packed-refs lock (no live holder)'
         return 0
       fi
@@ -262,23 +271,33 @@ fetch_with_packed_refs_lock_guard() {
 # the upstream owner) are not false-STUCK against a diverged origin/main.
 # Falls back to origin/<default> when no upstream is configured.
 resolve_sync_base() {
-  local upstream= remote merge
+  local remote merge
+  BASE=
+  SYNC_REMOTE=
+  SYNC_BRANCH=
+  SYNC_MERGE_REF=
   remote=$(git -C "$PROJ" config --get "branch.$DEFAULT.remote" 2>/dev/null || true)
   merge=$(git -C "$PROJ" config --get "branch.$DEFAULT.merge" 2>/dev/null || true)
   case "$merge" in
     refs/heads/*)
-      if [ "$remote" = "." ]; then
-        upstream=${merge#refs/heads/}
-      elif [ -n "$remote" ]; then
-        upstream="$remote/${merge#refs/heads/}"
+      SYNC_BRANCH=${merge#refs/heads/}
+      if [ -n "$SYNC_BRANCH" ]; then
+        SYNC_MERGE_REF=$merge
+        if [ "$remote" = "." ]; then
+          BASE=$SYNC_BRANCH
+        elif [ -n "$remote" ]; then
+          SYNC_REMOTE=$remote
+          BASE="$remote/$SYNC_BRANCH"
+        fi
       fi
       ;;
   esac
-  if [ -n "$upstream" ]; then
-    printf '%s\n' "$upstream"
-    return 0
+  if [ -z "$BASE" ]; then
+    SYNC_REMOTE=origin
+    SYNC_BRANCH=$DEFAULT
+    SYNC_MERGE_REF="refs/heads/$DEFAULT"
+    BASE="origin/$DEFAULT"
   fi
-  printf 'origin/%s\n' "$DEFAULT"
 }
 
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
@@ -317,6 +336,7 @@ sync_project() {
   # upstream). A controlled-fork home may still need a second fetch for the
   # delivery remote (fork) once DEFAULT is known.
   FETCH_REMOTE=origin
+  FETCH_REFSPEC=
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
     if [ -n "$FETCH_ERROR" ]; then
@@ -332,20 +352,30 @@ sync_project() {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
-  BASE=$(resolve_sync_base)
+  resolve_sync_base
   # When main tracks fork/main (etc.), also fetch that delivery remote so the
   # base ref is not a stale local cache while origin was the only fetch target.
-  tracking_remote=${BASE%%/*}
-  [ "$tracking_remote" != "$BASE" ] || tracking_remote=.
-  if [ -n "$tracking_remote" ] && [ "$tracking_remote" != "origin" ] \
-      && [ "$tracking_remote" != "." ]; then
-    if ! git -C "$PROJ" remote get-url "$tracking_remote" >/dev/null 2>&1; then
-      echo "$label: skipped: configured upstream remote $tracking_remote does not exist"
+  if [ -n "$SYNC_REMOTE" ]; then
+    if ! git -C "$PROJ" remote get-url "$SYNC_REMOTE" >/dev/null 2>&1; then
+      echo "$label: skipped: configured upstream remote $SYNC_REMOTE does not exist"
       return 0
     fi
-    FETCH_REMOTE=$tracking_remote
+    FETCH_REMOTE=$SYNC_REMOTE
+    FETCH_REFSPEC=
     if ! fetch_with_packed_refs_lock_guard; then
-      reason="fetch $tracking_remote failed"
+      reason="fetch $SYNC_REMOTE failed"
+      if [ -n "$FETCH_ERROR" ]; then
+        reason="$reason: $(first_line "$FETCH_ERROR")"
+      fi
+      echo "$label: skipped: $reason"
+      return 0
+    fi
+    if [ -n "$FETCH_RECOVERY" ]; then
+      echo "$label: recovered: $FETCH_RECOVERY"
+    fi
+    FETCH_REFSPEC="$SYNC_MERGE_REF:refs/remotes/$SYNC_REMOTE/$SYNC_BRANCH"
+    if ! fetch_with_packed_refs_lock_guard; then
+      reason="fetch $SYNC_REMOTE/$SYNC_BRANCH failed"
       if [ -n "$FETCH_ERROR" ]; then
         reason="$reason: $(first_line "$FETCH_ERROR")"
       fi
