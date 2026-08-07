@@ -115,9 +115,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# These tests spawn real watcher processes and wait on bounded pid-file,
-# heartbeat, and beacon windows. Sharing CPU with parallel jobs makes those
-# bounds flaky on a loaded host, so they run alone in a serial phase.
+# These tests spawn real watcher processes or provision a real Herdr lab and
+# wait on bounded pid-file, heartbeat, beacon, and lab-readiness windows.
+# Sharing CPU with parallel jobs makes those bounds flaky on a loaded host, so
+# they run alone in a serial phase.
 serial_test_ids='
 fm-codex-session-lock
 fm-pr-check-security
@@ -125,6 +126,12 @@ fm-watch-session
 fm-watch-triage
 fm-watcher-lock
 fm-watcher-protocol
+fm-backend-herdr-presentation-e2e
+fm-backend-herdr-prune-safety-e2e
+fm-backend-herdr-respawn-idem-e2e
+fm-backend-herdr-smoke
+fm-herdr-lab
+fm-herdr-session-cleanup-e2e
 '
 is_serial_test() {
   local candidate=$1 serial_id
@@ -158,7 +165,7 @@ active_jobs=$jobs
 [ "$active_jobs" -ge 1 ] || active_jobs=1
 printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_jobs"
 if [ "$serial_total" -ne 0 ]; then
-  printf 'Reserving %s watcher-timing test(s) for a serial phase\n' "$serial_total"
+  printf 'Reserving %s timing-sensitive test(s) for a serial phase\n' "$serial_total"
 fi
 
 run_one() {
@@ -235,7 +242,7 @@ if [ "$total" -ne 0 ]; then
 fi
 
 if [ "$serial_total" -ne 0 ]; then
-  printf 'Running %s watcher-timing test(s) serially\n' "$serial_total"
+  printf 'Running %s timing-sensitive test(s) serially\n' "$serial_total"
   phase_tests=("${serial_tests[@]}")
   phase_jobs=1
   run_phase
