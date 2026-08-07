@@ -290,7 +290,17 @@ spawn_abort_recovery_meta() {
     chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
     {
       echo "window=$T"
-      echo "worktree=${WT:-unknown}"
+      # Never fabricate a slot path. A durable lease taken under this task id
+      # whose worktree never settled has no path to record, and a placeholder
+      # would be a record teardown could only ever refuse. Record the lease
+      # holder (and whatever candidate path the settle poll saw) instead, so the
+      # leaked lease stays traceable and the record stays retirable.
+      echo "worktree=${WT:-}"
+      if [ -z "${WT:-}" ]; then
+        echo "slot_lease_state=unresolved"
+        echo "slot_lease_holder=$ID"
+        [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
+      fi
       echo "project=$PROJ_ABS"
       echo "harness=${HARNESS:-unknown}"
       echo "kind=${KIND:-ship}"
@@ -438,9 +448,14 @@ spawn_abort_cleanup() {
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
      && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ]; then
     if spawn_abort_recovery_meta; then
-      echo "warning: spawn abort left a recoverable task record for leased worktree ${WT:-unknown}" >&2
+      echo "warning: spawn abort left a recoverable task record for the lease held by $ID${WT:+ on worktree $WT}" >&2
     else
-      echo "error: spawn abort could not publish a recoverable task record for leased worktree ${WT:-unknown}" >&2
+      echo "error: spawn abort could not publish a recoverable task record for the lease held by $ID${WT:+ on worktree $WT}" >&2
+    fi
+    if [ -z "${WT:-}" ]; then
+      local candidate_note=''
+      [ -z "${WT_CANDIDATE:-}" ] || candidate_note=" (settle poll saw candidate ${WT_CANDIDATE})"
+      echo "warning: no pooled slot path was resolved for $ID; run 'treehouse list' to find the slot leased to $ID$candidate_note and reclaim it per docs/worker-isolation.md" >&2
     fi
   fi
   if [ -n "${META_TMP:-}" ] && [ -e "$META_TMP" ]; then
@@ -1668,12 +1683,18 @@ if [ -n "${WT:-}" ] && fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
   SPAWN_SLOT_LOCK_PATH=$FM_SLOT_LOCK_PATH
   SPAWN_SLOT_LOCK_HELD=1
   if ! fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null; then
-    echo "error: could not prove pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
+    if fm_slot_stamp_record "$WT" >/dev/null 2>&1; then
+      echo "error: could not prove pooled-slot ownership for $ID: slot $WT is already stamped for task '$FM_SLOT_STAMP_TASK' in home '$FM_SLOT_STAMP_HOME', not $ID in $(real_path_or_raw "$FM_HOME"); refusing to publish task state or launch" >&2
+    else
+      echo "error: could not prove pooled-slot ownership for $ID: the ownership stamp for slot $WT could not be written or read back; refusing to publish task state or launch" >&2
+    fi
+    echo "error: a slot whose stamp outlived its task poisons every spawn that draws it - reclaim it per docs/worker-isolation.md (confirm the stamped task is gone, then clear the stamp) before respawning $ID" >&2
     exit 1
   fi
   SPAWN_SLOT_STAMPED=1
 elif [ "$KIND" != secondmate ]; then
-  echo "error: could not prove pooled-slot ownership for $ID; refusing to publish task state or launch" >&2
+  echo "error: could not prove pooled-slot ownership for $ID: ${WT:-<no worktree>} is not a linked worktree with a private git dir, so no ownership stamp can be recorded; refusing to publish task state or launch" >&2
+  echo "error: docs/worker-isolation.md owns the reclaim procedure for a pooled slot that cannot be stamped" >&2
   exit 1
 fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
@@ -1777,11 +1798,14 @@ fi
 HERDR_FLAT_ABORT_CLEANUP=0
 fm_backend_send_key "$BACKEND" "$WID" Enter
 
+  # The launch has already been sent, so this is past the point of no return.
+  # A failed release of an advisory lock changes no ownership evidence and must
+  # never trigger the abort cleanup, which would kill the window, force-return
+  # the slot, and delete the published meta of a task that launched fine.
   if [ "$SPAWN_SLOT_LOCK_HELD" = 1 ]; then
-    if ! fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH"; then
-      exit 1
-    fi
     SPAWN_SLOT_LOCK_HELD=0
+    fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH" \
+      || echo "warning: $ID launched but its pooled-slot ownership lock $SPAWN_SLOT_LOCK_PATH could not be released; clear the stale lock file manually" >&2
   fi
 trap - EXIT
 

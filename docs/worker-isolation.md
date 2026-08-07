@@ -102,6 +102,8 @@ Writing is refused for anything that is not a linked worktree, so a primary chec
 Two boundaries are deliberate.
 Absence of evidence is not evidence: a slot with no stamp retains its lease, even without a conflicting reference, because current ownership cannot be proved safely.
 The same fail-closed rule applies when a recorded worktree path is missing: teardown preserves the task record and lease because it cannot prove which slot, if any, remains held.
+A secondmate home whose directory is already gone is the one carve-out, and it is decided on evidence rather than on the missing path: git keeps the worktree registration of a removed slot, so that registration is what proves a lease may still be held.
+A home with no such registration never drew a pooled slot - a plain clone - and has nothing to return, so refusing it forever would only make it permanently unretirable.
 `--force` does not waive the gate: it is the captain's authority to discard *this* task's work, never authority to release another task's slot.
 
 Retaining means the lease is retired rather than returned.
@@ -128,6 +130,20 @@ Once a process is proven inside the slot, unreadable, partial, undeclared, or mi
 
 The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode and refuses every later mutation until the sweep is clean.
 
+#### Interrupted returns and unresolved leases
+
+Two durable records exist so a crash can never hide the state of a pooled slot, and neither may become a one-way door.
+
+`slot_returning=1` in `state/<id>.meta` is written immediately before `treehouse return` and means the return started and its outcome is unknown.
+Teardown refuses while it is set, because retrying a return whose first attempt may have partly succeeded is exactly how a slot gets reissued out from under a live holder.
+It is cleared automatically whenever the return provably did *not* take effect - the slot is still a linked worktree carrying this task's own ownership stamp - so the ordinary failure stays retryable.
+When that cannot be proved, teardown prints a `teardown: RECOVERY:` line naming the meta file and the slot: confirm with `treehouse list` whether the slot is still leased to the task, then delete the `slot_returning=1` line to retry, or replace it with `slot_returned=1` if the slot was in fact returned.
+
+`slot_lease_state=unresolved` is written by an aborted spawn that took a durable lease under the task id but never resolved a slot path, so there is no worktree to record.
+Such a record deliberately carries an empty `worktree=` plus `slot_lease_holder=` and, when the settle poll saw one, `slot_worktree_candidate=`.
+Teardown retires the endpoint and the records but never returns anything, and prints a `teardown: RECLAIM:` line: find the slot leased to that holder with `treehouse list` and return it per the reclaim steps below.
+The lease stays held until an operator returns it, so an aborted spawn can leak a slot but can never hand a live one to another task.
+
 #### Reclaiming an already-leaked slot
 
 A slot leaked before that rule existed has no record left to release it: no metadata in any home names it, and its stamp names a task that no longer exists.
@@ -149,6 +165,10 @@ It is read-only, returns nonzero for an actionable finding or unproven required 
 
 Positive location and identity findings come only from an authoritative process reading.
 A task with no such reading is reported as unproven `ISOLATION:` evidence and blocks mutation. `FM_ISOLATION_VERBOSE=1` adds the matching `BOOTSTRAP_INFO` fact; a pane path remains a hint and is never promoted to a violation.
+
+The block is scoped to records whose endpoint could still be running a worker.
+An endpoint the provider reports as gone or agent-less has no worker that could act on the record at all, so such a stale record is reported as a `BOOTSTRAP_INFO` fact instead of dropping the whole home to read-only with no per-task override.
+An endpoint that merely cannot be read is not proof of absence and still blocks, so the gate stays fail-closed exactly where a live collapsed worker is still possible.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.
 A secondmate declares its own home while its record lives in the launching primary's state directory, so comparing every declaration against this home would report every healthy secondmate in the fleet as a foreign worker on every session start.

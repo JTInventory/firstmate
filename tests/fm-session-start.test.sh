@@ -687,6 +687,17 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  # The isolation gate only blocks records whose endpoint could still be
+  # running a worker, so the fixture window must report itself as live.
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *list-windows*window_name*) printf '%s\n' fm-isolation-gate ;;
+  *pane_current_command*) printf '%s\n' claude ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$home/state/isolation-gate.meta" <<EOF
 window=firstmate:fm-isolation-gate
 worktree=$home/worker

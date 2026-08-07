@@ -839,9 +839,29 @@ make_sweep_home() {
   printf '%s\n' "$world"
 }
 
-run_sweep() {  # <world>
+run_sweep() {  # <world> [path]
   FM_ROOT_OVERRIDE="$1/project" FM_HOME="$1/home" \
-    FM_STATE_OVERRIDE="$1/home/state" "$SWEEP" 2>&1
+    FM_STATE_OVERRIDE="$1/home/state" PATH="${2:-$PATH}" "$SWEEP" 2>&1
+}
+
+# sweep_live_tmux <world> <window-name>: a tmux stub reporting exactly one live
+# window running a harness, and the PATH that puts it first. The sweep only
+# blocks records whose endpoint could still be running a worker, so a test that
+# wants the blocking path has to say so instead of depending on whether the host
+# happens to have a tmux server.
+sweep_live_tmux() {  # <world> <window-name>
+  local world=$1 window=$2 fakebin="$1/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *list-windows*window_name*) printf '%s\n' '$window' ;;
+  *pane_current_command*) printf '%s\n' claude ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin:$PATH"
 }
 
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout() {
@@ -879,20 +899,62 @@ test_sweep_is_silent_for_a_correctly_isolated_worker() {
 }
 
 test_sweep_fails_closed_without_process_evidence() {
-  local world out status
+  local world out status path
   world=$(make_sweep_home sweep-hint)
   fm_write_meta "$world/home/state/task-f3.meta" \
     "window=firstmate:fm-task-f3" "worktree=$world/wt" "project=$world/project" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  out=$(run_sweep "$world")
+  path=$(sweep_live_tmux "$world" fm-task-f3)
+  out=$(run_sweep "$world" "$path")
   status=$?
   expect_code 1 "$status" "the sweep must fail closed when required process evidence is unproven"
   assert_contains "$out" "ISOLATION: task task-f3 isolation is unproven" \
     "the sweep did not report unproven required evidence"
-  out=$(FM_ISOLATION_VERBOSE=1 run_sweep "$world")
+  out=$(FM_ISOLATION_VERBOSE=1 run_sweep "$world" "$path")
   assert_contains "$out" "BOOTSTRAP_INFO: isolation for task-f3 is unproven" \
     "an unprovable task was not reported as unproven under verbose facts"
   pass "unproven process evidence blocks restore-time mutation without using a pane path"
+}
+
+test_sweep_does_not_block_a_record_whose_endpoint_is_gone() {
+  local world out status path
+  world=$(make_sweep_home sweep-stale-endpoint)
+  fm_write_meta "$world/home/state/task-f3b.meta" \
+    "window=firstmate:fm-task-f3b" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  # The live window belongs to a different task, so this record's endpoint is
+  # provably gone: no worker can be acting on it and it must not halt the home.
+  path=$(sweep_live_tmux "$world" fm-someone-else)
+  status=0
+  out=$(run_sweep "$world" "$path") || status=$?
+  expect_code 0 "$status" "a record whose endpoint is gone must not block restore-time mutation"
+  assert_not_contains "$out" "ISOLATION: task task-f3b" \
+    "the sweep blocked the whole home on a record whose endpoint is gone"
+  assert_contains "$out" "BOOTSTRAP_INFO: isolation for task-f3b is unproven but its endpoint" \
+    "the sweep did not report the stale record as a fact"
+  pass "an unproven record whose endpoint is gone is a fact, not a fleet-wide block"
+}
+
+test_sweep_still_blocks_when_the_endpoint_cannot_be_read() {
+  local world out status fakebin
+  world=$(make_sweep_home sweep-unreadable-endpoint)
+  fm_write_meta "$world/home/state/task-f3c.meta" \
+    "window=firstmate:fm-task-f3c" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fakebin="$world/fakebin-unreadable"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'server exploded\n' >&2
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(run_sweep "$world" "$fakebin:$PATH")
+  status=$?
+  expect_code 1 "$status" "an endpoint that cannot be read is not proof of absence"
+  assert_contains "$out" "ISOLATION: task task-f3c isolation is unproven" \
+    "the sweep stopped failing closed on an unreadable endpoint"
+  pass "an unreadable endpoint still blocks restore-time mutation"
 }
 
 test_sweep_reports_an_agent_declared_for_another_home() {
@@ -978,6 +1040,8 @@ test_teardown_endpoint_state_prefers_backend_agent_state
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_fails_closed_without_process_evidence
+test_sweep_does_not_block_a_record_whose_endpoint_is_gone
+test_sweep_still_blocks_when_the_endpoint_cannot_be_read
 test_sweep_reports_an_agent_declared_for_another_home
 test_sweep_is_silent_for_a_healthy_secondmate
 test_sweep_still_reports_a_secondmate_running_for_a_foreign_home

@@ -21,6 +21,13 @@
 # isolation violation on 2026-07-25. A task with no authoritative reading is
 # an unproven isolation finding; verbose mode adds a BOOTSTRAP_INFO fact.
 #
+# The block is scoped to records whose endpoint could still be running a worker.
+# An endpoint the provider reports as gone (missing pane/window) or agent-less
+# (a bare shell) cannot have a worker acting on it at all, so such a stale
+# record is reported as a BOOTSTRAP_INFO fact instead of halting every mutation
+# in the home. An endpoint that cannot be read is not proof of absence and
+# still blocks.
+#
 # docs/worker-isolation.md owns how this mechanism fits with the other three.
 #
 # Usage: fm-isolation-sweep.sh
@@ -69,6 +76,19 @@ for meta in "$STATE"/*.meta; do
   record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX")
   source=$(fm_agent_verdict_field "$record" source)
   if [ "$source" != proc ]; then
+    # Unproven isolation blocks the fleet, but only while the task's endpoint
+    # could still be running something. A record whose endpoint is PROVABLY
+    # gone - the window or pane no longer exists, or its foreground is a bare
+    # shell - has no worker that could be writing anywhere, so it is reported
+    # as a fact rather than dropping the whole session to read-only. Anything
+    # else, including an endpoint that cannot be read, still fails closed.
+    endpoint_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+    case "$endpoint_state" in
+      missing|dead|no-agent)
+        echo "BOOTSTRAP_INFO: isolation for $id is unproven but its endpoint ${target:-<none>} is ${endpoint_state}, not live: no worker can be acting on this record; reconcile or tear it down"
+        continue
+        ;;
+    esac
     echo "ISOLATION: task $id isolation is unproven: no live agent process could be identified, and a pane path is only a hint; block mutation until the endpoint and worker identity are re-established"
     if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
       echo "BOOTSTRAP_INFO: isolation for $id is unproven: no live agent process could be identified, and a pane path is only a hint"

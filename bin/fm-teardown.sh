@@ -45,6 +45,15 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# A pending return is recorded as slot_returning=1 before the return runs so a
+# crash can never hide a half-returned slot. That mark is cleared again whenever
+# the return provably did not take effect (the slot is still a linked worktree
+# stamped for this task), so an ordinary failure stays retryable; when that
+# cannot be proved teardown prints the exact manual recovery instead.
+# A spawn that leased a slot but never resolved its path records
+# slot_lease_state=unresolved with the lease holder rather than a fabricated
+# worktree: teardown then retires the endpoint and records, returns nothing, and
+# prints the reclaim instruction for the still-held lease.
 # Worktree disposal never trusts a recorded worktree= as current ownership.
 # Before returning a pooled slot, bin/fm-slot-owner-lib.sh checks other metadata,
 # the private owner stamp, and live declared agents. A conflict retains the
@@ -257,10 +266,6 @@ TOP_SLOT_RETURNED=
 TOP_SLOT_RETURNING=
 TOP_SLOT_RETURNED=$(meta_value "$META" slot_returned)
 TOP_SLOT_RETURNING=$(meta_value "$META" slot_returning)
-if [ "$TOP_SLOT_RETURNING" = 1 ]; then
-  echo "REFUSED: durable return for $ID is incomplete; preserving task state and lease" >&2
-  exit 1
-fi
 
 teardown_meta_set_slot_state() {
   local meta=$1 state=$2 dir tmp rc
@@ -275,7 +280,9 @@ teardown_meta_set_slot_state() {
       return 1
     fi
   }
-  printf 'slot_%s=1\n' "$state" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ "$state" != none ]; then
+    printf 'slot_%s=1\n' "$state" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
 }
 
@@ -286,6 +293,40 @@ teardown_meta_mark_slot_returning() {
 teardown_meta_mark_slot_returned() {
   teardown_meta_set_slot_state "$1" returned
 }
+
+teardown_meta_clear_slot_state() {
+  teardown_meta_set_slot_state "$1" none
+}
+
+# The pending-return mark is written BEFORE `treehouse return` so a crash can
+# never hide a half-returned slot. That must not make it a one-way door: every
+# caller that fails past the mark either proves the return did not take effect
+# and clears it, or prints the exact manual recovery for the operator.
+teardown_slot_returning_recovery_line() {  # <meta> <worktree> <task-id>
+  echo "teardown: RECOVERY: run 'treehouse list' and confirm whether ${2:-the recorded slot} is still leased to $3. If it is, delete the 'slot_returning=1' line from $1 and re-run teardown; if the slot was already returned, replace that line with 'slot_returned=1'. docs/worker-isolation.md owns the manual reclaim path." >&2
+}
+
+# A return provably did not take effect when the slot is still a linked
+# worktree carrying THIS task's own ownership stamp: nothing was handed back to
+# the pool, so the lease is still held here and teardown stays retryable.
+# Anything less keeps the mark and prints the manual recovery instead.
+teardown_slot_return_recover() {  # <meta> <worktree> <task-id> <label>
+  local meta=$1 wt=$2 id=$3 label=$4
+  if fm_slot_stamp_record "$wt" >/dev/null 2>&1 \
+     && [ "$FM_SLOT_STAMP_TASK" = "$id" ] \
+     && teardown_meta_clear_slot_state "$meta"; then
+    echo "teardown: $label $wt was not returned and its lease is still held by $id; teardown can be retried" >&2
+    return 0
+  fi
+  teardown_slot_returning_recovery_line "$meta" "$wt" "$id"
+  return 1
+}
+
+if [ "$TOP_SLOT_RETURNING" = 1 ]; then
+  echo "REFUSED: durable return for $ID is incomplete; preserving task state and lease" >&2
+  teardown_slot_returning_recovery_line "$META" "$WT" "$ID"
+  exit 1
+fi
 
 teardown_meta_backup_create() {
   local meta=$1 dir
@@ -888,6 +929,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
   meta_path="$state_scope/$meta_id.meta"
   if [ "$(meta_value "$meta_path" slot_returning)" = 1 ]; then
     echo "error: durable return for $label $home is incomplete; preserving task state" >&2
+    teardown_slot_returning_recovery_line "$meta_path" "$home" "${expected_id:-$ID}"
     return 1
   fi
   if [ "$(meta_value "$meta_path" slot_returned)" = 1 ]; then
@@ -898,9 +940,19 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
     return 0
   fi
   if [ ! -e "$home" ] && [ ! -L "$home" ]; then
-    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$home" \
-      "$home_scope" "$label" refuse unknown "" "" "$home" secondmate || return 1
-    return 1
+    # A home that is already gone is only a lease hazard when it was a pooled
+    # slot. git keeps the worktree registration of a slot whose directory was
+    # removed (it lists as prunable), so that registration - not the missing
+    # directory - is the evidence of record. A plain-clone secondmate home
+    # never drew a slot and has nothing to return, and refusing it forever
+    # would make such a home permanently unretirable. An unresolvable path
+    # still fails closed.
+    if [ ! -d "$(dirname "$home")" ] || firstmate_home_has_treehouse_slot "$home"; then
+      slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$home" \
+        "$home_scope" "$label" refuse unknown "" "" "$home" secondmate || return 1
+      return 1
+    fi
+    return 0
   fi
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
@@ -927,11 +979,14 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       fm_slot_lock_release "$lock_path" || true
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      teardown_slot_return_recover "$meta_path" "$abs_home_path" \
+        "${expected_id:-$ID}" "$label" || true
       return 1
     }
     teardown_meta_mark_slot_returned "$meta_path" || {
       fm_slot_lock_release "$lock_path" || true
       echo "error: could not record successful return for $label $abs_home_path; preserving task state" >&2
+      teardown_slot_returning_recovery_line "$meta_path" "$abs_home_path" "${expected_id:-$ID}"
       return 1
     }
     fm_slot_stamp_clear_after_return "$abs_home_path" "${expected_id:-$ID}" || {
@@ -947,7 +1002,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
 
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_backend child_wt child_proj child_kind child_home
-  local child_slot_returned child_slot_returning
+  local child_slot_returned child_slot_returning child_slot_path
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -961,7 +1016,10 @@ validate_firstmate_home_children_removal() {
     child_slot_returned=$(meta_value "$child_meta" slot_returned)
     child_slot_returning=$(meta_value "$child_meta" slot_returning)
     if [ "$child_slot_returning" = 1 ]; then
+      child_slot_path=$(meta_value "$child_meta" home)
+      [ -n "$child_slot_path" ] || child_slot_path=$child_wt
       echo "REFUSED: child $child_id has an incomplete durable return; preserving child state." >&2
+      teardown_slot_returning_recovery_line "$child_meta" "$child_slot_path" "$child_id"
       return 1
     fi
     if [ "$child_kind" = secondmate ]; then
@@ -1007,7 +1065,7 @@ validate_child_backend() {
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
-  local child_slot_returned child_slot_returning child_slot_lock_path
+  local child_slot_returned child_slot_returning child_slot_lock_path child_slot_path
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1022,7 +1080,10 @@ cleanup_firstmate_home_children() {
     child_slot_returned=$(meta_value "$child_meta" slot_returned)
     child_slot_returning=$(meta_value "$child_meta" slot_returning)
     if [ "$child_slot_returning" = 1 ]; then
+      child_slot_path=$(meta_value "$child_meta" home)
+      [ -n "$child_slot_path" ] || child_slot_path=$child_wt
       echo "REFUSED: child $child_id has an incomplete durable return; preserving child state" >&2
+      teardown_slot_returning_recovery_line "$child_meta" "$child_slot_path" "$child_id"
       return 1
     fi
     child_retire_staged=0
@@ -1112,11 +1173,13 @@ cleanup_firstmate_home_children() {
           if ! teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
             fm_slot_lock_release "$child_slot_lock_path" || true
             echo "error: treehouse return failed for child worktree $child_wt; lease may still be held" >&2
+            teardown_slot_return_recover "$child_meta" "$child_wt" "$child_id" "child worktree" || true
             return 1
           fi
           teardown_meta_mark_slot_returned "$child_meta" || {
             fm_slot_lock_release "$child_slot_lock_path" || true
             echo "error: could not record successful return for child worktree $child_wt; preserving child state" >&2
+            teardown_slot_returning_recovery_line "$child_meta" "$child_wt" "$child_id"
             return 1
           }
           fm_slot_stamp_clear_after_return "$child_wt" "$child_id" || {
@@ -1331,6 +1394,10 @@ TOP_SLOT_RETAIN_VERDICT=
 TOP_SLOT_ENDPOINT_STATE=closed
 TOP_SLOT_LOCK_HELD=0
 TOP_SLOT_LOCK_PATH=
+TOP_SLOT_UNRESOLVED_LEASE=0
+TOP_SLOT_LEASE_STATE=$(meta_value "$META" slot_lease_state)
+TOP_SLOT_LEASE_HOLDER=$(meta_value "$META" slot_lease_holder)
+TOP_SLOT_WT_CANDIDATE=$(meta_value "$META" slot_worktree_candidate)
 teardown_release_top_slot_lock() {
   if [ "$TOP_SLOT_LOCK_HELD" = 1 ]; then
     fm_slot_lock_release "$TOP_SLOT_LOCK_PATH" || return 1
@@ -1349,6 +1416,16 @@ if [ "$KIND" != secondmate ]; then
       TOP_SLOT_LOCK_HELD=1
     fi
     TOP_SLOT_RELEASE_AUTHORIZED=1
+  elif [ -z "$WT" ] && [ "$TOP_SLOT_LEASE_STATE" = unresolved ]; then
+    # A spawn that leased a pooled slot but never resolved its path recorded the
+    # lease holder instead of a fabricated worktree. There is no slot to gate,
+    # prove, or return here: the lease stays held (fail-closed) and traceable,
+    # while the endpoint and records still retire so one aborted spawn cannot
+    # make the task permanently untearable.
+    TOP_SLOT_UNRESOLVED_LEASE=1
+    TEARDOWN_SLOT_RETAINED=1
+    echo "teardown: task $ID never resolved a pooled slot path; its durable treehouse lease is RETAINED, not returned." >&2
+    echo "teardown: RECLAIM: run 'treehouse list' to find the slot leased to ${TOP_SLOT_LEASE_HOLDER:-$ID}${TOP_SLOT_WT_CANDIDATE:+ (spawn saw candidate path $TOP_SLOT_WT_CANDIDATE)} and return it with 'treehouse return --force <slot>'; docs/worker-isolation.md owns the reclaim path." >&2
   else
     if fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
       fm_slot_lock_acquire "$WT" || {
@@ -1382,7 +1459,10 @@ if [ "$KIND" != secondmate ]; then
 fi
 
 if [ "$BACKEND" = herdr ]; then
-  if ! teardown_herdr_endpoint_focus_safe "$T"; then
+  # Same resume gate as the other endpoint branches: a prior run that already
+  # returned the slot also already closed this pane, so re-closing it would
+  # refuse on a pane that is legitimately gone and leave the task unfinishable.
+  if [ "$TOP_SLOT_RETURNED" != 1 ] && ! teardown_herdr_endpoint_focus_safe "$T"; then
     echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
     exit 1
   fi
@@ -1423,20 +1503,18 @@ if [ "$KIND" != secondmate ] \
     fi
     # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-    post_lock_cleanup_check=
-    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-      post_lock_cleanup_check=validate_worktree_teardown_safety
-    fi
     teardown_meta_mark_slot_returning "$META" || {
       echo "error: could not record pending return for worktree $WT; preserving task state" >&2
       exit 1
     }
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" || {
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      teardown_slot_return_recover "$META" "$WT" "$ID" "worktree" || true
       exit 1
     }
     teardown_meta_mark_slot_returned "$META" || {
       echo "error: could not record successful return for worktree $WT; preserving task state" >&2
+      teardown_slot_returning_recovery_line "$META" "$WT" "$ID"
       exit 1
     }
     TOP_SLOT_RETURNED=1
@@ -1506,7 +1584,9 @@ teardown_release_top_slot_lock || {
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-if [ "$TEARDOWN_SLOT_RETAINED" = 1 ]; then
+if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
+  echo "teardown $ID complete (window $T, no pooled slot path was ever resolved - its treehouse lease is still held by ${TOP_SLOT_LEASE_HOLDER:-$ID} and needs the reclaim above)"
+elif [ "$TEARDOWN_SLOT_RETAINED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT retained on disk - its lease was retired, not returned)"
 else
   echo "teardown $ID complete (window $T, worktree $WT)"

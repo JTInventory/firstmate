@@ -718,6 +718,71 @@ test_teardown_refuses_unsafe_tasktmp() {
   pass "teardown refuses arbitrary tasktmp cleanup targets from meta"
 }
 
+# An interrupted durable return must never become a permanent one-way door: the
+# refusal has to hand the operator the exact recovery for state/<id>.meta.
+test_teardown_refusal_on_incomplete_return_prints_recovery() {
+  local case_dir rc
+  case_dir=$(make_case incomplete-return)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'slot_returning=1\n' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "incomplete-return: teardown must refuse while a durable return is incomplete"
+  grep -q 'durable return for task-x1 is incomplete' "$case_dir/stderr" \
+    || fail "incomplete-return: refusal did not cite the incomplete return"
+  grep -q 'teardown: RECOVERY:' "$case_dir/stderr" \
+    || fail "incomplete-return: refusal left no recovery instruction"
+  grep -F "$case_dir/state/task-x1.meta" "$case_dir/stderr" >/dev/null \
+    || fail "incomplete-return: the recovery instruction did not name the meta file to edit"
+  assert_present "$case_dir/state/task-x1.meta" "incomplete-return: task state must be preserved"
+  pass "an incomplete durable return refuses with an exact, documented recovery"
+}
+
+# A spawn that leased a pooled slot but never resolved its path records the
+# lease holder instead of a fabricated worktree. Teardown must retire the
+# endpoint and records, return nothing, and print the reclaim instruction.
+test_teardown_retires_an_unresolved_lease_record() {
+  local case_dir rc
+  case_dir=$(make_case unresolved-lease)
+  add_compatible_tasks_axi "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "worktree=" \
+    "slot_lease_state=unresolved" \
+    "slot_lease_holder=task-x1" \
+    "slot_worktree_candidate=$case_dir/half-settled" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unresolved-lease: teardown must retire a record with no resolved slot path: $(cat "$case_dir/stderr")"
+  grep -q 'teardown: RECLAIM:' "$case_dir/stderr" \
+    || fail "unresolved-lease: teardown left no reclaim instruction for the still-held lease"
+  grep -F "$case_dir/half-settled" "$case_dir/stderr" >/dev/null \
+    || fail "unresolved-lease: the reclaim instruction did not name the recorded candidate path"
+  assert_absent "$case_dir/state/task-x1.meta" "unresolved-lease: the record should be retired"
+  assert_absent "$case_dir/treehouse.log" \
+    "unresolved-lease: teardown must not run treehouse against a slot it could not identify"
+  grep -q 'lease is still held by task-x1' "$case_dir/stdout" \
+    || fail "unresolved-lease: the completion line did not report the still-held lease"
+  pass "an unresolved-lease record is retirable and reports its still-held lease"
+}
+
 test_teardown_retries_transient_index_lock() {
   local case_dir rc wt_head attempts
   case_dir=$(make_case transient-index-lock)
@@ -1282,8 +1347,8 @@ test_herdr_teardown_helper_locks_and_closes_focus_safe() {
 
 test_projection_journal_retires_before_worktree_return() {
   local retire_line return_line
-  retire_line=$(grep -n '^    rm -f "$HERDR_PRESENTATION_JOURNAL"$' "$TEARDOWN" | cut -d: -f1)
-  return_line=$(grep -n '^  teardown_treehouse_return "$WT"' "$TEARDOWN" | cut -d: -f1)
+  retire_line=$(grep -n '^[[:space:]]*rm -f "$HERDR_PRESENTATION_JOURNAL"$' "$TEARDOWN" | cut -d: -f1)
+  return_line=$(grep -n '^[[:space:]]*teardown_treehouse_return "$WT"' "$TEARDOWN" | cut -d: -f1)
   [ -n "$retire_line" ] && [ -n "$return_line" ] && [ "$retire_line" -lt "$return_line" ] \
     || fail "confirmed projection journal retirement must precede the fallible worktree return"
   grep -Fq 'teardown_backend_endpoint "$child_backend" "$child_t"' "$TEARDOWN" \
@@ -1297,6 +1362,8 @@ test_teardown_reconciles_consumed_presentation_receipt
 test_teardown_refuses_foreign_presentation_receipt
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_teardown_refuses_unsafe_tasktmp
+test_teardown_refusal_on_incomplete_return_prints_recovery
+test_teardown_retires_an_unresolved_lease_record
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
