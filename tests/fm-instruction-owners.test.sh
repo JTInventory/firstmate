@@ -394,7 +394,7 @@ assert_contains "$POST_CONFLICT_PATH" 'After helper exit zero, Firstmate must us
 assert_contains "$POST_CONFLICT_PATH" 'validate the private namespace contains only `BASE_FETCH_REF` and `FEATURE_FETCH_REF`, delete both exact refs in one `git update-ref --stdin` transaction' \
   "post-conflict finalization does not retire exact private refs transactionally"
 TEARDOWN_VALIDATOR=$(sed -n '/^validate_direct_pr_state_cleanup()/,/^}/p' "$ROOT/bin/fm-teardown.sh")
-TEARDOWN_STATE_RM=$(sed -n '/^rm -f "$STATE\/$ID.status"/,/direct-pr-lease.tmp/p' "$ROOT/bin/fm-teardown.sh")
+TEARDOWN_STATE_RM=$(sed -n '/^if ! rm -f "$STATE\/$ID.status"/,/direct-pr-lease.tmp/p' "$ROOT/bin/fm-teardown.sh")
 assert_contains "$TEARDOWN_VALIDATOR" '"$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"' \
   "teardown lost exact direct-PR state validation"
 assert_contains "$TEARDOWN_VALIDATOR" 'mode=$(fm_pr_file_mode "$artifact")' \
@@ -470,6 +470,10 @@ make_direct_pr_teardown_fixture() {
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-watcher-protocol-lib.sh" "$fake/bin/fm-watcher-protocol-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-slot-owner-lib.sh" "$fake/bin/fm-slot-owner-lib.sh"
+  ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake/bin/fm-agent-cwd-lib.sh"
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-worker-isolation-lib.sh" "$fake/bin/fm-worker-isolation-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -547,9 +551,16 @@ fi
 
 REF_CLEANUP_ID=direct-pr-ref-cleanup
 REF_CLEANUP_HOME=$(make_direct_pr_teardown_fixture "$REF_CLEANUP_ID")
+# A task worktree is a pooled linked worktree stamped by its owner: only that
+# shape lets the ownership gate authorize the return this ordering check needs.
+REF_CLEANUP_PROJECT="$REF_CLEANUP_HOME/project"
 REF_CLEANUP_REPO="$REF_CLEANUP_HOME/worktree"
-git init -q "$REF_CLEANUP_REPO"
-git -C "$REF_CLEANUP_REPO" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m fixture
+git init -q "$REF_CLEANUP_PROJECT"
+git -C "$REF_CLEANUP_PROJECT" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m fixture
+git -C "$REF_CLEANUP_PROJECT" worktree add -q --detach "$REF_CLEANUP_REPO" >/dev/null 2>&1
+( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+  && fm_slot_stamp_write "$REF_CLEANUP_REPO" "$REF_CLEANUP_ID" "$REF_CLEANUP_HOME" ) \
+  || fail "the direct-PR ref-cleanup fixture could not stamp its pooled slot"
 REF_CLEANUP_OID=$(git -C "$REF_CLEANUP_REPO" rev-parse HEAD)
 git -C "$REF_CLEANUP_REPO" update-ref "refs/firstmate/direct-pr/$REF_CLEANUP_ID/base" "$REF_CLEANUP_OID"
 git -C "$REF_CLEANUP_REPO" update-ref "refs/firstmate/direct-pr/$REF_CLEANUP_ID/feature" "$REF_CLEANUP_OID"
@@ -557,7 +568,7 @@ git -C "$REF_CLEANUP_REPO" update-ref "refs/firstmate/direct-pr/$REF_CLEANUP_ID/
 cat > "$REF_CLEANUP_HOME/state/$REF_CLEANUP_ID.meta" <<META
 window=fakeses:fm-$REF_CLEANUP_ID
 worktree=$REF_CLEANUP_REPO
-project=$REF_CLEANUP_REPO
+project=$REF_CLEANUP_PROJECT
 harness=claude
 kind=ship
 mode=direct-PR
@@ -582,7 +593,7 @@ printf 'stable-temporary\n' > "$REF_CLEANUP_LEASE_TMP"
 REF_CLEANUP_LEASE_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE")
 REF_CLEANUP_LEASE_TMP_HASH=$(shasum -a 256 "$REF_CLEANUP_LEASE_TMP")
 REF_TRANSACTION_FLAG="$REF_CLEANUP_HOME/fail-ref-transaction"
-REF_TRANSACTION_HOOK="$REF_CLEANUP_REPO/.git/hooks/reference-transaction"
+REF_TRANSACTION_HOOK="$REF_CLEANUP_PROJECT/.git/hooks/reference-transaction"
 cat > "$REF_TRANSACTION_HOOK" <<EOF
 #!/bin/sh
 [ "\$1" != prepared ] || [ ! -e "$REF_TRANSACTION_FLAG" ]

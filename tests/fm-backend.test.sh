@@ -272,6 +272,11 @@ SH
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake_root/bin/fm-pr-lib.sh"
   : > "$fake_root/bin/fm-pending-reply-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake_root/bin/fm-gate-refuse-lib.sh"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake_root/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-slot-owner-lib.sh" "$fake_root/bin/fm-slot-owner-lib.sh"
+  ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake_root/bin/fm-agent-cwd-lib.sh"
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake_root/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-worker-isolation-lib.sh" "$fake_root/bin/fm-worker-isolation-lib.sh"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

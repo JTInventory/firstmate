@@ -1463,11 +1463,11 @@ if [ "$KIND" != secondmate ]; then
       TOP_SLOT_LOCK_PATH=$FM_SLOT_LOCK_PATH
       TOP_SLOT_LOCK_HELD=1
     fi
-    if [ -d "$WT" ]; then
-      TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
-    else
-      TOP_SLOT_ENDPOINT_STATE=unknown
-    fi
+    # The endpoint is proved from the backend, not from the recorded worktree.
+    # A worktree that is already gone still retains its lease through the
+    # verdict below; assuming an unknown endpoint for it would only make such a
+    # task permanently untearable.
+    TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
     if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
       "worktree" retire "$TOP_SLOT_ENDPOINT_STATE" "$BACKEND" "$T" \
       "$FM_HOME" crewmate; then
@@ -1585,7 +1585,9 @@ if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   exit 1
 fi
 if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
-  if [ "$TOP_SLOT_LOCK_HELD" != 1 ]; then
+  # A slot whose directory is gone has no stamp to serialize against; demanding
+  # a lock on it would strand the record this teardown already retired.
+  if [ "$TOP_SLOT_LOCK_HELD" != 1 ] && fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
     fm_slot_lock_acquire "$WT" || {
       teardown_meta_backup_restore "$META" || true
       echo "error: could not serialize ownership cleanup for $ID; preserving task state" >&2

@@ -435,7 +435,10 @@ test_bootstrap_reports_missing_x_dependency() {
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux node no-mistakes gh-axi chrome-devtools-axi lavish-axi curl
-  for tool in dirname grep tail; do
+  # bash is required for bootstrap's own helper scripts (the isolation sweep
+  # runs through `env bash`); without it the sweep cannot execute at all and
+  # bootstrap blocks before it can report the missing X dependency.
+  for tool in dirname grep tail bash; do
     tool_path=$(command -v "$tool") || fail "test host must provide $tool"
     ln -s "$tool_path" "$fakebin/$tool"
   done
