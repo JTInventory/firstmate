@@ -762,7 +762,7 @@ SH
     "slot_lease_holder=task-x1" \
     "slot_worktree_candidate=$case_dir/half-settled" \
     "project=$case_dir/project" \
-    "kind=scout" \
+    "kind=ship" \
     "mode=no-mistakes"
 
   set +e
@@ -781,6 +781,53 @@ SH
   grep -q 'lease is still held by task-x1' "$case_dir/stdout" \
     || fail "unresolved-lease: the completion line did not report the still-held lease"
   pass "an unresolved-lease record is retirable and reports its still-held lease"
+}
+
+# The recovery the previous refusal advertises has to be REACHABLE. A failed
+# return must leave the worktree on its task branch, so the retry passes
+# fm_assert_task_branch_matches_meta instead of dying on an unrelated identity
+# mismatch, and the task branch is only retired once the return is proven.
+test_teardown_failed_return_stays_retryable_for_a_ship_task() {
+  local case_dir rc wt_head gate branch
+  case_dir=$(make_case failed-return-retry)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work before the failed return"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  gate="$case_dir/treehouse-allow"
+
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ -e "$gate" ] || { echo "fatal: pool is busy" >&2; exit 1; }
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "failed-return-retry: teardown must refuse when the return fails"
+  grep -q 'teardown can be retried' "$case_dir/stderr" \
+    || fail "failed-return-retry: the failure did not advertise a retry: $(cat "$case_dir/stderr")"
+  grep -q '^slot_returning=1$' "$case_dir/state/task-x1.meta" \
+    && fail "failed-return-retry: a retryable failure left an uncleanable slot_returning mark"
+  branch=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD || printf 'DETACHED')
+  [ "$branch" = "fm/task-x1" ] \
+    || fail "failed-return-retry: the failed return left the worktree on $branch, not its task branch"
+
+  touch "$gate"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "failed-return-retry: the advertised retry must succeed: $(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" "failed-return-retry: the retry should retire the record"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "failed-return-retry: the task branch survived a proven return"
+  pass "a failed return stays retryable and only retires the task branch once the return is proven"
 }
 
 test_teardown_retries_transient_index_lock() {
@@ -1364,6 +1411,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_teardown_refuses_unsafe_tasktmp
 test_teardown_refusal_on_incomplete_return_prints_recovery
 test_teardown_retires_an_unresolved_lease_record
+test_teardown_failed_return_stays_retryable_for_a_ship_task
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

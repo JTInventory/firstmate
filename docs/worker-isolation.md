@@ -138,6 +138,10 @@ Two durable records exist so a crash can never hide the state of a pooled slot, 
 Teardown refuses while it is set, because retrying a return whose first attempt may have partly succeeded is exactly how a slot gets reissued out from under a live holder.
 It is cleared automatically whenever the return provably did *not* take effect - the slot is still a linked worktree carrying this task's own ownership stamp - so the ordinary failure stays retryable.
 When that cannot be proved, teardown prints a `teardown: RECOVERY:` line naming the meta file and the slot: confirm with `treehouse list` whether the slot is still leased to the task, then delete the `slot_returning=1` line to retry, or replace it with `slot_returned=1` if the slot was in fact returned.
+An advertised retry has to actually be reachable, so the task branch is detached and deleted only *after* the return is proven.
+Retiring it first would strip the very branch identity the ship-task identity check asserts, and the retry would come back as an unrelated identity mismatch instead of reaching the recovery.
+
+For the same reason a record with no resolvable worktree skips that identity check outright: it has no worktree to assert and no slot it could mis-address, so refusing it would hide the reclaim instruction behind an unrelated mismatch and leave an aborted spawn's record permanently unretirable.
 
 `slot_lease_state=unresolved` is written by an aborted spawn that took a durable lease under the task id but never resolved a slot path, so there is no worktree to record.
 Such a record deliberately carries an empty `worktree=` plus `slot_lease_holder=` and, when the settle poll saw one, `slot_worktree_candidate=`.
@@ -167,7 +171,7 @@ Positive location and identity findings come only from an authoritative process 
 A task with no such reading is reported as unproven `ISOLATION:` evidence and blocks mutation. `FM_ISOLATION_VERBOSE=1` adds the matching `BOOTSTRAP_INFO` fact; a pane path remains a hint and is never promoted to a violation.
 
 The block is scoped to records whose endpoint could still be running a worker.
-An endpoint the provider reports as gone or agent-less has no worker that could act on the record at all, so such a stale record is reported as a `BOOTSTRAP_INFO` fact instead of dropping the whole home to read-only with no per-task override.
+An endpoint the provider reports as gone or agent-less has no worker that could act on the record at all, so such a stale record is a non-actionable `BOOTSTRAP_INFO` fact under `FM_ISOLATION_VERBOSE` rather than a finding that drops the whole home to read-only with no per-task override.
 An endpoint that merely cannot be read is not proof of absence and still blocks, so the gate stays fail-closed exactly where a live collapsed worker is still possible.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.

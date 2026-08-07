@@ -349,9 +349,14 @@ EOF
   expect_code 0 "$status" "a stale record with a dead endpoint must not block bootstrap mutation"
   assert_not_contains "$out" "ISOLATION: bootstrap mutations blocked until worker isolation is clean" \
     "bootstrap blocked the whole home on a record whose endpoint is gone"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: isolation for isolation-stale" \
+    "a non-actionable stale record was reported without FM_ISOLATION_VERBOSE"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_ISOLATION_VERBOSE=1 "$ROOT/bin/fm-bootstrap.sh") || status=$?
   assert_contains "$out" "BOOTSTRAP_INFO: isolation for isolation-stale is unproven but its endpoint" \
-    "bootstrap did not report the stale unproven record as a fact"
-  pass "an unproven record whose endpoint is gone is a fact, not a fleet-wide block"
+    "bootstrap did not report the stale unproven record as a verbose fact"
+  pass "an unproven record whose endpoint is gone is a quiet fact, not a fleet-wide block"
 }
 
 test_bootstrap_reporting

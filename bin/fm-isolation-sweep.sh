@@ -85,7 +85,9 @@ for meta in "$STATE"/*.meta; do
     endpoint_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
     case "$endpoint_state" in
       missing|dead|no-agent)
-        echo "BOOTSTRAP_INFO: isolation for $id is unproven but its endpoint ${target:-<none>} is ${endpoint_state}, not live: no worker can be acting on this record; reconcile or tear it down"
+        if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
+          echo "BOOTSTRAP_INFO: isolation for $id is unproven but its endpoint ${target:-<none>} is ${endpoint_state}, not live: no worker can be acting on this record; reconcile or tear it down"
+        fi
         continue
         ;;
     esac

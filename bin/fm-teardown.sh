@@ -237,7 +237,26 @@ teardown_treehouse_return() {
   done
 }
 
-if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ]; then
+meta_value() {
+  local meta=$1 key=$2
+  grep "^$key=" "$meta" | cut -d= -f2- || true
+}
+
+TOP_SLOT_LEASE_STATE=$(meta_value "$META" slot_lease_state)
+TOP_SLOT_LEASE_HOLDER=$(meta_value "$META" slot_lease_holder)
+TOP_SLOT_WT_CANDIDATE=$(meta_value "$META" slot_worktree_candidate)
+TOP_SLOT_UNRESOLVED_LEASE=0
+if [ "$KIND" != secondmate ] && [ -z "$WT" ] \
+   && [ "$TOP_SLOT_LEASE_STATE" = unresolved ]; then
+  TOP_SLOT_UNRESOLVED_LEASE=1
+fi
+
+# A record that never resolved a slot path has no worktree identity to assert
+# and no slot it could mis-address. Refusing it here would hide the reclaim
+# instruction the operator actually needs behind an unrelated identity
+# mismatch, and would leave an aborted spawn's record permanently unretirable.
+if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ] \
+   && [ "$TOP_SLOT_UNRESOLVED_LEASE" != 1 ]; then
   fm_assert_task_branch_matches_meta "$ID" "$META" "REFUSED" || exit 1
 fi
 
@@ -255,11 +274,6 @@ default_branch() {
     fi
   done
   return 1
-}
-
-meta_value() {
-  local meta=$1 key=$2
-  grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
 TOP_SLOT_RETURNED=
@@ -304,6 +318,25 @@ teardown_meta_clear_slot_state() {
 # and clears it, or prints the exact manual recovery for the operator.
 teardown_slot_returning_recovery_line() {  # <meta> <worktree> <task-id>
   echo "teardown: RECOVERY: run 'treehouse list' and confirm whether ${2:-the recorded slot} is still leased to $3. If it is, delete the 'slot_returning=1' line from $1 and re-run teardown; if the slot was already returned, replace that line with 'slot_returned=1'. docs/worker-isolation.md owns the manual reclaim path." >&2
+}
+
+# Retire the task branch only once the slot is provably back in the pool.
+# Detaching and deleting it BEFORE the return would strip the very identity
+# fm_assert_task_branch_matches_meta checks, so a retryable return failure
+# would come back as an unrelated identity mismatch on the next attempt.
+teardown_retire_task_branch() {  # <worktree> <project> <branch>
+  local wt=$1 proj=$2 branch=$3 current
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 0
+  if [ -d "$wt" ] && git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+    current=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$current" = "$branch" ]; then
+      git -C "$wt" checkout --detach -q 2>/dev/null || return 0
+    fi
+    git -C "$wt" branch -D "$branch" >/dev/null 2>&1 || true
+    return 0
+  fi
+  [ -n "$proj" ] && [ -d "$proj" ] || return 0
+  git -C "$proj" branch -D "$branch" >/dev/null 2>&1 || true
 }
 
 # A return provably did not take effect when the slot is still a linked
@@ -977,10 +1010,10 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       return 1
     }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      fm_slot_lock_release "$lock_path" || true
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       teardown_slot_return_recover "$meta_path" "$abs_home_path" \
         "${expected_id:-$ID}" "$label" || true
+      fm_slot_lock_release "$lock_path" || true
       return 1
     }
     teardown_meta_mark_slot_returned "$meta_path" || {
@@ -1171,9 +1204,9 @@ cleanup_firstmate_home_children() {
             return 1
           }
           if ! teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-            fm_slot_lock_release "$child_slot_lock_path" || true
             echo "error: treehouse return failed for child worktree $child_wt; lease may still be held" >&2
             teardown_slot_return_recover "$child_meta" "$child_wt" "$child_id" "child worktree" || true
+            fm_slot_lock_release "$child_slot_lock_path" || true
             return 1
           fi
           teardown_meta_mark_slot_returned "$child_meta" || {
@@ -1394,10 +1427,6 @@ TOP_SLOT_RETAIN_VERDICT=
 TOP_SLOT_ENDPOINT_STATE=closed
 TOP_SLOT_LOCK_HELD=0
 TOP_SLOT_LOCK_PATH=
-TOP_SLOT_UNRESOLVED_LEASE=0
-TOP_SLOT_LEASE_STATE=$(meta_value "$META" slot_lease_state)
-TOP_SLOT_LEASE_HOLDER=$(meta_value "$META" slot_lease_holder)
-TOP_SLOT_WT_CANDIDATE=$(meta_value "$META" slot_worktree_candidate)
 teardown_release_top_slot_lock() {
   if [ "$TOP_SLOT_LOCK_HELD" = 1 ]; then
     fm_slot_lock_release "$TOP_SLOT_LOCK_PATH" || return 1
@@ -1416,13 +1445,12 @@ if [ "$KIND" != secondmate ]; then
       TOP_SLOT_LOCK_HELD=1
     fi
     TOP_SLOT_RELEASE_AUTHORIZED=1
-  elif [ -z "$WT" ] && [ "$TOP_SLOT_LEASE_STATE" = unresolved ]; then
+  elif [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ]; then
     # A spawn that leased a pooled slot but never resolved its path recorded the
     # lease holder instead of a fabricated worktree. There is no slot to gate,
     # prove, or return here: the lease stays held (fail-closed) and traceable,
     # while the endpoint and records still retire so one aborted spawn cannot
     # make the task permanently untearable.
-    TOP_SLOT_UNRESOLVED_LEASE=1
     TEARDOWN_SLOT_RETAINED=1
     echo "teardown: task $ID never resolved a pooled slot path; its durable treehouse lease is RETAINED, not returned." >&2
     echo "teardown: RECLAIM: run 'treehouse list' to find the slot leased to ${TOP_SLOT_LEASE_HOLDER:-$ID}${TOP_SLOT_WT_CANDIDATE:+ (spawn saw candidate path $TOP_SLOT_WT_CANDIDATE)} and return it with 'treehouse return --force <slot>'; docs/worker-isolation.md owns the reclaim path." >&2
@@ -1495,12 +1523,7 @@ if [ "$KIND" != secondmate ] \
       exit 1
     }
   elif [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
+    TOP_TASK_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
     teardown_meta_mark_slot_returning "$META" || {
@@ -1518,6 +1541,7 @@ if [ "$KIND" != secondmate ] \
       exit 1
     }
     TOP_SLOT_RETURNED=1
+    teardown_retire_task_branch "$WT" "$PROJ" "$TOP_TASK_BRANCH"
     fm_slot_stamp_clear_after_return "$WT" "$ID" || {
       echo "error: could not clear the ownership stamp for worktree $WT; preserving task state" >&2
       exit 1

@@ -930,9 +930,13 @@ test_sweep_does_not_block_a_record_whose_endpoint_is_gone() {
   expect_code 0 "$status" "a record whose endpoint is gone must not block restore-time mutation"
   assert_not_contains "$out" "ISOLATION: task task-f3b" \
     "the sweep blocked the whole home on a record whose endpoint is gone"
+  # Non-actionable facts follow this file's documented contract: quiet by
+  # default, visible under FM_ISOLATION_VERBOSE.
+  [ -z "$out" ] || fail "a non-actionable stale record was reported without FM_ISOLATION_VERBOSE: $out"
+  out=$(FM_ISOLATION_VERBOSE=1 run_sweep "$world" "$path")
   assert_contains "$out" "BOOTSTRAP_INFO: isolation for task-f3b is unproven but its endpoint" \
-    "the sweep did not report the stale record as a fact"
-  pass "an unproven record whose endpoint is gone is a fact, not a fleet-wide block"
+    "the sweep did not report the stale record as a verbose fact"
+  pass "an unproven record whose endpoint is gone is a quiet fact, not a fleet-wide block"
 }
 
 test_sweep_still_blocks_when_the_endpoint_cannot_be_read() {
