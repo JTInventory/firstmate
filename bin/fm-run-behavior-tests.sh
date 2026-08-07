@@ -115,17 +115,51 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mapfile -t tests < <(
+# These tests spawn real watcher processes and wait on bounded pid-file,
+# heartbeat, and beacon windows. Sharing CPU with parallel jobs makes those
+# bounds flaky on a loaded host, so they run alone in a serial phase.
+serial_test_ids='
+fm-codex-session-lock
+fm-pr-check-security
+fm-watch-session
+fm-watch-triage
+fm-watcher-lock
+fm-watcher-protocol
+'
+is_serial_test() {
+  local candidate=$1 serial_id
+  for serial_id in $serial_test_ids; do
+    [ "$candidate" != "$serial_id" ] || return 0
+  done
+  return 1
+}
+
+mapfile -t all_tests < <(
   cd "$test_root" || exit 1
   for test_path in tests/*.test.sh; do
     [ -f "$test_path" ] || continue
     [ "$test_path" = tests/fm-gate-refuse.test.sh ] || printf '%s\n' "$test_path"
   done
 )
+tests=()
+serial_tests=()
+for test_path in "${all_tests[@]}"; do
+  test_name=${test_path##*/}
+  if is_serial_test "${test_name%.test.sh}"; then
+    serial_tests+=("$test_path")
+  else
+    tests+=("$test_path")
+  fi
+done
 total=${#tests[@]}
+serial_total=${#serial_tests[@]}
 active_jobs=$jobs
 [ "$active_jobs" -le "$total" ] || active_jobs=$total
+[ "$active_jobs" -ge 1 ] || active_jobs=1
 printf 'Running %s behavior tests with %s parallel job(s)\n' "$total" "$active_jobs"
+if [ "$serial_total" -ne 0 ]; then
+  printf 'Reserving %s watcher-timing test(s) for a serial phase\n' "$serial_total"
+fi
 
 run_one() {
   local test_path=$1 job_root=$2 log_path=$3
@@ -150,45 +184,64 @@ run_one() {
 }
 
 failed_count=0
-index=0
-while [ "$index" -lt "$total" ]; do
-  pids=()
-  batch_tests=()
-  batch_logs=()
-  batch_roots=()
-  batch_count=0
 
-  while [ "$index" -lt "$total" ] && [ "$batch_count" -lt "$active_jobs" ]; do
-    test_path=${tests[$index]}
-    test_name=${test_path##*/}
-    test_id=${test_name%.test.sh}
-    job_root="$suite_tmp/$test_id"
-    log_path="$job_root/output.log"
-    mkdir -p "$job_root/tmp" "$job_root/gotmp"
-    printf 'START: %s (TMPDIR=%s GOTMPDIR=%s)\n' "$test_path" "$job_root/tmp" "$job_root/gotmp"
-    run_one "$test_path" "$job_root" "$log_path" &
-    pids+=("$!")
-    batch_tests+=("$test_path")
-    batch_logs+=("$log_path")
-    batch_roots+=("$job_root")
-    index=$((index + 1))
-    batch_count=$((batch_count + 1))
-  done
+# Runs every path in the global phase_tests array, at most phase_jobs at a time.
+run_phase() {
+  local phase_total=${#phase_tests[@]} index=0
+  local test_path test_name test_id job_root log_path test_rc batch_index
+  local pids batch_paths batch_logs batch_count
+  while [ "$index" -lt "$phase_total" ]; do
+    pids=()
+    batch_paths=()
+    batch_logs=()
+    batch_count=0
 
-  for batch_index in "${!pids[@]}"; do
-    test_rc=0
-    wait "${pids[$batch_index]}" || test_rc=$?
-    if [ "$test_rc" -eq 0 ]; then
-      printf 'PASS: %s\n' "${batch_tests[$batch_index]}"
-    else
-      printf 'FAIL: %s (exit %s)\n' "${batch_tests[$batch_index]}" "$test_rc" >&2
-      failed_count=$((failed_count + 1))
-    fi
-    if [ -s "${batch_logs[$batch_index]}" ]; then
-      cat "${batch_logs[$batch_index]}"
-    fi
+    while [ "$index" -lt "$phase_total" ] && [ "$batch_count" -lt "$phase_jobs" ]; do
+      test_path=${phase_tests[$index]}
+      test_name=${test_path##*/}
+      test_id=${test_name%.test.sh}
+      job_root="$suite_tmp/$test_id"
+      log_path="$job_root/output.log"
+      mkdir -p "$job_root/tmp" "$job_root/gotmp"
+      printf 'START: %s (TMPDIR=%s GOTMPDIR=%s)\n' "$test_path" "$job_root/tmp" "$job_root/gotmp"
+      run_one "$test_path" "$job_root" "$log_path" &
+      pids+=("$!")
+      batch_paths+=("$test_path")
+      batch_logs+=("$log_path")
+      index=$((index + 1))
+      batch_count=$((batch_count + 1))
+    done
+
+    for batch_index in "${!pids[@]}"; do
+      test_rc=0
+      wait "${pids[$batch_index]}" || test_rc=$?
+      if [ "$test_rc" -eq 0 ]; then
+        printf 'PASS: %s\n' "${batch_paths[$batch_index]}"
+      else
+        printf 'FAIL: %s (exit %s)\n' "${batch_paths[$batch_index]}" "$test_rc" >&2
+        failed_count=$((failed_count + 1))
+      fi
+      if [ -s "${batch_logs[$batch_index]}" ]; then
+        cat "${batch_logs[$batch_index]}"
+      fi
+    done
   done
-done
+}
+
+if [ "$total" -ne 0 ]; then
+  phase_tests=("${tests[@]}")
+  phase_jobs=$active_jobs
+  run_phase
+fi
+
+if [ "$serial_total" -ne 0 ]; then
+  printf 'Running %s watcher-timing test(s) serially\n' "$serial_total"
+  phase_tests=("${serial_tests[@]}")
+  phase_jobs=1
+  run_phase
+fi
+
+total=$((total + serial_total))
 
 if [ "$failed_count" -ne 0 ]; then
   printf '%s test(s) failed\n' "$failed_count" >&2
