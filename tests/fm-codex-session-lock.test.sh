@@ -10,6 +10,12 @@ HOOK="$ROOT/bin/fm-codex-session-lock-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-codex-session-lock-tests)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
+# Codex owner records exist only while no other harness marker claims the thread,
+# so a marker exported by the shell that launches this suite (a Claude, Pi, or
+# Grok session running the gate) would silently reduce every Codex owner here to a
+# markerless legacy lock. Scrub them once; each case sets the markers it needs.
+unset CLAUDECODE PI_CODING_AGENT GROK_AGENT CODEX_THREAD_ID
+
 make_home() {
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state"

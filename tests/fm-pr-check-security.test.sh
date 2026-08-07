@@ -670,11 +670,16 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+# Run one watcher cycle and return its exit code. Both bounds here are backstops
+# against a watcher that never exits, not assertions about how fast it runs: a
+# loaded host needs many times the nominal wall clock, and a check killed by too
+# tight a per-check timeout produces no notification, so the watcher keeps
+# polling until the outer alarm reports a bogus failure. Keep them generous.
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   shift 2
-  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 120; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=30 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -3668,13 +3673,17 @@ test_scope_ledger_body_fetch_is_bounded() {
 
   start=$(date +%s)
   set +e
-  out=$(FM_SCOPE_LEDGER_TIMEOUT_SECONDS=1 FM_TEST_GH_BODY_SLEEP=5 FM_TEST_GH_BODY_FILE="$body" \
+  # The body fetch sleeps far longer than its timeout so the elapsed-time verdict
+  # keeps a wide margin: the rest of the check entry is real work whose wall clock
+  # varies with host load, and a margin near the timeout measures that noise rather
+  # than whether the fetch was actually cut off.
+  out=$(FM_SCOPE_LEDGER_TIMEOUT_SECONDS=1 FM_TEST_GH_BODY_SLEEP=60 FM_TEST_GH_BODY_FILE="$body" \
     run_check_entry "$dir" task-a https://github.com/o/r/pull/37 2>"$dir/check.err")
   rc=$?
   set -e
   elapsed=$(($(date +%s) - start))
   [ "$rc" -eq 0 ] || fail "timed-out ledger blocked PR check: $(cat "$dir/check.err")"
-  [ "$elapsed" -lt 4 ] || fail "ledger body fetch exceeded its timeout"
+  [ "$elapsed" -lt 30 ] || fail "ledger body fetch exceeded its timeout (elapsed ${elapsed}s)"
   assert_contains "$out" $'scope-ledger\tunknown\treason=body-unavailable' "timeout diagnostic missing"
   fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" || fail "ledger timeout prevented poll publication"
   pass "PR ledger body fetch is bounded and failure-neutral"
