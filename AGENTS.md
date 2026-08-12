@@ -109,6 +109,9 @@ Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 
 Run `bin/fm-bootstrap.sh`.
+If the session-start harness shows only a preview and a full digest was persisted, read the exact path supplied by the harness or the session-start wrapper, then act on that complete artifact.
+Do not guess filenames.
+Do not bulk-reread `state/`.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Bootstrap also sweeps every live secondmate home, fast-forwarding each one's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
