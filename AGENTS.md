@@ -373,6 +373,8 @@ Project worktrees start at detached HEAD on a clean default branch; ship briefs 
 After spawning, peek the pane to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
 Add the task to `data/backlog.md` under In flight.
 
+Herdr crew dispatch has an additional session boundary. New `backend=herdr` tasks use the dedicated Herdr session `firstmate`; they never create or close panes in Herdr's default session or its `CAPTAIN`/`w1` workspace. Metadata must retain the exact Herdr session, workspace, tab, and pane ids returned by the provider. If the host lacks `pane.close_bound`, teardown may use legacy `pane.close` only in `firstmate`, after matching the recorded pane's foreground PID and `/proc` start time; an unproven identity or any captain-session target is a refusal.
+
 ### Supervise
 
 Covered by section 8.

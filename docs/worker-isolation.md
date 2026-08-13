@@ -71,7 +71,7 @@ Per-provider process id availability:
 | Provider | Per-pane process id | Consequence |
 |---|---|---|
 | tmux | `#{pane_pid}`, a real shell pid | Process cwd is readable without the marker, but task isolation still requires complete worker identity. |
-| herdr | none; the pane API exposes `foreground_cwd` only | Authoritative cwd reading requires the declaration marker; task teardown uses a separately proven process identity with bound close. |
+| herdr | `pane.process-info` exposes the foreground process id | Authoritative cwd reading requires the declaration marker; teardown separately proves the foreground PID and `/proc` start time before closing. |
 | zellij | none exposed at all | Same. |
 | cmux | none on the control socket | Same. |
 | orca | none on the terminal endpoint | Same. |
@@ -80,11 +80,11 @@ A provider with no process id is not a failure of the library.
 It means a task that also lacks the declaration marker has only a hint, which is reported as `unknown` rather than promoted to evidence.
 
 Herdr has a separate identity contract for task presentation endpoints.
-`bin/fm-spawn.sh` records the exact Herdr session, workspace, tab, and pane ids in task metadata.
+New `backend=herdr` crew spawns default to the dedicated `firstmate` session, never Herdr's default captain session, and `bin/fm-spawn.sh` records the exact session, workspace, tab, and pane ids in task metadata.
 Before live teardown, `bin/fm-teardown.sh` revalidates those ids and the task label, then proves the current declaration-backed process pid and start time.
-`bin/backends/herdr.sh` keeps its fixed spawn-time command path atomic with Herdr's `pane.run` primitive and closes a live pane only through `pane.close_bound` with that expected process identity.
+`bin/backends/herdr.sh` keeps its fixed spawn-time command path atomic with Herdr's `pane.run` primitive. When `pane.close_bound` exists it is preferred; on hosts without it, only the isolated `firstmate` session may use legacy `pane.close`, and only after `pane.process-info`'s PID and the live `/proc` start time match the recorded identity. Captain-owned `default`/`CAPTAIN` targets refuse before mutation.
 The production launch path still sends its launch text and Enter separately; production launch atomicity is outside this focused proof.
-The adapter refuses at preflight when the required bound capabilities are absent; failed workspace or task-tab creation is reconciled only from exact provider identities, and unresolved cleanup is surfaced as uncertainty rather than retried blindly.
+The adapter refuses at preflight when a non-isolated session lacks the required bound capabilities; failed workspace or task-tab creation is reconciled only from exact provider identities, using the same isolated-session boundary, and unresolved cleanup is surfaced as uncertainty rather than retried blindly.
 
 A tmux target is resolved to its stable window id by exact enumeration before any pane is read.
 `display-message` given a window name it cannot find silently answers for the *active client's* window instead, so a task whose window name was lost or auto-renamed would hand back firstmate's own pane, whose working directory is the primary checkout - a healthy worker reported as collapsed.
@@ -205,7 +205,7 @@ A sweep that cries wolf on a normal fleet is worse than no sweep, because the `b
 
 `tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every verified harness, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, the stable-window-id resolution and its refusal to answer from a lost window name, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, the contested-then-released and still-blocked stamp sequences, and the sweep outcomes including a healthy secondmate staying silent, unproven evidence blocking, stale endpoints staying quiet, and live foreign-owner processes still blocking.
 `tests/fm-slot-occupant-proof.test.sh` owns focused pooled-slot endpoint proof: exact endpoint selection, PID reuse, foreign and undeclared occupants, closed-endpoint census uncertainty, cross-home metadata, and disposal only after a complete empty census.
-`tests/fm-backend-herdr-presentation-e2e.test.sh` owns the focused Herdr presentation proof: read-only installed-host preflight, exact workspace/tab/pane identity, atomic adapter-command submission, bound process teardown, precise failure diagnostics, and provider-mutation reconciliation.
+`tests/fm-backend-herdr-presentation-e2e.test.sh` owns the focused Herdr presentation proof: read-only installed-host preflight, dedicated-session routing, exact workspace/tab/pane identity, atomic adapter-command submission, PID/start-time teardown matching, captain-session refusal, precise failure diagnostics, and provider-mutation reconciliation.
 
 ## Maintaining this file
 

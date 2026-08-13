@@ -13,7 +13,7 @@
 # per task inside that workspace.
 # Target resolution stays parallel to the tmux adapter in both layouts.
 #
-# Target string shape: "<herdr-session>:<pane-id>", e.g. "default:w1:p2" (the
+# Target string shape: "<herdr-session>:<pane-id>", e.g. "firstmate:ws1:p2" (the
 # pane id itself contains a colon; the session is always the FIRST field, the
 # remainder is the whole pane id - fm_backend_herdr_parse_target splits on the
 # first colon only). This is the value stored in a herdr task's meta window=
@@ -67,6 +67,7 @@ FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # (14): the adapter's spawn/capture/send primitives work on 14, only the push
 # subscriber needs 16.
 FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
+FM_BACKEND_HERDR_DEDICATED_SESSION=firstmate
 # Per-pane escalation dedupe marker prefix, under the state dir. One marker per
 # window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
 # is enqueued, cleared on any working edge, so exactly one wake fires per
@@ -240,15 +241,25 @@ fm_backend_herdr_bound_tab_close_capable() {
     'workspace_id:string,tab_id:string,pane_id:string'
 }
 
+fm_backend_herdr_legacy_close_capable() {
+  local schema
+  schema=$(herdr api schema --json 2>/dev/null) || return 1
+  printf '%s' "$schema" | jq -e '
+    [.schemas.request.oneOf[]?.properties.method.const] as $methods
+    | ($methods | index("pane.close") != null)
+    and ($methods | index("tab.close") != null)
+  ' >/dev/null 2>&1
+}
+
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
-# herdr client or missing bound-mutation capabilities. Verified locally: v0.7.1,
+# herdr client or missing mutation capabilities. Verified locally: v0.7.1,
 # protocol 14 (herdr status --json's .client.protocol; client info is
-# session-independent, unlike .server). Live task teardown requires
-# pane.close_bound(expected_pid, expected_start_time); workspace/task-tab
-# reconciliation requires tab.close_bound(workspace_id, tab_id, pane_id).
+# session-independent, unlike .server). The isolated firstmate session may
+# fall back to identity-checked pane.close/tab.close on hosts that lack the
+# newer bound methods; every other session still requires both bound methods.
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
-  local status protocol version
+  local status protocol version session pane_bound tab_bound
   status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
   protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
@@ -262,12 +273,31 @@ fm_backend_herdr_version_check() {
     echo "error: herdr protocol $protocol (version ${version:-unknown}) is older than the verified minimum $FM_BACKEND_HERDR_MIN_PROTOCOL; update herdr (herdr update) before using backend=herdr" >&2
     return 1
   fi
-  if ! fm_backend_herdr_bound_close_capable; then
+  session=$(fm_backend_herdr_session) || return 1
+  if fm_backend_herdr_bound_close_capable; then
+    pane_bound=1
+  else
+    pane_bound=0
+  fi
+  if fm_backend_herdr_bound_tab_close_capable; then
+    tab_bound=1
+  else
+    tab_bound=0
+  fi
+  if [ "$pane_bound" != 1 ] \
+    && [ "$session" != "$FM_BACKEND_HERDR_DEDICATED_SESSION" ]; then
     echo "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" >&2
     return 1
   fi
-  if ! fm_backend_herdr_bound_tab_close_capable; then
+  if [ "$tab_bound" != 1 ] \
+    && [ "$session" != "$FM_BACKEND_HERDR_DEDICATED_SESSION" ]; then
     echo "error: herdr provider lacks atomic tab.close_bound(workspace_id,tab_id,pane_id); refusing a backend that cannot safely reconcile task-tab creation" >&2
+    return 1
+  fi
+  if [ "$session" = "$FM_BACKEND_HERDR_DEDICATED_SESSION" ] \
+    && { [ "$pane_bound" != 1 ] || [ "$tab_bound" != 1 ]; } \
+    && ! fm_backend_herdr_legacy_close_capable; then
+    echo "error: isolated Herdr session lacks pane.close/tab.close; refusing unbound cleanup" >&2
     return 1
   fi
   return 0
@@ -280,14 +310,17 @@ fm_backend_herdr_server_available() {  # <session>
   [ "$running" = true ]
 }
 
-# fm_backend_herdr_session: resolve which named herdr session this normal
-# spawn/op uses. HERDR_SESSION mirrors tmux's $TMUX ambient-selection for
-# adapter workspace/tab/pane operations: an operator (or firstmate's own
-# isolated test harness) sets it explicitly; absent means herdr's own
-# "default" session. Do not use HERDR_SESSION alone for destructive test
-# cleanup; tests/herdr-test-safety.sh documents and guards that path.
+# fm_backend_herdr_session: resolve which named Herdr session a new normal
+# spawn uses. Firstmate must never default to Herdr's captain-owned session;
+# the isolated session is the only default. HERDR_SESSION remains an explicit
+# selector for focused tests and recovery of already-recorded endpoints.
 fm_backend_herdr_session() {
-  printf '%s' "${HERDR_SESSION:-default}"
+  local session=${HERDR_SESSION:-$FM_BACKEND_HERDR_DEDICATED_SESSION}
+  if [ "$session" = default ]; then
+    echo "error: normal Herdr crew dispatch cannot target the captain-owned default session; use '$FM_BACKEND_HERDR_DEDICATED_SESSION'" >&2
+    return 1
+  fi
+  printf '%s' "$session"
 }
 
 fm_backend_herdr_provider_close_bound() {
@@ -306,7 +339,14 @@ fm_backend_herdr_provider_close_tab_bound() {
   [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
   socket=$(fm_backend_herdr_socket_path "$session") || return 1
   [ -x "$helper" ] || return 1
-  "$helper" "$socket" --tab "$workspace_id" "$tab_id" "$pane_id" >/dev/null 2>&1
+  if fm_backend_herdr_bound_tab_close_capable; then
+    "$helper" "$socket" --tab "$workspace_id" "$tab_id" "$pane_id" >/dev/null 2>&1
+    return $?
+  fi
+  [ "$session" = "$FM_BACKEND_HERDR_DEDICATED_SESSION" ] || return 1
+  fm_backend_herdr_tab_pane_identity_matches \
+    "$session" "$workspace_id" "$tab_id" "$pane_id" || return 1
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1
 }
 
 fm_backend_herdr_server_ensure() {  # <session>
@@ -1839,10 +1879,58 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+fm_backend_herdr_pane_identity_matches() {  # <session> <pane> <pid> <start>
+  local session=$1 pane_id=$2 expected_pid=$3 expected_start=$4 info current_start
+  [ -n "$expected_pid" ] && [ -n "$expected_start" ] || return 1
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane_id" --arg pid "$expected_pid" '
+    .result.process_info.pane_id == $pane
+    and ([.result.process_info.foreground_processes[]? |
+      select((.pid | tostring) == $pid)] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  current_start=$(fm_backend_herdr_proc_start_time "$expected_pid") || return 1
+  [ "$current_start" = "$expected_start" ]
+}
+
+fm_backend_herdr_proc_start_time() {
+  local pid=$1 stat rest start
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    rest=$(printf '%s\n' "$stat" | sed -E 's/^[0-9]+ \(.*\) //')
+    start=$(printf '%s\n' "$rest" | awk '{print $20}')
+  else
+    start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')
+  fi
+  [ -n "$start" ] || return 1
+  printf '%s' "$start"
+}
+
+fm_backend_herdr_provider_close_safe() {  # <session> <pane> <pid> <start>
+  local session=$1 pane_id=$2 expected_pid=$3 expected_start=$4
+  if fm_backend_herdr_bound_close_capable; then
+    fm_backend_herdr_provider_close_bound \
+      "$session" "$pane_id" "$expected_pid" "$expected_start"
+    return $?
+  fi
+  # Legacy pane.close is safe only in the isolated worker session. In
+  # particular, never turn missing pane.close_bound into a close of default's
+  # CAPTAIN workspace.
+  if [ "$session" != "$FM_BACKEND_HERDR_DEDICATED_SESSION" ]; then
+    echo "error: Herdr unbound pane.close is forbidden outside dedicated session '$FM_BACKEND_HERDR_DEDICATED_SESSION'" >&2
+    return 1
+  fi
+  fm_backend_herdr_pane_identity_matches \
+    "$session" "$pane_id" "$expected_pid" "$expected_start" || return 1
+  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1
+}
+
 # fm_backend_herdr_kill: close the task's exact pane only with its expected
-# process pid/start-time identity, then prove it disappeared. A bound close
-# prevents pane/PID drift. Verified: closing a tab's only pane closes the tab
-# too, so a separate tab close is unnecessary for normal teardown.
+# process pid/start-time identity, then prove it disappeared. A bound close is
+# preferred; the isolated firstmate session may use legacy pane.close only
+# after independently proving that identity on the recorded pane.
 fm_backend_herdr_kill() {  # <target> [pid] [start-time]
   local target=$1 expected_pid=${2:-} expected_start=${3:-} state
   fm_backend_herdr_target_ready "$target" || {
@@ -1857,10 +1945,10 @@ fm_backend_herdr_kill() {  # <target> [pid] [start-time]
         echo "error: Herdr teardown target '$target' lacks bound process identity" >&2
         return 1
       fi
-      fm_backend_herdr_provider_close_bound \
+      fm_backend_herdr_provider_close_safe \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$expected_pid" \
         "$expected_start" || {
-        echo "error: Herdr bound pane.close_bound failed for target '$target'" >&2
+        echo "error: Herdr safe pane close failed identity verification or mutation for target '$target'" >&2
         return 1
       }
       ;;
@@ -1870,7 +1958,7 @@ fm_backend_herdr_kill() {  # <target> [pid] [start-time]
       ;;
   esac
   if [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" != dead ]; then
-    echo "error: Herdr bound pane.close_bound did not close target '$target'" >&2
+    echo "error: Herdr pane close did not close target '$target'" >&2
     return 1
   fi
 }
