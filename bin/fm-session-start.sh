@@ -362,7 +362,14 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
-  DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
+  # Reconcile quiet terminal children while this session owns the fleet lock;
+  # the following drain then presents and acknowledges the resulting durable
+  # receipts in the same turn.
+  INACTIVE_OUT=$(
+    FM_SESSION_LOCK_BOOTSTRAP=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1 || true
+  )
+  [ -z "$INACTIVE_OUT" ] || printf '%s\n' "$INACTIVE_OUT"
+  DRAIN_OUT=$(FM_SESSION_LOCK_BOOTSTRAP=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"
   else

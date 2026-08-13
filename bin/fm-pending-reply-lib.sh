@@ -481,6 +481,98 @@ fm_pending_reply_get() {  # <record-path> <key>
   grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# JT secondmate outcome routing uses the existing parent-owned pending-reply
+# record and its corr= acknowledgement grammar. This small marker only binds a
+# secondmate home to that already-owned record; it is not a second parent
+# protocol. The marker is intentionally fail-closed when any field is missing,
+# malformed, or no longer matches the live parent record.
+fm_pending_reply_secondmate_route_path() {  # <secondmate-home>
+  printf '%s/state/.fm-jt-parent-route' "$1"
+}
+
+fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <parent-state> <secondmate-id> <corr-id>
+  local secondmate_home=$1 parent_home=$2 parent_state=$3 secondmate_id=$4 corr=$5
+  local marker tmp parent_abs state_abs status_path
+  marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
+  [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
+  [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
+  case "$secondmate_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
+  state_abs=$(cd "$parent_state" 2>/dev/null && pwd -P) || return 1
+  status_path="$state_abs/$secondmate_id.status"
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  tmp="$marker.tmp.${BASHPID:-$$}"
+  {
+    printf 'schema=fm-jt-parent-route.v1\n'
+    printf 'secondmate_id=%s\n' "$secondmate_id"
+    printf 'parent_home=%s\n' "$parent_abs"
+    printf 'parent_status=%s\n' "$status_path"
+    printf 'corr_id=%s\n' "$corr"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$marker"
+}
+
+fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
+  local secondmate_home=$1 marker line key value schema marker_id secondmate_id
+  local parent_home parent_status corr parent_abs state_abs expected_status rec
+  local phase delivered record_home record_status record_task record_corr home_marker
+  FM_PENDING_ROUTE_PARENT_STATUS=
+  FM_PENDING_ROUTE_CORR=
+  marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  schema='' secondmate_id='' parent_home='' parent_status='' corr=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) return 1 ;;
+    esac
+    case "$key" in
+      schema) [ -z "$schema" ] || return 1; schema=$value ;;
+      secondmate_id) [ -z "$secondmate_id" ] || return 1; secondmate_id=$value ;;
+      parent_home) [ -z "$parent_home" ] || return 1; parent_home=$value ;;
+      parent_status) [ -z "$parent_status" ] || return 1; parent_status=$value ;;
+      corr_id) [ -z "$corr" ] || return 1; corr=$value ;;
+      *) return 1 ;;
+    esac
+  done < "$marker"
+  [ "$schema" = fm-jt-parent-route.v1 ] || return 1
+  home_marker="$secondmate_home/.fm-secondmate-home"
+  [ -f "$home_marker" ] && [ ! -L "$home_marker" ] || return 1
+  marker_id=$(cat "$home_marker" 2>/dev/null || true)
+  case "$marker_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "$secondmate_id" = "$marker_id" ] || return 1
+  case "$parent_home" in /*) ;; *) return 1 ;; esac
+  case "$parent_status" in /*) ;; *) return 1 ;; esac
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
+  state_abs=$(cd "$parent_abs/state" 2>/dev/null && pwd -P) || return 1
+  expected_status="$state_abs/$secondmate_id.status"
+  [ "$parent_status" = "$expected_status" ] || return 1
+  rec=$(fm_pending_reply_active_path "$state_abs" "$corr")
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  record_task=$(fm_pending_reply_get "$rec" task_id)
+  record_home=$(fm_pending_reply_get "$rec" parent_home)
+  record_status=$(fm_pending_reply_get "$rec" parent_status)
+  record_corr=$(fm_pending_reply_get "$rec" corr_id)
+  [ "$record_task" = "$secondmate_id" ] || return 1
+  [ "$record_home" = "$parent_abs" ] || return 1
+  [ "$record_status" = "$expected_status" ] || return 1
+  [ "$record_corr" = "$corr" ] || return 1
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -n "$delivered" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated) ;;
+    *) return 1 ;;
+  esac
+  # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
+  FM_PENDING_ROUTE_PARENT_STATUS=$expected_status
+  # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
+  FM_PENDING_ROUTE_CORR=$corr
+  return 0
+}
+
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1

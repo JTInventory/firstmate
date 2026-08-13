@@ -5,11 +5,14 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-fm_worker_refuse_primary_operation "wake drain" || exit 1
+if [ "${FM_SESSION_LOCK_BOOTSTRAP:-0}" != 1 ]; then
+  fm_worker_refuse_primary_operation "wake drain" || exit 1
+fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 DRAIN_TMP=
+DRAIN_DEDUPED=
 DRAIN_LOCK_HELD=false
 
 # Defense in depth for the watcher re-arm chain: this script runs at the top of
@@ -33,6 +36,7 @@ cleanup() {
   if [ "$status" -ne 0 ] && [ "$DRAIN_LOCK_HELD" = true ] && [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ]; then
     fm_wake_restore_queue "$DRAIN_TMP" || true
   fi
+  [ -z "$DRAIN_DEDUPED" ] || rm -f "$DRAIN_DEDUPED" || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
@@ -56,12 +60,32 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
 fi
 
 DRAIN_TMP="$STATE/.wake-queue.drain.$(fm_current_pid)"
+DRAIN_DEDUPED="$STATE/.wake-queue.deduped.$(fm_current_pid)"
 rm -f "$DRAIN_TMP"
+rm -f "$DRAIN_DEDUPED"
 mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
 : > "$FM_WAKE_QUEUE" || exit 1
 
-fm_wake_print_deduped "$DRAIN_TMP" || exit "$?"
+fm_wake_print_deduped "$DRAIN_TMP" > "$DRAIN_DEDUPED" || exit "$?"
+cat "$DRAIN_DEDUPED"
+# Inactive-outcome rows are acknowledged only after their matching durable
+# receipt is presented. The locked session-start/watcher context authorizes the
+# helper; a failed correlation leaves the original drained rows restorable.
+while IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload; do
+  case "$_key" in
+    inactive-outcome:*)
+      "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" || {
+        ack_status=$?
+        # 1 means the receipt was already acknowledged or is not ours. Any
+        # other failure keeps the drained row durable for a later turn.
+        [ "$ack_status" = 1 ] || exit "$ack_status"
+      }
+      ;;
+  esac
+done < "$DRAIN_DEDUPED"
 rm -f "$DRAIN_TMP"
 DRAIN_TMP=
+rm -f "$DRAIN_DEDUPED"
+DRAIN_DEDUPED=
 assert_watcher_liveness
 exit 0
