@@ -1749,7 +1749,7 @@ case "$BACKEND" in
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
     fi
-    HERDR_SES=$(fm_backend_herdr_session)
+    HERDR_SES=$(fm_backend_herdr_spawn_session)
     HERDR_LABEL_LOCK="$STATE/.herdr-label.lock"
     if ! fm_lock_acquire_wait "$HERDR_LABEL_LOCK"; then
       echo "error: timed out waiting for another Herdr spawn to finish reserving its display label" >&2

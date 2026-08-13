@@ -274,7 +274,7 @@ fm_backend_herdr_version_check() {
     echo "error: herdr protocol $protocol (version ${version:-unknown}) is older than the verified minimum $FM_BACKEND_HERDR_MIN_PROTOCOL; update herdr (herdr update) before using backend=herdr" >&2
     return 1
   fi
-  session=$(fm_backend_herdr_session) || return 1
+  session=$(fm_backend_herdr_spawn_session) || return 1
   if fm_backend_herdr_bound_close_capable; then
     pane_bound=1
   else
@@ -311,10 +311,10 @@ fm_backend_herdr_server_available() {  # <session>
   [ "$running" = true ]
 }
 
-# fm_backend_herdr_session: resolve which named Herdr session a new normal
-# spawn uses. Firstmate must never default to Herdr's captain-owned session;
-# the isolated session is the only default. HERDR_SESSION remains an explicit
-# selector for focused tests and recovery of already-recorded endpoints.
+fm_backend_herdr_spawn_session() {
+  printf '%s' "$FM_BACKEND_HERDR_DEDICATED_SESSION"
+}
+
 fm_backend_herdr_session() {
   local session=${HERDR_SESSION:-$FM_BACKEND_HERDR_DEDICATED_SESSION}
   if [ "$session" = default ]; then
@@ -336,6 +336,7 @@ fm_backend_herdr_provider_close_bound() {
 
 fm_backend_herdr_provider_close_tab_bound() {
   local session=${1:-} workspace_id=${2:-} tab_id=${3:-} pane_id=${4:-}
+  local expected_pid=${5:-} expected_start=${6:-}
   local socket helper=${FM_BACKEND_HERDR_BOUND_CLOSE_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-pane-close-bound.py}
   [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
   socket=$(fm_backend_herdr_socket_path "$session") || return 1
@@ -345,6 +346,9 @@ fm_backend_herdr_provider_close_tab_bound() {
     return $?
   fi
   [ "$session" = "$FM_BACKEND_HERDR_DEDICATED_SESSION" ] || return 1
+  [ -n "$expected_pid" ] && [ -n "$expected_start" ] || return 1
+  fm_backend_herdr_pane_identity_matches \
+    "$session" "$pane_id" "$expected_pid" "$expected_start" || return 1
   fm_backend_herdr_tab_pane_identity_matches \
     "$session" "$workspace_id" "$tab_id" "$pane_id" || return 1
   fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1
@@ -645,7 +649,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
 fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
   local cwd=${1:-$PWD} session label
   fm_backend_herdr_version_check || return 1
-  session=$(fm_backend_herdr_session)
+  session=$(fm_backend_herdr_spawn_session)
   fm_backend_herdr_server_ensure "$session" || return 1
   fm_backend_herdr_workspace_ensure "$session" "$cwd" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
   if [ -z "$FM_BACKEND_HERDR_WS_ID" ]; then
