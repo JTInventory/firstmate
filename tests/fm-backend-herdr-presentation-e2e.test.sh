@@ -197,6 +197,9 @@ case "$cmd $sub" in
   'session list')
     printf '{"sessions":[{"name":"%s","default":false,"running":true,"socket_path":"/tmp/fm-herdr-presentation-e2e.sock"}]}\n' "${HERDR_SESSION:-firstmate-e2e}"
     ;;
+  'api snapshot')
+    jq '{result:{snapshot:{workspaces:.workspaces,tabs:.tabs,panes:[.tabs[] | {workspace_id,tab_id,pane_id,cwd:(.cwd // ""),foreground_cwd:(.cwd // "")}]}}}' "$state"
+    ;;
   'workspace list')
     if [ "${FM_HERDR_MALFORMED_WORKSPACE_LIST:-0}" = 1 ] \
       && [ -e "$state.malformed-workspace-list" ]; then
@@ -207,8 +210,9 @@ case "$cmd $sub" in
     ;;
   'workspace create')
     workspace_id=${FM_HERDR_CREATE_WORKSPACE_ID:-ws-task}
-    jq --arg workspace "$workspace_id" \
-      '.workspaces += [{"workspace_id":$workspace,"label":"firstmate","focused":false,"active_tab_id":"tab-seed"}] | .tabs += [{"workspace_id":$workspace,"tab_id":"tab-seed","pane_id":"pane-seed","label":"1","focused":false}]' \
+    create_cwd=$(value_after --cwd || true)
+    jq --arg workspace "$workspace_id" --arg cwd "$create_cwd" \
+      '.workspaces += [{"workspace_id":$workspace,"label":"firstmate","focused":false,"active_tab_id":"tab-seed"}] | .tabs += [{"workspace_id":$workspace,"tab_id":"tab-seed","pane_id":"pane-seed","cwd":$cwd,"label":"1","focused":false}]' \
       "$state" | save
     if [ "${FM_HERDR_FAIL_WORKSPACE_CREATE:-0}" = 2 ]; then
       exit 1
@@ -242,7 +246,8 @@ case "$cmd $sub" in
     ;;
   'tab create')
     label=$(value_after --label || true)
-    jq --arg workspace "$workspace" --arg label "$label" '.tabs += [{"workspace_id":$workspace,"tab_id":"tab-task","pane_id":"pane-task","label":$label,"focused":false}] | .agent_status["pane-task"] = "working"' "$state" | save
+    create_cwd=$(value_after --cwd || true)
+    jq --arg workspace "$workspace" --arg label "$label" --arg cwd "$create_cwd" '.tabs += [{"workspace_id":$workspace,"tab_id":"tab-task","pane_id":"pane-task","cwd":$cwd,"label":$label,"focused":false}] | .agent_status["pane-task"] = "working"' "$state" | save
     if [ "${FM_HERDR_FAIL_TAB_CREATE:-0}" = 1 ]; then
       exit 1
     fi
@@ -418,27 +423,16 @@ export FM_HERDR_FAIL_WORKSPACE_CREATE=3
 export FM_HERDR_MALFORMED_WORKSPACE_LIST=1
 if capture_failure fm_backend_herdr_container_ensure "$WS_FAIL_PROJECT"; then
   assert_contains "$CAPTURED_OUTPUT" \
-    "error: Herdr workspace create failed for 'firstmate' in session '$SESSION'; cleanup uncertainty recorded" \
-    "unverifiable workspace mutation did not persist cleanup uncertainty"
-  WS_UNCERTAINTY=$(find "$WS_FAIL_HOME/state" -maxdepth 1 -name '.herdr-workspace-create-uncertain.*' -print -quit)
-  [ -n "$WS_UNCERTAINTY" ] && [ -f "$WS_UNCERTAINTY" ] \
-    || fail "unverifiable workspace mutation did not leave durable uncertainty state"
+    "error: Herdr workspace create failed for 'firstmate' in session '$SESSION'; exact workspace ws-uncertain was reconciled" \
+    "malformed workspace-list output did not fall back to exact snapshot reconciliation"
+  if jq -e '.workspaces[] | select(.workspace_id == "ws-uncertain")' "$WS_FAIL_STATE" >/dev/null; then
+    fail "malformed workspace-list output left a half-created workspace"
+  fi
+  pass "Herdr reconciles workspace creation from an exact provider snapshot"
 else
-  fail "unverifiable workspace mutation returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+  fail "malformed workspace-list mutation returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
 fi
-workspace_create_attempts=$(grep -c '^workspace create' "$FAKE_LOG" 2>/dev/null || true)
-unset FM_HERDR_FAIL_WORKSPACE_CREATE
-if capture_failure fm_backend_herdr_container_ensure "$WS_FAIL_PROJECT"; then
-  assert_contains "$CAPTURED_OUTPUT" \
-    "error: unresolved Herdr workspace creation uncertainty at $WS_UNCERTAINTY; refusing another workspace attempt" \
-    "durable workspace uncertainty did not block a retry"
-  workspace_create_attempts_after=$(grep -c '^workspace create' "$FAKE_LOG" 2>/dev/null || true)
-  [ "$workspace_create_attempts_after" -eq "$workspace_create_attempts" ] \
-    || fail "durable workspace uncertainty still attempted another workspace create"
-  pass "Herdr refuses retry after an unidentified workspace mutation"
-else
-  fail "durable workspace uncertainty returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
-fi
+unset FM_HERDR_FAIL_WORKSPACE_CREATE FM_HERDR_CREATE_WORKSPACE_ID
 export FM_HOME="$FAKE_HOME"
 export FM_HERDR_FAKE_STATE="$FAKE_STATE"
 export FM_HERDR_CREATE_WORKSPACE_ID=ws-task
