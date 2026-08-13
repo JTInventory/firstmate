@@ -10,18 +10,53 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ "${FM_SESSION_LOCK_BOOTSTRAP:-0}" != 1 ]; then
   fm_worker_refuse_primary_operation "inactive outcome reconciliation" || exit 1
 fi
+
+FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
+OUTCOME_DIR="$STATE/terminal-outcomes"
+SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
+SCAN_CURSOR="$STATE/.inactive-outcome-reconcile.cursor"
+FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
+
+inactive_state_path_is_safe() {
+  local path=$1 kind=$2
+  [ ! -L "$path" ] || return 1
+  if [ -e "$path" ]; then
+    case "$kind" in
+      dir) [ -d "$path" ] || return 1 ;;
+      file) [ -f "$path" ] || return 1 ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+inactive_state_preflight() {
+  if [ -L "$STATE" ] || { [ -e "$STATE" ] && [ ! -d "$STATE" ]; }; then
+    return 1
+  fi
+  if [ ! -e "$STATE" ] && ! mkdir -p "$STATE"; then
+    return 1
+  fi
+  inactive_state_path_is_safe "$STATE" dir || return 1
+  inactive_state_path_is_safe "$OUTCOME_DIR" dir || return 1
+  inactive_state_path_is_safe "$SCAN_MARKER" file || return 1
+  inactive_state_path_is_safe "$SCAN_CURSOR" file || return 1
+  inactive_state_path_is_safe "$FM_WAKE_QUEUE" file || return 1
+}
+
+inactive_state_preflight || {
+  echo "error: inactive reconciliation state must be local regular state under $FM_HOME" >&2
+  exit 1
+}
+
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
-FM_HOME="${FM_HOME:-$FM_ROOT}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
-OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
-SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
-SCAN_CURSOR="$STATE/.inactive-outcome-reconcile.cursor"
 ROUTE_MARKER="$FM_HOME/.fm-secondmate-home"
 CHILD_LOCK_HELD=0
 CHILD_LOCK=
@@ -137,6 +172,7 @@ receipt_field() {  # <receipt> <key>
 
 receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
   local pending tmp
+  inactive_state_preflight || return 1
   pending=$(receipt_path "$FP" pending)
   RECEIPT_CREATED=0
   for suffix in pending presented reported; do
@@ -309,7 +345,8 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
 
 scan_locked() {
   local startup=${1:-0} marker_mtime now age cursor meta id found=0 started=1
-  local scan_started remaining rc complete=1
+  local scan_started remaining rc complete=1 scan_failed=0
+  inactive_state_preflight || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
   now=$(date +%s)
   if [ "$startup" != 1 ] && [ -n "$marker_mtime" ]; then
@@ -339,25 +376,36 @@ scan_locked() {
       complete=0
       break
     fi
-    printf '%s\n' "$id" > "$SCAN_CURSOR"
     rc=0
     FM_LOCK_WAIT_SECS="$remaining" run_bounded_child "$remaining" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" _child "$id" || rc=$?
     if [ "$rc" -ne 0 ]; then
       complete=0
+      scan_failed=1
+      break
+    fi
+    if printf '%s\n' "$id" > "$SCAN_CURSOR"; then
+      :
+    else
+      rc=$?
+      complete=0
+      scan_failed=1
       break
     fi
     found=1
   done
-  [ "$complete" = 1 ] && rm -f "$SCAN_CURSOR"
-  date +%s > "$SCAN_MARKER"
+  [ "$scan_failed" = 0 ] || return "$rc"
+  if [ "$complete" = 1 ]; then
+    rm -f "$SCAN_CURSOR" || return 1
+  fi
+  date +%s > "$SCAN_MARKER" || return 1
   [ "$found" = 1 ] || true
   return 0
 }
 
 scan() {
   local startup=${1:-0}
-  mkdir -p "$STATE" || return 1
+  inactive_state_preflight || return 1
   fm_lock_acquire_wait "$SCAN_LOCK" || return 1
   trap 'fm_lock_release "$SCAN_LOCK" || true' EXIT INT TERM
   scan_locked "$startup"
