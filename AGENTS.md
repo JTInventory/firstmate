@@ -299,6 +299,21 @@ Touch nothing else.
 
 If `no-mistakes doctor` reports problems, fix the environment (auth, daemon) before dispatching work to that project.
 
+
+### JT app vs pipeline routing
+
+JT Inventory's app code and its data pipeline now live in two different repos.
+Before opening a PR or dispatching a change, resolve which repo owns the work:
+
+- App/UI/design (`app/`, `components/`, `lib/`, `design-system/`, `docs/design/`) goes to
+  `JTInventory/jt-war-room`; a merge on its `main` deploys Firebase Hosting automatically.
+- Pipeline/data/secrets stay on `JTInventory/Openclaw-Backup` (the OpenClaw monorepo); its CI
+  blocks app paths (`app-code-freeze`) and points to jt-war-room.
+
+The canonical definition lives in `jt-war-room`'s README (section « Hébergement ») and in
+`Openclaw-Backup`'s `AGENTS.md`; prefer reading those sources over copied detail. When in doubt
+about a path, route the PR to the repo whose merge would deploy the change.
+
 ## 7. Task lifecycle
 
 ### Intake
