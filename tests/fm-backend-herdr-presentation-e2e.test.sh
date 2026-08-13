@@ -7,7 +7,7 @@
 #   1. the installed Herdr is read-only preflighted through spawn's real
 #      container-ensure gate;
 #   2. a stateful provider double drives the surviving adapter end to end;
-#   3. the exact workspace/pane ids are checked on atomic run and close calls.
+#   3. the exact workspace/tab/pane ids are checked on atomic run and close calls.
 #
 # No command in this test targets the default Herdr session for mutation.
 set -uEo pipefail
