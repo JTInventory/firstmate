@@ -12,6 +12,7 @@ fm_worker_refuse_primary_operation "wake drain" || exit 1
 DRAIN_TMP=
 DRAIN_DEDUPED=
 DRAIN_RESTORE=
+DRAIN_PID=${BASHPID:-$$}
 DRAIN_LOCK_HELD=false
 
 # Defense in depth for the watcher re-arm chain: this script runs at the top of
@@ -64,8 +65,8 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   exit 0
 fi
 
-DRAIN_TMP="$STATE/.wake-queue.drain.$(fm_current_pid)"
-DRAIN_DEDUPED="$STATE/.wake-queue.deduped.$(fm_current_pid)"
+DRAIN_TMP="$STATE/.wake-queue.drain.$DRAIN_PID"
+DRAIN_DEDUPED="$STATE/.wake-queue.deduped.$DRAIN_PID"
 rm -f "$DRAIN_TMP"
 rm -f "$DRAIN_DEDUPED"
 mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
@@ -73,38 +74,41 @@ mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
 
 fm_wake_print_deduped "$DRAIN_TMP" > "$DRAIN_DEDUPED" || exit "$?"
 # Inactive-outcome rows are acknowledged only after their matching durable
-# receipt is presented. The locked session-start/watcher context authorizes the
-# helper; a failed correlation leaves the original drained rows restorable.
+# receipt is presented. A one-time claim binds the receipt to this locked drain.
 drain_line=0
 while IFS= read -r drain_row || [ -n "$drain_row" ]; do
   drain_line=$((drain_line + 1))
   IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
   case "$_key" in
     inactive-outcome:*)
-      presentation_status=0
-      FM_INACTIVE_ACK_FROM_DRAIN=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" presentation "$_key" || presentation_status=$?
-      case "$presentation_status" in
+      claim_status=0
+      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" claim "$_key" "$drain_row" || claim_status=$?
+      case "$claim_status" in
         0)
           if ! printf '%s\n' "$drain_row"; then
-            FM_INACTIVE_ACK_FROM_DRAIN=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" presentation-clear "$_key" || true
-            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$(fm_current_pid)"
+            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
+            awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+            exit 1
+          fi
+          if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$_key" "$drain_row"; then
+            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
             awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
             exit 1
           fi
           ;;
         1) ;;
         *)
-          DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$(fm_current_pid)"
+          DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
           awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
-          exit "$presentation_status"
+          exit "$claim_status"
           ;;
       esac
-      FM_INACTIVE_ACK_FROM_DRAIN=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" || {
+      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" "$drain_row" || {
         ack_status=$?
         # 1 means the receipt was already acknowledged or is not ours. Any
         # other failure keeps the drained row durable for a later turn.
         if [ "$ack_status" != 1 ]; then
-          DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$(fm_current_pid)"
+          DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
           awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
           exit "$ack_status"
         fi
@@ -112,7 +116,7 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       ;;
     *)
       if ! printf '%s\n' "$drain_row"; then
-        DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$(fm_current_pid)"
+        DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
         awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
         exit 1
       fi

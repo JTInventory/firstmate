@@ -613,7 +613,7 @@ fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
 
 fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   local secondmate_home=$1 marker line key value schema marker_id secondmate_id
-  local parent_home parent_status corr parent_abs state_abs expected_status rec
+  local parent_home parent_status corr parent_abs state_abs expected_status rec active_rec history_rec history_dir
   local phase delivered record_home record_status record_task record_corr home_marker
   local seen_schema=0 seen_secondmate_id=0 seen_parent_home=0 seen_parent_status=0 seen_corr=0
   FM_PENDING_ROUTE_PARENT_STATUS=
@@ -654,8 +654,9 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
   state_abs=$(cd "$parent_abs/state" 2>/dev/null && pwd -P) || return 1
   [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
-  if [ -e "$state_abs/pending-replies/history" ]; then
-    [ -d "$state_abs/pending-replies/history" ] && [ ! -L "$state_abs/pending-replies/history" ] || return 1
+  history_dir=$(fm_pending_reply_history_dir "$state_abs")
+  if [ -e "$history_dir" ] || [ -L "$history_dir" ]; then
+    [ -d "$history_dir" ] && [ ! -L "$history_dir" ] || return 1
   fi
   expected_status="$state_abs/$secondmate_id.status"
   [ "$parent_status" = "$expected_status" ] || return 1
@@ -663,8 +664,16 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   if [ -e "$expected_status" ]; then
     [ -f "$expected_status" ] || return 1
   fi
-  rec="$state_abs/pending-replies/$corr"
-  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  active_rec="$state_abs/pending-replies/$corr"
+  history_rec="$history_dir/$corr"
+  if [ -e "$active_rec" ] || [ -L "$active_rec" ]; then
+    [ -f "$active_rec" ] && [ ! -L "$active_rec" ] || return 1
+    rec=$active_rec
+  elif [ -f "$history_rec" ] && [ ! -L "$history_rec" ]; then
+    rec=$history_rec
+  else
+    return 1
+  fi
   record_task=$(fm_pending_reply_get "$rec" task_id)
   record_home=$(fm_pending_reply_get "$rec" parent_home)
   record_status=$(fm_pending_reply_get "$rec" parent_status)
@@ -693,7 +702,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
 
 fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmate-id> <parent-home> <parent-status> <corr>
   local secondmate_home=$1 secondmate_id=$2 parent_home=$3 parent_status=$4 corr=$5
-  local home_marker marker_id parent_abs state_abs expected_status rec active_rec history_rec
+  local home_marker marker_id parent_abs state_abs expected_status rec active_rec history_rec history_dir
   local record_task record_home record_status record_corr delivered phase
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
@@ -709,8 +718,9 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
   state_abs=$(cd "$parent_abs/state" 2>/dev/null && pwd -P) || return 1
   [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
-  if [ -e "$state_abs/pending-replies/history" ]; then
-    [ -d "$state_abs/pending-replies/history" ] && [ ! -L "$state_abs/pending-replies/history" ] || return 1
+  history_dir=$(fm_pending_reply_history_dir "$state_abs")
+  if [ -e "$history_dir" ] || [ -L "$history_dir" ]; then
+    [ -d "$history_dir" ] && [ ! -L "$history_dir" ] || return 1
   fi
   expected_status="$state_abs/$secondmate_id.status"
   [ "$parent_status" = "$expected_status" ] || return 1
@@ -719,7 +729,7 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
     [ -f "$parent_status" ] || return 1
   fi
   active_rec="$state_abs/pending-replies/$corr"
-  history_rec="$state_abs/pending-replies/history/$corr"
+  history_rec="$history_dir/$corr"
   if [ -f "$active_rec" ] && [ ! -L "$active_rec" ]; then
     rec=$active_rec
   elif [ -f "$history_rec" ] && [ ! -L "$history_rec" ]; then

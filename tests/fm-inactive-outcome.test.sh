@@ -158,6 +158,17 @@ receipt_value() {
   awk -F= -v wanted="$key" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$file"
 }
 
+receipt_fingerprint() {
+  local value=$1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$value" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "$value" | cksum | awk '{print $1}'
+  fi
+}
+
 receipt_count() {
   local state=$1 suffix=$2
   find "$state/terminal-outcomes" -maxdepth 1 -type f -name "*.$suffix" 2>/dev/null | wc -l | tr -d ' '
@@ -187,11 +198,19 @@ test_done_and_failed_are_replayed_once() {
     fingerprint=$(basename "$rec" .pending)
     [ "$(receipt_value "$rec" schema)" = fm-jt-terminal-outcome.v1 ] || fail "receipt schema was not durable"
     [ "$(receipt_value "$rec" fingerprint)" = "$fingerprint" ] || fail "receipt fingerprint did not bind its filename"
-    [ "$(receipt_value "$rec" incarnation)" = inc-done ] || [ "$(receipt_value "$rec" incarnation)" = inc-failed ] \
-      || fail "receipt lost its spawn incarnation"
     case "$task" in
-      done-x1) [ "$(receipt_value "$rec" outcome)" = done ] || fail "done receipt outcome was incorrect" ;;
-      failed-x1) [ "$(receipt_value "$rec" outcome)" = failed ] || fail "failed receipt outcome was incorrect" ;;
+      done-x1)
+        [ "$(receipt_value "$rec" incarnation)" = inc-done ] || fail "done receipt used the wrong incarnation"
+        [ "$(receipt_value "$rec" outcome)" = done ] || fail "done receipt outcome was incorrect"
+        [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: done · source: pane · pane is quiet' ] || fail "done receipt snapshot was not exact"
+        [ "$fingerprint" = "$(receipt_fingerprint 'done-x1|inc-done|done|state: done · source: pane · pane is quiet')" ] || fail "done receipt fingerprint was not bound to its fields"
+        ;;
+      failed-x1)
+        [ "$(receipt_value "$rec" incarnation)" = inc-failed ] || fail "failed receipt used the wrong incarnation"
+        [ "$(receipt_value "$rec" outcome)" = failed ] || fail "failed receipt outcome was incorrect"
+        [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: failed · source: run-step · checks failed' ] || fail "failed receipt snapshot was not exact"
+        [ "$fingerprint" = "$(receipt_fingerprint 'failed-x1|inc-failed|failed|state: failed · source: run-step · checks failed')" ] || fail "failed receipt fingerprint was not bound to its fields"
+        ;;
       *) fail "receipt persisted an unexpected task id: $task" ;;
     esac
     [ "$(receipt_value "$rec" terminal_source)" != "" ] || fail "receipt lost terminal source"
@@ -318,7 +337,7 @@ test_state_paths_reject_symlinks_and_non_directories() {
 }
 
 test_reused_task_id_gets_new_fingerprint() {
-  local dir root home fakebin state rec first_fp second_fp
+  local dir root home fakebin state rec first_fp second_fp incarnation fingerprint
   new_case reused-id
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -332,10 +351,12 @@ test_reused_task_id_gets_new_fingerprint() {
   [ "$(queue_count "$state")" = 2 ] || fail "reused task id did not create a new fingerprinted wake"
   for rec in "$state"/terminal-outcomes/*.pending; do
     [ "$(receipt_value "$rec" task_id)" = reused-x1 ] || fail "reused task receipt lost its task id"
-    case "$(receipt_value "$rec" incarnation)" in
-      incarnation-old|incarnation-new) ;;
-      *) fail "reused task receipt lost its incarnation" ;;
-    esac
+    incarnation=$(receipt_value "$rec" incarnation)
+    case "$incarnation" in incarnation-old|incarnation-new) ;; *) fail "reused task receipt lost its incarnation" ;; esac
+    [ "$(receipt_value "$rec" outcome)" = done ] || fail "reused task receipt lost its outcome"
+    [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: done · source: pane · first run quiet' ] || fail "reused task receipt snapshot was not exact"
+    fingerprint=$(basename "$rec" .pending)
+    [ "$fingerprint" = "$(receipt_fingerprint "reused-x1|$incarnation|done|state: done · source: pane · first run quiet")" ] || fail "reused task fingerprint was not bound to its fields"
   done
   first_fp=
   second_fp=
@@ -350,6 +371,132 @@ test_reused_task_id_gets_new_fingerprint() {
     || fail "reused task receipts did not retain distinct fingerprints"
   unset FM_FAKE_CREW_STATE_REUSED_X1
   pass "reused task ids are separated by the spawn incarnation"
+}
+
+test_spawn_publishes_incarnation_token() {
+  local dir root home fakebin state project worktree tmux_state pane_pid out status meta token
+  new_case spawn-contract
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  project="$dir/project"
+  worktree="$dir/worktree"
+  tmux_state="$dir/tmux-window-name"
+  git init -q -b main "$project"
+  git -C "$project" commit -q --allow-empty -m init
+  git -C "$project" worktree add -q --detach "$worktree"
+  mkdir -p "$home/data/spawn-contract" "$home/projects" "$home/config"
+  printf 'spawn contract brief\n' > "$home/data/spawn-contract/brief.md"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+  case "$*" in
+    *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+    *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_PANE_PID:-}"; exit 0 ;;
+    *"#{window_name}"*) cat "$FM_FAKE_TMUX_STATE"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message|list-windows|has-session|new-session|send-keys|kill-window|set-window-option) exit 0 ;;
+  new-window) printf '%s\n' '@42'; exit 0 ;;
+  rename-window) printf '%s\n' "${@: -1}" > "$FM_FAKE_TMUX_STATE"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  : > "$tmux_state"
+  ( cd "$worktree" && exec sleep 30 ) >/dev/null 2>&1 &
+  pane_pid=$!
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_PANE_PATH="$worktree" FM_FAKE_PANE_PID="$pane_pid" FM_FAKE_TMUX_STATE="$tmux_state" TMUX=fake,1,0 \
+    FM_SPAWN_WT_WAIT_SECS=3 "$root/bin/fm-spawn.sh" spawn-contract "$project" \
+    --harness codex 2>&1)
+  status=$?
+  kill "$pane_pid" 2>/dev/null || true
+  [ "$status" = 0 ] || fail "public fm-spawn path failed: $out"
+  meta="$state/spawn-contract.meta"
+  [ -f "$meta" ] || fail "public fm-spawn path did not publish metadata"
+  token=$(receipt_value "$meta" spawn_incarnation)
+  case "$token" in ''|legacy-unknown) fail "public fm-spawn path published no incarnation token" ;; esac
+  grep -F 'spawn_incarnation=' "$meta" >/dev/null || fail "spawn metadata omitted its incarnation field"
+  pass "public fm-spawn publishes the incarnation token in task metadata"
+}
+
+test_session_start_drains_before_inactive_scan() {
+  local dir root home fakebin state out status wake_line inactive_line
+  new_case session-start-wiring
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" session-x1 session-inc
+  export FM_FAKE_CREW_STATE_SESSION_X1='state: done · source: pane · session wiring'
+  printf '1\t1\tsignal\ttask-before\tqueued before inactive scan\n' > "$state/.wake-queue"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
+    FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
+    FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux "$root/bin/fm-session-start.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "session-start integration path failed: $out"
+  wake_line=$(printf '%s\n' "$out" | grep -n '^1[[:space:]]\+1[[:space:]]\+signal[[:space:]]\+task-before' | head -1 | cut -d: -f1)
+  inactive_line=$(printf '%s\n' "$out" | grep -n 'queued inactive outcome: task=session-x1' | head -1 | cut -d: -f1)
+  [ -n "$wake_line" ] && [ -n "$inactive_line" ] && [ "$wake_line" -lt "$inactive_line" ] \
+    || fail "session-start did not drain the existing wake before inactive reconciliation"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "session-start did not run inactive reconciliation"
+  unset FM_FAKE_CREW_STATE_SESSION_X1
+  pass "session-start drains existing wakes before inactive reconciliation"
+}
+
+test_watcher_runs_inactive_cadence() {
+  local dir root home fakebin state out status
+  new_case watcher-wiring
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" watcher-x1 watcher-inc
+  export FM_FAKE_CREW_STATE_WATCHER_X1='state: failed · source: pane · watcher wiring'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+  *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
+  *"#{window_name}"*) printf '%s\n' firstmate ;;
+  capture-pane) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
+    FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
+    FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 FM_FAKE_PANE_PATH="$home" \
+    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
+    "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the inactive outcome wake"
+  printf '%s\n' "$out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
+    || fail "watcher did not surface the inactive reconciliation result"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher cadence did not create the inactive receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "watcher cadence did not retain the inactive outcome wake"
+  unset FM_FAKE_CREW_STATE_WATCHER_X1
+  pass "watcher cadence runs inactive reconciliation and surfaces its wake"
 }
 
 test_legacy_metadata_uses_stable_fallback() {
@@ -494,18 +641,20 @@ test_status_log_terminal_is_not_replayed() {
 }
 
 test_valid_secondmate_route_reports_parent_once() {
-  local dir root home fakebin state child_home child_state parent_status corr rec outside
+  local dir root home fakebin state child_home child_state parent_status corr rec outside parent_history
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   child_home="$dir/secondmate-home"
   child_state="$child_home/state"
-  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$state/pending-replies"
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" \
+    "$state/pending-replies" "$state/pending-reply-history"
   printf 'sm-valid\n' > "$child_home/.fm-secondmate-home"
   write_meta "$child_state" child-x1 child-inc
   corr=0123456789abcdef
   parent_status="$state/sm-valid.status"
-  rec="$state/pending-replies/$corr"
+  parent_history="$state/pending-reply-history"
+  rec="$parent_history/$corr"
   fm_write_meta "$rec" \
     schema=fm-pending-reply.v1 corr_id="$corr" task_id=sm-valid \
     parent_home="$home" parent_status="$parent_status" delivered_epoch=1 phase=awaiting_report
@@ -629,6 +778,14 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
     parent_home="$home" parent_status="$parent_status" delivered_epoch=1 phase=awaiting_report
   scan "$root" "$child_home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$child_state" pending)" = 0 ] || fail "duplicate route fields were accepted"
+  rm -f "$child_home/.fm-jt-parent-route"
+  rm -f "$child_home/.fm-secondmate-home"
+  ln -s "$dir/missing-secondmate-marker" "$child_home/.fm-secondmate-home"
+  printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-x1\nparent_home=%s\nparent_status=%s\ncorr_id=0123456789abcdef\n' \
+    "$home" "$parent_status" > "$child_state/.fm-jt-parent-route"
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null \
+    || fail "dangling secondmate marker scan failed"
+  [ "$(receipt_count "$child_state" pending)" = 0 ] || fail "dangling secondmate marker was treated as an ordinary home"
   unset FM_FAKE_CREW_STATE_CHILD_X1
   pass "malformed and missing secondmate parent routes fail closed without chat scraping"
 }
@@ -638,6 +795,9 @@ test_portable_timeout_runner_is_used
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
+test_spawn_publishes_incarnation_token
+test_session_start_drains_before_inactive_scan
+test_watcher_runs_inactive_cadence
 test_legacy_metadata_uses_stable_fallback
 test_relaunch_and_teardown_races_recheck_under_spawn_lock
 test_parent_home_secondmate_records_are_skipped
