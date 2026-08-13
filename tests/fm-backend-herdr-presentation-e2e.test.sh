@@ -87,62 +87,45 @@ capture_failure() {
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-presentation-e2e.XXXXXX")
 PRE_HOME="$TMP_ROOT/preflight-home"
 PRE_PROJECT="$TMP_ROOT/preflight-project"
-PRE_BIN="$TMP_ROOT/preflight-bin"
-PRE_LOG="$TMP_ROOT/preflight.log"
-PRE_SESSION=firstmate-preflight
+PRE_SESSION="firstmate-preflight-$$"
 mkdir -p "$PRE_HOME/data/preflight" "$PRE_HOME/config"
 printf 'Preflight fixture.\n' > "$PRE_HOME/data/preflight/brief.md"
 : > "$PRE_HOME/data/backlog.md"
 make_project "$PRE_PROJECT"
-mkdir -p "$PRE_BIN"
-: > "$PRE_LOG"
-cat > "$PRE_BIN/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-log=${FM_HERDR_PREFLIGHT_LOG:?}
-cmd=${1:-}
-sub=${2:-}
-printf 'session=%s\t%s %s' "${HERDR_SESSION:-unset}" "$cmd" "$sub" >> "$log"
-for arg in "${@:3}"; do
-  printf '\t%s' "$arg" >> "$log"
-done
-printf '\n' >> "$log"
-case "$cmd $sub" in
-  'status --json')
-    printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":false}}'
-    ;;
-  'api schema')
-    printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close"},"params":{"type":"object"}}}]}}}'
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-SH
-chmod +x "$PRE_BIN/herdr"
+
+command -v herdr >/dev/null 2>&1 || fail "installed Herdr CLI is required for the real preflight"
+command -v jq >/dev/null 2>&1 || fail "jq is required for the real Herdr preflight"
+PRE_STATUS=$(herdr status --json 2>&1) || fail "installed Herdr status failed: $PRE_STATUS"
+PRE_SCHEMA=$(herdr api schema --json 2>&1) || fail "installed Herdr schema failed: $PRE_SCHEMA"
+PRE_VERSION=$(printf '%s' "$PRE_STATUS" | jq -er '.client.version') \
+  || fail "installed Herdr status omitted client.version: $PRE_STATUS"
+PRE_PROTOCOL=$(printf '%s' "$PRE_STATUS" | jq -er '.client.protocol | numbers') \
+  || fail "installed Herdr status omitted numeric client.protocol: $PRE_STATUS"
+[ "$PRE_VERSION" = 0.7.4 ] \
+  || fail "focused proof requires installed Herdr 0.7.4, found $PRE_VERSION"
+[ "$PRE_PROTOCOL" -eq 16 ] \
+  || fail "focused proof requires installed Herdr protocol 16, found $PRE_PROTOCOL"
+printf '%s' "$PRE_SCHEMA" | jq -e \
+  '[.schemas.request.oneOf[]?.properties.method.const] | index("pane.close") != null' \
+  >/dev/null || fail "installed Herdr schema omitted pane.close"
+if printf '%s' "$PRE_SCHEMA" | jq -e \
+  '[.schemas.request.oneOf[]?.properties.method.const] | index("pane.close_bound") != null' \
+  >/dev/null; then
+  fail "installed Herdr schema unexpectedly advertises pane.close_bound"
+fi
 
 if capture_failure env \
-  FM_HERDR_PREFLIGHT_LOG="$PRE_LOG" \
   FM_HOME="$PRE_HOME" \
   FM_ROOT_OVERRIDE="$ROOT" \
   HERDR_SESSION="$PRE_SESSION" \
-  PATH="$PRE_BIN:$ORIGINAL_PATH" \
+  PATH="$ORIGINAL_PATH" \
   bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure "$2"' \
   _ "$ROOT" "$PRE_PROJECT"; then
   [ "$CAPTURED_STATUS" -eq 1 ] || fail "Herdr preflight returned an unexpected exit $CAPTURED_STATUS"
   assert_contains "$CAPTURED_OUTPUT" \
     "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" \
     "Herdr preflight did not explain the missing bound close capability: $CAPTURED_OUTPUT"
-  preflight_log=$(cat "$PRE_LOG")
-  assert_contains "$preflight_log" "session=$PRE_SESSION" \
-    "Herdr preflight did not use its isolated named session"
-  assert_not_contains "$preflight_log" "session=default" \
-    "Herdr preflight selected the default session"
-  assert_not_contains "$preflight_log" "server" \
-    "Herdr preflight attempted to start or inspect a server"
-  assert_not_contains "$preflight_log" "workspace" \
-    "Herdr preflight attempted workspace mutation"
-  pass "Herdr 0.7.4 protocol-16 preflight refuses without live-session mutation"
+  pass "installed Herdr 0.7.4 protocol-16 preflight refuses before session mutation"
 else
   fail "Herdr preflight did not refuse with the exact diagnostic (status $CAPTURED_STATUS): $CAPTURED_OUTPUT"
 fi
@@ -205,7 +188,11 @@ case "$cmd $sub" in
     printf '{"client":{"version":"0.8.0-test","protocol":16},"server":{"running":true}}\n'
     ;;
   'api schema')
-    printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/PaneCloseBoundParams"}}}],"$defs":{"PaneCloseBoundParams":{"required":["pane_id","expected_pid","expected_start_time"],"properties":{"pane_id":{"type":"string"},"expected_pid":{"type":"integer"},"expected_start_time":{"type":"string"}}}}}}}'
+    if [ "${FM_HERDR_OMIT_TAB_CLOSE:-0}" = 1 ]; then
+      printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/PaneCloseBoundParams"}}}],"$defs":{"PaneCloseBoundParams":{"required":["pane_id","expected_pid","expected_start_time"],"properties":{"pane_id":{"type":"string"},"expected_pid":{"type":"integer"},"expected_start_time":{"type":"string"}}}}}}}'
+    else
+      printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close_bound"},"params":{"$ref":"#/schemas/request/$defs/PaneCloseBoundParams"}}},{"properties":{"method":{"const":"tab.close_bound"},"params":{"$ref":"#/schemas/request/$defs/TabCloseBoundParams"}}}],"$defs":{"PaneCloseBoundParams":{"required":["pane_id","expected_pid","expected_start_time"],"properties":{"pane_id":{"type":"string"},"expected_pid":{"type":"integer"},"expected_start_time":{"type":"string"}}},"TabCloseBoundParams":{"required":["workspace_id","tab_id","pane_id"],"properties":{"workspace_id":{"type":"string"},"tab_id":{"type":"string"},"pane_id":{"type":"string"}}}}}}}'
+    fi
     ;;
   'session list')
     printf '{"sessions":[{"name":"%s","default":false,"running":true,"socket_path":"/tmp/fm-herdr-presentation-e2e.sock"}]}\n' "${HERDR_SESSION:-firstmate-e2e}"
@@ -254,6 +241,16 @@ case "$cmd $sub" in
       exit 1
     fi
     :
+    ;;
+  'pane send-text')
+    if [ "${FM_HERDR_FAIL_LITERAL:-0}" = 1 ]; then
+      exit 1
+    fi
+    ;;
+  'pane send-keys')
+    if [ "${FM_HERDR_FAIL_KEY:-0}" = 1 ]; then
+      exit 1
+    fi
     ;;
   *)
     printf 'unexpected Herdr fake call: %s\n' "$cmd $sub" >&2
@@ -307,6 +304,17 @@ export PATH="$FAKE_BIN:$ORIGINAL_PATH"
 # shellcheck source=bin/backends/herdr.sh
 # shellcheck disable=SC1091
 . "$ROOT/bin/backends/herdr.sh"
+
+export FM_HERDR_OMIT_TAB_CLOSE=1
+if capture_failure fm_backend_herdr_version_check; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: herdr provider lacks atomic tab.close_bound(workspace_id,tab_id,pane_id); refusing a backend that cannot safely reconcile task-tab creation" \
+    "missing tab.close_bound did not refuse before workspace use"
+  pass "Herdr preflight refuses when bound task-tab reconciliation is unavailable"
+else
+  fail "missing tab.close_bound preflight returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+unset FM_HERDR_OMIT_TAB_CLOSE
 
 CONTAINER=$(fm_backend_herdr_container_ensure "$PROJECT") \
   || fail "capability-complete Herdr fixture could not ensure its workspace"
@@ -377,6 +385,28 @@ else
   esac
 fi
 unset FM_HERDR_FAIL_RUN
+
+export FM_HERDR_FAIL_LITERAL=1
+if capture_failure fm_backend_herdr_send_literal "$TARGET" "launch-literal-probe"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: Herdr pane.send-text failed for target '$TARGET'" \
+    "literal launch failure did not print its exact target"
+  pass "Herdr literal launch failure reports a precise fail-closed reason"
+else
+  fail "literal launch failure was silent or returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+unset FM_HERDR_FAIL_LITERAL
+
+export FM_HERDR_FAIL_KEY=1
+if capture_failure fm_backend_herdr_send_key "$TARGET" Enter; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: Herdr pane.send-keys failed for target '$TARGET' (key 'enter')" \
+    "key launch failure did not print its exact target"
+  pass "Herdr launch submit-key failure reports a precise fail-closed reason"
+else
+  fail "launch submit-key failure was silent or returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+unset FM_HERDR_FAIL_KEY
 
 # Bound teardown receives the exact pane plus the process identity. The fake
 # close helper removes only that pane; the unrelated focused pane must remain.

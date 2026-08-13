@@ -173,27 +173,43 @@ fm_backend_herdr_tool_check() {
   return 0
 }
 
-fm_backend_herdr_bound_close_capable() {
-  local schema
+fm_backend_herdr_bound_method_capable() {
+  local method=$1 requirements=$2 schema
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | jq -e '
+  printf '%s' "$schema" | jq -e --arg method "$method" --arg requirements "$requirements" '
     . as $root
     | def params_for($method):
         $root.schemas.request.oneOf[]?
         | select(.properties.method.const? == $method)
-        | .properties.params."$ref"?
-        | select(startswith("#/schemas/request/$defs/"))
-        | split("/")[-1] as $name
-        | $root.schemas.request."$defs"[$name]?;
-    def required_type($schema; $field; $type):
-      (($schema.required // []) | index($field)) != null
-      and (($schema.properties[$field].type? // null) == $type);
-    (params_for("pane.close_bound")) as $pane
-    | ($pane != null)
-      and required_type($pane; "pane_id"; "string")
-      and required_type($pane; "expected_pid"; "integer")
-      and required_type($pane; "expected_start_time"; "string")
+        | .properties.params? // null
+        | if ((. | type) == "object") and ((."$ref"? // "") | type) == "string"
+             and ((."$ref"? // "") | startswith("#/schemas/request/$defs/"))
+          then (."$ref" | split("/")[-1]) as $name
+          | $root.schemas.request."$defs"[$name]?
+          else .
+          end;
+    (params_for($method)) as $params
+    | ($requirements | split(",") | map(split(":"))) as $fields
+    | ($params != null)
+      and all($fields[];
+        .[0] as $field
+        | .[1] as $type
+        | (($params.required // []) | index($field)) != null
+        and (($params.properties[$field].type? // null) == $type)
+      )
   ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_bound_close_capable() {
+  fm_backend_herdr_bound_method_capable \
+    pane.close_bound \
+    'pane_id:string,expected_pid:integer,expected_start_time:string'
+}
+
+fm_backend_herdr_bound_tab_close_capable() {
+  fm_backend_herdr_bound_method_capable \
+    tab.close_bound \
+    'workspace_id:string,tab_id:string,pane_id:string'
 }
 
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
@@ -217,6 +233,10 @@ fm_backend_herdr_version_check() {
   fi
   if ! fm_backend_herdr_bound_close_capable; then
     echo "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_bound_tab_close_capable; then
+    echo "error: herdr provider lacks atomic tab.close_bound(workspace_id,tab_id,pane_id); refusing a backend that cannot safely reconcile task-tab creation" >&2
     return 1
   fi
   return 0
@@ -514,8 +534,15 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
 fm_backend_herdr_send_literal() {  # <target> <text>
-  fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  local target=$1 text=$2
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr literal-send target '$target' is unavailable" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1 || {
+    echo "error: Herdr pane.send-text failed for target '$target'" >&2
+    return 1
+  }
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
@@ -535,10 +562,16 @@ fm_backend_herdr_normalize_key() {  # <key>
 # fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
 # path (tmux's `send-keys -t T key`).
 fm_backend_herdr_send_key() {  # <target> <key>
-  fm_backend_herdr_target_ready "$1" || return 1
-  local key
+  local target=$1 key
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr key-send target '$target' is unavailable" >&2
+    return 1
+  }
   key=$(fm_backend_herdr_normalize_key "$2")
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1 || {
+    echo "error: Herdr pane.send-keys failed for target '$target' (key '$key')" >&2
+    return 1
+  }
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
