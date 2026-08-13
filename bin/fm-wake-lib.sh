@@ -632,7 +632,7 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
-fm_wake_append() {
+fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   case "$kind" in
     signal|stale|check|heartbeat) ;;
@@ -645,10 +645,6 @@ fm_wake_append() {
   seq_file="$STATE/.wake-queue.seq"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
-    printf 'fm_wake_append: could not serialize the wake queue; refusing to append unlocked\n' >&2
-    return 1
-  }
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;
@@ -658,7 +654,37 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_append() {
+  local status
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+    printf 'fm_wake_append: could not serialize the wake queue; refusing to append unlocked\n' >&2
+    return 1
+  }
+  fm_wake_append_locked "$@"
+  status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  return "$status"
+}
+
+fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
+  local result_var=$1 kind=$2 key=$3 payload=$4 status=0
+  FM_WAKE_APPEND_CREATED=0
+  case "$result_var" in ''|*[!A-Za-z0-9_]*) return 2 ;; esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+    printf 'fm_wake_append_if_absent: could not serialize the wake queue; refusing to append unlocked\n' >&2
+    return 1
+  }
+  if [ -f "$FM_WAKE_QUEUE" ] && awk -F '\t' -v wanted="$key" '$4 == wanted { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+    printf -v "$result_var" '%s' 0
+  else
+    fm_wake_append_locked "$kind" "$key" "$payload"
+    status=$?
+    [ "$status" -eq 0 ] && { FM_WAKE_APPEND_CREATED=1; printf -v "$result_var" '%s' 1; }
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   return "$status"
 }
 

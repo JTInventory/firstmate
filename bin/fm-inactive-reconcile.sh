@@ -7,9 +7,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-if [ "${FM_SESSION_LOCK_BOOTSTRAP:-0}" != 1 ]; then
-  fm_worker_refuse_primary_operation "inactive outcome reconciliation" || exit 1
-fi
+fm_worker_refuse_primary_operation "inactive outcome reconciliation" || exit 1
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -142,12 +140,6 @@ herdr_identity_allowed() {  # <meta>
   return 1
 }
 
-queue_contains() {  # <key>
-  local key=$1
-  [ -f "$FM_WAKE_QUEUE" ] || return 1
-  awk -F '\t' -v wanted="$key" '$4 == wanted { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE" 2>/dev/null
-}
-
 run_bounded_child() {  # <seconds> <command> [args...]
   local seconds=$1
   shift
@@ -171,15 +163,34 @@ receipt_field() {  # <receipt> <key>
 }
 
 receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
-  local pending tmp
+  local pending tmp existing
   inactive_state_preflight || return 1
   pending=$(receipt_path "$FP" pending)
   RECEIPT_CREATED=0
   for suffix in pending presented reported; do
-    local existing
     existing=$(receipt_path "$FP" "$suffix")
     [ ! -L "$existing" ] || return 1
     [ -e "$existing" ] || continue
+    [ -f "$existing" ] || return 1
+    [ "$(receipt_field "$existing" schema)" = fm-jt-terminal-outcome.v1 ] || return 1
+    [ "$(receipt_field "$existing" fingerprint)" = "$FP" ] || return 1
+    [ "$(receipt_field "$existing" task_id)" = "$ID" ] || return 1
+    [ "$(receipt_field "$existing" incarnation)" = "$INC" ] || return 1
+    [ "$(receipt_field "$existing" outcome)" = "$OUTCOME" ] || return 1
+    [ "$(receipt_field "$existing" terminal_source)" = "$SOURCE" ] || return 1
+    [ "$(receipt_field "$existing" terminal_snapshot)" = "$SNAPSHOT" ] || return 1
+    [ "$(receipt_field "$existing" kind)" = "$KIND" ] || return 1
+    if [ "$KIND" = secondmate ]; then
+      [ "$(receipt_field "$existing" parent_task_id)" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 1
+      [ "$(receipt_field "$existing" parent_home)" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 1
+      [ "$(receipt_field "$existing" parent_status)" = "${FM_PENDING_ROUTE_PARENT_STATUS:-}" ] || return 1
+      [ "$(receipt_field "$existing" parent_corr)" = "${FM_PENDING_ROUTE_CORR:-}" ] || return 1
+    else
+      [ -z "$(receipt_field "$existing" parent_task_id)" ] || return 1
+      [ -z "$(receipt_field "$existing" parent_home)" ] || return 1
+      [ -z "$(receipt_field "$existing" parent_status)" ] || return 1
+      [ -z "$(receipt_field "$existing" parent_corr)" ] || return 1
+    fi
     return 0
   done
   mkdir -p "$OUTCOME_DIR" || return 1
@@ -194,6 +205,10 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
     printf 'terminal_source=%s\n' "$SOURCE"
     printf 'terminal_snapshot=%s\n' "$SNAPSHOT"
     printf 'kind=%s\n' "$KIND"
+    printf 'parent_task_id=%s\n' "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}"
+    printf 'parent_home=%s\n' "${FM_PENDING_ROUTE_PARENT_HOME:-}"
+    printf 'parent_status=%s\n' "${FM_PENDING_ROUTE_PARENT_STATUS:-}"
+    printf 'parent_corr=%s\n' "${FM_PENDING_ROUTE_CORR:-}"
     printf 'created_epoch=%s\n' "$(date +%s)"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   # ln is an exclusive, same-filesystem publication. A concurrent scanner can
@@ -206,6 +221,60 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
     [ -e "$pending" ] || return 1
   fi
   return 0
+}
+
+presentation_marker_path() {  # <fingerprint>
+  printf '%s/%s.presented-marker' "$OUTCOME_DIR" "$1"
+}
+
+presentation_mark() {  # <inactive-outcome:fingerprint>
+  local key=$1 fp marker pending presented reported tmp existing
+  [ "${FM_INACTIVE_ACK_FROM_DRAIN:-0}" = 1 ] || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  inactive_state_preflight || return 2
+  marker=$(presentation_marker_path "$fp")
+  [ ! -L "$marker" ] || return 2
+  if [ -e "$marker" ]; then
+    [ -f "$marker" ] || return 2
+    return 1
+  fi
+  pending=$(receipt_path "$fp" pending)
+  presented=$(receipt_path "$fp" presented)
+  reported=$(receipt_path "$fp" reported)
+  for existing in "$pending" "$presented" "$reported"; do
+    [ ! -L "$existing" ] || return 2
+    if [ -e "$existing" ]; then
+      [ -f "$existing" ] || return 2
+      [ "$(receipt_field "$existing" fingerprint)" = "$fp" ] || return 2
+    fi
+  done
+  if [ ! -f "$pending" ]; then
+    [ -f "$presented" ] || [ -f "$reported" ] || return 2
+    return 1
+  fi
+  tmp=$(mktemp "$OUTCOME_DIR/.presentation.XXXXXX") || return 2
+  printf '%s\n' "$fp" > "$tmp" || { rm -f "$tmp"; return 2; }
+  if ln "$tmp" "$marker" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  [ -f "$marker" ] && [ ! -L "$marker" ] && return 1
+  return 2
+}
+
+presentation_clear() {  # <inactive-outcome:fingerprint>
+  local key=$1 fp marker
+  [ "${FM_INACTIVE_ACK_FROM_DRAIN:-0}" = 1 ] || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  inactive_state_preflight || return 2
+  marker=$(presentation_marker_path "$fp")
+  [ ! -L "$marker" ] || return 2
+  [ -e "$marker" ] || return 0
+  [ -f "$marker" ] || return 2
+  rm -f "$marker"
 }
 
 read_incarnation() {  # <meta> <id>
@@ -242,19 +311,13 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend now activity age line outcome source
-  local snapshot token key route_rc
+  local snapshot token key route_rc state_tmp state_rc
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
   [ "$kind" = secondmate ] && return 0
   case "$kind" in ''|ship|scout) ;; *) return 0 ;; esac
   herdr_identity_allowed "$meta" || return 0
-  now=$(date +%s)
-  activity=$(latest_activity "$id")
-  [ "$activity" -gt 0 ] || return 0
-  age=$((now - activity))
-  [ "$age" -ge "$RECONCILE_SECS" ] || return 0
-
   CHILD_LOCK="$STATE/.spawn-$id.lock"
   FM_LOCK_WAIT_SECS=${FM_INACTIVE_OUTCOME_LOCK_WAIT_SECS:-30}
   fm_lock_acquire_wait "$CHILD_LOCK" || return 0
@@ -267,10 +330,22 @@ reconcile_child() {
   kind=$(meta_value "$meta" kind)
   [ "$kind" = secondmate ] && return 0
   herdr_identity_allowed "$meta" || return 0
+  now=$(date +%s)
+  activity=$(latest_activity "$id")
+  [ "$activity" -gt 0 ] || return 0
+  age=$((now - activity))
+  [ "$age" -ge "$RECONCILE_SECS" ] || return 0
+  state_tmp=$(mktemp "$STATE/.$id.inactive-state.XXXXXX") || return 1
+  [ -f "$state_tmp" ] && [ ! -L "$state_tmp" ] || { rm -f "$state_tmp"; return 1; }
+  state_rc=0
   FM_CREW_STATE_NM_TIMEOUT=${FM_INACTIVE_OUTCOME_STATE_TIMEOUT_SECS:-10} \
-    "$FM_CREW_STATE_BIN" "$id" > "$STATE/.$id.inactive-state.$$" 2>/dev/null || return 0
-  line=$(cat "$STATE/.$id.inactive-state.$$" 2>/dev/null || true)
-  rm -f "$STATE/.$id.inactive-state.$$"
+    "$FM_CREW_STATE_BIN" "$id" > "$state_tmp" 2>/dev/null || state_rc=$?
+  line=
+  if [ "$state_rc" -eq 0 ]; then
+    line=$(cat "$state_tmp" 2>/dev/null) || state_rc=$?
+  fi
+  rm -f "$state_tmp" || [ "$state_rc" -ne 0 ] || state_rc=1
+  [ "$state_rc" -eq 0 ] || return "$state_rc"
   case "$line" in *$'\n'*) return 0 ;; esac
   case "$line" in
     state:\ done\ *|state:\ failed\ *) ;;
@@ -304,8 +379,9 @@ reconcile_child() {
   receipt_write || return 1
   key="inactive-outcome:$FP"
   if [ "$RECEIPT_CREATED" = 1 ] || [ -f "$(receipt_path "$FP" pending)" ]; then
-    if ! queue_contains "$key"; then
-      fm_wake_append check "$key" "inactive terminal outcome: task=$id state=$outcome fingerprint=$FP" || return 1
+    fm_wake_append_if_absent FM_WAKE_APPEND_CREATED check "$key" \
+      "inactive terminal outcome: task=$id state=$outcome fingerprint=$FP" || return 1
+    if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
       printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
     fi
   fi
@@ -313,21 +389,48 @@ reconcile_child() {
 }
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
-  local key=$1 fp rec id kind outcome parent_status corr line target
+  local key=$1 fp rec id kind outcome parent_task_id parent_home parent_status corr line target existing marker
+  [ "${FM_INACTIVE_ACK_FROM_DRAIN:-0}" = 1 ] || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 0 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac
   rec=$(receipt_path "$fp" pending)
-  [ -f "$rec" ] && [ ! -L "$rec" ] || return 0
+  [ ! -L "$rec" ] || return 2
+  if [ ! -e "$rec" ]; then
+    for existing in "$(receipt_path "$fp" presented)" "$(receipt_path "$fp" reported)"; do
+      [ ! -L "$existing" ] || return 2
+      if [ -e "$existing" ]; then
+        [ -f "$existing" ] || return 2
+        [ "$(receipt_field "$existing" fingerprint)" = "$fp" ] || return 2
+        return 1
+      fi
+    done
+    return 2
+  fi
+  [ -f "$rec" ] || return 2
+  marker=$(presentation_marker_path "$fp")
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$fp" ] || return 2
   [ "$(receipt_field "$rec" fingerprint)" = "$fp" ] || return 2
+  [ "$(receipt_field "$rec" schema)" = fm-jt-terminal-outcome.v1 ] || return 2
   id=$(receipt_field "$rec" task_id)
   kind=$(receipt_field "$rec" kind)
+  parent_task_id=$(receipt_field "$rec" parent_task_id)
   outcome=$(receipt_field "$rec" outcome)
+  case "$kind" in ship|scout|secondmate) ;; *) return 2 ;; esac
   if [ "$kind" = secondmate ]; then
-    fm_pending_reply_secondmate_route_validate "$FM_HOME" || return 2
-    parent_status=$FM_PENDING_ROUTE_PARENT_STATUS
-    corr=$FM_PENDING_ROUTE_CORR
+    parent_home=$(receipt_field "$rec" parent_home)
+    parent_status=$(receipt_field "$rec" parent_status)
+    corr=$(receipt_field "$rec" parent_corr)
+    [ -n "$parent_task_id" ] || return 2
+    fm_pending_reply_secondmate_receipt_validate \
+      "$FM_HOME" "$parent_task_id" "$parent_home" "$parent_status" "$corr" || return 2
     line="$outcome [corr=$corr]: inactive terminal outcome replayed: task=$id fingerprint=$fp"
-    mkdir -p "$(dirname "$parent_status")" || return 2
+    [ ! -L "$parent_status" ] || return 2
+    if [ -e "$parent_status" ]; then
+      [ -f "$parent_status" ] || return 2
+    else
+      : > "$parent_status" || return 2
+    fi
     if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
       printf '%s\n' "$line" >> "$parent_status" || return 2
     fi
@@ -336,15 +439,19 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     target=$(receipt_path "$fp" presented)
   fi
   [ ! -L "$target" ] || return 2
-  [ ! -e "$target" ] || { rm -f "$rec"; return 0; }
+  if [ -e "$target" ]; then
+    [ -f "$target" ] || return 2
+    [ "$(receipt_field "$target" fingerprint)" = "$fp" ] || return 2
+    rm -f "$rec" || return 2
+    return 1
+  fi
   mv "$rec" "$target" || return 2
-  [ "$kind" = secondmate ] || return 0
-  fm_pending_reply_secondmate_route_clear "$FM_HOME" "$corr" || true
+  presentation_clear "$key" || return 2
   return 0
 }
 
 scan_locked() {
-  local startup=${1:-0} marker_mtime now age cursor meta id found=0 started=1
+  local startup=${1:-0} marker_mtime now age cursor meta id started=1 cursor_seen=1
   local scan_started remaining rc complete=1 scan_failed=0
   inactive_state_preflight || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
@@ -359,7 +466,14 @@ scan_locked() {
     cursor=
   fi
   if [ -n "$cursor" ]; then started=0; fi
-  for meta in "$STATE"/*.meta; do
+  [ -n "$cursor" ] && cursor_seen=0
+  while IFS= read -r -d '' meta; do
+    now=$(date +%s)
+    remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+    if [ "$remaining" -le 0 ]; then
+      complete=0
+      break
+    fi
     if [ ! -f "$meta" ] || [ -L "$meta" ]; then
       continue
     fi
@@ -368,13 +482,8 @@ scan_locked() {
     if [ "$started" = 0 ]; then
       [ "$id" = "$cursor" ] || continue
       started=1
+      cursor_seen=1
       continue
-    fi
-    now=$(date +%s)
-    remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
-    if [ "$remaining" -le 0 ]; then
-      complete=0
-      break
     fi
     rc=0
     FM_LOCK_WAIT_SECS="$remaining" run_bounded_child "$remaining" \
@@ -392,14 +501,18 @@ scan_locked() {
       scan_failed=1
       break
     fi
-    found=1
-  done
+  done < <(
+    find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
+      \( -type f -name '*.meta' -print0 \)
+  )
   [ "$scan_failed" = 0 ] || return "$rc"
+  if [ "$complete" = 1 ] && [ "$cursor_seen" = 0 ]; then
+    return 1
+  fi
   if [ "$complete" = 1 ]; then
     rm -f "$SCAN_CURSOR" || return 1
   fi
   date +%s > "$SCAN_MARKER" || return 1
-  [ "$found" = 1 ] || true
   return 0
 }
 
@@ -426,6 +539,14 @@ case "${1:-}" in
   ack)
     [ -n "${2:-}" ] || exit 2
     ack_receipt "$2"
+    ;;
+  presentation)
+    [ -n "${2:-}" ] || exit 2
+    presentation_mark "$2"
+    ;;
+  presentation-clear)
+    [ -n "${2:-}" ] || exit 2
+    presentation_clear "$2"
     ;;
   _child)
     [ -n "${2:-}" ] || exit 2
