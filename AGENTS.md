@@ -246,6 +246,10 @@ Read `data/backlog.md`, pick queued items that fit the scope, and move them with
 Do not hand off `local-only` items; that work stays with the main firstmate (section 7).
 For idempotence, destination validation, and refusal of `## In flight` entries, load `secondmate-provisioning`.
 
+### JT PR routing (app vs pipeline)
+
+Pour le travail JT (OpenClaw-Backup, jt-war-room, firstmate, Control Room) : une PR de code app ou de config hosting va sur `JTInventory/jt-war-room` (source unique, merge main => deploy Firebase automatique). Une PR de pipeline, de donnees ou de CI va sur `Openclaw-Backup` (aucun deploy ; la branche `data` + Storage suivent le refresh). La definition canonique est le README de jt-war-room ; ne pas copier la regle ailleurs.
+
 ### Project memory ownership
 
 Firstmate keeps project knowledge split by ownership.
