@@ -373,6 +373,8 @@ Project worktrees start at detached HEAD on a clean default branch; ship briefs 
 After spawning, peek the pane to confirm the crewmate is processing the brief and handle any trust dialog with `harness-adapters`.
 Add the task to `data/backlog.md` under In flight.
 
+Herdr crew dispatch uses the dedicated `firstmate` session and never targets the captain-owned default/CAPTAIN workspace; the full endpoint-identity and teardown contract lives in [`docs/worker-isolation.md`](docs/worker-isolation.md).
+
 ### Supervise
 
 Covered by section 8.
