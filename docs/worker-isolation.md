@@ -80,11 +80,12 @@ A provider with no process id is not a failure of the library.
 It means a task that also lacks the declaration marker has only a hint, which is reported as `unknown` rather than promoted to evidence.
 
 Herdr has a separate identity contract for task presentation endpoints.
+Select the backend with `config/backend` or `FM_BACKEND`; putting `herdr` in `config/backend` is sufficient and does not require an `FM_BACKEND=tmux` override.
 New `backend=herdr` crew spawns default to the dedicated `firstmate` session, never Herdr's default captain session, and `bin/fm-spawn.sh` records the exact session, workspace, tab, and pane ids in task metadata.
 Before live teardown, `bin/fm-teardown.sh` revalidates those ids and the task label, then proves the current declaration-backed process pid and start time.
 `bin/backends/herdr.sh` keeps its fixed spawn-time command path atomic with Herdr's `pane.run` primitive. When `pane.close_bound` exists it is preferred; on hosts without it, only the isolated `firstmate` session may use legacy `pane.close`, and only after `pane.process-info`'s PID and the live `/proc` start time match the recorded identity. Captain-owned `default`/`CAPTAIN` targets refuse before mutation.
 The production launch path still sends its launch text and Enter separately; production launch atomicity is outside this focused proof.
-The adapter refuses at preflight when a non-isolated session lacks the required bound capabilities; failed workspace or task-tab creation is reconciled only from exact provider identities, using the same isolated-session boundary, and unresolved cleanup is surfaced as uncertainty rather than retried blindly.
+If any required identity is missing or mismatched, teardown refuses and leaves the recorded pane in place. The adapter refuses at preflight when a non-isolated session lacks the required bound capabilities; failed workspace or task-tab creation is reconciled only from exact provider identities, using the same isolated-session boundary, and cleanup is recorded as uncertain rather than closing an unproven endpoint.
 
 A tmux target is resolved to its stable window id by exact enumeration before any pane is read.
 `display-message` given a window name it cannot find silently answers for the *active client's* window instead, so a task whose window name was lost or auto-renamed would hand back firstmate's own pane, whose working directory is the primary checkout - a healthy worker reported as collapsed.
