@@ -81,42 +81,70 @@ capture_failure() {
     CAPTURED_STATUS=$?
   fi
   [ "$CAPTURED_STATUS" -ne 0 ] || return 1
-  [ -n "$CAPTURED_OUTPUT" ] || return 2
   return 0
 }
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-presentation-e2e.XXXXXX")
 PRE_HOME="$TMP_ROOT/preflight-home"
 PRE_PROJECT="$TMP_ROOT/preflight-project"
+PRE_BIN="$TMP_ROOT/preflight-bin"
+PRE_LOG="$TMP_ROOT/preflight.log"
+PRE_SESSION=firstmate-preflight
 mkdir -p "$PRE_HOME/data/preflight" "$PRE_HOME/config"
 printf 'Preflight fixture.\n' > "$PRE_HOME/data/preflight/brief.md"
 : > "$PRE_HOME/data/backlog.md"
 make_project "$PRE_PROJECT"
+mkdir -p "$PRE_BIN"
+: > "$PRE_LOG"
+cat > "$PRE_BIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+log=${FM_HERDR_PREFLIGHT_LOG:?}
+cmd=${1:-}
+sub=${2:-}
+printf 'session=%s\t%s %s' "${HERDR_SESSION:-unset}" "$cmd" "$sub" >> "$log"
+for arg in "${@:3}"; do
+  printf '\t%s' "$arg" >> "$log"
+done
+printf '\n' >> "$log"
+case "$cmd $sub" in
+  'status --json')
+    printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":false}}'
+    ;;
+  'api schema')
+    printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"pane.close"},"params":{"type":"object"}}}]}}}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$PRE_BIN/herdr"
 
-# Host preflight: this reads status/schema only. Today the installed 0.7.4 /
-# protocol-16 client has pane.close but no pane.close_bound, so spawn must stop
-# before server/workspace/task creation with the existing loud diagnostic.
-if command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  # shellcheck disable=SC2016
-  if capture_failure env \
-    FM_HOME="$PRE_HOME" \
-    FM_ROOT_OVERRIDE="$ROOT" \
-    PATH="$ORIGINAL_PATH" \
-    bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure "$2"' \
-    _ "$ROOT" "$PRE_PROJECT"; then
-    [ "$CAPTURED_STATUS" -eq 1 ] || fail "Herdr preflight returned an unexpected exit $CAPTURED_STATUS"
-    assert_contains "$CAPTURED_OUTPUT" \
-      "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" \
-      "Herdr preflight did not explain the missing bound close capability: $CAPTURED_OUTPUT"
-    pass "real Herdr preflight refuses unsafe live teardown with the exact diagnostic"
-  else
-    case "$CAPTURED_STATUS" in
-      2) pass "real Herdr preflight was unavailable without mutating the host session: $CAPTURED_OUTPUT" ;;
-      *) fail "real Herdr preflight returned no diagnostic (status $CAPTURED_STATUS): $CAPTURED_OUTPUT" ;;
-    esac
-  fi
+if capture_failure env \
+  FM_HERDR_PREFLIGHT_LOG="$PRE_LOG" \
+  FM_HOME="$PRE_HOME" \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  HERDR_SESSION="$PRE_SESSION" \
+  PATH="$PRE_BIN:$ORIGINAL_PATH" \
+  bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure "$2"' \
+  _ "$ROOT" "$PRE_PROJECT"; then
+  [ "$CAPTURED_STATUS" -eq 1 ] || fail "Herdr preflight returned an unexpected exit $CAPTURED_STATUS"
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" \
+    "Herdr preflight did not explain the missing bound close capability: $CAPTURED_OUTPUT"
+  preflight_log=$(cat "$PRE_LOG")
+  assert_contains "$preflight_log" "session=$PRE_SESSION" \
+    "Herdr preflight did not use its isolated named session"
+  assert_not_contains "$preflight_log" "session=default" \
+    "Herdr preflight selected the default session"
+  assert_not_contains "$preflight_log" "server" \
+    "Herdr preflight attempted to start or inspect a server"
+  assert_not_contains "$preflight_log" "workspace" \
+    "Herdr preflight attempted workspace mutation"
+  pass "Herdr 0.7.4 protocol-16 preflight refuses without live-session mutation"
 else
-  pass "real Herdr preflight skipped: herdr and jq are required for the host check"
+  fail "Herdr preflight did not refuse with the exact diagnostic (status $CAPTURED_STATUS): $CAPTURED_OUTPUT"
 fi
 
 FAKE_ROOT="$TMP_ROOT/provider"
@@ -195,11 +223,15 @@ case "$cmd $sub" in
   'tab list')
     jq --arg workspace "$workspace" '{result:{tabs:[.tabs[] | select(.workspace_id == $workspace)]}}' "$state"
     ;;
+  'pane list')
+    jq --arg workspace "$workspace" '{result:{panes:[.tabs[] | select(.workspace_id == $workspace) | {workspace_id,tab_id,pane_id}]}}' "$state"
+    ;;
   'tab create')
+    label=$(value_after --label || true)
+    jq --arg workspace "$workspace" --arg label "$label" '.tabs += [{"workspace_id":$workspace,"tab_id":"tab-task","pane_id":"pane-task","label":$label,"focused":false}] | .agent_status["pane-task"] = "working"' "$state" | save
     if [ "${FM_HERDR_FAIL_TAB_CREATE:-0}" = 1 ]; then
       exit 1
     fi
-    jq --arg workspace "$workspace" '.tabs += [{"workspace_id":$workspace,"tab_id":"tab-task","pane_id":"pane-task","label":"fm-herdr-e2e","focused":false}] | .agent_status["pane-task"] = "working"' "$state" | save
     printf '%s\n' '{"result":{"tab":{"tab_id":"tab-task"},"root_pane":{"pane_id":"pane-task"}}}'
     ;;
   'pane get')
@@ -236,12 +268,24 @@ cat > "$FAKE_CLOSE" <<'SH'
 set -u
 state=${FM_HERDR_FAKE_STATE:?}
 log=${FM_HERDR_FAKE_CLOSE_LOG:?}
+if [ "$#" -eq 5 ] && [ "$2" = --tab ]; then
+  socket=$1
+  workspace=$3
+  tab=$4
+  pane=$5
+  printf '%s\t--tab\t%s\t%s\t%s\n' "$socket" "$workspace" "$tab" "$pane" >> "$log"
+  [ "${FM_HERDR_FAIL_CLOSE_BOUND:-0}" = 1 ] && exit 1
+  tmp="$state.tmp.$$"
+  jq --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '.tabs |= map(select(.workspace_id != $workspace or .tab_id != $tab or .pane_id != $pane)) | del(.agent_status[$pane])' "$state" > "$tmp"
+  mv -f -- "$tmp" "$state"
+  exit 0
+fi
 [ "$#" -eq 5 ] && [ "$2" = --pane ] || exit 2
 socket=$1
 pane=$3
 pid=$4
 start=$5
-printf '%s\t%s\t%s\t%s\n' "$socket" "$pane" "$pid" "$start" >> "$log"
+printf '%s\t--pane\t%s\t%s\t%s\n' "$socket" "$pane" "$pid" "$start" >> "$log"
 [ "${FM_HERDR_FAIL_CLOSE_BOUND:-0}" = 1 ] && exit 1
 tmp="$state.tmp.$$"
 jq --arg pane "$pane" '.tabs |= map(select(.pane_id != $pane)) | del(.agent_status[$pane])' "$state" > "$tmp"
@@ -354,7 +398,7 @@ unset FM_HERDR_FAIL_CLOSE_BOUND
 fm_backend_herdr_kill "$TARGET" 4242 start-4242 \
   || fail "bound Herdr teardown failed for the recorded live task endpoint"
 assert_file_contains "$FAKE_CLOSE_LOG" \
-  $'/tmp/fm-herdr-presentation-e2e.sock\tpane-task\t4242\tstart-4242' \
+  $'/tmp/fm-herdr-presentation-e2e.sock\t--pane\tpane-task\t4242\tstart-4242' \
   "bound teardown did not receive the exact pane/process identity"
 jq -e '.tabs[] | select(.pane_id == "pane-focused" and .workspace_id == "ws-focused")' \
   "$FAKE_STATE" >/dev/null \
@@ -382,5 +426,14 @@ else
     *) fail "Herdr task-tab failure returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT" ;;
   esac
 fi
+assert_file_contains "$FAKE_CLOSE_LOG" \
+  $'/tmp/fm-herdr-presentation-e2e.sock\t--tab\tws-task\ttab-task\tpane-task' \
+  "failed task-tab mutation was not reconciled through the exact bound tab endpoint"
+if jq -e '.tabs[] | select(.workspace_id == "ws-task" and .label == "fm-herdr-failed")' "$FAKE_STATE" >/dev/null; then
+  fail "failed Herdr task-tab mutation left a half-created task endpoint"
+fi
+jq -e '([.tabs[] | select(.workspace_id == "ws-task")] | . as $tabs | ($tabs | length) == 1 and $tabs[0].tab_id == "tab-seed")' "$FAKE_STATE" >/dev/null \
+  || fail "failed Herdr task-tab mutation did not leave only the durable seeded workspace tab"
+pass "Herdr task-tab failure reconciles a provider mutation without a half-created task endpoint"
 
 printf 'ok - scoped Herdr presentation launch/teardown proof completed\n'

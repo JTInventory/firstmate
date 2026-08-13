@@ -249,6 +249,15 @@ fm_backend_herdr_provider_close_bound() {
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
 }
 
+fm_backend_herdr_provider_close_tab_bound() {
+  local session=${1:-} workspace_id=${2:-} tab_id=${3:-} pane_id=${4:-}
+  local socket helper=${FM_BACKEND_HERDR_BOUND_CLOSE_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-pane-close-bound.py}
+  [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+  socket=$(fm_backend_herdr_socket_path "$session") || return 1
+  [ -x "$helper" ] || return 1
+  "$helper" "$socket" --tab "$workspace_id" "$tab_id" "$pane_id" >/dev/null 2>&1
+}
+
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
@@ -1479,8 +1488,28 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   return 2
 }
 
+fm_backend_herdr_reconcile_failed_task_tab() {
+  local session=$1 wsid=$2 label=$3 tab_id=${4:-} pane_id=${5:-} list matches
+  if [ -z "$tab_id" ]; then
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+    matches=$(printf '%s' "$list" | jq -er --arg want "$label" '
+      [.result.tabs[]? | select(.label == $want)]
+      | if length == 1 then .[0].tab_id else empty end
+    ' 2>/dev/null) || return 1
+    tab_id=$matches
+  fi
+  [ -n "$tab_id" ] || return 1
+  [ -n "$pane_id" ] || pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
+  [ -n "$pane_id" ] || return 1
+  fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" || return 1
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e --arg tab "$tab_id" '
+    ([.result.tabs[]? | select(.tab_id == $tab)] | length) == 0
+  ' >/dev/null 2>&1
+}
+
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
-  local container=$1 label=$2 cwd=$3 session wsid list duplicate out tab_id pane_id
+  local container=$1 label=$2 cwd=$3 session wsid list duplicate out tab_id pane_id create_status
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
@@ -1496,15 +1525,20 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
     echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
     return 1
   }
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" \
-    --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || {
-    echo "error: could not create Herdr task tab '$label' in workspace $wsid (session $session)" >&2
-    return 1
-  }
+  if out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" \
+    --cwd "$cwd" --label "$label" --no-focus 2>/dev/null); then
+    create_status=0
+  else
+    create_status=$?
+  fi
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
-    echo "error: Herdr task tab '$label' in workspace $wsid (session $session) returned no tab/pane id" >&2
+  if [ "$create_status" -ne 0 ] || [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    if ! fm_backend_herdr_reconcile_failed_task_tab "$session" "$wsid" "$label" "$tab_id" "$pane_id"; then
+      printf 'cleanup-uncertain\t%s:%s\t%s\n' "$session" "$wsid" "$label"
+      echo "error: could not reconcile Herdr task tab '$label' in workspace $wsid (session $session); refusing with cleanup uncertainty" >&2
+    fi
+    echo "error: could not create Herdr task tab '$label' in workspace $wsid (session $session)" >&2
     return 1
   fi
   printf '%s %s' "$tab_id" "$pane_id"
