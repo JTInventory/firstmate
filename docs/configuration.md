@@ -14,7 +14,7 @@ Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1
 
 ## Captain preferences (data/captain.md)
 
-Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/secondmates.md` during bootstrap.
+Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and printed in the `CONTEXT` section of the session-start digest alongside the project registry and optional route files.
 
 ## Secondmate routes (data/secondmates.md)
 

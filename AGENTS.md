@@ -103,7 +103,7 @@ state/               volatile runtime signals; gitignored
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
 The tmux window for a task is always named `fm-<id>`.
 
-## 3. Bootstrap (run at every session start)
+## 3. Session start and bootstrap (run at every session start)
 
 Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
@@ -480,7 +480,7 @@ Only an actionable wake is written to the durable queue at `state/.wake-queue` -
 That is what eliminates the quiet-stretch churn: during a long crew validation the benign `turn-ended`/`working:`/non-terminal-stale/no-change-heartbeat wakes are all absorbed in bash, the liveness beacon (`state/.last-watcher-beat`) stays fresh the whole time so `fm-guard.sh` never false-alarms, and your LLM is woken only when something genuinely needs you.
 The classifier lives in `bin/fm-classify-lib.sh` and is shared: the same captain-relevant verb set and signal/stale/heartbeat predicates back both this always-on watcher and the away-mode daemon, so the two can never drift apart.
 While `state/.afk` exists the daemon owns supervision, so the watcher reverts to one-shot - it surfaces every wake for the daemon to classify - and never double-triages.
-At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
+At the start of every wake-handling turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work; the session-start digest already performs that drain for recovery turns.
 The printed reason line is still useful, but the drained queue is the lossless backlog.
 **Keep exactly one live cycle.**
 The arm chain IS the supervision: while any task is in flight, keep exactly one live `bin/fm-watch-arm.sh` background task at all times, because if no cycle is live firstmate is blind.
@@ -509,7 +509,7 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
-bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
+bin/fm-wake-drain.sh       # drain queued wake records on a standalone wake-handling turn; asserts guard after draining
 bin/fm-crew-state.sh <id>  # one-line current-state read; reconciles matching run-step, pane, and status log
 ```
 
