@@ -114,10 +114,11 @@ valid_task_id() {
 
 is_secondmate_home() {
   local marker=$ROUTE_MARKER value
+  [ ! -L "$marker" ] || return 2
   if [ ! -e "$marker" ]; then
     return 1
   fi
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
+  [ -f "$marker" ] || return 2
   value=$(cat "$marker" 2>/dev/null || true)
   case "$value" in
     ''|*[!A-Za-z0-9._-]*) return 2 ;;
@@ -160,6 +161,103 @@ receipt_path() {  # <fingerprint> <suffix>
 
 receipt_field() {  # <receipt> <key>
   meta_value "$1" "$2"
+}
+
+claim_path() {  # <fingerprint>
+  printf '%s/.%s.claim' "$OUTCOME_DIR" "$1"
+}
+
+claim_field() {  # <claim> <key>
+  meta_value "$1" "$2"
+}
+
+drain_claim_owner() {
+  local row=$1 owner parent_pid drain_file drain_dir state_dir
+  owner=$(fm_lock_link_owner "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true)
+  parent_pid=${PPID:-}
+  drain_file=${FM_WAKE_DRAIN_FILE:-}
+  [ -n "$owner" ] && [ -n "$parent_pid" ] && [ -n "$row" ] && [ -n "$drain_file" ] || return 1
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$parent_pid" ] || return 1
+  fm_lock_points_to_owner "$FM_WAKE_QUEUE_LOCK" "$owner" || return 1
+  [ -f "$drain_file" ] && [ ! -L "$drain_file" ] || return 1
+  drain_dir=$(cd "$(dirname "$drain_file")" 2>/dev/null && pwd -P) || return 1
+  state_dir=$(cd "$STATE" 2>/dev/null && pwd -P) || return 1
+  [ "$drain_dir" = "$state_dir" ] || return 1
+  [ "$(basename "$drain_file")" = ".wake-queue.deduped.$parent_pid" ] || return 1
+  awk -v wanted="$row" '$0 == wanted { found=1; exit } END { exit !found }' "$drain_file"
+}
+
+claim_validate() {  # <claim> <fingerprint> <row>
+  local claim=$1 fp=$2 row=$3 state
+  [ -f "$claim" ] && [ ! -L "$claim" ] || return 1
+  [ "$(claim_field "$claim" schema)" = fm-inactive-outcome-claim.v1 ] || return 1
+  [ "$(claim_field "$claim" fingerprint)" = "$fp" ] || return 1
+  [ "$(claim_field "$claim" row)" = "$row" ] || return 1
+  state=$(claim_field "$claim" state)
+  case "$state" in reserved|presented) printf '%s' "$state" ;; *) return 1 ;; esac
+}
+
+claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim tmp state existing
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  inactive_state_preflight || return 2
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  if [ -e "$claim" ]; then
+    state=$(claim_validate "$claim" "$fp" "$row") || return 2
+    [ "$state" = presented ] && return 1
+    return 0
+  fi
+  mkdir -p "$OUTCOME_DIR" || return 2
+  tmp=$(mktemp "$OUTCOME_DIR/.claim.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  {
+    printf 'schema=fm-inactive-outcome-claim.v1\n'
+    printf 'fingerprint=%s\n' "$fp"
+    printf 'row=%s\n' "$row"
+    printf 'state=reserved\n'
+    printf 'created_epoch=%s\n' "$(date +%s)"
+  } > "$tmp" || { rm -f "$tmp"; return 2; }
+  if ln "$tmp" "$claim" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  [ -e "$claim" ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  [ "$state" = presented ] && return 1
+  return 0
+}
+
+claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim tmp line
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  [ "$(claim_validate "$claim" "$fp" "$row")" = reserved ] || return 2
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in state=*) printf 'state=presented\n' ;; *) printf '%s\n' "$line" ;; esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+}
+
+claim_remove() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  [ -e "$claim" ] || return 0
+  claim_validate "$claim" "$fp" "$row" >/dev/null || return 2
+  rm -f "$claim"
 }
 
 receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
@@ -221,60 +319,6 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
     [ -e "$pending" ] || return 1
   fi
   return 0
-}
-
-presentation_marker_path() {  # <fingerprint>
-  printf '%s/%s.presented-marker' "$OUTCOME_DIR" "$1"
-}
-
-presentation_mark() {  # <inactive-outcome:fingerprint>
-  local key=$1 fp marker pending presented reported tmp existing
-  [ "${FM_INACTIVE_ACK_FROM_DRAIN:-0}" = 1 ] || return 2
-  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
-  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
-  inactive_state_preflight || return 2
-  marker=$(presentation_marker_path "$fp")
-  [ ! -L "$marker" ] || return 2
-  if [ -e "$marker" ]; then
-    [ -f "$marker" ] || return 2
-    return 1
-  fi
-  pending=$(receipt_path "$fp" pending)
-  presented=$(receipt_path "$fp" presented)
-  reported=$(receipt_path "$fp" reported)
-  for existing in "$pending" "$presented" "$reported"; do
-    [ ! -L "$existing" ] || return 2
-    if [ -e "$existing" ]; then
-      [ -f "$existing" ] || return 2
-      [ "$(receipt_field "$existing" fingerprint)" = "$fp" ] || return 2
-    fi
-  done
-  if [ ! -f "$pending" ]; then
-    [ -f "$presented" ] || [ -f "$reported" ] || return 2
-    return 1
-  fi
-  tmp=$(mktemp "$OUTCOME_DIR/.presentation.XXXXXX") || return 2
-  printf '%s\n' "$fp" > "$tmp" || { rm -f "$tmp"; return 2; }
-  if ln "$tmp" "$marker" 2>/dev/null; then
-    rm -f "$tmp"
-    return 0
-  fi
-  rm -f "$tmp"
-  [ -f "$marker" ] && [ ! -L "$marker" ] && return 1
-  return 2
-}
-
-presentation_clear() {  # <inactive-outcome:fingerprint>
-  local key=$1 fp marker
-  [ "${FM_INACTIVE_ACK_FROM_DRAIN:-0}" = 1 ] || return 2
-  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
-  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
-  inactive_state_preflight || return 2
-  marker=$(presentation_marker_path "$fp")
-  [ ! -L "$marker" ] || return 2
-  [ -e "$marker" ] || return 0
-  [ -f "$marker" ] || return 2
-  rm -f "$marker"
 }
 
 read_incarnation() {  # <meta> <id>
@@ -389,10 +433,13 @@ reconcile_child() {
 }
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
-  local key=$1 fp rec id kind outcome parent_task_id parent_home parent_status corr line target existing marker
-  [ "${FM_INACTIVE_ACK_FROM_DRAIN:-0}" = 1 ] || return 2
+  local key=$1 row=${2:-} fp rec id kind outcome parent_task_id parent_home parent_status corr line target existing claim_state
+  [ -n "$row" ] || return 2
+  drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 0 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac
+  claim_state=$(claim_validate "$(claim_path "$fp")" "$fp" "$row") || return 2
+  [ "$claim_state" = presented ] || return 2
   rec=$(receipt_path "$fp" pending)
   [ ! -L "$rec" ] || return 2
   if [ ! -e "$rec" ]; then
@@ -401,15 +448,13 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
       if [ -e "$existing" ]; then
         [ -f "$existing" ] || return 2
         [ "$(receipt_field "$existing" fingerprint)" = "$fp" ] || return 2
+        claim_remove "$key" "$row" || return 2
         return 1
       fi
     done
     return 2
   fi
   [ -f "$rec" ] || return 2
-  marker=$(presentation_marker_path "$fp")
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
-  [ "$(cat "$marker" 2>/dev/null || true)" = "$fp" ] || return 2
   [ "$(receipt_field "$rec" fingerprint)" = "$fp" ] || return 2
   [ "$(receipt_field "$rec" schema)" = fm-jt-terminal-outcome.v1 ] || return 2
   id=$(receipt_field "$rec" task_id)
@@ -443,10 +488,11 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     [ -f "$target" ] || return 2
     [ "$(receipt_field "$target" fingerprint)" = "$fp" ] || return 2
     rm -f "$rec" || return 2
+    claim_remove "$key" "$row" || return 2
     return 1
   fi
   mv "$rec" "$target" || return 2
-  presentation_clear "$key" || return 2
+  claim_remove "$key" "$row" || return 2
   return 0
 }
 
@@ -537,23 +583,23 @@ case "${1:-}" in
     fi
     ;;
   ack)
-    [ -n "${2:-}" ] || exit 2
-    ack_receipt "$2"
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    ack_receipt "$2" "$3"
     ;;
-  presentation)
-    [ -n "${2:-}" ] || exit 2
-    presentation_mark "$2"
+  claim)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    claim_reserve "$2" "$3"
     ;;
-  presentation-clear)
-    [ -n "${2:-}" ] || exit 2
-    presentation_clear "$2"
+  presented)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    claim_mark_presented "$2" "$3"
     ;;
   _child)
     [ -n "${2:-}" ] || exit 2
     reconcile_child "$2"
     ;;
   *)
-    echo "usage: fm-inactive-reconcile.sh scan [--startup] | ack <inactive-outcome:key>" >&2
+    echo "usage: fm-inactive-reconcile.sh scan [--startup] | ack <inactive-outcome:key> <wake-row>" >&2
     exit 2
     ;;
 esac
