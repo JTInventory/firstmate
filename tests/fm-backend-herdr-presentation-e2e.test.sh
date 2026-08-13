@@ -101,10 +101,10 @@ PRE_VERSION=$(printf '%s' "$PRE_STATUS" | jq -er '.client.version') \
   || fail "installed Herdr status omitted client.version: $PRE_STATUS"
 PRE_PROTOCOL=$(printf '%s' "$PRE_STATUS" | jq -er '.client.protocol | numbers') \
   || fail "installed Herdr status omitted numeric client.protocol: $PRE_STATUS"
-[ "$PRE_VERSION" = 0.7.4 ] \
-  || fail "focused proof requires installed Herdr 0.7.4, found $PRE_VERSION"
-[ "$PRE_PROTOCOL" -eq 16 ] \
-  || fail "focused proof requires installed Herdr protocol 16, found $PRE_PROTOCOL"
+[ -n "$PRE_VERSION" ] \
+  || fail "installed Herdr status omitted client.version: $PRE_STATUS"
+[ "$PRE_PROTOCOL" -ge 16 ] \
+  || fail "focused proof requires installed Herdr protocol >=16, found $PRE_PROTOCOL"
 printf '%s' "$PRE_SCHEMA" | jq -e \
   '[.schemas.request.oneOf[]?.properties.method.const] | index("pane.close") != null' \
   >/dev/null || fail "installed Herdr schema omitted pane.close"
@@ -125,7 +125,7 @@ if capture_failure env \
   assert_contains "$CAPTURED_OUTPUT" \
     "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" \
     "Herdr preflight did not explain the missing bound close capability: $CAPTURED_OUTPUT"
-  pass "installed Herdr 0.7.4 protocol-16 preflight refuses before session mutation"
+  pass "installed Herdr $PRE_VERSION protocol-$PRE_PROTOCOL preflight refuses before session mutation"
 else
   fail "Herdr preflight did not refuse with the exact diagnostic (status $CAPTURED_STATUS): $CAPTURED_OUTPUT"
 fi
@@ -201,13 +201,31 @@ case "$cmd $sub" in
     jq '{result:{workspaces:.workspaces}}' "$state"
     ;;
   'workspace create')
-    if [ "${FM_HERDR_FAIL_WORKSPACE_CREATE:-0}" = 1 ]; then
+    workspace_id=${FM_HERDR_CREATE_WORKSPACE_ID:-ws-task}
+    jq --arg workspace "$workspace_id" \
+      '.workspaces += [{"workspace_id":$workspace,"label":"firstmate","focused":false,"active_tab_id":"tab-seed"}] | .tabs += [{"workspace_id":$workspace,"tab_id":"tab-seed","pane_id":"pane-seed","label":"1","focused":false}]' \
+      "$state" | save
+    if [ "${FM_HERDR_FAIL_WORKSPACE_CREATE:-0}" = 2 ]; then
       exit 1
     fi
-    jq '.workspaces += [{"workspace_id":"ws-task","label":"firstmate","focused":false,"active_tab_id":"tab-seed"}] | .tabs += [{"workspace_id":"ws-task","tab_id":"tab-seed","pane_id":"pane-seed","label":"1","focused":false}]' "$state" | save
-    printf '%s\n' '{"result":{"workspace":{"workspace_id":"ws-task"},"tab":{"tab_id":"tab-seed"},"root_pane":{"pane_id":"pane-seed"}}}'
+    if [ "${FM_HERDR_FAIL_WORKSPACE_CREATE:-0}" = 1 ]; then
+      jq -n --arg workspace "$workspace_id" \
+        '{result:{workspace:{workspace_id:$workspace},tab:{tab_id:"tab-seed"},root_pane:{pane_id:"pane-seed"}}}'
+      exit 1
+    fi
+    jq -n --arg workspace "$workspace_id" \
+      '{result:{workspace:{workspace_id:$workspace},tab:{tab_id:"tab-seed"},root_pane:{pane_id:"pane-seed"}}}'
     ;;
   'tab list')
+    if [ "${FM_HERDR_MALFORMED_TAB_LIST:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{}}'
+      exit 0
+    fi
+    if [ "${FM_HERDR_MALFORMED_AFTER_CLOSE:-0}" = 1 ] \
+      && [ -e "$state.malformed-after-close" ]; then
+      printf '%s\n' '{"result":{}}'
+      exit 0
+    fi
     jq --arg workspace "$workspace" '{result:{tabs:[.tabs[] | select(.workspace_id == $workspace)]}}' "$state"
     ;;
   'pane list')
@@ -273,8 +291,18 @@ if [ "$#" -eq 5 ] && [ "$2" = --tab ]; then
   printf '%s\t--tab\t%s\t%s\t%s\n' "$socket" "$workspace" "$tab" "$pane" >> "$log"
   [ "${FM_HERDR_FAIL_CLOSE_BOUND:-0}" = 1 ] && exit 1
   tmp="$state.tmp.$$"
-  jq --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '.tabs |= map(select(.workspace_id != $workspace or .tab_id != $tab or .pane_id != $pane)) | del(.agent_status[$pane])' "$state" > "$tmp"
+  jq --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+    .tabs |= map(select(.workspace_id != $workspace or .tab_id != $tab or .pane_id != $pane))
+    | del(.agent_status[$pane])
+    | if ([.tabs[] | select(.workspace_id == $workspace)] | length) == 0
+      then .workspaces |= map(select(.workspace_id != $workspace))
+      else .
+      end
+  ' "$state" > "$tmp"
   mv -f -- "$tmp" "$state"
+  if [ "${FM_HERDR_MALFORMED_AFTER_CLOSE:-0}" = 1 ]; then
+    : > "$state.malformed-after-close"
+  fi
   exit 0
 fi
 [ "$#" -eq 5 ] && [ "$2" = --pane ] || exit 2
@@ -315,6 +343,74 @@ else
   fail "missing tab.close_bound preflight returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
 fi
 unset FM_HERDR_OMIT_TAB_CLOSE
+
+export FM_HERDR_MALFORMED_TAB_LIST=1
+if capture_failure fm_backend_herdr_create_task "$SESSION:ws-focused" "fm-herdr-uninspectable" "$PROJECT"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: could not inspect Herdr task tabs in workspace ws-focused (session $SESSION)" \
+    "malformed task-tab inventory did not refuse with a precise diagnostic"
+  assert_not_contains "$(cat "$FAKE_LOG")" \
+    $'tab create\t--workspace\tws-focused' \
+    "malformed task-tab inventory was followed by a create attempt"
+  pass "Herdr refuses an unverifiable task-tab inventory"
+else
+  fail "malformed task-tab inventory returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+unset FM_HERDR_MALFORMED_TAB_LIST
+
+WS_FAIL_HOME="$FAKE_ROOT/workspace-failure-home"
+WS_FAIL_STATE="$FAKE_ROOT/workspace-failure-state.json"
+WS_FAIL_PROJECT="$FAKE_ROOT/workspace-failure-project"
+mkdir -p "$WS_FAIL_HOME/state" "$WS_FAIL_HOME/data" "$WS_FAIL_HOME/config"
+printf '%s\n' \
+  '{"next":1,"workspaces":[{"workspace_id":"ws-focused","label":"focused","focused":true,"active_tab_id":"tab-focused"}],"tabs":[{"workspace_id":"ws-focused","tab_id":"tab-focused","pane_id":"pane-focused","label":"focused","focused":true}],"agent_status":{}}' \
+  > "$WS_FAIL_STATE"
+make_project "$WS_FAIL_PROJECT"
+export FM_HOME="$WS_FAIL_HOME"
+export FM_HERDR_FAKE_STATE="$WS_FAIL_STATE"
+export FM_HERDR_CREATE_WORKSPACE_ID=ws-failed
+export FM_HERDR_FAIL_WORKSPACE_CREATE=1
+if capture_failure fm_backend_herdr_container_ensure "$WS_FAIL_PROJECT"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: Herdr workspace create failed for 'firstmate' in session '$SESSION'; exact workspace ws-failed was reconciled" \
+    "mutated workspace creation did not report exact reconciliation"
+  if jq -e '.workspaces[] | select(.workspace_id == "ws-failed")' "$WS_FAIL_STATE" >/dev/null; then
+    fail "failed Herdr workspace creation left a half-created workspace"
+  fi
+  if find "$WS_FAIL_HOME/state" -maxdepth 1 -name '.herdr-workspace-create-uncertain.*' -print -quit | grep -q .; then
+    fail "successfully reconciled Herdr workspace creation left uncertainty state"
+  fi
+  pass "Herdr workspace-create mutation is reconciled before refusal"
+else
+  fail "mutated workspace creation returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+export FM_HERDR_FAIL_WORKSPACE_CREATE=2
+if capture_failure fm_backend_herdr_container_ensure "$WS_FAIL_PROJECT"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: Herdr workspace create failed for 'firstmate' in session '$SESSION'; cleanup uncertainty recorded" \
+    "unidentified workspace mutation did not persist cleanup uncertainty"
+  WS_UNCERTAINTY=$(find "$WS_FAIL_HOME/state" -maxdepth 1 -name '.herdr-workspace-create-uncertain.*' -print -quit)
+  [ -n "$WS_UNCERTAINTY" ] && [ -f "$WS_UNCERTAINTY" ] \
+    || fail "unidentified workspace mutation did not leave durable uncertainty state"
+else
+  fail "unidentified workspace mutation returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+workspace_create_attempts=$(grep -c '^workspace create' "$FAKE_LOG" 2>/dev/null || true)
+unset FM_HERDR_FAIL_WORKSPACE_CREATE
+if capture_failure fm_backend_herdr_container_ensure "$WS_FAIL_PROJECT"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: unresolved Herdr workspace creation uncertainty at $WS_UNCERTAINTY; refusing another workspace attempt" \
+    "durable workspace uncertainty did not block a retry"
+  workspace_create_attempts_after=$(grep -c '^workspace create' "$FAKE_LOG" 2>/dev/null || true)
+  [ "$workspace_create_attempts_after" -eq "$workspace_create_attempts" ] \
+    || fail "durable workspace uncertainty still attempted another workspace create"
+  pass "Herdr refuses retry after an unidentified workspace mutation"
+else
+  fail "durable workspace uncertainty returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+export FM_HOME="$FAKE_HOME"
+export FM_HERDR_FAKE_STATE="$FAKE_STATE"
+export FM_HERDR_CREATE_WORKSPACE_ID=ws-task
 
 CONTAINER=$(fm_backend_herdr_container_ensure "$PROJECT") \
   || fail "capability-complete Herdr fixture could not ensure its workspace"
@@ -465,5 +561,24 @@ fi
 jq -e '([.tabs[] | select(.workspace_id == "ws-task")] | . as $tabs | ($tabs | length) == 1 and $tabs[0].tab_id == "tab-seed")' "$FAKE_STATE" >/dev/null \
   || fail "failed Herdr task-tab mutation did not leave only the durable seeded workspace tab"
 pass "Herdr task-tab failure reconciles a provider mutation without a half-created task endpoint"
+
+export FM_HERDR_FAIL_TAB_CREATE=1
+export FM_HERDR_MALFORMED_AFTER_CLOSE=1
+if capture_failure fm_backend_herdr_create_task "$CONTAINER_ID" "fm-herdr-unverified-cleanup" "$PROJECT"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    $'cleanup-uncertain\tfirstmate-e2e:ws-task\tfm-herdr-unverified-cleanup' \
+    "unverifiable post-close inventory did not report cleanup uncertainty"
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: could not reconcile Herdr task tab 'fm-herdr-unverified-cleanup' in workspace ws-task (session $SESSION); refusing with cleanup uncertainty" \
+    "unverifiable post-close inventory did not refuse loudly"
+  if jq -e '.tabs[] | select(.workspace_id == "ws-task" and .label == "fm-herdr-unverified-cleanup")' "$FAKE_STATE" >/dev/null; then
+    fail "unverifiable post-close inventory left the failed task tab alive"
+  fi
+  pass "Herdr refuses when post-close task-tab absence cannot be verified"
+else
+  fail "unverifiable post-close inventory returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+unset FM_HERDR_FAIL_TAB_CREATE FM_HERDR_MALFORMED_AFTER_CLOSE
+rm -f -- "$FAKE_STATE.malformed-after-close"
 
 printf 'ok - scoped Herdr presentation launch/teardown proof completed\n'

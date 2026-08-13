@@ -145,6 +145,32 @@ fm_backend_herdr_workspace_owner_write() {
   mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
 }
 
+fm_backend_herdr_workspace_uncertainty_file() {
+  local key
+  key=$(printf '%s--%s' "$1" "$2" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_') || return 1
+  printf '%s/.herdr-workspace-create-uncertain.%s' "$FM_HOME/state" "$key"
+}
+
+fm_backend_herdr_workspace_uncertainty_record() {
+  local session=$1 label=$2 reason=$3 state file tmp
+  state="$FM_HOME/state"
+  file=$(fm_backend_herdr_workspace_uncertainty_file "$session" "$label") || return 1
+  mkdir -p "$state" || return 1
+  tmp=$(mktemp "$state/.herdr-workspace-create-uncertain.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! {
+    printf 'version=1\n'
+    printf 'session=%s\n' "$session"
+    printf 'label=%s\n' "$label"
+    printf 'reason=%s\n' "$reason"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  printf '%s' "$file"
+}
+
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
 # BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Current transport
@@ -297,8 +323,13 @@ fm_backend_herdr_server_ensure() {  # <session>
 # Read-only, safe for recovery/list paths. A label match is usable only when
 # this home has a matching persisted owner record.
 fm_backend_herdr_workspace_find() {  # <session>
-  local session=$1 label list owner_wsid owner_status
+  local session=$1 label list owner_wsid owner_status uncertainty
   label=$(fm_backend_herdr_workspace_label)
+  uncertainty=$(fm_backend_herdr_workspace_uncertainty_file "$session" "$label") || return 1
+  if [ -e "$uncertainty" ] || [ -L "$uncertainty" ]; then
+    echo "error: unresolved Herdr workspace creation uncertainty at $uncertainty; refusing another workspace attempt" >&2
+    return 1
+  fi
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
@@ -336,8 +367,30 @@ fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
     end' 2>/dev/null
 }
 
+fm_backend_herdr_workspace_create_failure() {
+  local session=$1 label=$2 wsid=${3:-} tab_id=${4:-} pane_id=${5:-} reason=$6 uncertainty
+  if [ -n "$wsid" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] \
+    && fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" \
+    && fm_backend_herdr_cli "$session" workspace list 2>/dev/null | jq -e --arg workspace "$wsid" '
+      (.result.workspaces | type) == "array"
+      and all(.result.workspaces[]; type == "object" and (.workspace_id | type) == "string")
+      and ([.result.workspaces[] | select(.workspace_id == $workspace)] | length) == 0
+    ' >/dev/null 2>&1; then
+    echo "error: Herdr workspace create failed for '$label' in session '$session'; exact workspace $wsid was reconciled" >&2
+    return 1
+  fi
+  uncertainty=$(fm_backend_herdr_workspace_uncertainty_record \
+    "$session" "$label" "$reason" 2>/dev/null || true)
+  if [ -n "$uncertainty" ]; then
+    echo "error: Herdr workspace create failed for '$label' in session '$session'; cleanup uncertainty recorded at $uncertainty" >&2
+  else
+    echo "error: Herdr workspace create failed for '$label' in session '$session'; cleanup uncertainty could not be recorded" >&2
+  fi
+  return 1
+}
+
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
-  local session=$1 cwd=$2 wsid out label
+  local session=$1 cwd=$2 wsid out label tab_id pane_id create_status
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
@@ -347,7 +400,29 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
     return 0
   fi
   label=$(fm_backend_herdr_workspace_label)
-  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  if out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null); then
+    create_status=0
+  else
+    create_status=$?
+  fi
+  wsid=$(printf '%s' "$out" | jq -r '
+    select((.result.workspace.workspace_id | type) == "string" and (.result.workspace.workspace_id | length) > 0)
+    | .result.workspace.workspace_id
+  ' 2>/dev/null) || wsid=
+  tab_id=$(printf '%s' "$out" | jq -r '
+    select((.result.tab.tab_id | type) == "string" and (.result.tab.tab_id | length) > 0)
+    | .result.tab.tab_id
+  ' 2>/dev/null) || tab_id=
+  pane_id=$(printf '%s' "$out" | jq -r '
+    select((.result.root_pane.pane_id | type) == "string" and (.result.root_pane.pane_id | length) > 0)
+    | .result.root_pane.pane_id
+  ' 2>/dev/null) || pane_id=
+  if [ "$create_status" -ne 0 ] || [ -z "$wsid" ] || [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$wsid" "$tab_id" "$pane_id" \
+      "workspace create returned incomplete or failed provider output"
+    return 1
+  fi
   printf '%s' "$out" | jq -e '
     (.result.workspace.workspace_id | type) == "string"
     and (.result.workspace.workspace_id | length) > 0
@@ -355,10 +430,20 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
     and (.result.tab.tab_id | length) > 0
     and (.result.root_pane.pane_id | type) == "string"
     and (.result.root_pane.pane_id | length) > 0
-  ' >/dev/null 2>&1 || return 1
-  wsid=$(printf '%s' "$out" | jq -er '.result.workspace.workspace_id' 2>/dev/null) || return 1
+  ' >/dev/null 2>&1 || {
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$wsid" "$tab_id" "$pane_id" \
+      "workspace create returned malformed provider output"
+    return 1
+  }
   FM_BACKEND_HERDR_WS_ID=$wsid
-  fm_backend_herdr_workspace_owner_write "$session" "$label" "$wsid" || return 1
+  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$tab_id
+  fm_backend_herdr_workspace_owner_write "$session" "$label" "$wsid" || {
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$wsid" "$tab_id" "$pane_id" \
+      "workspace ownership record could not be persisted"
+    return 1
+  }
   printf '%s' "$wsid"
 }
 
@@ -1525,8 +1610,9 @@ fm_backend_herdr_reconcile_failed_task_tab() {
   local session=$1 wsid=$2 label=$3 tab_id=${4:-} pane_id=${5:-} list matches
   if [ -z "$tab_id" ]; then
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+    fm_backend_herdr_tab_list_valid "$list" || return 1
     matches=$(printf '%s' "$list" | jq -er --arg want "$label" '
-      [.result.tabs[]? | select(.label == $want)]
+      [.result.tabs[] | select(.label == $want)]
       | if length == 1 then .[0].tab_id else empty end
     ' 2>/dev/null) || return 1
     tab_id=$matches
@@ -1536,8 +1622,21 @@ fm_backend_herdr_reconcile_failed_task_tab() {
   [ -n "$pane_id" ] || return 1
   fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" || return 1
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_tab_list_valid "$list" || return 1
   printf '%s' "$list" | jq -e --arg tab "$tab_id" '
-    ([.result.tabs[]? | select(.tab_id == $tab)] | length) == 0
+    ([.result.tabs[] | select(.tab_id == $tab)] | length) == 0
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_tab_list_valid() {
+  printf '%s' "$1" | jq -e '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[];
+      type == "object"
+      and (.tab_id | type) == "string"
+      and (.tab_id | length) > 0
+      and (.label | type) == "string"
+    )
   ' >/dev/null 2>&1
 }
 
@@ -1549,8 +1648,12 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
     echo "error: could not list Herdr task tabs in workspace $wsid (session $session)" >&2
     return 1
   }
+  fm_backend_herdr_tab_list_valid "$list" || {
+    echo "error: could not inspect Herdr task tabs in workspace $wsid (session $session)" >&2
+    return 1
+  }
   duplicate=$(printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null) || {
+    '.result.tabs[] | select(.label == $want) | .tab_id' 2>/dev/null) || {
     echo "error: could not inspect Herdr task tabs in workspace $wsid (session $session)" >&2
     return 1
   }
