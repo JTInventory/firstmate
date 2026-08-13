@@ -23,6 +23,8 @@
 # verbatim).
 #
 # Authoritative task recovery uses labels and exact persisted endpoint ids.
+# Live teardown also proves the task's current declared process identity before
+# issuing a bound close for that exact pane.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -239,8 +241,11 @@ fm_backend_herdr_bound_tab_close_capable() {
 }
 
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
-# herdr client. Verified locally: v0.7.1, protocol 14 (herdr status --json's
-# .client.protocol; client info is session-independent, unlike .server).
+# herdr client or missing bound-mutation capabilities. Verified locally: v0.7.1,
+# protocol 14 (herdr status --json's .client.protocol; client info is
+# session-independent, unlike .server). Live task teardown requires
+# pane.close_bound(expected_pid, expected_start_time); workspace/task-tab
+# reconciliation requires tab.close_bound(workspace_id, tab_id, pane_id).
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
@@ -1237,9 +1242,6 @@ fm_backend_herdr_submit_enter() {  # <target> <retries> <enter-sleep> [expected-
   done
 }
 
-# fm_backend_herdr_kill: remove the task's exact pane and prove it disappeared.
-# Verified: closing a tab's only pane closes the tab too, so a separate tab
-# close is unnecessary.
 fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
   case "$1" in
     working) printf 'busy' ;;
@@ -1837,6 +1839,10 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+# fm_backend_herdr_kill: close the task's exact pane only with its expected
+# process pid/start-time identity, then prove it disappeared. A bound close
+# prevents pane/PID drift. Verified: closing a tab's only pane closes the tab
+# too, so a separate tab close is unnecessary for normal teardown.
 fm_backend_herdr_kill() {  # <target> [pid] [start-time]
   local target=$1 expected_pid=${2:-} expected_start=${3:-} state
   fm_backend_herdr_target_ready "$target" || {
