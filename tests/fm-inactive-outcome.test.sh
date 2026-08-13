@@ -147,6 +147,68 @@ SH
   pass "inactive scan uses the portable timeout invocation"
 }
 
+test_scan_failure_retries_without_advancing_cadence() {
+  local dir root home fakebin state wake_dir wake_removed
+  new_case scan-failure
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  wake_dir="$dir/wake"
+  wake_removed="$dir/wake-removed"
+  mkdir -p "$wake_dir"
+  : > "$wake_dir/queue"
+  write_meta "$state" first-x1 first-inc
+  write_meta "$state" second-x1 second-inc
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = second-x1 ] && [ "${FM_BREAK_QUEUE:-0}" = 1 ]; then
+  mv "${FM_WAKE_QUEUE_DIR}" "${FM_WAKE_QUEUE_REMOVED}"
+fi
+printf 'state: done · source: pane · scan retry\n'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  export FM_WAKE_QUEUE="$wake_dir/queue" FM_WAKE_QUEUE_LOCK="$wake_dir/lock"
+  export FM_WAKE_QUEUE_DIR="$wake_dir" FM_WAKE_QUEUE_REMOVED="$wake_removed" FM_BREAK_QUEUE=1
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "child scan failure was reported as success"
+  fi
+  [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "failed scan advanced the cadence marker"
+  [ "$(receipt_count "$state" pending)" = 2 ] || fail "durable receipts were not retained across wake publication failure"
+  grep -l '^task_id=first-x1$' "$state"/terminal-outcomes/*.pending >/dev/null \
+    || fail "successful child receipt was not retained"
+  [ "$(cat "$state/.inactive-outcome-reconcile.cursor")" = first-x1 ] || fail "cursor did not preserve the last successful child"
+  mv "$wake_removed" "$wake_dir"
+  export FM_BREAK_QUEUE=0
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "retry after child failure did not complete"
+  [ "$(receipt_count "$state" pending)" = 2 ] || fail "failed child was skipped on retry"
+  unset FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK FM_WAKE_QUEUE_DIR FM_WAKE_QUEUE_REMOVED FM_BREAK_QUEUE
+  pass "scan failures preserve retry state and cadence"
+}
+
+test_state_paths_reject_symlinks_and_non_directories() {
+  local dir root home fakebin state real_state
+  new_case symlink-state
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  real_state="$dir/real-state"
+  mv "$state" "$real_state"
+  ln -s "$real_state" "$state"
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "symlinked state path was accepted"
+  fi
+  [ ! -e "$real_state/.inactive-outcome-reconcile" ] || fail "symlinked state received a cadence marker"
+
+  new_case file-state
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  mv "$state" "$dir/state-directory"
+  printf 'not a directory\n' > "$state"
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "non-directory state path was accepted"
+  fi
+  pass "inactive reconciliation rejects unsafe state paths"
+}
+
 test_reused_task_id_gets_new_fingerprint() {
   local dir root home fakebin state
   new_case reused-id
@@ -380,6 +442,8 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
 
 test_done_and_failed_are_replayed_once
 test_portable_timeout_runner_is_used
+test_scan_failure_retries_without_advancing_cadence
+test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
 test_relaunch_and_teardown_races_recheck_under_spawn_lock
 test_herdr_identity_and_default_captain_refusal
