@@ -336,13 +336,7 @@ fm_backend_herdr_workspace_find() {  # <session>
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
-  printf '%s' "$list" | jq -e '
-    (.result.workspaces | type) == "array"
-    and all(.result.workspaces[];
-      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
-      and (.label | type) == "string"
-    )
-  ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_workspace_list_valid "$list" || return 1
   if owner_wsid=$(fm_backend_herdr_workspace_owner_read "$session" "$label" 2>/dev/null); then
     printf '%s' "$list" | jq -e --arg want "$label" --arg owner "$owner_wsid" \
       '[.result.workspaces[] | select(.label == $want and .workspace_id == $owner)] | length == 1' \
@@ -367,17 +361,102 @@ fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
     end' 2>/dev/null
 }
 
+fm_backend_herdr_workspace_list_valid() {
+  printf '%s' "$1" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[];
+      type == "object"
+      and (.workspace_id | type) == "string"
+      and (.workspace_id | length) > 0
+      and (.label | type) == "string"
+    )
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_pane_for_tab_exact() {
+  local session=$1 wsid=$2 tab_id=$3 panes
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -er --arg workspace "$wsid" --arg tab "$tab_id" '
+    if (.result.panes | type) != "array"
+       or (any(.result.panes[]; type != "object" or (.workspace_id | type) != "string"
+         or (.tab_id | type) != "string" or (.pane_id | type) != "string"
+         or (.pane_id | length) == 0))
+    then empty
+    else ([.result.panes[] | select(.workspace_id == $workspace and .tab_id == $tab)]
+      | if length == 1 then .[0].pane_id else empty end)
+    end
+  ' 2>/dev/null
+}
+
+fm_backend_herdr_tab_pane_identity_matches() {
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 label=${5:-} tabs
+  [ -n "$wsid" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_tab_list_valid "$tabs" || return 1
+  printf '%s' "$tabs" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" --arg pane "$pane_id" --arg label "$label" '
+    ([.result.tabs[] | select(
+      (.workspace_id | type) == "string" and .workspace_id == $workspace
+      and (.tab_id | type) == "string" and .tab_id == $tab
+      and (.label | type) == "string" and ($label == "" or .label == $label)
+    )] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_pane_for_tab_exact "$session" "$wsid" "$tab_id" | grep -Fqx -- "$pane_id"
+}
+
+fm_backend_herdr_workspace_seed_identity_matches() {
+  local session=$1 label=$2 wsid=$3 tab_id=$4 pane_id=$5 workspaces
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  fm_backend_herdr_workspace_list_valid "$workspaces" || return 1
+  printf '%s' "$workspaces" | jq -e --arg workspace "$wsid" --arg label "$label" --arg tab "$tab_id" '
+    ([.result.workspaces[] | select(.workspace_id == $workspace and .label == $label
+      and (.active_tab_id | type) == "string" and .active_tab_id == $tab)] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_tab_pane_identity_matches "$session" "$wsid" "$tab_id" "$pane_id"
+}
+
+fm_backend_herdr_workspace_absent() {
+  local session=$1 wsid=$2 workspaces
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  fm_backend_herdr_workspace_list_valid "$workspaces" || return 1
+  printf '%s' "$workspaces" | jq -e --arg workspace "$wsid" '
+    ([.result.workspaces[] | select(.workspace_id == $workspace)] | length) == 0
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_workspace_discover_created() {
+  local session=$1 label=$2 before=$3 after endpoint
+  fm_backend_herdr_workspace_list_valid "$before" || return 1
+  after=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  fm_backend_herdr_workspace_list_valid "$after" || return 1
+  endpoint=$(printf '%s' "$after" | jq -r --arg label "$label" --argjson before "$before" '
+    [$before.result.workspaces[]?.workspace_id] as $before_ids
+    | [.result.workspaces[] | . as $workspace
+      | select($workspace.label == $label)
+      | select(($before_ids | index($workspace.workspace_id)) == null)]
+    | if length == 1 and (.[0].active_tab_id | type) == "string"
+      and (.[0].active_tab_id | length) > 0
+      then [.[0].workspace_id, .[0].active_tab_id] | @tsv
+      else empty
+      end
+  ' 2>/dev/null) || return 1
+  [ -n "$endpoint" ] || return 1
+  printf '%s' "$endpoint"
+}
+
 fm_backend_herdr_workspace_create_failure() {
-  local session=$1 label=$2 wsid=${3:-} tab_id=${4:-} pane_id=${5:-} reason=$6 uncertainty
-  if [ -n "$wsid" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] \
-    && fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" \
-    && fm_backend_herdr_cli "$session" workspace list 2>/dev/null | jq -e --arg workspace "$wsid" '
-      (.result.workspaces | type) == "array"
-      and all(.result.workspaces[]; type == "object" and (.workspace_id | type) == "string")
-      and ([.result.workspaces[] | select(.workspace_id == $workspace)] | length) == 0
-    ' >/dev/null 2>&1; then
-    echo "error: Herdr workspace create failed for '$label' in session '$session'; exact workspace $wsid was reconciled" >&2
-    return 1
+  local session=$1 label=$2 before_list=${3:-} reason=${4:-} endpoint wsid tab_id pane_id uncertainty
+  if endpoint=$(fm_backend_herdr_workspace_discover_created "$session" "$label" "$before_list" 2>/dev/null); then
+    IFS=$'\t' read -r wsid tab_id <<EOF
+$endpoint
+EOF
+    pane_id=$(fm_backend_herdr_pane_for_tab_exact "$session" "$wsid" "$tab_id" 2>/dev/null || true)
+    if [ -n "$pane_id" ] \
+      && fm_backend_herdr_workspace_seed_identity_matches "$session" "$label" "$wsid" "$tab_id" "$pane_id" \
+      && fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" \
+      && fm_backend_herdr_workspace_absent "$session" "$wsid"; then
+      echo "error: Herdr workspace create failed for '$label' in session '$session'; exact workspace $wsid was reconciled" >&2
+      return 1
+    fi
   fi
   uncertainty=$(fm_backend_herdr_workspace_uncertainty_record \
     "$session" "$label" "$reason" 2>/dev/null || true)
@@ -390,7 +469,7 @@ fm_backend_herdr_workspace_create_failure() {
 }
 
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
-  local session=$1 cwd=$2 wsid out label tab_id pane_id create_status
+  local session=$1 cwd=$2 wsid out label tab_id pane_id create_status before_list
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
@@ -400,6 +479,14 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
     return 0
   fi
   label=$(fm_backend_herdr_workspace_label)
+  before_list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+    echo "error: could not inspect Herdr workspaces before creating '$label' in session '$session'; refusing workspace creation" >&2
+    return 1
+  }
+  fm_backend_herdr_workspace_list_valid "$before_list" || {
+    echo "error: could not validate Herdr workspaces before creating '$label' in session '$session'; refusing workspace creation" >&2
+    return 1
+  }
   if out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null); then
     create_status=0
   else
@@ -419,7 +506,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   ' 2>/dev/null) || pane_id=
   if [ "$create_status" -ne 0 ] || [ -z "$wsid" ] || [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
     fm_backend_herdr_workspace_create_failure \
-      "$session" "$label" "$wsid" "$tab_id" "$pane_id" \
+      "$session" "$label" "$before_list" \
       "workspace create returned incomplete or failed provider output"
     return 1
   fi
@@ -432,7 +519,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
     and (.result.root_pane.pane_id | length) > 0
   ' >/dev/null 2>&1 || {
     fm_backend_herdr_workspace_create_failure \
-      "$session" "$label" "$wsid" "$tab_id" "$pane_id" \
+      "$session" "$label" "$before_list" \
       "workspace create returned malformed provider output"
     return 1
   }
@@ -440,7 +527,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$tab_id
   fm_backend_herdr_workspace_owner_write "$session" "$label" "$wsid" || {
     fm_backend_herdr_workspace_create_failure \
-      "$session" "$label" "$wsid" "$tab_id" "$pane_id" \
+      "$session" "$label" "$before_list" \
       "workspace ownership record could not be persisted"
     return 1
   }
@@ -1608,23 +1695,23 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
 
 fm_backend_herdr_reconcile_failed_task_tab() {
   local session=$1 wsid=$2 label=$3 tab_id=${4:-} pane_id=${5:-} list matches
-  if [ -z "$tab_id" ]; then
-    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-    fm_backend_herdr_tab_list_valid "$list" || return 1
-    matches=$(printf '%s' "$list" | jq -er --arg want "$label" '
-      [.result.tabs[] | select(.label == $want)]
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_tab_list_valid "$list" || return 1
+  if [ -z "$tab_id" ] || [ -z "$pane_id" ] \
+    || ! fm_backend_herdr_tab_pane_identity_matches "$session" "$wsid" "$tab_id" "$pane_id" "$label"; then
+    matches=$(printf '%s' "$list" | jq -er --arg workspace "$wsid" --arg want "$label" '
+      [.result.tabs[] | select(.workspace_id == $workspace and .label == $want)]
       | if length == 1 then .[0].tab_id else empty end
     ' 2>/dev/null) || return 1
     tab_id=$matches
+    pane_id=$(fm_backend_herdr_pane_for_tab_exact "$session" "$wsid" "$tab_id") || return 1
+    fm_backend_herdr_tab_pane_identity_matches "$session" "$wsid" "$tab_id" "$pane_id" "$label" || return 1
   fi
-  [ -n "$tab_id" ] || return 1
-  [ -n "$pane_id" ] || pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 1
-  [ -n "$pane_id" ] || return 1
   fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" || return 1
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
   fm_backend_herdr_tab_list_valid "$list" || return 1
-  printf '%s' "$list" | jq -e --arg tab "$tab_id" '
-    ([.result.tabs[] | select(.tab_id == $tab)] | length) == 0
+  printf '%s' "$list" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" '
+    ([.result.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab)] | length) == 0
   ' >/dev/null 2>&1
 }
 
