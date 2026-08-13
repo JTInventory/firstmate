@@ -5,9 +5,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-if [ "${FM_SESSION_LOCK_BOOTSTRAP:-0}" != 1 ]; then
-  fm_worker_refuse_primary_operation "wake drain" || exit 1
-fi
+fm_worker_refuse_primary_operation "wake drain" || exit 1
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -74,7 +72,6 @@ mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
 : > "$FM_WAKE_QUEUE" || exit 1
 
 fm_wake_print_deduped "$DRAIN_TMP" > "$DRAIN_DEDUPED" || exit "$?"
-cat "$DRAIN_DEDUPED"
 # Inactive-outcome rows are acknowledged only after their matching durable
 # receipt is presented. The locked session-start/watcher context authorizes the
 # helper; a failed correlation leaves the original drained rows restorable.
@@ -84,7 +81,25 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
   IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
   case "$_key" in
     inactive-outcome:*)
-      "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" || {
+      presentation_status=0
+      FM_INACTIVE_ACK_FROM_DRAIN=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" presentation "$_key" || presentation_status=$?
+      case "$presentation_status" in
+        0)
+          if ! printf '%s\n' "$drain_row"; then
+            FM_INACTIVE_ACK_FROM_DRAIN=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" presentation-clear "$_key" || true
+            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$(fm_current_pid)"
+            awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+            exit 1
+          fi
+          ;;
+        1) ;;
+        *)
+          DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$(fm_current_pid)"
+          awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+          exit "$presentation_status"
+          ;;
+      esac
+      FM_INACTIVE_ACK_FROM_DRAIN=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" || {
         ack_status=$?
         # 1 means the receipt was already acknowledged or is not ours. Any
         # other failure keeps the drained row durable for a later turn.
@@ -94,6 +109,13 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
           exit "$ack_status"
         fi
       }
+      ;;
+    *)
+      if ! printf '%s\n' "$drain_row"; then
+        DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$(fm_current_pid)"
+        awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+        exit 1
+      fi
       ;;
   esac
 done < "$DRAIN_DEDUPED"

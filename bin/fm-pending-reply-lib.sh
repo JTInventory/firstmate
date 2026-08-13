@@ -505,9 +505,17 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   case "$secondmate_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   marker_id=$(cat "$secondmate_home/.fm-secondmate-home" 2>/dev/null || true)
   [ "$marker_id" = "$secondmate_id" ] || return 1
+  [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
+  [ -d "$parent_home/state" ] && [ ! -L "$parent_home/state" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
+  [ -d "$parent_state" ] && [ ! -L "$parent_state" ] || return 1
   state_abs=$(cd "$parent_state" 2>/dev/null && pwd -P) || return 1
+  [ "$state_abs" = "$parent_abs/state" ] || return 1
   status_path="$state_abs/$secondmate_id.status"
+  [ ! -L "$status_path" ] || return 1
+  if [ -e "$status_path" ]; then
+    [ -f "$status_path" ] || return 1
+  fi
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   tmp="$marker.tmp.${BASHPID:-$$}"
   {
@@ -607,8 +615,11 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   local secondmate_home=$1 marker line key value schema marker_id secondmate_id
   local parent_home parent_status corr parent_abs state_abs expected_status rec
   local phase delivered record_home record_status record_task record_corr home_marker
+  local seen_schema=0 seen_secondmate_id=0 seen_parent_home=0 seen_parent_status=0 seen_corr=0
   FM_PENDING_ROUTE_PARENT_STATUS=
+  FM_PENDING_ROUTE_PARENT_HOME=
   FM_PENDING_ROUTE_CORR=
+  FM_PENDING_ROUTE_SECOND_MATE_ID=
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   schema='' secondmate_id='' parent_home='' parent_status='' corr=''
@@ -618,14 +629,17 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
       *) return 1 ;;
     esac
     case "$key" in
-      schema) [ -z "$schema" ] || return 1; schema=$value ;;
-      secondmate_id) [ -z "$secondmate_id" ] || return 1; secondmate_id=$value ;;
-      parent_home) [ -z "$parent_home" ] || return 1; parent_home=$value ;;
-      parent_status) [ -z "$parent_status" ] || return 1; parent_status=$value ;;
-      corr_id) [ -z "$corr" ] || return 1; corr=$value ;;
+      schema) [ "$seen_schema" = 0 ] || return 1; seen_schema=1; schema=$value ;;
+      secondmate_id) [ "$seen_secondmate_id" = 0 ] || return 1; seen_secondmate_id=1; secondmate_id=$value ;;
+      parent_home) [ "$seen_parent_home" = 0 ] || return 1; seen_parent_home=1; parent_home=$value ;;
+      parent_status) [ "$seen_parent_status" = 0 ] || return 1; seen_parent_status=1; parent_status=$value ;;
+      corr_id) [ "$seen_corr" = 0 ] || return 1; seen_corr=1; corr=$value ;;
       *) return 1 ;;
     esac
   done < "$marker"
+  [ "$seen_schema" = 1 ] && [ "$seen_secondmate_id" = 1 ] \
+    && [ "$seen_parent_home" = 1 ] && [ "$seen_parent_status" = 1 ] \
+    && [ "$seen_corr" = 1 ] || return 1
   [ "$schema" = fm-jt-parent-route.v1 ] || return 1
   home_marker="$secondmate_home/.fm-secondmate-home"
   [ -f "$home_marker" ] && [ ! -L "$home_marker" ] || return 1
@@ -635,11 +649,21 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   case "$parent_home" in /*) ;; *) return 1 ;; esac
   case "$parent_status" in /*) ;; *) return 1 ;; esac
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
+  [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
   state_abs=$(cd "$parent_abs/state" 2>/dev/null && pwd -P) || return 1
+  [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
+  if [ -e "$state_abs/pending-replies/history" ]; then
+    [ -d "$state_abs/pending-replies/history" ] && [ ! -L "$state_abs/pending-replies/history" ] || return 1
+  fi
   expected_status="$state_abs/$secondmate_id.status"
   [ "$parent_status" = "$expected_status" ] || return 1
-  rec=$(fm_pending_reply_active_path "$state_abs" "$corr")
+  [ ! -L "$expected_status" ] || return 1
+  if [ -e "$expected_status" ]; then
+    [ -f "$expected_status" ] || return 1
+  fi
+  rec="$state_abs/pending-replies/$corr"
   [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
   record_task=$(fm_pending_reply_get "$rec" task_id)
   record_home=$(fm_pending_reply_get "$rec" parent_home)
@@ -653,13 +677,72 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   [ -n "$delivered" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
-    awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated) ;;
+    awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
     *) return 1 ;;
   esac
+  # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
+  FM_PENDING_ROUTE_PARENT_HOME=$parent_abs
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_PARENT_STATUS=$expected_status
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_CORR=$corr
+  # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
+  FM_PENDING_ROUTE_SECOND_MATE_ID=$secondmate_id
+  return 0
+}
+
+fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmate-id> <parent-home> <parent-status> <corr>
+  local secondmate_home=$1 secondmate_id=$2 parent_home=$3 parent_status=$4 corr=$5
+  local home_marker marker_id parent_abs state_abs expected_status rec active_rec history_rec
+  local record_task record_home record_status record_corr delivered phase
+  [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
+  [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
+  home_marker="$secondmate_home/.fm-secondmate-home"
+  [ -f "$home_marker" ] && [ ! -L "$home_marker" ] || return 1
+  marker_id=$(cat "$home_marker" 2>/dev/null || true)
+  [ "$marker_id" = "$secondmate_id" ] || return 1
+  case "$parent_home" in /*) ;; *) return 1 ;; esac
+  case "$parent_status" in /*) ;; *) return 1 ;; esac
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
+  parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
+  [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
+  state_abs=$(cd "$parent_abs/state" 2>/dev/null && pwd -P) || return 1
+  [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
+  if [ -e "$state_abs/pending-replies/history" ]; then
+    [ -d "$state_abs/pending-replies/history" ] && [ ! -L "$state_abs/pending-replies/history" ] || return 1
+  fi
+  expected_status="$state_abs/$secondmate_id.status"
+  [ "$parent_status" = "$expected_status" ] || return 1
+  [ ! -L "$parent_status" ] || return 1
+  if [ -e "$parent_status" ]; then
+    [ -f "$parent_status" ] || return 1
+  fi
+  active_rec="$state_abs/pending-replies/$corr"
+  history_rec="$state_abs/pending-replies/history/$corr"
+  if [ -f "$active_rec" ] && [ ! -L "$active_rec" ]; then
+    rec=$active_rec
+  elif [ -f "$history_rec" ] && [ ! -L "$history_rec" ]; then
+    rec=$history_rec
+  else
+    return 1
+  fi
+  [ "$(fm_pending_reply_get "$rec" schema)" = fm-pending-reply.v1 ] || return 1
+  record_task=$(fm_pending_reply_get "$rec" task_id)
+  record_home=$(fm_pending_reply_get "$rec" parent_home)
+  record_status=$(fm_pending_reply_get "$rec" parent_status)
+  record_corr=$(fm_pending_reply_get "$rec" corr_id)
+  [ "$record_task" = "$secondmate_id" ] || return 1
+  [ "$record_home" = "$parent_abs" ] || return 1
+  [ "$record_status" = "$expected_status" ] || return 1
+  [ "$record_corr" = "$corr" ] || return 1
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -n "$delivered" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
+    *) return 1 ;;
+  esac
   return 0
 }
 
