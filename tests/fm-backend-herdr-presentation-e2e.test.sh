@@ -62,6 +62,11 @@ assert_file_contains() {
   assert_contains "$contents" "$needle" "$message"
 }
 
+assert_meta_line() {
+  local file=$1 line=$2 message=$3
+  grep -Fx -- "$line" "$file" >/dev/null || fail "$message"
+}
+
 make_project() {
   local project=$1
   mkdir -p "$project"
@@ -135,7 +140,9 @@ PROJECT="$FAKE_ROOT/project"
 SESSION=firstmate
 mkdir -p "$FAKE_BIN" "$FAKE_HOME/state" "$FAKE_HOME/data" "$FAKE_HOME/config"
 : > "$FAKE_LOG"
-printf '{"next":1,"workspaces":[{"workspace_id":"ws-focused","label":"focused","focused":true,"active_tab_id":"tab-focused"}],"tabs":[{"workspace_id":"ws-focused","tab_id":"tab-focused","pane_id":"pane-focused","label":"focused","focused":true}],"agent_status":{}}\n' > "$FAKE_STATE"
+printf '%s\n' \
+  '{"next":1,"workspaces":[{"workspace_id":"CAPTAIN","label":"CAPTAIN","focused":true,"active_tab_id":"w1"},{"workspace_id":"ws-focused","label":"focused","focused":false,"active_tab_id":"tab-focused"}],"tabs":[{"workspace_id":"CAPTAIN","tab_id":"w1","pane_id":"captain-pane","label":"CAPTAIN","focused":true},{"workspace_id":"ws-focused","tab_id":"tab-focused","pane_id":"pane-focused","label":"focused","focused":false}],"agent_status":{"captain-pane":"working"}}' \
+  > "$FAKE_STATE"
 make_project "$PROJECT"
 
 # This fake is a small provider model, not a second implementation of the
@@ -311,6 +318,10 @@ case "$cmd $sub" in
     if [ "${FM_HERDR_FAIL_RUN:-0}" = 1 ]; then
       exit 1
     fi
+    text=${args[3]:-}
+    if [[ "$text" == *"treehouse get"* ]] && [ -n "${FM_HERDR_FAKE_LEASE_PROOF:-}" ]; then
+      printf '%s\n' "${FM_HERDR_FAKE_WORKTREE:?}" > "$FM_HERDR_FAKE_LEASE_PROOF"
+    fi
     :
     ;;
   'pane send-text')
@@ -344,6 +355,129 @@ export PATH="$FAKE_BIN:$ORIGINAL_PATH"
 # shellcheck disable=SC1091
 . "$ROOT/bin/backends/herdr.sh"
 
+SPAWN_HOME="$FAKE_ROOT/spawn-home"
+SPAWN_STATE="$SPAWN_HOME/state"
+SPAWN_PROJECT="$FAKE_ROOT/spawn-project"
+SPAWN_WORKTREE="$FAKE_ROOT/spawn-worktree"
+SPAWN_BIN="$FAKE_ROOT/spawn-bin"
+SPAWN_PRIMARY_ROOT="$FAKE_ROOT/spawn-primary"
+SPAWN_FAKE_STATE="$FAKE_ROOT/spawn-state.json"
+SPAWN_LOG="$FAKE_ROOT/spawn-herdr.log"
+SPAWN_FAKE_HARNESS_PID=7913
+SPAWN_FAKE_HARNESS_START=herdr-spawn-test-start
+SPAWN_ATTESTATION_TOKEN=herdr-spawn-test-token
+mkdir -p "$SPAWN_HOME/data/real-herdr-e2e" "$SPAWN_HOME/config" "$SPAWN_HOME/projects" \
+  "$SPAWN_STATE" "$SPAWN_BIN" "$SPAWN_PRIMARY_ROOT"
+cp -a "$ROOT/bin" "$SPAWN_PRIMARY_ROOT/bin"
+cp "$ROOT/AGENTS.md" "$SPAWN_PRIMARY_ROOT/AGENTS.md"
+git -C "$SPAWN_PRIMARY_ROOT" init -q
+git -C "$SPAWN_PRIMARY_ROOT" add AGENTS.md bin
+git -C "$SPAWN_PRIMARY_ROOT" -c user.name='Firstmate Tests' \
+  -c user.email='tests@example.invalid' commit -qm initial
+printf 'real spawn brief\n' > "$SPAWN_HOME/data/real-herdr-e2e/brief.md"
+printf '%s\n' '- spawn-project [direct-PR] - Herdr spawn fixture' > "$SPAWN_HOME/data/projects.md"
+: > "$SPAWN_HOME/data/backlog.md"
+make_project "$SPAWN_PROJECT"
+git -C "$SPAWN_PROJECT" worktree add -q --detach "$SPAWN_WORKTREE"
+ln -s "$FAKE_BIN/herdr" "$SPAWN_BIN/herdr"
+cat > "$SPAWN_BIN/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"comm="*|*"args="*)
+    pid="${@: -1}"
+    if [ "$pid" = "${FM_FAKE_HARNESS_PID:?}" ]; then
+      case "$*" in
+        *"comm="*) printf 'codex\n' ;;
+        *) printf 'codex --test\n' ;;
+      esac
+    else
+      printf 'bash\n'
+    fi
+    ;;
+  *"ppid="*) printf '%s\n' "${FM_FAKE_HARNESS_PID:?}" ;;
+  *"lstart="*) printf '%s\n' "${FM_FAKE_HARNESS_START:?}" ;;
+  *) exec /usr/bin/ps "$@" ;;
+esac
+SH
+chmod +x "$SPAWN_BIN/ps"
+printf 'root=%s\ntoken=%s\nharness_pid=%s\nharness_start=%s\n' \
+  "$SPAWN_PRIMARY_ROOT" "$SPAWN_ATTESTATION_TOKEN" "$SPAWN_FAKE_HARNESS_PID" \
+  "$SPAWN_FAKE_HARNESS_START" > "$SPAWN_STATE/.primary-attestation"
+printf '%s\n' \
+  "$SPAWN_FAKE_HARNESS_PID|codex:herdr-spawn-test|fallback" > "$SPAWN_STATE/.lock"
+: > "$SPAWN_LOG"
+cp "$FAKE_STATE" "$SPAWN_FAKE_STATE"
+SPAWN_CAPTAIN_BEFORE=$(jq -c '[ (.workspaces[] | select(.workspace_id == "CAPTAIN")), (.tabs[] | select(.workspace_id == "CAPTAIN" and .tab_id == "w1")), .agent_status["captain-pane"] ]' "$SPAWN_FAKE_STATE")
+
+run_real_herdr_spawn() {
+  local requested_session=$1
+  local -a spawn_env
+  spawn_env=(
+    -u NO_MISTAKES_GATE
+    FM_HOME="$SPAWN_HOME"
+    FM_STATE_OVERRIDE="$SPAWN_STATE"
+    FM_DATA_OVERRIDE="$SPAWN_HOME/data"
+    FM_PROJECTS_OVERRIDE="$SPAWN_HOME/projects"
+    FM_CONFIG_OVERRIDE="$SPAWN_HOME/config"
+    CODEX_THREAD_ID=herdr-spawn-test
+    FM_PRIMARY_ATTESTATION="$SPAWN_ATTESTATION_TOKEN"
+    FM_FAKE_HARNESS_PID="$SPAWN_FAKE_HARNESS_PID"
+    FM_FAKE_HARNESS_START="$SPAWN_FAKE_HARNESS_START"
+    FM_HERDR_FAKE_STATE="$SPAWN_FAKE_STATE"
+    FM_HERDR_FAKE_LOG="$SPAWN_LOG"
+    FM_HERDR_FAKE_LEASE_PROOF="$SPAWN_STATE/.real-herdr-e2e.spawn-worktree"
+    FM_HERDR_FAKE_WORKTREE="$SPAWN_WORKTREE"
+    FM_SPAWN_NO_GUARD=1
+    FM_SPAWN_WT_WAIT_SECS=2
+    PATH="$SPAWN_BIN:$ORIGINAL_PATH"
+  )
+  if [ -n "$requested_session" ]; then
+    spawn_env+=("HERDR_SESSION=$requested_session")
+  else
+    spawn_env=(-u HERDR_SESSION "${spawn_env[@]}")
+  fi
+  SPAWN_CAPTURED_OUTPUT=$(cd "$SPAWN_PRIMARY_ROOT" && env "${spawn_env[@]}" \
+    FM_ROOT_OVERRIDE="$SPAWN_PRIMARY_ROOT" \
+    "$SPAWN_PRIMARY_ROOT/bin/fm-spawn.sh" real-herdr-e2e "$SPAWN_PROJECT" \
+    --backend herdr --harness 'echo herdr spawn proof' 2>&1)
+  SPAWN_CAPTURED_STATUS=$?
+  return "$SPAWN_CAPTURED_STATUS"
+}
+
+if run_real_herdr_spawn default; then
+  fail "real Herdr spawn accepted the captain-owned default session"
+else
+  assert_contains "$SPAWN_CAPTURED_OUTPUT" \
+    "error: normal Herdr crew dispatch cannot target the captain-owned default session" \
+    "real Herdr spawn did not refuse the captain-owned default session"
+  pass "real Herdr spawn refuses the captain-owned default session before mutation"
+fi
+
+run_real_herdr_spawn "" || fail "real Herdr spawn failed: $SPAWN_CAPTURED_OUTPUT"
+SPAWN_META="$SPAWN_STATE/real-herdr-e2e.meta"
+[ -f "$SPAWN_META" ] || fail "real Herdr spawn did not publish task metadata"
+assert_contains "$(cat "$SPAWN_META")" $'backend=herdr\n' \
+  "real Herdr spawn metadata omitted backend=herdr"
+assert_meta_line "$SPAWN_META" 'herdr_session=firstmate' \
+  "real Herdr spawn did not record session=firstmate"
+assert_meta_line "$SPAWN_META" 'herdr_workspace_id=ws-task' \
+  "real Herdr spawn did not record the exact workspace id"
+assert_meta_line "$SPAWN_META" 'herdr_tab_id=tab-task' \
+  "real Herdr spawn did not record the exact tab id"
+assert_meta_line "$SPAWN_META" 'herdr_pane_id=pane-task' \
+  "real Herdr spawn did not record the exact pane id"
+[ "$(grep '^window=' "$SPAWN_META")" = 'window=firstmate:pane-task' ] \
+  || fail "real Herdr spawn recorded an unexpected target: $(grep '^window=' "$SPAWN_META")"
+SPAWN_CAPTAIN_AFTER=$(jq -c '[ (.workspaces[] | select(.workspace_id == "CAPTAIN")), (.tabs[] | select(.workspace_id == "CAPTAIN" and .tab_id == "w1")), .agent_status["captain-pane"] ]' "$SPAWN_FAKE_STATE")
+[ "$SPAWN_CAPTAIN_AFTER" = "$SPAWN_CAPTAIN_BEFORE" ] \
+  || fail "real Herdr spawn changed the protected CAPTAIN/w1 state"
+assert_not_contains "$(cat "$SPAWN_LOG")" 'CAPTAIN' \
+  "real Herdr spawn addressed the protected CAPTAIN workspace"
+assert_not_contains "$(cat "$SPAWN_LOG")" 'w1' \
+  "real Herdr spawn addressed the protected w1 tab"
+pass "real Herdr spawn records firstmate and exact workspace/tab/pane without touching CAPTAIN/w1"
+
 unset HERDR_SESSION
 [ "$(fm_backend_herdr_session)" = firstmate ] \
   || fail "normal Herdr dispatch did not default to the isolated firstmate session"
@@ -363,16 +497,19 @@ else
   fail "isolated firstmate preflight unexpectedly refused: $CAPTURED_OUTPUT"
 fi
 
-jq '.agent_status["pane-focused"] = "working"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+jq '.agent_status["captain-pane"] = "working"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
 mv -f -- "$FAKE_STATE.tmp" "$FAKE_STATE"
 export HERDR_SESSION=default
-if capture_failure fm_backend_herdr_kill "default:pane-focused" 4242 start-4242; then
+if capture_failure fm_backend_herdr_kill "default:captain-pane" 4242 start-4242; then
   assert_contains "$CAPTURED_OUTPUT" \
     "error: Herdr unbound pane.close is forbidden outside dedicated session 'firstmate'" \
     "default-session teardown did not refuse before mutation"
-  assert_not_contains "$(cat "$FAKE_LOG")" $'pane close\tpane-focused' \
+  assert_not_contains "$(cat "$FAKE_LOG")" $'pane close\tcaptain-pane' \
     "default-session teardown attempted an unbound pane close"
-  pass "Herdr refuses unbound teardown in the captain-owned default session"
+  jq -e '.tabs[] | select(.workspace_id == "CAPTAIN" and .tab_id == "w1" and .pane_id == "captain-pane")' \
+    "$FAKE_STATE" >/dev/null \
+    || fail "default-session teardown removed the protected CAPTAIN/w1 target"
+  pass "Herdr refuses unbound teardown before mutating the captain-owned CAPTAIN/w1 target"
 else
   fail "default-session teardown returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
 fi
