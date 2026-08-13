@@ -589,6 +589,14 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
+  # The helper owns its bounded cadence and receipt idempotence. A non-empty
+  # result means it appended an inactive-outcome wake, so surface that wake in
+  # this watcher turn without probing panes or scraping secondmate chat here.
+  inactive_out=$(FM_SESSION_LOCK_BOOTSTRAP=1 "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null || true)
+  if [ -n "$inactive_out" ]; then
+    wake "check: inactive terminal outcome replay queued"
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed

@@ -88,6 +88,7 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
+TARGET_HOME=
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
@@ -138,6 +139,15 @@ else
       && ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
+      exit 1
+    fi
+    TARGET_HOME=$(fm_meta_get "$meta" home)
+    if ! fm_pending_reply_secondmate_route_write \
+      "$TARGET_HOME" "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$PENDING_REPLY_CORR"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: failed to bind the secondmate pending-reply route for $TARGET_TASK_ID" >&2
       exit 1
     fi
   fi

@@ -197,6 +197,7 @@ HERDR_FLAT_ABORT_LABEL=
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE=
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_INCARNATION=
 SPAWN_ENDPOINT_CREATED=0
 SPAWN_WORKTREE_LEASED=0
 SPAWN_WORKTREE_PROVEN=0
@@ -316,6 +317,7 @@ spawn_abort_recovery_meta() {
     echo "kind=${KIND:-ship}"
     echo "mode=${MODE:-no-mistakes}"
     echo "yolo=${YOLO:-off}"
+    echo "spawn_incarnation=${SPAWN_INCARNATION:-legacy-unknown}"
     echo "tasktmp=${TASK_TMP:-}"
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
@@ -376,6 +378,7 @@ spawn_endpoint_recovery_meta() {
     printf 'kind=%s\n' "${KIND:-ship}"
     printf 'mode=%s\n' "${MODE:-no-mistakes}"
     printf 'yolo=%s\n' "${YOLO:-off}"
+    printf 'spawn_incarnation=%s\n' "${SPAWN_INCARNATION:-legacy-unknown}"
     printf 'backend=tmux\n'
     printf 'endpoint_recovery=1\n'
     printf 'spawn_state=aborted\n'
@@ -403,6 +406,7 @@ spawn_endpoint_recovery_reservation() {
     printf 'kind=%s\n' "${KIND:-ship}"
     printf 'mode=%s\n' "${MODE:-no-mistakes}"
     printf 'yolo=%s\n' "${YOLO:-off}"
+    printf 'spawn_incarnation=%s\n' "${SPAWN_INCARNATION:-legacy-unknown}"
     printf 'backend=tmux\n'
     printf 'endpoint_recovery=1\n'
     printf 'endpoint_recovery_pending=1\n'
@@ -877,6 +881,7 @@ spawn_abort_cleanup() {
             echo "kind=$KIND"
             echo "mode=${MODE:-no-mistakes}"
             echo "yolo=${YOLO:-off}"
+            echo "spawn_incarnation=${SPAWN_INCARNATION:-legacy-unknown}"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
@@ -1044,6 +1049,7 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+SPAWN_INCARNATION="s$(date +%s)-${BASHPID:-$$}-$RANDOM"
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/$ID.herdr-cleanup-uncertain"
 if [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; then
   echo "error: unresolved Herdr cleanup uncertainty for $ID at $HERDR_FLAT_ABORT_UNCERTAINTY_FILE; refusing another spawn" >&2
@@ -2120,6 +2126,7 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "spawn_incarnation=$SPAWN_INCARNATION"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
