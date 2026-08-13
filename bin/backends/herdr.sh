@@ -489,8 +489,15 @@ fm_backend_herdr_current_path() {  # <target>
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
 # the command and submits it in one call (verified).
 fm_backend_herdr_send_text_line() {  # <target> <text>
-  fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  local target=$1 text=$2
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr atomic pane.run target '$target' is unavailable" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1 || {
+    echo "error: Herdr atomic pane.run submit failed for target '$target'" >&2
+    return 1
+  }
 }
 
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
@@ -1476,34 +1483,61 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
   local container=$1 label=$2 cwd=$3 session wsid list duplicate out tab_id pane_id
   session=${container%%:*}
   wsid=${container#*:}
-  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+    echo "error: could not list Herdr task tabs in workspace $wsid (session $session)" >&2
+    return 1
+  }
   duplicate=$(printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null) || return 1
+    '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null) || {
+    echo "error: could not inspect Herdr task tabs in workspace $wsid (session $session)" >&2
+    return 1
+  }
   [ -z "$duplicate" ] || {
     echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
     return 1
   }
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" \
-    --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+    --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || {
+    echo "error: could not create Herdr task tab '$label' in workspace $wsid (session $session)" >&2
+    return 1
+  }
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    echo "error: Herdr task tab '$label' in workspace $wsid (session $session) returned no tab/pane id" >&2
+    return 1
+  fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
 fm_backend_herdr_kill() {  # <target> [pid] [start-time]
   local target=$1 expected_pid=${2:-} expected_start=${3:-} state
-  fm_backend_herdr_target_ready "$target" || return 1
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr teardown target '$target' is unavailable" >&2
+    return 1
+  }
   state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   case "$state" in
     dead) return 0 ;;
     live)
-      [ -n "$expected_pid" ] && [ -n "$expected_start" ] || return 1
+      if [ -z "$expected_pid" ] || [ -z "$expected_start" ]; then
+        echo "error: Herdr teardown target '$target' lacks bound process identity" >&2
+        return 1
+      fi
       fm_backend_herdr_provider_close_bound \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$expected_pid" \
-        "$expected_start" || return 1
+        "$expected_start" || {
+        echo "error: Herdr bound pane.close_bound failed for target '$target'" >&2
+        return 1
+      }
       ;;
-    *) return 1 ;;
+    *)
+      echo "error: Herdr teardown target '$target' has unsafe agent state '$state'" >&2
+      return 1
+      ;;
   esac
-  [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = dead ]
+  if [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" != dead ]; then
+    echo "error: Herdr bound pane.close_bound did not close target '$target'" >&2
+    return 1
+  fi
 }
