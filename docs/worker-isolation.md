@@ -71,7 +71,7 @@ Per-provider process id availability:
 | Provider | Per-pane process id | Consequence |
 |---|---|---|
 | tmux | `#{pane_pid}`, a real shell pid | Process cwd is readable without the marker, but task isolation still requires complete worker identity. |
-| herdr | `pane.process-info` exposes the foreground process id | Authoritative cwd reading requires the declaration marker; teardown separately proves the foreground PID and `/proc` start time before closing. |
+| herdr | no shell PID through `fm_agent_backend_shell_pid`; the adapter's `pane.process-info` exposes a foreground process id for teardown | Authoritative cwd reading requires the declaration marker; teardown separately proves the foreground PID and `/proc` start time before closing. |
 | zellij | none exposed at all | Same. |
 | cmux | none on the control socket | Same. |
 | orca | none on the terminal endpoint | Same. |

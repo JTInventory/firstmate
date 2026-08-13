@@ -24,7 +24,8 @@
 #
 # Authoritative task recovery uses labels and exact persisted endpoint ids.
 # Live teardown also proves the task's current declared process identity before
-# issuing a bound close for that exact pane.
+# issuing a bound close, or the isolated-session legacy close fallback, for that
+# exact pane.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
