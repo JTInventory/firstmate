@@ -576,6 +576,13 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
       "workspace create returned malformed provider output"
     return 1
   }
+  if ! fm_backend_herdr_workspace_seed_identity_matches \
+    "$session" "$label" "$cwd_real" "$wsid" "$tab_id" "$pane_id"; then
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$cwd_real" "$before_snapshot" \
+      "workspace create returned an unverified provider identity"
+    return 1
+  fi
   FM_BACKEND_HERDR_WS_ID=$wsid
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$tab_id
   fm_backend_herdr_workspace_owner_write "$session" "$label" "$wsid" || {
@@ -1815,6 +1822,16 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-ta
       echo "error: could not reconcile Herdr task tab '$label' in workspace $wsid (session $session); refusing with cleanup uncertainty" >&2
     fi
     echo "error: could not create Herdr task tab '$label' in workspace $wsid (session $session)" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_tab_pane_identity_matches \
+    "$session" "$wsid" "$tab_id" "$pane_id" "$label"; then
+    if ! fm_backend_herdr_reconcile_failed_task_tab \
+      "$session" "$wsid" "$label" "$tab_id" "$pane_id"; then
+      printf 'cleanup-uncertain\t%s:%s\t%s\n' "$session" "$wsid" "$label"
+      echo "error: could not reconcile Herdr task tab '$label' in workspace $wsid (session $session); refusing with cleanup uncertainty" >&2
+    fi
+    echo "error: Herdr task tab '$label' returned an unverified provider identity in workspace $wsid (session $session)" >&2
     return 1
   fi
   printf '%s %s' "$tab_id" "$pane_id"

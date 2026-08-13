@@ -210,6 +210,9 @@ case "$cmd $sub" in
     ;;
   'workspace create')
     workspace_id=${FM_HERDR_CREATE_WORKSPACE_ID:-ws-task}
+    response_workspace_id=$workspace_id
+    response_tab_id=tab-seed
+    response_pane_id=pane-seed
     create_cwd=$(value_after --cwd || true)
     jq --arg workspace "$workspace_id" --arg cwd "$create_cwd" \
       '.workspaces += [{"workspace_id":$workspace,"label":"firstmate","focused":false,"active_tab_id":"tab-seed"}] | .tabs += [{"workspace_id":$workspace,"tab_id":"tab-seed","pane_id":"pane-seed","cwd":$cwd,"label":"1","focused":false}]' \
@@ -226,8 +229,14 @@ case "$cmd $sub" in
         '{result:{workspace:{workspace_id:$workspace},tab:{tab_id:"tab-seed"},root_pane:{pane_id:"pane-seed"}}}'
       exit 1
     fi
-    jq -n --arg workspace "$workspace_id" \
-      '{result:{workspace:{workspace_id:$workspace},tab:{tab_id:"tab-seed"},root_pane:{pane_id:"pane-seed"}}}'
+    if [ "${FM_HERDR_STALE_WORKSPACE_RESPONSE:-0}" = 1 ]; then
+      response_workspace_id=ws-focused
+      response_tab_id=tab-focused
+      response_pane_id=pane-focused
+    fi
+    jq -n --arg workspace "$response_workspace_id" --arg tab "$response_tab_id" \
+      --arg pane "$response_pane_id" \
+      '{result:{workspace:{workspace_id:$workspace},tab:{tab_id:$tab},root_pane:{pane_id:$pane}}}'
     ;;
   'tab list')
     if [ "${FM_HERDR_MALFORMED_TAB_LIST:-0}" = 1 ]; then
@@ -255,7 +264,11 @@ case "$cmd $sub" in
       printf '%s\n' '{"result":{"tab":{"tab_id":"tab-seed"},"root_pane":{"pane_id":"pane-seed"}}}'
       exit 1
     fi
-    printf '%s\n' '{"result":{"tab":{"tab_id":"tab-task"},"root_pane":{"pane_id":"pane-task"}}}'
+    if [ "${FM_HERDR_STALE_TAB_RESPONSE:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"tab":{"tab_id":"tab-seed"},"root_pane":{"pane_id":"pane-seed"}}}'
+    else
+      printf '%s\n' '{"result":{"tab":{"tab_id":"tab-task"},"root_pane":{"pane_id":"pane-task"}}}'
+    fi
     ;;
   'pane get')
     if jq -e --arg pane "$pane" '.tabs[]? | select(.pane_id == $pane)' "$state" >/dev/null; then
@@ -432,7 +445,22 @@ if capture_failure fm_backend_herdr_container_ensure "$WS_FAIL_PROJECT"; then
 else
   fail "malformed workspace-list mutation returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
 fi
-unset FM_HERDR_FAIL_WORKSPACE_CREATE FM_HERDR_CREATE_WORKSPACE_ID
+unset FM_HERDR_FAIL_WORKSPACE_CREATE FM_HERDR_CREATE_WORKSPACE_ID FM_HERDR_MALFORMED_WORKSPACE_LIST
+rm -f -- "$WS_FAIL_STATE.malformed-workspace-list"
+export FM_HERDR_CREATE_WORKSPACE_ID=ws-success-stale
+export FM_HERDR_STALE_WORKSPACE_RESPONSE=1
+if capture_failure fm_backend_herdr_container_ensure "$WS_FAIL_PROJECT"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: Herdr workspace create failed for 'firstmate' in session '$SESSION'; exact workspace ws-success-stale was reconciled" \
+    "stale workspace-create ids did not refuse after provider verification"
+  if jq -e '.workspaces[] | select(.workspace_id == "ws-success-stale")' "$WS_FAIL_STATE" >/dev/null; then
+    fail "stale workspace-create ids left the created workspace alive"
+  fi
+  pass "Herdr refuses and reconciles a zero-exit workspace-create identity mismatch"
+else
+  fail "stale workspace-create ids returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+unset FM_HERDR_CREATE_WORKSPACE_ID FM_HERDR_STALE_WORKSPACE_RESPONSE
 export FM_HOME="$FAKE_HOME"
 export FM_HERDR_FAKE_STATE="$FAKE_STATE"
 export FM_HERDR_CREATE_WORKSPACE_ID=ws-task
@@ -581,6 +609,22 @@ fi
 assert_not_contains "$(cat "$FAKE_LOG")" 'pane close' \
   "teardown used unbound pane.close instead of pane.close_bound"
 pass "Herdr teardown closes only the exact recorded pane with bound process identity"
+
+export FM_HERDR_STALE_TAB_RESPONSE=1
+if capture_failure fm_backend_herdr_create_task "$CONTAINER_ID" "fm-herdr-stale-success" "$PROJECT"; then
+  assert_contains "$CAPTURED_OUTPUT" \
+    "error: Herdr task tab 'fm-herdr-stale-success' returned an unverified provider identity in workspace ws-task (session $SESSION)" \
+    "stale task-create ids did not refuse after provider verification"
+  if jq -e '.tabs[] | select(.workspace_id == "ws-task" and .label == "fm-herdr-stale-success")' "$FAKE_STATE" >/dev/null; then
+    fail "stale task-create ids left the created task tab alive"
+  fi
+  jq -e '.tabs[] | select(.workspace_id == "ws-task" and .tab_id == "tab-seed")' "$FAKE_STATE" >/dev/null \
+    || fail "stale task-create ids caused the durable seed tab to disappear"
+  pass "Herdr refuses and reconciles a zero-exit task-create identity mismatch"
+else
+  fail "stale task-create ids returned unexpected status $CAPTURED_STATUS: $CAPTURED_OUTPUT"
+fi
+unset FM_HERDR_STALE_TAB_RESPONSE
 
 # A post-capability tab-create failure must not become an empty exit 1. The
 # adapter emits a reason that names the exact workspace/session and the failed
