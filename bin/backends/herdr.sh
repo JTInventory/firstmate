@@ -23,6 +23,8 @@
 # verbatim).
 #
 # Authoritative task recovery uses labels and exact persisted endpoint ids.
+# Live teardown also proves the task's current declared process identity before
+# issuing a bound close for that exact pane.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -145,6 +147,32 @@ fm_backend_herdr_workspace_owner_write() {
   mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
 }
 
+fm_backend_herdr_workspace_uncertainty_file() {
+  local key
+  key=$(printf '%s--%s' "$1" "$2" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_') || return 1
+  printf '%s/.herdr-workspace-create-uncertain.%s' "$FM_HOME/state" "$key"
+}
+
+fm_backend_herdr_workspace_uncertainty_record() {
+  local session=$1 label=$2 reason=$3 state file tmp
+  state="$FM_HOME/state"
+  file=$(fm_backend_herdr_workspace_uncertainty_file "$session" "$label") || return 1
+  mkdir -p "$state" || return 1
+  tmp=$(mktemp "$state/.herdr-workspace-create-uncertain.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! {
+    printf 'version=1\n'
+    printf 'session=%s\n' "$session"
+    printf 'label=%s\n' "$label"
+    printf 'reason=%s\n' "$reason"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  printf '%s' "$file"
+}
+
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
 # BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Current transport
@@ -173,32 +201,51 @@ fm_backend_herdr_tool_check() {
   return 0
 }
 
-fm_backend_herdr_bound_close_capable() {
-  local schema
+fm_backend_herdr_bound_method_capable() {
+  local method=$1 requirements=$2 schema
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | jq -e '
+  printf '%s' "$schema" | jq -e --arg method "$method" --arg requirements "$requirements" '
     . as $root
     | def params_for($method):
         $root.schemas.request.oneOf[]?
         | select(.properties.method.const? == $method)
-        | .properties.params."$ref"?
-        | select(startswith("#/schemas/request/$defs/"))
-        | split("/")[-1] as $name
-        | $root.schemas.request."$defs"[$name]?;
-    def required_type($schema; $field; $type):
-      (($schema.required // []) | index($field)) != null
-      and (($schema.properties[$field].type? // null) == $type);
-    (params_for("pane.close_bound")) as $pane
-    | ($pane != null)
-      and required_type($pane; "pane_id"; "string")
-      and required_type($pane; "expected_pid"; "integer")
-      and required_type($pane; "expected_start_time"; "string")
+        | .properties.params? // null
+        | if ((. | type) == "object") and ((."$ref"? // "") | type) == "string"
+             and ((."$ref"? // "") | startswith("#/schemas/request/$defs/"))
+          then (."$ref" | split("/")[-1]) as $name
+          | $root.schemas.request."$defs"[$name]?
+          else .
+          end;
+    (params_for($method)) as $params
+    | ($requirements | split(",") | map(split(":"))) as $fields
+    | ($params != null)
+      and all($fields[];
+        .[0] as $field
+        | .[1] as $type
+        | (($params.required // []) | index($field)) != null
+        and (($params.properties[$field].type? // null) == $type)
+      )
   ' >/dev/null 2>&1
 }
 
+fm_backend_herdr_bound_close_capable() {
+  fm_backend_herdr_bound_method_capable \
+    pane.close_bound \
+    'pane_id:string,expected_pid:integer,expected_start_time:string'
+}
+
+fm_backend_herdr_bound_tab_close_capable() {
+  fm_backend_herdr_bound_method_capable \
+    tab.close_bound \
+    'workspace_id:string,tab_id:string,pane_id:string'
+}
+
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
-# herdr client. Verified locally: v0.7.1, protocol 14 (herdr status --json's
-# .client.protocol; client info is session-independent, unlike .server).
+# herdr client or missing bound-mutation capabilities. Verified locally: v0.7.1,
+# protocol 14 (herdr status --json's .client.protocol; client info is
+# session-independent, unlike .server). Live task teardown requires
+# pane.close_bound(expected_pid, expected_start_time); workspace/task-tab
+# reconciliation requires tab.close_bound(workspace_id, tab_id, pane_id).
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
@@ -217,6 +264,10 @@ fm_backend_herdr_version_check() {
   fi
   if ! fm_backend_herdr_bound_close_capable; then
     echo "error: herdr provider lacks atomic pane.close_bound(expected_pid); refusing a backend that cannot safely finish live task teardown" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_bound_tab_close_capable; then
+    echo "error: herdr provider lacks atomic tab.close_bound(workspace_id,tab_id,pane_id); refusing a backend that cannot safely reconcile task-tab creation" >&2
     return 1
   fi
   return 0
@@ -249,6 +300,15 @@ fm_backend_herdr_provider_close_bound() {
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")" = dead ]
 }
 
+fm_backend_herdr_provider_close_tab_bound() {
+  local session=${1:-} workspace_id=${2:-} tab_id=${3:-} pane_id=${4:-}
+  local socket helper=${FM_BACKEND_HERDR_BOUND_CLOSE_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-pane-close-bound.py}
+  [ -n "$session" ] && [ -n "$workspace_id" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+  socket=$(fm_backend_herdr_socket_path "$session") || return 1
+  [ -x "$helper" ] || return 1
+  "$helper" "$socket" --tab "$workspace_id" "$tab_id" "$pane_id" >/dev/null 2>&1
+}
+
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
@@ -268,21 +328,20 @@ fm_backend_herdr_server_ensure() {  # <session>
 # Read-only, safe for recovery/list paths. A label match is usable only when
 # this home has a matching persisted owner record.
 fm_backend_herdr_workspace_find() {  # <session>
-  local session=$1 label list owner_wsid owner_status
+  local session=$1 label list owner_wsid owner_status uncertainty
   label=$(fm_backend_herdr_workspace_label)
+  uncertainty=$(fm_backend_herdr_workspace_uncertainty_file "$session" "$label") || return 1
+  if [ -e "$uncertainty" ] || [ -L "$uncertainty" ]; then
+    echo "error: unresolved Herdr workspace creation uncertainty at $uncertainty; refusing another workspace attempt" >&2
+    return 1
+  fi
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
-  printf '%s' "$list" | jq -e '
-    (.result.workspaces | type) == "array"
-    and all(.result.workspaces[];
-      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
-      and (.label | type) == "string"
-    )
-  ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_workspace_list_valid "$list" || return 1
   if owner_wsid=$(fm_backend_herdr_workspace_owner_read "$session" "$label" 2>/dev/null); then
     printf '%s' "$list" | jq -e --arg want "$label" --arg owner "$owner_wsid" \
       '[.result.workspaces[] | select(.label == $want and .workspace_id == $owner)] | length == 1' \
@@ -307,8 +366,156 @@ fm_backend_herdr_workspace_tab_labels() {  # <session> [workspace]
     end' 2>/dev/null
 }
 
+fm_backend_herdr_workspace_list_valid() {
+  printf '%s' "$1" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[];
+      type == "object"
+      and (.workspace_id | type) == "string"
+      and (.workspace_id | length) > 0
+      and (.label | type) == "string"
+    )
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_snapshot_valid() {
+  printf '%s' "$1" | jq -e '
+    (.result.snapshot | type) == "object"
+    and (.result.snapshot.workspaces | type) == "array"
+    and all(.result.snapshot.workspaces[];
+      type == "object"
+      and (.workspace_id | type) == "string"
+      and (.workspace_id | length) > 0
+      and (.label | type) == "string"
+      and (.active_tab_id | type) == "string"
+    )
+    and (.result.snapshot.tabs | type) == "array"
+    and all(.result.snapshot.tabs[];
+      type == "object"
+      and (.workspace_id | type) == "string"
+      and (.tab_id | type) == "string"
+      and (.label | type) == "string"
+    )
+    and (.result.snapshot.panes | type) == "array"
+    and all(.result.snapshot.panes[];
+      type == "object"
+      and (.workspace_id | type) == "string"
+      and (.tab_id | type) == "string"
+      and (.pane_id | type) == "string"
+      and (.pane_id | length) > 0
+    )
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_snapshot() {
+  fm_backend_herdr_cli "$1" api snapshot 2>/dev/null
+}
+
+fm_backend_herdr_pane_for_tab_exact() {
+  local session=$1 wsid=$2 tab_id=$3 panes
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -er --arg workspace "$wsid" --arg tab "$tab_id" '
+    if (.result.panes | type) != "array"
+       or (any(.result.panes[]; type != "object" or (.workspace_id | type) != "string"
+         or (.tab_id | type) != "string" or (.pane_id | type) != "string"
+         or (.pane_id | length) == 0))
+    then empty
+    else ([.result.panes[] | select(.workspace_id == $workspace and .tab_id == $tab)]
+      | if length == 1 then .[0].pane_id else empty end)
+    end
+  ' 2>/dev/null
+}
+
+fm_backend_herdr_tab_pane_identity_matches() {
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 label=${5:-} tabs
+  [ -n "$wsid" ] && [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_tab_list_valid "$tabs" || return 1
+  printf '%s' "$tabs" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" --arg pane "$pane_id" --arg label "$label" '
+    ([.result.tabs[] | select(
+      (.workspace_id | type) == "string" and .workspace_id == $workspace
+      and (.tab_id | type) == "string" and .tab_id == $tab
+      and (.label | type) == "string" and ($label == "" or .label == $label)
+    )] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_pane_for_tab_exact "$session" "$wsid" "$tab_id" | grep -Fqx -- "$pane_id"
+}
+
+fm_backend_herdr_workspace_seed_identity_matches() {
+  local session=$1 label=$2 cwd=$3 wsid=$4 tab_id=$5 pane_id=$6 snapshot
+  snapshot=$(fm_backend_herdr_snapshot "$session") || return 1
+  fm_backend_herdr_snapshot_valid "$snapshot" || return 1
+  printf '%s' "$snapshot" | jq -e --arg workspace "$wsid" --arg label "$label" \
+    --arg cwd "$cwd" --arg tab "$tab_id" --arg pane "$pane_id" '
+    .result.snapshot as $s
+    | ([ $s.workspaces[] | select(.workspace_id == $workspace and .label == $label
+        and .active_tab_id == $tab) ] | length) == 1
+    and ([ $s.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab) ] | length) == 1
+    and ([ $s.panes[] | select(.workspace_id == $workspace and .tab_id == $tab
+        and .pane_id == $pane and ((.cwd? == $cwd) or (.foreground_cwd? == $cwd))) ] | length) == 1
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_workspace_absent() {
+  local session=$1 wsid=$2 snapshot
+  snapshot=$(fm_backend_herdr_snapshot "$session") || return 1
+  fm_backend_herdr_snapshot_valid "$snapshot" || return 1
+  printf '%s' "$snapshot" | jq -e --arg workspace "$wsid" '
+    ([.result.snapshot.workspaces[] | select(.workspace_id == $workspace)] | length) == 0
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_workspace_discover_created() {
+  local session=$1 label=$2 cwd=$3 before=$4 after endpoint
+  fm_backend_herdr_snapshot_valid "$before" || return 1
+  after=$(fm_backend_herdr_snapshot "$session") || return 1
+  fm_backend_herdr_snapshot_valid "$after" || return 1
+  endpoint=$(printf '%s' "$after" | jq -r --arg label "$label" --arg cwd "$cwd" --argjson before "$before" '
+    .result.snapshot as $s
+    | [$before.result.snapshot.workspaces[] | .workspace_id] as $before_ids
+    | [ $s.workspaces[] as $workspace
+      | select($workspace.label == $label)
+      | select(($before_ids | index($workspace.workspace_id)) == null)
+      | [ $s.panes[] | select(.workspace_id == $workspace.workspace_id
+          and ((.cwd? == $cwd) or (.foreground_cwd? == $cwd))) ] as $panes
+      | select(($panes | length) == 1)
+      | select($panes[0].tab_id == $workspace.active_tab_id)
+      | [$workspace.workspace_id, $panes[0].tab_id, $panes[0].pane_id]
+    ]
+    | if length == 1 then .[0] | @tsv else empty end
+  ' 2>/dev/null) || return 1
+  [ -n "$endpoint" ] || return 1
+  printf '%s' "$endpoint"
+}
+
+fm_backend_herdr_workspace_create_failure() {
+  local session=$1 label=$2 cwd=$3 before_snapshot=$4 reason=$5 endpoint wsid tab_id pane_id uncertainty
+  if endpoint=$(fm_backend_herdr_workspace_discover_created \
+    "$session" "$label" "$cwd" "$before_snapshot" 2>/dev/null); then
+    IFS=$'\t' read -r wsid tab_id pane_id <<EOF
+$endpoint
+EOF
+    if [ -n "$pane_id" ] \
+      && fm_backend_herdr_workspace_seed_identity_matches \
+        "$session" "$label" "$cwd" "$wsid" "$tab_id" "$pane_id" \
+      && fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" \
+      && fm_backend_herdr_workspace_absent "$session" "$wsid"; then
+      echo "error: Herdr workspace create failed for '$label' in session '$session'; exact workspace $wsid was reconciled" >&2
+      return 1
+    fi
+  fi
+  uncertainty=$(fm_backend_herdr_workspace_uncertainty_record \
+    "$session" "$label" "$reason" 2>/dev/null || true)
+  if [ -n "$uncertainty" ]; then
+    echo "error: Herdr workspace create failed for '$label' in session '$session'; cleanup uncertainty recorded at $uncertainty" >&2
+  else
+    echo "error: Herdr workspace create failed for '$label' in session '$session'; cleanup uncertainty could not be recorded" >&2
+  fi
+  return 1
+}
+
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
-  local session=$1 cwd=$2 wsid out label
+  local session=$1 cwd=$2 cwd_real wsid out label tab_id pane_id create_status before_list before_snapshot
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 1
@@ -318,7 +525,49 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
     return 0
   fi
   label=$(fm_backend_herdr_workspace_label)
-  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  cwd_real=$(cd "$cwd" 2>/dev/null && pwd -P) || {
+    echo "error: could not resolve Herdr workspace cwd '$cwd'; refusing workspace creation" >&2
+    return 1
+  }
+  before_list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+    echo "error: could not inspect Herdr workspaces before creating '$label' in session '$session'; refusing workspace creation" >&2
+    return 1
+  }
+  fm_backend_herdr_workspace_list_valid "$before_list" || {
+    echo "error: could not validate Herdr workspaces before creating '$label' in session '$session'; refusing workspace creation" >&2
+    return 1
+  }
+  before_snapshot=$(fm_backend_herdr_snapshot "$session") || {
+    echo "error: could not inspect Herdr snapshot before creating '$label' in session '$session'; refusing workspace creation" >&2
+    return 1
+  }
+  fm_backend_herdr_snapshot_valid "$before_snapshot" || {
+    echo "error: could not validate Herdr snapshot before creating '$label' in session '$session'; refusing workspace creation" >&2
+    return 1
+  }
+  if out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null); then
+    create_status=0
+  else
+    create_status=$?
+  fi
+  wsid=$(printf '%s' "$out" | jq -r '
+    select((.result.workspace.workspace_id | type) == "string" and (.result.workspace.workspace_id | length) > 0)
+    | .result.workspace.workspace_id
+  ' 2>/dev/null) || wsid=
+  tab_id=$(printf '%s' "$out" | jq -r '
+    select((.result.tab.tab_id | type) == "string" and (.result.tab.tab_id | length) > 0)
+    | .result.tab.tab_id
+  ' 2>/dev/null) || tab_id=
+  pane_id=$(printf '%s' "$out" | jq -r '
+    select((.result.root_pane.pane_id | type) == "string" and (.result.root_pane.pane_id | length) > 0)
+    | .result.root_pane.pane_id
+  ' 2>/dev/null) || pane_id=
+  if [ "$create_status" -ne 0 ] || [ -z "$wsid" ] || [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$cwd_real" "$before_snapshot" \
+      "workspace create returned incomplete or failed provider output"
+    return 1
+  fi
   printf '%s' "$out" | jq -e '
     (.result.workspace.workspace_id | type) == "string"
     and (.result.workspace.workspace_id | length) > 0
@@ -326,10 +575,27 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
     and (.result.tab.tab_id | length) > 0
     and (.result.root_pane.pane_id | type) == "string"
     and (.result.root_pane.pane_id | length) > 0
-  ' >/dev/null 2>&1 || return 1
-  wsid=$(printf '%s' "$out" | jq -er '.result.workspace.workspace_id' 2>/dev/null) || return 1
+  ' >/dev/null 2>&1 || {
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$cwd_real" "$before_snapshot" \
+      "workspace create returned malformed provider output"
+    return 1
+  }
+  if ! fm_backend_herdr_workspace_seed_identity_matches \
+    "$session" "$label" "$cwd_real" "$wsid" "$tab_id" "$pane_id"; then
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$cwd_real" "$before_snapshot" \
+      "workspace create returned an unverified provider identity"
+    return 1
+  fi
   FM_BACKEND_HERDR_WS_ID=$wsid
-  fm_backend_herdr_workspace_owner_write "$session" "$label" "$wsid" || return 1
+  FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$tab_id
+  fm_backend_herdr_workspace_owner_write "$session" "$label" "$wsid" || {
+    fm_backend_herdr_workspace_create_failure \
+      "$session" "$label" "$cwd_real" "$before_snapshot" \
+      "workspace ownership record could not be persisted"
+    return 1
+  }
   printf '%s' "$wsid"
 }
 
@@ -489,8 +755,15 @@ fm_backend_herdr_current_path() {  # <target>
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
 # the command and submits it in one call (verified).
 fm_backend_herdr_send_text_line() {  # <target> <text>
-  fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  local target=$1 text=$2
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr atomic pane.run target '$target' is unavailable" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1 || {
+    echo "error: Herdr atomic pane.run submit failed for target '$target'" >&2
+    return 1
+  }
 }
 
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
@@ -498,8 +771,15 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
 fm_backend_herdr_send_literal() {  # <target> <text>
-  fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  local target=$1 text=$2
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr literal-send target '$target' is unavailable" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1 || {
+    echo "error: Herdr pane.send-text failed for target '$target'" >&2
+    return 1
+  }
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
@@ -519,10 +799,16 @@ fm_backend_herdr_normalize_key() {  # <key>
 # fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
 # path (tmux's `send-keys -t T key`).
 fm_backend_herdr_send_key() {  # <target> <key>
-  fm_backend_herdr_target_ready "$1" || return 1
-  local key
+  local target=$1 key
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr key-send target '$target' is unavailable" >&2
+    return 1
+  }
   key=$(fm_backend_herdr_normalize_key "$2")
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1 || {
+    echo "error: Herdr pane.send-keys failed for target '$target' (key '$key')" >&2
+    return 1
+  }
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
@@ -956,9 +1242,6 @@ fm_backend_herdr_submit_enter() {  # <target> <retries> <enter-sleep> [expected-
   done
 }
 
-# fm_backend_herdr_kill: remove the task's exact pane and prove it disappeared.
-# Verified: closing a tab's only pane closes the tab too, so a separate tab
-# close is unnecessary.
 fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
   case "$1" in
     working) printf 'busy' ;;
@@ -1472,38 +1755,122 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   return 2
 }
 
+fm_backend_herdr_reconcile_failed_task_tab() {
+  local session=$1 wsid=$2 label=$3 tab_id=${4:-} pane_id=${5:-} list matches
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_tab_list_valid "$list" || return 1
+  if [ -z "$tab_id" ] || [ -z "$pane_id" ] \
+    || ! fm_backend_herdr_tab_pane_identity_matches "$session" "$wsid" "$tab_id" "$pane_id" "$label"; then
+    matches=$(printf '%s' "$list" | jq -er --arg workspace "$wsid" --arg want "$label" '
+      [.result.tabs[] | select(.workspace_id == $workspace and .label == $want)]
+      | if length == 1 then .[0].tab_id else empty end
+    ' 2>/dev/null) || return 1
+    tab_id=$matches
+    pane_id=$(fm_backend_herdr_pane_for_tab_exact "$session" "$wsid" "$tab_id") || return 1
+    fm_backend_herdr_tab_pane_identity_matches "$session" "$wsid" "$tab_id" "$pane_id" "$label" || return 1
+  fi
+  fm_backend_herdr_provider_close_tab_bound "$session" "$wsid" "$tab_id" "$pane_id" || return 1
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_tab_list_valid "$list" || return 1
+  printf '%s' "$list" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" '
+    ([.result.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab)] | length) == 0
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_tab_list_valid() {
+  printf '%s' "$1" | jq -e '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[];
+      type == "object"
+      and (.tab_id | type) == "string"
+      and (.tab_id | length) > 0
+      and (.label | type) == "string"
+    )
+  ' >/dev/null 2>&1
+}
+
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> [seeded-default-tab]
-  local container=$1 label=$2 cwd=$3 session wsid list duplicate out tab_id pane_id
+  local container=$1 label=$2 cwd=$3 session wsid list duplicate out tab_id pane_id create_status
   session=${container%%:*}
   wsid=${container#*:}
-  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+    echo "error: could not list Herdr task tabs in workspace $wsid (session $session)" >&2
+    return 1
+  }
+  fm_backend_herdr_tab_list_valid "$list" || {
+    echo "error: could not inspect Herdr task tabs in workspace $wsid (session $session)" >&2
+    return 1
+  }
   duplicate=$(printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null) || return 1
+    '.result.tabs[] | select(.label == $want) | .tab_id' 2>/dev/null) || {
+    echo "error: could not inspect Herdr task tabs in workspace $wsid (session $session)" >&2
+    return 1
+  }
   [ -z "$duplicate" ] || {
     echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
     return 1
   }
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" \
-    --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  if out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" \
+    --cwd "$cwd" --label "$label" --no-focus 2>/dev/null); then
+    create_status=0
+  else
+    create_status=$?
+  fi
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+  if [ "$create_status" -ne 0 ] || [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    if ! fm_backend_herdr_reconcile_failed_task_tab "$session" "$wsid" "$label" "$tab_id" "$pane_id"; then
+      printf 'cleanup-uncertain\t%s:%s\t%s\n' "$session" "$wsid" "$label"
+      echo "error: could not reconcile Herdr task tab '$label' in workspace $wsid (session $session); refusing with cleanup uncertainty" >&2
+    fi
+    echo "error: could not create Herdr task tab '$label' in workspace $wsid (session $session)" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_tab_pane_identity_matches \
+    "$session" "$wsid" "$tab_id" "$pane_id" "$label"; then
+    if ! fm_backend_herdr_reconcile_failed_task_tab \
+      "$session" "$wsid" "$label" "$tab_id" "$pane_id"; then
+      printf 'cleanup-uncertain\t%s:%s\t%s\n' "$session" "$wsid" "$label"
+      echo "error: could not reconcile Herdr task tab '$label' in workspace $wsid (session $session); refusing with cleanup uncertainty" >&2
+    fi
+    echo "error: Herdr task tab '$label' returned an unverified provider identity in workspace $wsid (session $session)" >&2
+    return 1
+  fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+# fm_backend_herdr_kill: close the task's exact pane only with its expected
+# process pid/start-time identity, then prove it disappeared. A bound close
+# prevents pane/PID drift. Verified: closing a tab's only pane closes the tab
+# too, so a separate tab close is unnecessary for normal teardown.
 fm_backend_herdr_kill() {  # <target> [pid] [start-time]
   local target=$1 expected_pid=${2:-} expected_start=${3:-} state
-  fm_backend_herdr_target_ready "$target" || return 1
+  fm_backend_herdr_target_ready "$target" || {
+    echo "error: Herdr teardown target '$target' is unavailable" >&2
+    return 1
+  }
   state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   case "$state" in
     dead) return 0 ;;
     live)
-      [ -n "$expected_pid" ] && [ -n "$expected_start" ] || return 1
+      if [ -z "$expected_pid" ] || [ -z "$expected_start" ]; then
+        echo "error: Herdr teardown target '$target' lacks bound process identity" >&2
+        return 1
+      fi
       fm_backend_herdr_provider_close_bound \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$expected_pid" \
-        "$expected_start" || return 1
+        "$expected_start" || {
+        echo "error: Herdr bound pane.close_bound failed for target '$target'" >&2
+        return 1
+      }
       ;;
-    *) return 1 ;;
+    *)
+      echo "error: Herdr teardown target '$target' has unsafe agent state '$state'" >&2
+      return 1
+      ;;
   esac
-  [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = dead ]
+  if [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" != dead ]; then
+    echo "error: Herdr bound pane.close_bound did not close target '$target'" >&2
+    return 1
+  fi
 }
