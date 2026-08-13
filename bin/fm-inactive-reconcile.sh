@@ -113,6 +113,20 @@ queue_contains() {  # <key>
   awk -F '\t' -v wanted="$key" '$4 == wanted { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE" 2>/dev/null
 }
 
+run_bounded_child() {  # <seconds> <command> [args...]
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  else
+    return 125
+  fi
+}
+
 receipt_path() {  # <fingerprint> <suffix>
   printf '%s/%s.%s' "$OUTCOME_DIR" "$1" "$2"
 }
@@ -288,6 +302,8 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   [ ! -L "$target" ] || return 2
   [ ! -e "$target" ] || { rm -f "$rec"; return 0; }
   mv "$rec" "$target" || return 2
+  [ "$kind" = secondmate ] || return 0
+  fm_pending_reply_secondmate_route_clear "$FM_HOME" "$corr" || true
   return 0
 }
 
@@ -325,7 +341,7 @@ scan_locked() {
     fi
     printf '%s\n' "$id" > "$SCAN_CURSOR"
     rc=0
-    FM_LOCK_WAIT_SECS="$remaining" timeout --foreground "$remaining" \
+    FM_LOCK_WAIT_SECS="$remaining" run_bounded_child "$remaining" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" _child "$id" || rc=$?
     if [ "$rc" -ne 0 ]; then
       complete=0

@@ -490,13 +490,21 @@ fm_pending_reply_secondmate_route_path() {  # <secondmate-home>
   printf '%s/state/.fm-jt-parent-route' "$1"
 }
 
+fm_pending_reply_secondmate_route_lock_path() {  # <secondmate-home>
+  printf '%s/state/.fm-jt-parent-route.lock' "$1"
+}
+
 fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <parent-state> <secondmate-id> <corr-id>
   local secondmate_home=$1 parent_home=$2 parent_state=$3 secondmate_id=$4 corr=$5
-  local marker tmp parent_abs state_abs status_path
+  local marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
+  local existing_schema existing_id existing_home existing_status existing_corr
+  local existing_state existing_record existing_phase
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   case "$secondmate_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  marker_id=$(cat "$secondmate_home/.fm-secondmate-home" 2>/dev/null || true)
+  [ "$marker_id" = "$secondmate_id" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
   state_abs=$(cd "$parent_state" 2>/dev/null && pwd -P) || return 1
   status_path="$state_abs/$secondmate_id.status"
@@ -510,7 +518,89 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
     printf 'corr_id=%s\n' "$corr"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$marker"
+  route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
+  if ! fm_lock_acquire_wait "$route_lock"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    if [ -f "$marker" ] && [ ! -L "$marker" ] \
+      && [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" = 5 ]; then
+      existing_schema=$(fm_pending_reply_get "$marker" schema)
+      existing_id=$(fm_pending_reply_get "$marker" secondmate_id)
+      existing_home=$(fm_pending_reply_get "$marker" parent_home)
+      existing_status=$(fm_pending_reply_get "$marker" parent_status)
+      existing_corr=$(fm_pending_reply_get "$marker" corr_id)
+      if [ "$existing_schema" = fm-jt-parent-route.v1 ] \
+        && [ "$existing_id" = "$secondmate_id" ] \
+        && [ "$existing_home" = "$parent_abs" ] \
+        && [ "$existing_status" = "$status_path" ] \
+        && [ "$existing_corr" = "$corr" ]; then
+        rm -f "$tmp"
+        fm_lock_release "$route_lock" || return 1
+        return 0
+      fi
+      if [ "$existing_schema" != fm-jt-parent-route.v1 ] \
+        || [ "$existing_id" != "$secondmate_id" ]; then
+        route_status=1
+      fi
+      case "$existing_home" in /*) ;; *) route_status=1 ;; esac
+      case "$existing_status" in /*) ;; *) route_status=1 ;; esac
+      printf '%s' "$existing_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || route_status=1
+      if [ "$route_status" = 0 ]; then
+        existing_state=$(cd "$existing_home/state" 2>/dev/null && pwd -P) || route_status=1
+      fi
+      if [ "$route_status" = 0 ] \
+        && [ "$existing_status" != "$existing_state/$existing_id.status" ]; then
+        route_status=1
+      fi
+      if [ "$route_status" = 0 ]; then
+        if [ -f "$(fm_pending_reply_active_path "$existing_state" "$existing_corr")" ]; then
+          existing_record=$(fm_pending_reply_active_path "$existing_state" "$existing_corr")
+        elif [ -f "$(fm_pending_reply_history_dir "$existing_state")/$existing_corr" ]; then
+          existing_record="$(fm_pending_reply_history_dir "$existing_state")/$existing_corr"
+        else
+          route_status=1
+        fi
+      fi
+      if [ "$route_status" = 0 ]; then
+        existing_phase=$(fm_pending_reply_get "$existing_record" phase)
+        case "$existing_phase" in
+          resolved|retired) ;;
+          *) route_status=1 ;;
+        esac
+      fi
+    else
+      route_status=1
+    fi
+  fi
+  if [ "$route_status" = 0 ]; then
+    mv -f "$tmp" "$marker" || route_status=1
+  fi
+  [ "$route_status" = 0 ] || rm -f "$tmp"
+  fm_lock_release "$route_lock" || route_status=1
+  return "$route_status"
+}
+
+fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
+  local secondmate_home=$1 corr=$2 marker route_lock existing_corr status=0
+  marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
+  fm_lock_acquire_wait "$route_lock" || return 1
+  if [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" != 5 ]; then
+    status=1
+  else
+    existing_corr=$(fm_pending_reply_get "$marker" corr_id)
+  [ "$existing_corr" = "$corr" ] || status=1
+  fi
+  if [ "$status" = 0 ]; then
+    rm -f "$marker" || status=1
+  fi
+  fm_lock_release "$route_lock" || status=1
+  return "$status"
 }
 
 fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>

@@ -89,6 +89,14 @@ PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
 TARGET_HOME=
+
+clear_new_pending_route() {
+  if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+    && [ -n "$TARGET_HOME" ]; then
+    fm_pending_reply_secondmate_route_clear "$TARGET_HOME" "$PENDING_REPLY_CORR" || true
+  fi
+}
+
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
@@ -137,6 +145,7 @@ else
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
     if [ "$PENDING_REPLY_CREATED" = 1 ] \
       && ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+      clear_new_pending_route
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
@@ -144,6 +153,7 @@ else
     TARGET_HOME=$(fm_meta_get "$meta" home)
     if ! fm_pending_reply_secondmate_route_write \
       "$TARGET_HOME" "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$PENDING_REPLY_CORR"; then
+      clear_new_pending_route
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -181,6 +191,7 @@ else
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle"); then
+    clear_new_pending_route
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
@@ -194,6 +205,7 @@ else
     sleep "$settle"
     final_after_pending=1
     if ! verdict=$(fm_backend_submit_enter "$TARGET_BACKEND" "$T" 1 "$sleep_s" "$MESSAGE"); then
+      clear_new_pending_route
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -203,6 +215,7 @@ else
   fi
   case "$verdict" in
     pending)
+      clear_new_pending_route
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -210,6 +223,7 @@ else
       exit 1
       ;;
     send-failed)
+      clear_new_pending_route
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -218,6 +232,7 @@ else
       ;;
     unknown)
       if [ "$final_after_pending" = 1 ]; then
+        clear_new_pending_route
         if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
           fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
         fi

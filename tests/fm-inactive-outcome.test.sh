@@ -126,6 +126,27 @@ test_done_and_failed_are_replayed_once() {
   pass "done and failed inactive outcomes are replayed once and acknowledged on drain"
 }
 
+test_portable_timeout_runner_is_used() {
+  local dir root home fakebin state
+  new_case portable-timeout
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" portable-x1 portable-inc
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" != --foreground ] || exit 91
+shift
+exec "$@"
+SH
+  chmod +x "$fakebin/timeout"
+  export FM_FAKE_CREW_STATE_PORTABLE_X1='state: done · source: pane · portable timeout'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "portable timeout runner did not reconcile the child"
+  unset FM_FAKE_CREW_STATE_PORTABLE_X1
+  pass "inactive scan uses the portable timeout invocation"
+}
+
 test_reused_task_id_gets_new_fingerprint() {
   local dir root home fakebin state
   new_case reused-id
@@ -263,6 +284,7 @@ test_valid_secondmate_route_reports_parent_once() {
   [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "valid secondmate route did not create a pending receipt"
   drain "$root" "$child_home" "$fakebin" >/dev/null
   [ "$(receipt_count "$child_state" reported)" = 1 ] || fail "valid secondmate route was not reported"
+  [ ! -e "$child_state/.fm-jt-parent-route" ] || fail "reported secondmate route remained installed"
   grep -F "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status" >/dev/null \
     || fail "valid secondmate route did not append the correlated parent status"
   drain "$root" "$child_home" "$fakebin" >/dev/null
@@ -270,6 +292,69 @@ test_valid_secondmate_route_reports_parent_once() {
     || fail "secondmate parent report was duplicated"
   unset FM_FAKE_CREW_STATE_CHILD_X1
   pass "valid secondmate outcomes use the parent status correlation exactly once"
+}
+
+test_concurrent_secondmate_routes_are_rejected() {
+  local dir root home fakebin state child_home child_state marker corr_one corr_two
+  new_case secondmate-route-concurrent
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  marker="$child_state/.fm-jt-parent-route"
+  corr_one=0123456789abcdef
+  corr_two=1123456789abcdef
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$state/pending-replies"
+  printf 'sm-concurrent\n' > "$child_home/.fm-secondmate-home"
+  fm_write_meta "$state/pending-replies/$corr_one" \
+    schema=fm-pending-reply.v1 corr_id="$corr_one" task_id=sm-concurrent \
+    parent_home="$home" parent_status="$state/sm-concurrent.status" delivered_epoch=1 phase=awaiting_report
+  fm_write_meta "$state/pending-replies/$corr_two" \
+    schema=fm-pending-reply.v1 corr_id="$corr_two" task_id=sm-concurrent \
+    parent_home="$home" parent_status="$state/sm-concurrent.status" delivered_epoch=1 phase=awaiting_report
+  route_write() {
+    env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" bash -c \
+      '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+      _ "$ROOT" "$child_home" "$home" "$state" sm-concurrent "$1"
+  }
+  route_write "$corr_one" || fail "initial secondmate route was not written"
+  marker_before=$(cat "$marker")
+  if route_write "$corr_two"; then
+    fail "concurrent secondmate route was silently replaced"
+  fi
+  [ "$(cat "$marker")" = "$marker_before" ] || fail "concurrent route rejection changed the active marker"
+  pass "concurrent secondmate routes fail closed without overwriting"
+}
+
+test_drain_restores_only_unprocessed_rows() {
+  local dir root home fakebin state first second
+  new_case drain-rollback
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  first=1111111111111111
+  second=2222222222222222
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$first.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$first" task_id=first-x1 \
+    incarnation=first-inc outcome=done terminal_source=pane terminal_snapshot=done kind=ship
+  fm_write_meta "$state/terminal-outcomes/$second.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$second" task_id=second-x1 \
+    incarnation=second-inc outcome=failed terminal_source=pane terminal_snapshot=failed kind=secondmate
+  printf 'sm-rollback\n' > "$home/.fm-secondmate-home"
+  printf '1\t1\tcheck\tinactive-outcome:%s\tfirst\n2\t2\tcheck\tinactive-outcome:%s\tsecond\n' \
+    "$first" "$second" > "$state/.wake-queue"
+  if drain "$root" "$home" "$fakebin" >"$dir/drain.out" 2>&1; then
+    fail "drain accepted a malformed secondmate route"
+  fi
+  [ -e "$state/terminal-outcomes/$first.presented" ] || fail "presented receipt was not acknowledged"
+  [ ! -e "$state/terminal-outcomes/$first.pending" ] || fail "presented receipt remained pending"
+  [ -e "$state/terminal-outcomes/$second.pending" ] || fail "failed receipt was lost"
+  [ "$(awk -F '\t' '$4 == "inactive-outcome:'"$first"'" { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
+    || fail "already-presented receipt was requeued"
+  [ "$(awk -F '\t' '$4 == "inactive-outcome:'"$second"'" { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
+    || fail "unprocessed receipt was not requeued"
+  pass "drain rollback preserves only unprocessed inactive outcomes"
 }
 
 test_malformed_or_missing_secondmate_route_fails_closed() {
@@ -294,10 +379,13 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
 }
 
 test_done_and_failed_are_replayed_once
+test_portable_timeout_runner_is_used
 test_reused_task_id_gets_new_fingerprint
 test_relaunch_and_teardown_races_recheck_under_spawn_lock
 test_herdr_identity_and_default_captain_refusal
 test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_valid_secondmate_route_reports_parent_once
+test_concurrent_secondmate_routes_are_rejected
+test_drain_restores_only_unprocessed_rows
 test_malformed_or_missing_secondmate_route_fails_closed
