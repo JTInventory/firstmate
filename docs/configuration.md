@@ -14,7 +14,7 @@ Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1
 
 ## Captain preferences (data/captain.md)
 
-Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/secondmates.md` during bootstrap.
+Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and printed in the `CONTEXT` section of the session-start digest alongside the project registry and optional route files.
 
 ## Secondmate routes (data/secondmates.md)
 
@@ -98,6 +98,8 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task; each line is capped at 220 characters with ` [truncated]`
+FM_SESSION_START_QUEUED_LIMIT=20 # plain ready queued rows in the session-start digest; in-flight, held, and blocked rows are kept, done rows are omitted
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap

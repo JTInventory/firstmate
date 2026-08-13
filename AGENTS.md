@@ -103,15 +103,20 @@ state/               volatile runtime signals; gitignored
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
 The tmux window for a task is always named `fm-<id>`.
 
-## 3. Bootstrap (run at every session start)
+## 3. Session start and bootstrap (run at every session start)
 
 Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
 
-Run `bin/fm-bootstrap.sh`.
+Run `bin/fm-session-start.sh` as the one session-start entrypoint.
+It acquires the per-home lock before bootstrap, runs the mutating bootstrap and
+wake-drain steps only when it owns that lock, and then prints the ordered
+`READ-ONCE CONTRACT`, `FLEET STATE`, `CONTEXT`, and `NEXT STEP` sections.
+Do not run the old component sequence separately or bulk-reread the sources
+already covered by the digest.
 If the session-start harness shows only a preview and a full digest was persisted, read the exact path supplied by the harness or the session-start wrapper, then act on that complete artifact.
 Do not guess filenames.
-Do not bulk-reread the already persisted complete session-start artifact after reading the exact path supplied by the harness; section 5 recovery still requires reading every `state/*.meta` and `state/*.status`.
+Do not bulk-reread the already persisted complete session-start artifact after reading the exact path supplied by the harness; follow the emitted `READ-ONCE CONTRACT` for any targeted follow-up.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Bootstrap also sweeps every live secondmate home, fast-forwarding each one's worktree to firstmate's own current default-branch commit so the fleet stays converged on whatever version firstmate is on.
@@ -140,11 +145,17 @@ Otherwise it prints one line per problem or capability fact; handle each:
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
 
-Then read `data/projects.md`, the fleet registry, to load what each project is.
-If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
-Then read `data/secondmates.md` if present so intake can route work by registered secondmate scope (section 7).
-Then read `data/captain.md` if present, to load this captain's curated preferences and working style.
-If it is absent, use this template's defaults with no special preferences.
+The digest's `CONTEXT` section includes `data/projects.md`, `data/secondmates.md`,
+`data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` when they
+exist, with explicit `ABSENT` markers otherwise.
+If `data/projects.md` is absent or disagrees with what is actually under
+`projects/`, rebuild it from the clones (a README skim per project is enough)
+before taking on work.
+Use the printed `data/secondmates.md` content, when present, to route work by
+registered secondmate scope (section 7).
+Use the printed `data/captain.md` content, when present, to load this captain's
+curated preferences and working style; if it is absent, use this template's
+defaults with no special preferences.
 Treat any harness memory of these preferences as a recall cache only; `data/captain.md` is the canonical, harness-portable home.
 
 Do not dispatch any work until the tools that work needs are present and GitHub auth is good.
@@ -166,29 +177,32 @@ If `config/crew-harness` names an unverified one, tell the captain and fall back
 If the captain asks for a new harness, load `harness-adapters`, verify it empirically with a trivial supervised task, then commit the script and knowledge changes.
 Load `harness-adapters` before any spawn, recovery, trust-dialog handling, harness-specific skill invocation, interrupt, exit, resume, or adapter verification.
 
-## 5. Recovery (run at every session start, after bootstrap)
+## 5. Recovery (performed by the session-start digest)
 
 You may have been restarted mid-flight.
 Reconcile reality with your records before doing anything else:
 
-1. Run `bin/fm-lock.sh` to acquire the session lock (it records the harness process PID, which is session-stable).
-   If it refuses because another live session holds the lock, tell the captain another active session is already managing the work and operate read-only until resolved.
-2. Drain queued wakes with `bin/fm-wake-drain.sh` and keep the printed records as the first work queue for this recovery turn.
-3. Read `data/backlog.md`, `data/secondmates.md` if present, every `state/*.meta`, and every `state/*.status`.
-   Treat status files as wake-event history; when you need a live current-state read for a recorded direct report, use `bin/fm-crew-state.sh <id>` instead of inferring from the last status line.
-4. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those tmux panes.
+`bin/fm-session-start.sh` performs the lock, bootstrap, and wake-drain steps
+above, then prints a compact backlog listing, every `state/*.meta`, and a
+bounded tail of every `state/*.status` in `FLEET STATE`. A lock refusal still
+produces the read-only-safe digest and leaves queued wakes untouched. Treat the
+printed wake records as this turn's first work queue and follow the emitted
+`READ-ONCE CONTRACT`; it names the narrow cases that justify a targeted source
+read, such as a full task body or a capped status line.
+
+1. Use the `window=` values from this home's `state/*.meta` files as the live direct-report set, then check those tmux panes.
    Do not sweep every `fm-*` tmux window across all sessions during recovery; another firstmate home's child panes may share that namespace and are not this home's orphans.
-5. If a recorded direct-report window is missing, reconcile it through its meta as described below.
-6. For meta with no window, reconcile by kind.
+2. If a recorded direct-report window is missing, reconcile it through its meta as described below.
+3. For meta with no window, reconcile by kind.
    For ordinary crewmates, check `treehouse status` in that project, salvage or report.
    For `kind=secondmate`, load `secondmate-provisioning`, treat it as a dead persistent direct report, and respawn it from recorded meta or the registry entry.
-7. Do not reconstruct a secondmate's whole tree from the main home.
+4. Do not reconstruct a secondmate's whole tree from the main home.
    The main firstmate reconciles only direct reports.
    Each secondmate is a firstmate in its own home, so it reconciles only work that is already its own and then idles; it never creates new work during recovery.
-8. If `state/.afk` is present, load `/afk`, ensure the daemon is running, do not separately arm the watcher because the daemon owns it, and resume away-mode supervision.
-9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
+5. If `state/.afk` is present, load `/afk`, ensure the daemon is running, do not separately arm the watcher because the daemon owns it, and resume away-mode supervision.
+6. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
-10. Handle drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
+7. Handle the printed drained wakes, then follow the section 8 watcher checklist; if `state/.afk` exists, the daemon owns the watcher.
 
 A firstmate restart must be a non-event.
 All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
@@ -466,7 +480,7 @@ Only an actionable wake is written to the durable queue at `state/.wake-queue` -
 That is what eliminates the quiet-stretch churn: during a long crew validation the benign `turn-ended`/`working:`/non-terminal-stale/no-change-heartbeat wakes are all absorbed in bash, the liveness beacon (`state/.last-watcher-beat`) stays fresh the whole time so `fm-guard.sh` never false-alarms, and your LLM is woken only when something genuinely needs you.
 The classifier lives in `bin/fm-classify-lib.sh` and is shared: the same captain-relevant verb set and signal/stale/heartbeat predicates back both this always-on watcher and the away-mode daemon, so the two can never drift apart.
 While `state/.afk` exists the daemon owns supervision, so the watcher reverts to one-shot - it surfaces every wake for the daemon to classify - and never double-triages.
-At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
+At the start of every wake-handling turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work; the session-start digest already performs that drain for recovery turns.
 The printed reason line is still useful, but the drained queue is the lossless backlog.
 **Keep exactly one live cycle.**
 The arm chain IS the supervision: while any task is in flight, keep exactly one live `bin/fm-watch-arm.sh` background task at all times, because if no cycle is live firstmate is blind.
@@ -495,7 +509,7 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 bin/fm-watch-arm.sh        # safe verified re-arm; run as harness-tracked background; no-ops if healthy
 bin/fm-watch-arm.sh --restart  # home-scoped forced restart; never a broad pkill
 bin/fm-watch.sh            # the watcher itself; exits with: signal|stale|check|heartbeat
-bin/fm-wake-drain.sh       # drain queued wake records at turn start; asserts guard after draining
+bin/fm-wake-drain.sh       # drain queued wake records on a standalone wake-handling turn; asserts guard after draining
 bin/fm-crew-state.sh <id>  # one-line current-state read; reconciles matching run-step, pane, and status log
 ```
 
