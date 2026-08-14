@@ -35,7 +35,11 @@ TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 FM_FAKE_HARNESS_PID=$$
 FM_UPDATE_THREAD_ID="fm-update-test-$FM_FAKE_HARNESS_PID"
 FM_UPDATE_FAKEBIN="$TMP_ROOT/fakebin"
-export FM_FAKE_HARNESS_PID CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID"
+FM_UPDATE_REAL_PS=$(command -v ps 2>/dev/null) \
+  || fail "fm-update tests require a host ps executable"
+[ -n "$FM_UPDATE_REAL_PS" ] || fail "fm-update tests require a host ps executable"
+export FM_FAKE_HARNESS_PID CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+  FM_UPDATE_REAL_PS
 mkdir -p "$FM_UPDATE_FAKEBIN"
 cat > "$FM_UPDATE_FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
@@ -48,9 +52,9 @@ case "$*" in
       printf 'bash\n'
     fi
     ;;
-  *ppid=*) exec /usr/bin/ps "$@" ;;
-  *lstart=*) exec /usr/bin/ps "$@" ;;
-  *) exec /usr/bin/ps "$@" ;;
+  *ppid=*) exec "${FM_UPDATE_REAL_PS:?}" "$@" ;;
+  *lstart=*) exec "${FM_UPDATE_REAL_PS:?}" "$@" ;;
+  *) exec "${FM_UPDATE_REAL_PS:?}" "$@" ;;
 esac
 SH
 chmod +x "$FM_UPDATE_FAKEBIN/ps"
