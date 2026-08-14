@@ -671,6 +671,32 @@ SH
   pass "post-output failures finalize without duplicate presentation"
 }
 
+test_direct_drain_finalizes_after_successful_output() {
+  local dir root home fakebin state fingerprint row
+  new_case direct-success
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" direct-x1 direct-inc
+  export FM_FAKE_CREW_STATE_DIRECT_X1='state: done · source: pane · direct presentation'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "direct receipt setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  export FM_WAKE_DRAIN_DIRECT=1
+  drain "$root" "$home" "$fakebin" >"$dir/direct.out" \
+    || fail "direct drain did not finalize a successful presentation"
+  grep -F "$row" "$dir/direct.out" >/dev/null || fail "direct drain did not emit the wake row"
+  [ "$(receipt_count "$state" presented)" = 1 ] || fail "direct drain left the receipt unfinalized"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "direct drain left a pending receipt"
+  [ "$(queue_count "$state")" = 0 ] || fail "direct drain left the wake queued"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "direct drain left a presentation claim"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >"$dir/direct-replay.out" \
+    || fail "direct replay drain failed"
+  [ ! -s "$dir/direct-replay.out" ] || fail "direct drain replayed a finalized receipt"
+  unset FM_FAKE_CREW_STATE_DIRECT_X1 FM_WAKE_DRAIN_DIRECT
+  pass "direct inactive drains finalize successful output once"
+}
+
 test_finalized_receipt_rows_are_suppressed() {
   local dir root home fakebin state fingerprint row
   new_case finalized-row
@@ -1073,7 +1099,7 @@ SH
 }
 
 test_watcher_runs_inactive_cadence() {
-  local dir root home fakebin state out second_out status
+  local dir root home fakebin state out second_out third_out status fingerprint
   new_case watcher-wiring
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1126,6 +1152,42 @@ SH
     || fail "watcher did not surface the inactive reconciliation result"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher cadence did not create the inactive receipt"
   [ "$(queue_count "$state")" = 1 ] || fail "watcher cadence did not retain exactly one inactive outcome wake"
+
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  third_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
+    FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
+    FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 FM_FAKE_PANE_PATH="$home" \
+    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
+    "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "watcher cadence failed while draining the inactive outcome wake"
+  printf '%s\n' "$third_out" | grep -F 'inactive-outcome:' >/dev/null \
+    || fail "watcher did not surface the exact inactive outcome wake"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher cadence did not acknowledge the inactive receipt"
+  [ "$(receipt_count "$state" presented)" = 1 ] || fail "watcher cadence did not finalize the inactive receipt"
+  [ "$(queue_count "$state")" = 0 ] || fail "watcher cadence did not consume the inactive outcome wake"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "watcher cadence left a presentation claim"
+
+  write_meta "$state" watcher-failure-x1 watcher-failure-inc
+  export FM_FAKE_CREW_STATE_WATCHER_FAILURE_X1='state: failed · source: pane · watcher output failure'
+  rm -f "$state/.inactive-outcome-reconcile"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
+    FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
+    FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 FM_FAKE_PANE_PATH="$home" \
+    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
+    "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "watcher cadence failed while queuing the failure fixture"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher failure fixture did not create one pending receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "watcher failure fixture did not retain one wake"
   set +e
   ( cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
@@ -1142,7 +1204,7 @@ SH
     || fail "watcher consumed the inactive receipt after presentation failure"
   [ -e "$state/terminal-outcomes/.$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending).claim" ] \
     || fail "watcher did not retain a retryable presentation claim"
-  unset FM_FAKE_CREW_STATE_WATCHER_X1
+  unset FM_FAKE_CREW_STATE_WATCHER_X1 FM_FAKE_CREW_STATE_WATCHER_FAILURE_X1
   pass "watcher cadence gates acknowledgement on successful output"
 }
 
@@ -2246,6 +2308,7 @@ test_presenting_claim_recovers_before_output
 test_output_started_claim_is_not_reprinted
 test_pre_output_claim_retries_after_crash
 test_output_completion_failure_does_not_reprint
+test_direct_drain_finalizes_after_successful_output
 test_finalized_receipt_rows_are_suppressed
 test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
