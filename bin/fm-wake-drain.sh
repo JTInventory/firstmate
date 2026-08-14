@@ -18,8 +18,10 @@ DRAIN_LOCK_HELD=false
 present_inactive_row() {
   local key=$1 row=$2 status=0
   trap - INT TERM HUP
-  FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-started "$key" "$row" || status=1
-  if [ "$status" = 0 ] && ! printf '%s\n' "$row"; then
+  if ! printf '%s\n' "$row"; then
+    status=1
+  fi
+  if [ "$status" = 0 ] && ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-started "$key" "$row"; then
     status=1
   fi
   if [ "$status" = 0 ] && ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$key" "$row"; then
@@ -45,18 +47,31 @@ assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }
 
+restore_unprocessed_rows() {
+  local start=$1 restored
+  restored=$(mktemp "$STATE/.wake-queue.unprocessed.XXXXXX") || return 1
+  [ -f "$restored" ] && [ ! -L "$restored" ] || { rm -f "$restored"; return 1; }
+  awk -v start="$start" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$restored" || {
+    rm -f "$restored"
+    return 1
+  }
+  DRAIN_RESTORE=$restored
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
-  local status=$?
+  local status=$? restore_status=0
   if [ "$status" -ne 0 ] && [ "$DRAIN_LOCK_HELD" = true ]; then
     if [ -n "$DRAIN_RESTORE" ] && [ -e "$DRAIN_RESTORE" ]; then
-      fm_wake_restore_queue "$DRAIN_RESTORE" || true
+      fm_wake_restore_queue "$DRAIN_RESTORE" || restore_status=1
     elif [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ]; then
-      fm_wake_restore_queue "$DRAIN_TMP" || true
+      fm_wake_restore_queue "$DRAIN_TMP" || restore_status=1
     fi
   fi
-  [ -z "$DRAIN_TMP" ] || rm -f "$DRAIN_TMP" || true
-  [ -z "$DRAIN_RESTORE" ] || rm -f "$DRAIN_RESTORE" || true
+  if [ "$restore_status" = 0 ]; then
+    [ -z "$DRAIN_TMP" ] || rm -f "$DRAIN_TMP" || true
+    [ -z "$DRAIN_RESTORE" ] || rm -f "$DRAIN_RESTORE" || true
+  fi
   [ -z "$DRAIN_DEDUPED" ] || rm -f "$DRAIN_DEDUPED" || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -101,20 +116,17 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       case "$claim_status" in
         0)
           if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presenting "$_key" "$drain_row"; then
-            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
-            awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+            restore_unprocessed_rows "$drain_line" || exit 1
             exit 1
           fi
           if ! present_inactive_row "$_key" "$drain_row"; then
-            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
-            awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+            restore_unprocessed_rows "$drain_line" || exit 1
             exit 1
           fi
           ;;
         1) ;;
         *)
-          DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
-          awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+          restore_unprocessed_rows "$drain_line" || exit 1
           exit "$claim_status"
           ;;
       esac
@@ -123,16 +135,14 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
         # 1 means the receipt was already acknowledged or is not ours. Any
         # other failure keeps the drained row durable for a later turn.
         if [ "$ack_status" != 1 ]; then
-          DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
-          awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+          restore_unprocessed_rows "$drain_line" || exit 1
           exit "$ack_status"
         fi
       }
       ;;
     *)
       if ! printf '%s\n' "$drain_row"; then
-        DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
-        awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+        restore_unprocessed_rows "$drain_line" || exit 1
         exit 1
       fi
       ;;

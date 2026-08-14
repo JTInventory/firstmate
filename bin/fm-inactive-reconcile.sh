@@ -451,7 +451,33 @@ receipt_existing_core() {
     [ "$(receipt_field "$existing" terminal_source)" = "$SOURCE" ] || return 2
     [ "$(receipt_field "$existing" terminal_snapshot)" = "$SNAPSHOT" ] || return 2
     existing_kind=$(receipt_field "$existing" kind)
-    case "$existing_kind" in ship|scout) parent_id=$(receipt_field "$existing" parent_task_id); parent_home=$(receipt_field "$existing" parent_home); parent_status=$(receipt_field "$existing" parent_status); parent_corr=$(receipt_field "$existing" parent_corr); [ -z "$parent_id" ] && [ -z "$parent_home" ] && [ -z "$parent_status" ] && [ -z "$parent_corr" ] || return 2 ;; secondmate) parent_id=$(receipt_field "$existing" parent_task_id); parent_home=$(receipt_field "$existing" parent_home); parent_status=$(receipt_field "$existing" parent_status); parent_corr=$(receipt_field "$existing" parent_corr); [ -n "$parent_id" ] && case "$parent_home" in /*) ;; *) return 2 ;; esac && case "$parent_status" in /*) ;; *) return 2 ;; esac && printf '%s' "$parent_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 2 ;; *) return 2 ;; esac
+    case "$existing_kind" in
+      ship|scout)
+        parent_id=$(receipt_field "$existing" parent_task_id)
+        parent_home=$(receipt_field "$existing" parent_home)
+        parent_status=$(receipt_field "$existing" parent_status)
+        parent_corr=$(receipt_field "$existing" parent_corr)
+        [ -z "$parent_id" ] && [ -z "$parent_home" ] && [ -z "$parent_status" ] && [ -z "$parent_corr" ] || return 2
+        ;;
+      secondmate)
+        parent_id=$(receipt_field "$existing" parent_task_id)
+        parent_home=$(receipt_field "$existing" parent_home)
+        parent_status=$(receipt_field "$existing" parent_status)
+        parent_corr=$(receipt_field "$existing" parent_corr)
+        if [ "$suffix" = pending ]; then
+          [ "$parent_id" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 2
+          [ "$parent_home" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 2
+          [ "$parent_status" = "${FM_PENDING_ROUTE_PARENT_STATUS:-}" ] || return 2
+          [ "$parent_corr" = "${FM_PENDING_ROUTE_CORR:-}" ] || return 2
+        else
+          [ -n "$parent_id" ] || return 2
+        fi
+        case "$parent_home" in /*) ;; *) return 2 ;; esac
+        case "$parent_status" in /*) ;; *) return 2 ;; esac
+        printf '%s' "$parent_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 2
+        ;;
+      *) return 2 ;;
+    esac
     RECEIPT_EXISTING_SUFFIX=$suffix
     return 0
   done
@@ -459,14 +485,65 @@ receipt_existing_core() {
 }
 
 republish_existing_receipt_wake() {
-  local existing task outcome status=0
-  existing=$(receipt_path "$FP" pending)
-  task=$(receipt_field "$existing" task_id)
-  outcome=$(receipt_field "$existing" outcome)
+  local existing task outcome status=0 existing_rc
   FM_WAKE_APPEND_CREATED=0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
-    "inactive terminal outcome: task=$task state=$outcome fingerprint=$FP" || status=$?
+  if receipt_existing_core; then
+    if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
+      existing=$(receipt_path "$FP" pending)
+      task=$(receipt_field "$existing" task_id)
+      outcome=$(receipt_field "$existing" outcome)
+      fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
+        "inactive terminal outcome: task=$task state=$outcome fingerprint=$FP" || status=$?
+    fi
+  else
+    existing_rc=$?
+    [ "$existing_rc" = 1 ] || status=1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  return "$status"
+}
+
+publish_secondmate_receipt_and_wake() {
+  local route_lock status=0 existing_rc
+  FM_WAKE_APPEND_CREATED=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ -L "$FM_HOME" ] || [ ! -d "$FM_HOME" ] || [ -L "$FM_HOME/state" ] || [ ! -d "$FM_HOME/state" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    return 0
+  fi
+  route_lock=$(fm_pending_reply_secondmate_route_lock_path "$FM_HOME")
+  if ! fm_lock_acquire_wait "$route_lock"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    return 1
+  fi
+  if ! fm_pending_reply_secondmate_route_validate "$FM_HOME"; then
+    fm_lock_release "$route_lock" || true
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    return 0
+  fi
+  KIND=secondmate
+  if receipt_existing_core; then
+    if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
+      fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
+        "inactive terminal outcome: task=$ID state=$OUTCOME fingerprint=$FP" || status=$?
+    fi
+  else
+    existing_rc=$?
+    if [ "$existing_rc" = 1 ]; then
+      if receipt_write; then
+        if [ -f "$(receipt_path "$FP" pending)" ]; then
+          fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
+            "inactive terminal outcome: task=$ID state=$OUTCOME fingerprint=$FP" || status=$?
+        fi
+      else
+        status=$?
+      fi
+    else
+      status=1
+    fi
+  fi
+  fm_lock_release "$route_lock" || status=1
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   return "$status"
 }
@@ -519,7 +596,7 @@ reconcile_child() {
   case "$kind" in ''|ship|scout) ;; *) return 0 ;; esac
   herdr_identity_allowed "$meta" || return 0
   CHILD_LOCK="$STATE/.spawn-$id.lock"
-  FM_LOCK_WAIT_SECS=${FM_INACTIVE_OUTCOME_LOCK_WAIT_SECS:-30}
+  FM_LOCK_WAIT_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_LOCK_WAIT_SECS:-30}" 30 0 300)
   fm_lock_acquire_wait "$CHILD_LOCK" || return 0
   CHILD_LOCK_HELD=1
   trap child_cleanup EXIT INT TERM
@@ -573,6 +650,13 @@ reconcile_child() {
     0|1) ;;
     *) return 0 ;;
   esac
+  if [ "$route_rc" = 0 ]; then
+    publish_secondmate_receipt_and_wake || return 1
+    if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
+      printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
+    fi
+    return 0
+  fi
   if receipt_existing_core; then
     if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
       republish_existing_receipt_wake || return 1
@@ -584,10 +668,6 @@ reconcile_child() {
   else
     existing_rc=$?
     [ "$existing_rc" = 1 ] || return 1
-  fi
-  if [ "$route_rc" = 0 ]; then
-    fm_pending_reply_secondmate_route_validate "$FM_HOME" || return 0
-    KIND=secondmate
   fi
   key="inactive-outcome:$FP"
   publish_receipt_and_wake || return 1
@@ -764,10 +844,18 @@ scan_locked() {
 }
 
 scan() {
-  local startup=${1:-0}
+  local startup=${1:-0} rc
+  scan_abort() {
+    local status=$1
+    fm_lock_release "$SCAN_LOCK" || true
+    trap - EXIT INT TERM
+    exit "$status"
+  }
   inactive_state_preflight || return 1
   fm_lock_acquire_wait "$SCAN_LOCK" || return 1
-  trap 'fm_lock_release "$SCAN_LOCK" || true' EXIT INT TERM
+  trap 'fm_lock_release "$SCAN_LOCK" || true' EXIT
+  trap 'scan_abort 130' INT
+  trap 'scan_abort 143' TERM
   scan_locked "$startup"
   rc=$?
   fm_lock_release "$SCAN_LOCK" || true

@@ -362,17 +362,26 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
-  DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
-  if [ -n "$DRAIN_OUT" ]; then
+  DRAIN_STATUS=0
+  DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1) || DRAIN_STATUS=$?
+  if [ "$DRAIN_STATUS" -ne 0 ]; then
+    printf 'error: wake drain failed (status %s); inactive reconciliation skipped\n%s\n' \
+      "$DRAIN_STATUS" "$DRAIN_OUT" >&2
+  elif [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"
   else
     printf '(no queued wakes)\n'
   fi
-  if ! INACTIVE_OUT=$("$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1); then
-    printf '%s\n' "$INACTIVE_OUT" >&2
-    exit 1
+  if [ "$DRAIN_STATUS" -eq 0 ]; then
+    INACTIVE_STATUS=0
+    INACTIVE_OUT=$("$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_STATUS=$?
+    if [ "$INACTIVE_STATUS" -ne 0 ]; then
+      printf 'error: inactive outcome reconciliation failed (status %s)\n%s\n' \
+        "$INACTIVE_STATUS" "$INACTIVE_OUT" >&2
+    elif [ -n "$INACTIVE_OUT" ]; then
+      printf '%s\n' "$INACTIVE_OUT"
+    fi
   fi
-  [ -z "$INACTIVE_OUT" ] || printf '%s\n' "$INACTIVE_OUT"
 fi
 
 # --- 4. supervision operating instructions ----------------------------------
