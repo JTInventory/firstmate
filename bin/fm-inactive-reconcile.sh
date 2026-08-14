@@ -62,6 +62,8 @@ CHILD_LOCK=
 bounded_secs() {
   local value=$1 fallback=$2 minimum=$3 maximum=$4
   case "$value" in ''|*[!0-9]*) value=$fallback ;; esac
+  while [ "${value#0}" != "$value" ]; do value=${value#0}; done
+  [ -n "$value" ] || value=0
   [ "$value" -lt "$minimum" ] && value=$minimum
   [ "$value" -gt "$maximum" ] && value=$maximum
   printf '%s' "$value"
@@ -72,6 +74,17 @@ SCAN_BUDGET_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" 10 1 30
 
 meta_value() {  # <meta> <key>
   awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
+}
+
+meta_value_unique() {  # <meta> <key>
+  awk -F= -v wanted="$2" '
+    $1 == wanted { count++; value=substr($0, index($0, "=") + 1) }
+    END {
+      if (count == 1) { print value; exit 0 }
+      if (count == 0) exit 1
+      exit 2
+    }
+  ' "$1" 2>/dev/null
 }
 
 file_mtime() {
@@ -127,11 +140,17 @@ is_secondmate_home() {
 }
 
 herdr_identity_allowed() {  # <meta>
-  local meta=$1 backend session window
-  backend=$(meta_value "$meta" backend)
+  local meta=$1 backend session window rc
+  if backend=$(meta_value_unique "$meta" backend); then
+    :
+  else
+    rc=$?
+    [ "$rc" = 1 ] && return 0
+    return 1
+  fi
   [ "$backend" = herdr ] || return 0
-  session=$(meta_value "$meta" herdr_session)
-  window=$(meta_value "$meta" window)
+  session=$(meta_value_unique "$meta" herdr_session) || return 1
+  window=$(meta_value_unique "$meta" window) || return 1
   case "$session" in
     firstmate) : ;;
     default|DEFAULT|CAPTAIN|captain) return 1 ;;
@@ -144,12 +163,14 @@ herdr_identity_allowed() {  # <meta>
 run_bounded_child() {  # <seconds> <command> [args...]
   local seconds=$1
   shift
-  if command -v timeout >/dev/null 2>&1; then
+  if [ "${FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT:-0}" != 1 ] \
+    && command -v timeout >/dev/null 2>&1; then
     timeout "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
+  elif [ "${FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT:-0}" != 1 ] \
+    && command -v gtimeout >/dev/null 2>&1; then
     gtimeout "$seconds" "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : ($status >> 8))' "$seconds" "$@"
   else
     return 125
   fi
@@ -160,7 +181,7 @@ receipt_path() {  # <fingerprint> <suffix>
 }
 
 receipt_field() {  # <receipt> <key>
-  meta_value "$1" "$2"
+  meta_value_unique "$1" "$2"
 }
 
 claim_path() {  # <fingerprint>
@@ -168,7 +189,7 @@ claim_path() {  # <fingerprint>
 }
 
 claim_field() {  # <claim> <key>
-  meta_value "$1" "$2"
+  meta_value_unique "$1" "$2"
 }
 
 drain_claim_owner() {
@@ -198,7 +219,7 @@ claim_validate() {  # <claim> <fingerprint> <row>
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp state existing
+  local key=$1 row=$2 fp claim tmp state existing old_row line
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -206,8 +227,22 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
   claim=$(claim_path "$fp")
   [ ! -L "$claim" ] || return 2
   if [ -e "$claim" ]; then
-    state=$(claim_validate "$claim" "$fp" "$row") || return 2
-    [ "$state" = presented ] && return 1
+    [ -f "$claim" ] || return 2
+    [ "$(claim_field "$claim" schema)" = fm-inactive-outcome-claim.v1 ] || return 2
+    [ "$(claim_field "$claim" fingerprint)" = "$fp" ] || return 2
+    state=$(claim_field "$claim" state)
+    case "$state" in presented) return 1 ;; reserved) ;; *) return 2 ;; esac
+    old_row=$(claim_field "$claim" row)
+    [ -n "$old_row" ] || return 2
+    if [ "$old_row" != "$row" ]; then
+      tmp=$(mktemp "$OUTCOME_DIR/.claim-row.XXXXXX") || return 2
+      chmod 600 "$tmp" 2>/dev/null || true
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in row=*) printf 'row=%s\n' "$row" ;; *) printf '%s\n' "$line" ;; esac
+      done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+      [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+      mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+    fi
     return 0
   fi
   mkdir -p "$OUTCOME_DIR" || return 2
@@ -321,9 +356,34 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
   return 0
 }
 
+publish_receipt_and_wake() {
+  local status=0
+  FM_WAKE_APPEND_CREATED=0
+  if ! fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+    receipt_write || return 1
+    return 1
+  fi
+  if receipt_write; then
+    if [ -f "$(receipt_path "$FP" pending)" ]; then
+      fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
+        "inactive terminal outcome: task=$ID state=$OUTCOME fingerprint=$FP" || status=$?
+    fi
+  else
+    status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  return "$status"
+}
+
 read_incarnation() {  # <meta> <id>
-  local meta=$1 id=$2 token tasktmp window worktree seed
-  token=$(meta_value "$meta" spawn_incarnation)
+  local meta=$1 id=$2 token tasktmp window worktree seed rc
+  if token=$(meta_value_unique "$meta" spawn_incarnation); then
+    :
+  else
+    rc=$?
+    [ "$rc" = 1 ] || return 1
+    token=
+  fi
   case "$token" in
     ''|legacy-unknown|*[!A-Za-z0-9._:-]*) token= ;;
   esac
@@ -404,7 +464,7 @@ reconcile_child() {
   source=$(printf '%s\n' "$line" | sed -n 's/.*source: \([^ ·]*\).*/\1/p')
   [ -n "$source" ] && [ "$source" != none ] || return 0
   snapshot=$(single_line "$line")
-  INC=$(read_incarnation "$meta" "$id")
+  INC=$(read_incarnation "$meta" "$id") || return 0
   FP=$(hash_text "$id|$INC|$outcome|$snapshot")
   ID=$id
   OUTCOME=$outcome
@@ -420,20 +480,16 @@ reconcile_child() {
     [ "$?" = 1 ] || return 0
     KIND=${kind:-ship}
   fi
-  receipt_write || return 1
   key="inactive-outcome:$FP"
-  if [ "$RECEIPT_CREATED" = 1 ] || [ -f "$(receipt_path "$FP" pending)" ]; then
-    fm_wake_append_if_absent FM_WAKE_APPEND_CREATED check "$key" \
-      "inactive terminal outcome: task=$id state=$outcome fingerprint=$FP" || return 1
-    if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
-      printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
-    fi
+  publish_receipt_and_wake || return 1
+  if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
+    printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
   fi
   return 0
 }
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
-  local key=$1 row=${2:-} fp rec id kind outcome parent_task_id parent_home parent_status corr line target existing claim_state
+  local key=$1 row=${2:-} fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing claim_state
   [ -n "$row" ] || return 2
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 0 ;; esac
@@ -459,8 +515,12 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   [ "$(receipt_field "$rec" schema)" = fm-jt-terminal-outcome.v1 ] || return 2
   id=$(receipt_field "$rec" task_id)
   kind=$(receipt_field "$rec" kind)
+  incarnation=$(receipt_field "$rec" incarnation)
   parent_task_id=$(receipt_field "$rec" parent_task_id)
   outcome=$(receipt_field "$rec" outcome)
+  snapshot=$(receipt_field "$rec" terminal_snapshot)
+  expected_fp=$(hash_text "$id|$incarnation|$outcome|$snapshot")
+  [ "$expected_fp" = "$fp" ] || return 2
   case "$kind" in ship|scout|secondmate) ;; *) return 2 ;; esac
   if [ "$kind" = secondmate ]; then
     parent_home=$(receipt_field "$rec" parent_home)
@@ -469,15 +529,19 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     [ -n "$parent_task_id" ] || return 2
     fm_pending_reply_secondmate_receipt_validate \
       "$FM_HOME" "$parent_task_id" "$parent_home" "$parent_status" "$corr" || return 2
-    line="$outcome [corr=$corr]: inactive terminal outcome replayed: task=$id fingerprint=$fp"
-    [ ! -L "$parent_status" ] || return 2
-    if [ -e "$parent_status" ]; then
-      [ -f "$parent_status" ] || return 2
+    if [ "$FM_PENDING_ROUTE_PHASE" = resolved ] || [ "$FM_PENDING_ROUTE_PHASE" = retired ]; then
+      fm_pending_reply_secondmate_route_clear "$FM_HOME" "$corr" || return 2
     else
-      : > "$parent_status" || return 2
-    fi
-    if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-      printf '%s\n' "$line" >> "$parent_status" || return 2
+      line="$outcome [corr=$corr]: inactive terminal outcome replayed: task=$id fingerprint=$fp"
+      [ ! -L "$parent_status" ] || return 2
+      if [ -e "$parent_status" ]; then
+        [ -f "$parent_status" ] || return 2
+      else
+        : > "$parent_status" || return 2
+      fi
+      if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$parent_status" || return 2
+      fi
     fi
     target=$(receipt_path "$fp" reported)
   else
@@ -498,7 +562,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
 
 scan_locked() {
   local startup=${1:-0} marker_mtime now age cursor meta id started=1 cursor_seen=1
-  local scan_started remaining rc complete=1 scan_failed=0
+  local scan_started remaining rc complete=1 scan_failed=0 find_tmp
   inactive_state_preflight || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
   now=$(date +%s)
@@ -513,6 +577,13 @@ scan_locked() {
   fi
   if [ -n "$cursor" ]; then started=0; fi
   [ -n "$cursor" ] && cursor_seen=0
+  find_tmp=$(mktemp "$STATE/.inactive-outcome-find.XXXXXX") || return 1
+  [ -f "$find_tmp" ] && [ ! -L "$find_tmp" ] || { rm -f "$find_tmp"; return 1; }
+  if ! find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
+    \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
+    rm -f "$find_tmp"
+    return 1
+  fi
   while IFS= read -r -d '' meta; do
     now=$(date +%s)
     remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
@@ -547,10 +618,8 @@ scan_locked() {
       scan_failed=1
       break
     fi
-  done < <(
-    find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
-      \( -type f -name '*.meta' -print0 \)
-  )
+  done < "$find_tmp"
+  rm -f "$find_tmp" || return 1
   [ "$scan_failed" = 0 ] || return "$rc"
   if [ "$complete" = 1 ] && [ "$cursor_seen" = 0 ]; then
     return 1

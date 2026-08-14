@@ -669,14 +669,10 @@ fm_wake_append() {
   return "$status"
 }
 
-fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
+fm_wake_append_if_absent_locked() {  # <result-var> <kind> <key> <payload>
   local result_var=$1 kind=$2 key=$3 payload=$4 status=0
   FM_WAKE_APPEND_CREATED=0
   case "$result_var" in ''|*[!A-Za-z0-9_]*) return 2 ;; esac
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
-    printf 'fm_wake_append_if_absent: could not serialize the wake queue; refusing to append unlocked\n' >&2
-    return 1
-  }
   if [ -f "$FM_WAKE_QUEUE" ] && awk -F '\t' -v wanted="$key" '$4 == wanted { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE" 2>/dev/null; then
     printf -v "$result_var" '%s' 0
   else
@@ -684,6 +680,16 @@ fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
     status=$?
     [ "$status" -eq 0 ] && { FM_WAKE_APPEND_CREATED=1; printf -v "$result_var" '%s' 1; }
   fi
+  return "$status"
+}
+
+fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
+  local status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+    printf 'fm_wake_append_if_absent: could not serialize the wake queue; refusing to append unlocked\n' >&2
+    return 1
+  }
+  fm_wake_append_if_absent_locked "$@" || status=$?
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   return "$status"
 }

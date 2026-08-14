@@ -41,6 +41,12 @@ new_case() {
 #!/usr/bin/env bash
 set -u
 id=${1:-}
+if [ "${FM_FAKE_CREW_STATE_SIGNAL:-0}" = 1 ]; then
+  kill -TERM $$
+fi
+if [ "${FM_FAKE_CREW_STATE_EXIT:-0}" != 0 ]; then
+  exit "$FM_FAKE_CREW_STATE_EXIT"
+fi
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_' | tr '[:lower:]' '[:upper:]')
 var="FM_FAKE_CREW_STATE_$key"
 printf '%s\n' "${!var:-${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}}"
@@ -56,6 +62,7 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  *"lstart="*|*"command="*) exec /usr/bin/ps "$@" ;;
   *"comm="*|*"args="*)
     if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then
       printf '%s\n' claude
@@ -102,6 +109,28 @@ prepare_primary_proof() {
   CASE_TOKEN=$token
 }
 
+prepare_watcher_protocol() {
+  local root=$1 home=$2 state=$3 pid_start pid_identity watch arm
+  watch="$root/bin/fm-watch.sh"
+  arm="$root/bin/fm-watch-arm.sh"
+  pid_start=$(FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_start "$2"' _ "$ROOT" "$$")
+  pid_identity=$(FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$$")
+  mkdir -p "$state/.watch.lock" "$state/.watch-arm.lock"
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$pid_start" > "$state/.watch.lock/pid-start"
+  printf '%s\n' "$pid_identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' pending-reply-ticket-v3 > "$state/.watch.lock/pending-reply-protocol"
+  printf '%s\n' "$$" > "$state/.watch-arm.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch-arm.lock/fm-home"
+  printf '%s\n' "$arm" > "$state/.watch-arm.lock/owner-path"
+  printf '%s\n' "$pid_start" > "$state/.watch-arm.lock/pid-start"
+  printf '%s\n' "$pid_identity" > "$state/.watch-arm.lock/pid-identity"
+}
+
 scan() {
   local root=$1 home=$2 fakebin=$3 startup=${4:-}
   if [ -d "$home/state" ] && [ ! -L "$home/state" ]; then
@@ -112,7 +141,8 @@ scan() {
       FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
       FM_FAKE_HARNESS_PID="$$" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-      FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
+      FM_INACTIVE_OUTCOME_SECS="${FM_INACTIVE_OUTCOME_SECS:-60}" \
+      FM_INACTIVE_OUTCOME_BUDGET_SECS="${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" \
       "$RECON" scan "$startup" )
 }
 
@@ -237,6 +267,7 @@ test_done_and_failed_are_replayed_once() {
   [ "$(receipt_count "$state" presented)" = 2 ] || fail "drain did not preserve two presented receipts"
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" presented)" = 2 ] || fail "presented receipts were replayed"
+  [ "$(queue_count "$state")" = 0 ] || fail "presented receipts caused a duplicate wake on rescan"
   unset FM_FAKE_CREW_STATE_DONE_X1 FM_FAKE_CREW_STATE_FAILED_X1
   pass "done and failed inactive outcomes are replayed once and acknowledged on drain"
 }
@@ -258,8 +289,104 @@ SH
   export FM_FAKE_CREW_STATE_PORTABLE_X1='state: done · source: pane · portable timeout'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "portable timeout runner did not reconcile the child"
-  unset FM_FAKE_CREW_STATE_PORTABLE_X1
+  export FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT=1
+  export FM_FAKE_CREW_STATE_EXIT=7
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "portable timeout runner hid a non-zero child status"
+  fi
+  unset FM_FAKE_CREW_STATE_PORTABLE_X1 FM_FAKE_CREW_STATE_EXIT FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT
   pass "inactive scan uses the portable timeout invocation"
+}
+
+test_portable_timeout_preserves_signal_failure() {
+  local dir root home fakebin state
+  new_case portable-timeout-signal
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" signal-x1 signal-inc
+  export FM_FAKE_CREW_STATE_SIGNAL=1 FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT=1
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "portable timeout runner converted a signal failure into success"
+  fi
+  [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "signal failure advanced the cadence marker"
+  unset FM_FAKE_CREW_STATE_SIGNAL FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT
+  pass "portable timeout preserves signal failures"
+}
+
+test_leading_zero_cadence_is_normalized() {
+  local dir root home fakebin state
+  new_case leading-zero-cadence
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" zero-x1 zero-inc
+  export FM_FAKE_CREW_STATE_ZERO_X1='state: done · source: pane · leading zero'
+  export FM_INACTIVE_OUTCOME_SECS=0080 FM_INACTIVE_OUTCOME_BUDGET_SECS=0010
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "leading-zero cadence aborted the scan"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "leading-zero cadence did not reconcile the child"
+  unset FM_FAKE_CREW_STATE_ZERO_X1 FM_INACTIVE_OUTCOME_SECS FM_INACTIVE_OUTCOME_BUDGET_SECS
+  pass "leading-zero cadence values are normalized before arithmetic"
+}
+
+test_find_failure_propagates_without_advancing_scan() {
+  local dir root home fakebin state
+  new_case find-failure
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" find-x1 find-inc
+  cat > "$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+exit 42
+SH
+  chmod +x "$fakebin/find"
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "find enumeration failure was reported as success"
+  fi
+  [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "find failure advanced the cadence marker"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "find failure created a receipt"
+  pass "find enumeration failures propagate and preserve retry state"
+}
+
+test_ack_recomputes_fingerprint_from_receipt_fields() {
+  local dir root home fakebin state rec fingerprint
+  new_case fingerprint-binding
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" fingerprint-x1 fingerprint-inc
+  export FM_FAKE_CREW_STATE_FINGERPRINT_X1='state: done · source: pane · original snapshot'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "fingerprint fixture scan failed"
+  rec=$(find "$state/terminal-outcomes" -maxdepth 1 -type f -name '*.pending' | head -1)
+  fingerprint=$(basename "$rec" .pending)
+  sed -i 's/^terminal_snapshot=.*/terminal_snapshot=tampered snapshot/' "$rec"
+  if drain "$root" "$home" "$fakebin" >/dev/null 2>&1; then
+    fail "drain accepted a receipt whose snapshot no longer matched its fingerprint"
+  fi
+  [ -f "$rec" ] || fail "fingerprint mismatch removed the pending receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "fingerprint mismatch did not preserve the wake for retry"
+  [ "$(receipt_value "$rec" fingerprint)" = "$fingerprint" ] || fail "fingerprint fixture changed its filename binding"
+  unset FM_FAKE_CREW_STATE_FINGERPRINT_X1
+  pass "drain recomputes the receipt fingerprint from bound fields"
+}
+
+test_reserved_claim_recovers_to_a_new_wake_row() {
+  local dir root home fakebin state fingerprint old_row new_row
+  new_case claim-recovery
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'claim-x1|claim-inc|done|state: done · source: pane · claim recovery')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=claim-x1 \
+    incarnation=claim-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · claim recovery' kind=ship
+  old_row='1	1	check	inactive-outcome:'"$fingerprint"$'\told row'
+  new_row='2	2	check	inactive-outcome:'"$fingerprint"$'\tnew row'
+  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=%s\nstate=reserved\ncreated_epoch=1\n' \
+    "$fingerprint" "$old_row" > "$state/terminal-outcomes/.$fingerprint.claim"
+  printf '%s\n' "$new_row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >/dev/null || fail "drain did not recover a reserved claim"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "recovered claim did not present its receipt"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "recovered claim was not retired"
+  pass "reserved inactive claims recover when the wake row is recreated"
 }
 
 test_scan_failure_retries_without_advancing_cadence() {
@@ -454,6 +581,9 @@ test_session_start_drains_before_inactive_scan() {
   inactive_line=$(printf '%s\n' "$out" | grep -n 'queued inactive outcome: task=session-x1' | head -1 | cut -d: -f1)
   [ -n "$wake_line" ] && [ -n "$inactive_line" ] && [ "$wake_line" -lt "$inactive_line" ] \
     || fail "session-start did not drain the existing wake before inactive reconciliation"
+  [ "$(awk -F '\t' '$4 == "task-before" { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
+    || fail "session-start left the pre-existing wake queued"
+  [ "$(queue_count "$state")" = 1 ] || fail "session-start did not queue exactly one inactive wake after draining"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "session-start did not run inactive reconciliation"
   unset FM_FAKE_CREW_STATE_SESSION_X1
   pass "session-start drains existing wakes before inactive reconciliation"
@@ -593,20 +723,28 @@ test_herdr_identity_and_default_captain_refusal() {
   state="$home/state"
   write_meta "$state" herdr-good good-inc ship herdr firstmate:pane
   printf 'herdr_session=firstmate\nherdr_workspace_id=ws\nherdr_tab_id=tab\nherdr_pane_id=pane\n' >> "$state/herdr-good.meta"
+  printf 'herdr_session=default\n' >> "$state/herdr-good.meta"
+  write_meta "$state" herdr-unique unique-inc ship herdr firstmate:pane
+  printf 'herdr_session=firstmate\nherdr_workspace_id=ws\nherdr_tab_id=tab\nherdr_pane_id=pane\n' >> "$state/herdr-unique.meta"
   write_meta "$state" herdr-default default-inc ship herdr default:pane
   printf 'herdr_session=default\nherdr_workspace_id=ws\nherdr_tab_id=tab\nherdr_pane_id=pane\n' >> "$state/herdr-default.meta"
   write_meta "$state" herdr-captain captain-inc ship herdr CAPTAIN:pane
   printf 'herdr_session=CAPTAIN\nherdr_workspace_id=ws\nherdr_tab_id=tab\nherdr_pane_id=pane\n' >> "$state/herdr-captain.meta"
-  touch -d '2 minutes ago' "$state/herdr-good.meta" "$state/herdr-default.meta" "$state/herdr-captain.meta"
+  touch -d '2 minutes ago' "$state/herdr-good.meta" "$state/herdr-unique.meta" \
+    "$state/herdr-default.meta" "$state/herdr-captain.meta"
   export FM_FAKE_CREW_STATE_HERDR_GOOD='state: done · source: pane · dedicated session quiet'
+  export FM_FAKE_CREW_STATE_HERDR_UNIQUE='state: done · source: pane · unique session quiet'
   export FM_FAKE_CREW_STATE_HERDR_DEFAULT='state: done · source: pane · must refuse'
   export FM_FAKE_CREW_STATE_HERDR_CAPTAIN='state: done · source: pane · must refuse'
   export FM_NETWORK_LOG="$dir/network.log"
   PATH="$fakebin:$PATH" scan "$root" "$home" "$fakebin" --startup >/dev/null \
     || fail "Herdr identity scan failed"
-  [ "$(receipt_count "$state" pending)" = 1 ] || fail "Herdr dedicated session was not accepted while default/CAPTAIN were refused"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "Herdr duplicate identity was accepted or default/CAPTAIN were not refused"
+  grep -l '^task_id=herdr-unique$' "$state"/terminal-outcomes/*.pending >/dev/null \
+    || fail "unique Herdr identity was not accepted"
   [ ! -s "$dir/network.log" ] || fail "inactive reconciliation made a forge/network call"
-  unset FM_FAKE_CREW_STATE_HERDR_GOOD FM_FAKE_CREW_STATE_HERDR_DEFAULT FM_FAKE_CREW_STATE_HERDR_CAPTAIN FM_NETWORK_LOG
+  unset FM_FAKE_CREW_STATE_HERDR_GOOD FM_FAKE_CREW_STATE_HERDR_UNIQUE \
+    FM_FAKE_CREW_STATE_HERDR_DEFAULT FM_FAKE_CREW_STATE_HERDR_CAPTAIN FM_NETWORK_LOG
   pass "Herdr uses the dedicated firstmate identity and refuses default/CAPTAIN"
 }
 
@@ -641,26 +779,42 @@ test_status_log_terminal_is_not_replayed() {
 }
 
 test_valid_secondmate_route_reports_parent_once() {
-  local dir root home fakebin state child_home child_state parent_status corr rec outside parent_history
+  local dir root home fakebin state child_home child_state parent_status corr rec outside parent_record send_out
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
   child_home="$dir/secondmate-home"
   child_state="$child_home/state"
   mkdir -p "$child_state" "$child_home/data" "$child_home/config" \
     "$state/pending-replies" "$state/pending-reply-history"
   printf 'sm-valid\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-valid parent-inc secondmate tmux firstmate:fm-sm-valid
+  printf 'home=%s\n' "$child_home" >> "$state/sm-valid.meta"
   write_meta "$child_state" child-x1 child-inc
-  corr=0123456789abcdef
   parent_status="$state/sm-valid.status"
-  parent_history="$state/pending-reply-history"
-  rec="$parent_history/$corr"
-  fm_write_meta "$rec" \
-    schema=fm-pending-reply.v1 corr_id="$corr" task_id=sm-valid \
-    parent_home="$home" parent_status="$parent_status" delivered_epoch=1 phase=awaiting_report
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{cursor_y}"*) printf '1\n' ;;
+  *capture-pane*) : ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-valid "parent request" 2>&1) || fail "public fm-send route setup failed: $send_out"
+  corr=$(basename "$(find "$state/pending-replies" -maxdepth 1 -type f | head -1)")
+  [ -n "$corr" ] || fail "public fm-send did not create a correlation record"
   export FM_FAKE_CREW_STATE_CHILD_X1='state: failed · source: pane · child quiet'
-  printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-valid\nparent_home=%s\nparent_status=%s\ncorr_id=%s\n' \
-    "$home" "$parent_status" "$corr" > "$child_state/.fm-jt-parent-route"
   scan "$root" "$child_home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "valid secondmate route did not create a pending receipt"
   rec=$(find "$child_state/terminal-outcomes" -maxdepth 1 -type f -name '*.pending' | head -1)
@@ -670,6 +824,7 @@ test_valid_secondmate_route_reports_parent_once() {
   [ "$(receipt_value "$rec" parent_status)" = "$parent_status" ] || fail "secondmate receipt did not persist its parent status path"
   outside="$dir/outside-status"
   printf 'outside\n' > "$outside"
+  rm -f "$parent_status"
   ln -s "$outside" "$parent_status"
   if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
     fail "secondmate acknowledgement followed a parent status symlink"
@@ -687,12 +842,16 @@ test_valid_secondmate_route_reports_parent_once() {
   drain "$root" "$child_home" "$fakebin" >/dev/null
   [ "$(grep -Fc "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status")" = 1 ] \
     || fail "secondmate parent report was duplicated"
+  parent_record="$state/pending-replies/$corr"
+  sed -i 's/^phase=.*/phase=resolved/' "$parent_record"
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null || fail "resolved history lifecycle scan failed"
+  [ ! -e "$child_state/.fm-jt-parent-route" ] || fail "resolved parent history left a stale route marker"
   unset FM_FAKE_CREW_STATE_CHILD_X1
   pass "valid secondmate outcomes use the parent status correlation exactly once"
 }
 
 test_concurrent_secondmate_routes_are_rejected() {
-  local dir root home fakebin state child_home child_state marker corr_one corr_two
+  local dir root home fakebin state child_home child_state marker corr_one corr_two outside
   new_case secondmate-route-concurrent
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -715,8 +874,24 @@ test_concurrent_secondmate_routes_are_rejected() {
       '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
       _ "$ROOT" "$child_home" "$home" "$state" sm-concurrent "$1"
   }
+  mv "$child_home/.fm-secondmate-home" "$dir/secondmate-marker"
+  ln -s "$dir/secondmate-marker" "$child_home/.fm-secondmate-home"
+  if route_write "$corr_one"; then
+    fail "symlinked secondmate home marker was accepted"
+  fi
+  rm -f "$child_home/.fm-secondmate-home"
+  mv "$dir/secondmate-marker" "$child_home/.fm-secondmate-home"
   route_write "$corr_one" || fail "initial secondmate route was not written"
   marker_before=$(cat "$marker")
+  outside="$dir/temp-target"
+  printf 'protected\n' > "$outside"
+  if env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; ln -s "$7" "$2/state/.fm-jt-parent-route.tmp.${BASHPID}"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+    _ "$ROOT" "$child_home" "$home" "$state" sm-concurrent "$corr_two" "$outside"; then
+    fail "second route replaced an active route unexpectedly"
+  fi
+  [ "$(cat "$outside")" = protected ] || fail "route publication followed a pre-created temporary symlink"
   if route_write "$corr_two"; then
     fail "concurrent secondmate route was silently replaced"
   fi
@@ -729,8 +904,8 @@ test_drain_restores_only_unprocessed_rows() {
   new_case drain-rollback
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
-  first=1111111111111111
-  second=2222222222222222
+  first=$(receipt_fingerprint 'first-x1|first-inc|done|done')
+  second=$(receipt_fingerprint 'second-x1|second-inc|failed|failed')
   mkdir -p "$state/terminal-outcomes"
   fm_write_meta "$state/terminal-outcomes/$first.pending" \
     schema=fm-jt-terminal-outcome.v1 fingerprint="$first" task_id=first-x1 \
@@ -761,6 +936,7 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
   child_home="$dir/secondmate-home"
   child_state="$child_home/state"
   mkdir -p "$child_state" "$child_home/data" "$child_home/config"
+  mkdir -p "$home/state/pending-replies"
   printf 'sm-x1\n' > "$child_home/.fm-secondmate-home"
   write_meta "$child_state" child-x1 child-inc
   export FM_FAKE_CREW_STATE_CHILD_X1='state: failed · source: pane · child quiet'
@@ -771,6 +947,14 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
   scan "$root" "$child_home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$child_state" pending)" = 0 ] || fail "malformed secondmate parent route was not fail-closed"
   [ ! -e "$parent_status" ] || fail "malformed secondmate route wrote parent status"
+  printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-x1\nparent_home=%s\nparent_status=%s\ncorr_id=0123456789abcdef\n' \
+    "$home" "$parent_status" > "$child_state/.fm-jt-parent-route"
+  fm_write_meta "$home/state/pending-replies/0123456789abcdef" \
+    schema=wrong-schema corr_id=0123456789abcdef task_id=sm-x1 \
+    parent_home="$home" parent_status="$parent_status" delivered_epoch=1 phase=awaiting_report
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null
+  [ "$(receipt_count "$child_state" pending)" = 0 ] || fail "malformed parent schema was accepted"
+  rm -f "$child_state/.fm-jt-parent-route"
   printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=\nsecondmate_id=sm-x1\nparent_home=%s\nparent_status=%s\ncorr_id=0123456789abcdef\n' \
     "$home" "$parent_status" > "$child_state/.fm-jt-parent-route"
   fm_write_meta "$home/state/pending-replies/0123456789abcdef" \
@@ -792,6 +976,11 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
 
 test_done_and_failed_are_replayed_once
 test_portable_timeout_runner_is_used
+test_portable_timeout_preserves_signal_failure
+test_leading_zero_cadence_is_normalized
+test_find_failure_propagates_without_advancing_scan
+test_ack_recomputes_fingerprint_from_receipt_fields
+test_reserved_claim_recovers_to_a_new_wake_row
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
