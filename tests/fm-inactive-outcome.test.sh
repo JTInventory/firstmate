@@ -557,6 +557,33 @@ test_output_started_claim_is_not_reprinted() {
   pass "output-started inactive claims do not reprint after a drain crash"
 }
 
+test_presented_claim_is_acknowledged_in_deferred_drain() {
+  local dir root home fakebin state fingerprint row
+  new_case presented-claim-ack
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'presented-x1|presented-inc|done|state: done · source: pane · presented claim')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=presented-x1 \
+    incarnation=presented-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · presented claim' kind=ship
+  row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tpresented claim row'
+  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=%s\nstate=presented\noutput_started=1\noutput_complete=1\ndefer_ack=0\ncreated_epoch=1\n' \
+    "$fingerprint" "$row" > "$state/terminal-outcomes/.$fingerprint.claim"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  if ! FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
+    drain "$root" "$home" "$fakebin" >"$dir/presented-claim.out"; then
+    fail "deferred drain did not acknowledge a completed presentation"
+  fi
+  [ ! -s "$dir/presented-claim.out" ] || fail "deferred drain re-presented a completed claim"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "deferred drain did not finalize the completed presentation"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
+    || fail "deferred drain left the completed presentation claim"
+  pass "deferred drains recover completed presentations without duplication"
+}
+
 test_pre_output_claim_retries_after_crash() {
   local dir root home fakebin state fingerprint row
   new_case pre-output-claim
@@ -630,7 +657,8 @@ test_deferred_ack_retries_after_caller_crash() {
   [ ! -s "$dir/live-deferred.out" ] || fail "live deferred claim was presented twice"
   [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
     || fail "live deferred claim was acknowledged before caller confirmation"
-  replace_field "$state/terminal-outcomes/.$fingerprint.claim" defer_generation 99999999
+  replace_field "$state/terminal-outcomes/.$fingerprint.claim" defer_generation "$$"
+  replace_field "$state/terminal-outcomes/.$fingerprint.claim" defer_generation_start proc:0
   rm -f "$state/deferred-x1.meta" "$state/deferred-x1.status" "$state/deferred-x1.turn-ended"
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "pending deferred receipt was not republished after caller crash"
   [ "$(queue_count "$state")" = 1 ] || fail "pending deferred receipt did not get a retry wake"
@@ -1097,7 +1125,7 @@ test_valid_secondmate_route_reports_parent_once() {
   cp -a "$ROOT/bin/." "$root/bin/"
   child_home="$dir/secondmate-home"
   child_state="$child_home/state"
-  mkdir -p "$child_state" "$child_home/data" "$child_home/config" \
+  mkdir -p "$child_state" "$child_state/terminal-outcomes" "$child_home/data" "$child_home/config" \
     "$state/pending-replies" "$state/pending-reply-history"
   printf 'sm-valid\n' > "$child_home/.fm-secondmate-home"
   write_meta "$state" sm-valid parent-inc secondmate tmux firstmate:fm-sm-valid
@@ -1264,6 +1292,63 @@ SH
   pass "valid secondmate outcomes use the parent status correlation exactly once"
 }
 
+test_reported_secondmate_route_repair_after_crash() {
+  local dir root home fakebin state child_home child_state parent_status corr fingerprint flag
+  new_case secondmate-reported-route-repair
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  parent_status="$state/sm-reported.status"
+  corr=0123456789abcdef
+  mkdir -p "$child_state" "$child_state/terminal-outcomes" "$child_home/data" "$child_home/config" \
+    "$state/pending-replies" "$state/pending-reply-history"
+  printf 'sm-reported\n' > "$child_home/.fm-secondmate-home"
+  fm_write_meta "$state/pending-replies/$corr" \
+    schema=fm-pending-reply.v1 corr_id="$corr" task_id=sm-reported \
+    parent_home="$home" parent_status="$parent_status" delivered_epoch=1 phase=awaiting_report
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+    _ "$ROOT" "$child_home" "$home" "$state" sm-reported "$corr" \
+    || fail "reported route fixture was not written"
+  fingerprint=$(receipt_fingerprint 'child-reported-x1|child-reported-inc|failed|state: failed · source: pane · reported crash' secondmate)
+  fm_write_meta "$child_state/terminal-outcomes/$fingerprint.reported" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=child-reported-x1 \
+    incarnation=child-reported-inc outcome=failed terminal_source=pane \
+    terminal_snapshot='state: failed · source: pane · reported crash' kind=secondmate \
+    parent_task_id=sm-reported parent_home="$home" parent_status="$parent_status" parent_corr="$corr"
+  flag="$dir/fail-route-clear-once"
+  : > "$flag"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  if [ "$arg" = "${FM_TEST_ROUTE_RM_PATH:-}" ] && [ -e "${FM_TEST_ROUTE_RM_ONCE:-}" ]; then
+    /bin/rm -f "$FM_TEST_ROUTE_RM_ONCE"
+    exit 42
+  fi
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
+  export FM_TEST_ROUTE_RM_PATH="$child_state/.fm-jt-parent-route" FM_TEST_ROUTE_RM_ONCE="$flag"
+  if scan "$root" "$child_home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "reported route cleanup failure was hidden"
+  fi
+  [ -f "$child_state/terminal-outcomes/$fingerprint.reported" ] \
+    || fail "reported receipt was lost during route cleanup failure"
+  [ -e "$child_state/.fm-jt-parent-route" ] \
+    || fail "route was removed before reported cleanup completed"
+  rm -f "$fakebin/rm"
+  unset FM_TEST_ROUTE_RM_PATH FM_TEST_ROUTE_RM_ONCE
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null \
+    || fail "reported route cleanup did not retry"
+  [ ! -e "$child_state/.fm-jt-parent-route" ] \
+    || fail "reported route remained after retry"
+  pass "reported secondmate routes recover after receipt finalization crashes"
+}
+
 test_secondmate_route_replacement_preserves_old_receipt() {
   local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker history_backup active_route_backup
   new_case secondmate-route-replacement
@@ -1368,7 +1453,7 @@ SH
 }
 
 test_undelivered_secondmate_route_cleanup_is_idempotent() {
-  local dir root home fakebin state child_home child_state marker corr
+  local dir root home fakebin state child_home child_state marker corr rec fail_rm_once
   new_case secondmate-undelivered-cleanup
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1387,11 +1472,43 @@ test_undelivered_secondmate_route_cleanup_is_idempotent() {
     _ "$ROOT" "$child_home" "$home" "$state" sm-cleanup "$corr" \
     || fail "undelivered route fixture was not written"
   [ -f "$marker" ] || fail "undelivered route fixture is missing"
+  rec="$state/pending-replies/$corr"
+  fail_rm_once="$dir/fail-undelivered-rm-once"
+  : > "$fail_rm_once"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  if [ "$arg" = "${FM_TEST_UNDELIVERED_RECORD:-}" ] && [ -e "${FM_TEST_UNDELIVERED_RM_ONCE:-}" ]; then
+    /bin/rm -f "$FM_TEST_UNDELIVERED_RM_ONCE"
+    exit 42
+  fi
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
+  export FM_TEST_UNDELIVERED_RECORD="$rec" FM_TEST_UNDELIVERED_RM_ONCE="$fail_rm_once"
+  if env PATH="$fakebin:$PATH" FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_discard_undelivered "$2" "$3"' \
+    _ "$ROOT" "$state" "$corr"; then
+    fail "undelivered record removal failure was hidden"
+  fi
+  [ -e "$rec" ] || fail "undelivered record was removed after a failed cleanup"
+  [ -e "$marker" ] || fail "undelivered route was cleared before record removal"
+  rm -f "$fakebin/rm"
+  unset FM_TEST_UNDELIVERED_RECORD FM_TEST_UNDELIVERED_RM_ONCE
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_discard_undelivered "$2" "$3"' \
+    _ "$ROOT" "$state" "$corr" \
+    || fail "undelivered record cleanup did not retry"
+  [ ! -e "$rec" ] || fail "undelivered record remained after retry"
   env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" bash -c \
     '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_clear_undelivered "$2" "$3"' \
     _ "$ROOT" "$child_home" "$corr" \
-    || fail "undelivered route cleanup rejected an awaiting report"
+    || fail "undelivered route cleanup rejected an already-removed record"
   [ ! -e "$marker" ] || fail "undelivered route cleanup left a stale marker"
   env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" bash -c \
@@ -1650,6 +1767,7 @@ test_presenting_claim_recovers_before_output
 test_output_started_claim_is_not_reprinted
 test_pre_output_claim_retries_after_crash
 test_finalized_receipt_rows_are_suppressed
+test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
@@ -1665,6 +1783,7 @@ test_herdr_identity_and_default_captain_refusal
 test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_valid_secondmate_route_reports_parent_once
+test_reported_secondmate_route_repair_after_crash
 test_secondmate_route_replacement_preserves_old_receipt
 test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
