@@ -480,19 +480,26 @@ run_check_capture() {
 # from one that has not - the latter being a per-wake-path miss it must surface.
 _hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
 _hb_terminal_surfaced_path() { printf '%s/.hb-terminal-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+_hb_surface_retry_path() { printf '%s/.hb-surface-retry-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
 
-mark_terminal_surfaced() {
-  local task=$1 last=$2 meta marker tmp spawn_incarnation tasktmp window worktree
+surface_meta_value() {
+  awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
+}
+
+surface_meta_value_unique() {
+  awk -F= -v wanted="$2" '
+    $1 == wanted { value=substr($0, index($0, "=") + 1); count++ }
+    END { if (count == 1) { print value; exit 0 } if (count == 0) exit 1; exit 2 }
+  ' "$1" 2>/dev/null
+}
+
+mark_terminal_surfaced_snapshot() {
+  local task=$1 last=$2 spawn_incarnation=$3 tasktmp=$4 window=$5 worktree=$6
+  local marker tmp
   case "$(status_line_verb "$last")" in
     done|failed) ;;
     *) return 0 ;;
   esac
-  meta="$STATE/$task.meta"
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  spawn_incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); count++ } END { exit !(count == 1) }' "$meta" 2>/dev/null || true)
-  tasktmp=$(awk -F= '$1 == "tasktmp" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
-  window=$(awk -F= '$1 == "window" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
-  worktree=$(awk -F= '$1 == "worktree" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
   marker=$(_hb_terminal_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\n' \
@@ -501,32 +508,148 @@ mark_terminal_surfaced() {
     rm -f "$tmp"
     return 1
   fi
-  return 0
+}
+
+mark_terminal_surfaced() {
+  local task=$1 last=$2 meta spawn_incarnation tasktmp window worktree rc
+  case "$(status_line_verb "$last")" in
+    done|failed) ;;
+    *) return 0 ;;
+  esac
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  spawn_incarnation=
+  if spawn_incarnation=$(surface_meta_value_unique "$meta" spawn_incarnation); then
+    :
+  else
+    rc=$?
+    [ "$rc" = 1 ] || [ "$rc" = 2 ] || return 1
+    spawn_incarnation=
+  fi
+  tasktmp=$(surface_meta_value "$meta" tasktmp)
+  window=$(surface_meta_value "$meta" window)
+  worktree=$(surface_meta_value "$meta" worktree)
+  mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
+    "$tasktmp" "$window" "$worktree"
+}
+
+surface_retry_valid() {
+  awk -F= '
+    BEGIN {
+      allowed["schema"]=1; allowed["task"]=1; allowed["snapshot"]=1
+      allowed["spawn_incarnation"]=1; allowed["tasktmp"]=1
+      allowed["window"]=1; allowed["worktree"]=1
+      required["schema"]=1; required["task"]=1; required["snapshot"]=1
+      required["spawn_incarnation"]=1; required["tasktmp"]=1
+      required["window"]=1; required["worktree"]=1
+      valid=1
+    }
+    /^[^=]+=/ {
+      key=$1
+      if (!(key in allowed) || (key in seen)) valid=0
+      seen[key]=1
+      values[key]=substr($0, index($0, "=") + 1)
+      next
+    }
+    { valid=0 }
+    END {
+      for (key in required) if (!(key in seen)) valid=0
+      exit !(valid && values["schema"] == "fm-hb-surface-retry.v1" && values["task"] != "" && values["snapshot"] != "")
+    }
+  ' "$1" 2>/dev/null
+}
+
+surface_retry_write() {
+  local task=$1 last=$2 meta="$STATE/$1.meta" retry tmp spawn_incarnation tasktmp window worktree rc
+  spawn_incarnation= tasktmp= window= worktree=
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    if spawn_incarnation=$(surface_meta_value_unique "$meta" spawn_incarnation); then
+      :
+    else
+      rc=$?
+      [ "$rc" = 1 ] || [ "$rc" = 2 ] || return 1
+      spawn_incarnation=
+    fi
+    tasktmp=$(surface_meta_value "$meta" tasktmp)
+    window=$(surface_meta_value "$meta" window)
+    worktree=$(surface_meta_value "$meta" worktree)
+  fi
+  retry=$(_hb_surface_retry_path "$task")
+  tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
+  if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\n' \
+    "$task" "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" > "$tmp" \
+    || ! mv -f "$tmp" "$retry"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+surface_retry_repair() {
+  local retry task last spawn_incarnation tasktmp window worktree status=0 status_file sig sf marker tmp
+  for retry in "$STATE"/.hb-surface-retry-*; do
+    [ -e "$retry" ] || continue
+    [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || { status=1; continue; }
+    task=$(surface_meta_value "$retry" task)
+    last=$(surface_meta_value "$retry" snapshot)
+    spawn_incarnation=$(surface_meta_value "$retry" spawn_incarnation)
+    tasktmp=$(surface_meta_value "$retry" tasktmp)
+    window=$(surface_meta_value "$retry" window)
+    worktree=$(surface_meta_value "$retry" worktree)
+    if ! mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
+      "$tasktmp" "$window" "$worktree"; then
+      status=1
+      continue
+    fi
+    marker=$(_hb_surfaced_path "$task")
+    tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || { status=1; continue; }
+    if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+      rm -f "$tmp"
+      status=1
+      continue
+    fi
+    status_file="$STATE/$task.status"
+    if [ -f "$status_file" ] && [ ! -L "$status_file" ] \
+      && [ "$(last_status_line "$status_file")" = "$last" ]; then
+      sig=$(stat_sig "$status_file") || { status=1; continue; }
+      sf="$STATE/.seen-$(basename "$status_file" | tr '.' '_')"
+      printf '%s' "$sig" > "$sf" || { status=1; continue; }
+    fi
+    rm -f "$retry" || status=1
+  done
+  return "$status"
 }
 
 # Record a status file's captain-relevant last line as surfaced (no-op for a
 # non-captain-relevant or empty status). Call AFTER the wake is enqueued, so the
 # enqueue-before-suppress ordering holds for this marker too.
 mark_surfaced() {  # <status-file>
-  local f=$1 task last
+  local f=$1 task last retry marker tmp
   task=$(basename "$f"); task="${task%.status}"
   last=$(last_status_line "$f")
   [ -n "$last" ] || return 0
   status_is_captain_relevant "$last" || return 0
-  printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
-  mark_terminal_surfaced "$task" "$last"
+  surface_retry_write "$task" "$last" || return 1
+  retry=$(_hb_surface_retry_path "$task")
+  mark_terminal_surfaced "$task" "$last" || return 1
+  marker=$(_hb_surfaced_path "$task")
+  tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
+  if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$retry" || return 1
 }
 
 # Mark every current captain-relevant status as surfaced. Called after the
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f task last
+  local f status=0
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
-    mark_terminal_surfaced "$task" "$last"
+    mark_surfaced "$f" || status=1
   done < <(scan_captain_relevant_statuses "$STATE")
+  return "$status"
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
@@ -594,6 +717,8 @@ printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 fm_watcher_protocol_acknowledge "$STATE" "$FM_HOME" "$WATCH_PATH" || exit 1
+
+surface_retry_repair || exit 1
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -770,11 +895,11 @@ $pending
 EOF
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
+        mark_surfaced "$f" || exit 1
+        printf '%s' "$sig" > "$sf" || exit 1
         if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
           pause_marker_record_status "$f"
         fi
-        mark_surfaced "$f"
       done <<EOF
 $pending
 EOF
@@ -842,9 +967,9 @@ EOF
           # Terminal status under a stale pane: actionable -> enqueue + exit.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            rm -f "$ssf"
-            mark_surfaced "$STATE/$(window_to_task "$w").status"
+            mark_surfaced "$STATE/$(window_to_task "$w").status" || exit 1
+            printf '%s' "$h" > "$sf" || exit 1
+            rm -f "$ssf" || exit 1
             wake "stale: $w"
           fi
         else
@@ -934,7 +1059,7 @@ EOF
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
+      mark_all_captain_relevant_surfaced || exit 1
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"

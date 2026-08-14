@@ -19,9 +19,9 @@ DRAIN_ACTIONABLE=0
 present_inactive_row() {
   local key=$1 row=$2 status=0 go emitted worker worker_status=0
   if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ]; then
-    printf '%s\n' "$row" || return 1
     FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-      output-started "$key" "$row" >/dev/null 2>&1 || true
+      output-started "$key" "$row" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$row" || return 1
     if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-complete "$key" "$row"; then
       if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
@@ -46,11 +46,11 @@ present_inactive_row() {
       fi
       sleep 0.01
     done
-    printf '%s\n' "$row" || exit 1
-    : > "$emitted" || exit 1
     FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-started "$key" "$row" || exit 1
+    printf '%s\n' "$row" || exit 1
+    : > "$emitted" || exit 1
     FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-complete "$key" "$row" || exit 1
@@ -76,8 +76,7 @@ present_inactive_row() {
         status=3
       fi
     else
-      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-        presenting "$key" "$row" >/dev/null 2>&1 || true
+      :
     fi
   fi
   if [ "$status" = 0 ] && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then

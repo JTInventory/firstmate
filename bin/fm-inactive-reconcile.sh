@@ -85,6 +85,11 @@ RECONCILE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_SECS:-900}" 900 60 1800)
 SCAN_BUDGET_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" 10 1 300)
 REPORTED_ROUTE_REPAIR_LIMIT=$(bounded_secs "${FM_REPORTED_ROUTE_REPAIR_LIMIT:-32}" 32 1 256)
 PENDING_RECEIPT_REPUBLISH_LIMIT=$(bounded_secs "${FM_PENDING_RECEIPT_REPUBLISH_LIMIT:-32}" 32 1 256)
+MAINTENANCE_RESERVE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_MAINTENANCE_RESERVE_SECS:-2}" 2 1 60)
+[ "$MAINTENANCE_RESERVE_SECS" -le "$SCAN_BUDGET_SECS" ] || MAINTENANCE_RESERVE_SECS=$SCAN_BUDGET_SECS
+DIRECT_SCAN_BUDGET_SECS=$((SCAN_BUDGET_SECS - MAINTENANCE_RESERVE_SECS))
+MAINTENANCE_STAGE_SECS=$((MAINTENANCE_RESERVE_SECS / 2))
+[ "$MAINTENANCE_STAGE_SECS" -gt 0 ] || MAINTENANCE_STAGE_SECS=1
 
 meta_value() {  # <meta> <key>
   awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
@@ -967,11 +972,11 @@ reported_secondmate_receipt_valid() {
 }
 
 repair_reported_secondmate_routes() {
-  local scan_started=$1 reported kind corr parent_task_id parent_home parent_status now remaining status=0
+  local scan_deadline=$1 reported kind corr parent_task_id parent_home parent_status now remaining status=0
   local cursor='' cursor_found=0 started=1 pass base last processed=0 stop_after=0 cursor_tmp
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
   now=$(date +%s)
-  remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+  remaining=$((scan_deadline - now))
   [ "$remaining" -gt 0 ] || return 1
   FM_LOCK_WAIT_SECS="$remaining" fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   cursor=$(cat "$REPORTED_ROUTE_CURSOR" 2>/dev/null || true)
@@ -1003,7 +1008,7 @@ repair_reported_secondmate_routes() {
         continue
       fi
       now=$(date +%s)
-      remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+      remaining=$((scan_deadline - now))
       [ "$remaining" -gt 0 ] || { status=1; break 2; }
       [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
       kind=$(receipt_field "$reported" kind 2>/dev/null || true)
@@ -1062,7 +1067,7 @@ republish_pending_receipt() {
 }
 
 republish_pending_receipts() {
-  local scan_started=$1 pending now remaining status=0
+  local scan_deadline=$1 pending now remaining status=0
   local cursor='' pass started=1 boundary='' stop_after=0
   local base last='' processed=0 cursor_tmp
   local LC_ALL=C
@@ -1102,7 +1107,7 @@ republish_pending_receipts() {
         break
       fi
       now=$(date +%s)
-      remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+      remaining=$((scan_deadline - now))
       [ "$remaining" -gt 0 ] || { status=1; break 2; }
       if ! FM_LOCK_WAIT_SECS="$remaining" republish_pending_receipt "$pending"; then
         status=1
@@ -1484,7 +1489,7 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
 
 scan_locked() {
   local startup=${1:-0} marker_mtime now age cursor meta id started=1 cursor_seen=1
-  local scan_started remaining rc complete=1 scan_failed=0 find_tmp maintenance_status=0
+  local scan_started scan_deadline maintenance_deadline remaining rc complete=1 scan_failed=0 find_tmp maintenance_status=0
   inactive_state_preflight || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
   now=$(date +%s)
@@ -1493,11 +1498,14 @@ scan_locked() {
     [ "$age" -ge "$RECONCILE_SECS" ] || return 0
   fi
   scan_started=$now
+  scan_deadline=$((scan_started + DIRECT_SCAN_BUDGET_SECS))
   run_maintenance() {
-    if ! republish_pending_receipts "$scan_started"; then
+    maintenance_deadline=$(( $(date +%s) + MAINTENANCE_STAGE_SECS ))
+    if ! republish_pending_receipts "$maintenance_deadline"; then
       maintenance_status=1
     fi
-    if ! repair_reported_secondmate_routes "$scan_started"; then
+    maintenance_deadline=$(( $(date +%s) + MAINTENANCE_STAGE_SECS ))
+    if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
       maintenance_status=1
     fi
   }
@@ -1517,7 +1525,7 @@ scan_locked() {
     return 1
   }
   now=$(date +%s)
-  remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+  remaining=$((scan_deadline - now))
   if [ "$remaining" -le 0 ]; then
     rm -f "$find_tmp"
     run_maintenance
@@ -1534,7 +1542,7 @@ scan_locked() {
   fi
   while [ "$scan_failed" = 0 ] && IFS= read -r -d '' meta; do
     now=$(date +%s)
-    remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+    remaining=$((scan_deadline - now))
     if [ "$remaining" -le 0 ]; then
       complete=0
       break
