@@ -305,10 +305,12 @@ If `no-mistakes doctor` reports problems, fix the environment (auth, daemon) bef
 JT Inventory's app code and its data pipeline now live in two different repos.
 Before opening a PR or dispatching a change, resolve which repo owns the work:
 
-- App/UI/design (`app/`, `components/`, `lib/`, `design-system/`, `docs/design/`) goes to
+- JT app/UI/design and Firebase Hosting/data-protection configuration (`app/`, `components/`,
+  `lib/`, `design-system/`, `docs/design/`, `firebase.json`, `storage.rules`,
+  `scripts/prepare-firebase-hosting.mjs`, and the deploy workflow) go to
   `JTInventory/jt-war-room`; a merge on its `main` deploys Firebase Hosting automatically.
-- Pipeline/data/secrets stay on `JTInventory/Openclaw-Backup` (the OpenClaw monorepo); its CI
-  blocks app paths (`app-code-freeze`) and points to jt-war-room.
+- Pipeline/data generators and secrets stay on `JTInventory/Openclaw-Backup` (the OpenClaw
+  monorepo); its CI blocks app paths (`app-code-freeze`) and points to jt-war-room.
 
 The canonical definition lives in `jt-war-room`'s README (section « Hébergement ») and in
 `Openclaw-Backup`'s `AGENTS.md`; prefer reading those sources over copied detail. When in doubt
