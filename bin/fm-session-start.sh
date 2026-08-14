@@ -363,33 +363,14 @@ if [ "$READ_ONLY" -eq 1 ]; then
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
   DRAIN_STATUS=0
-  DRAIN_OUT=$(FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
-    "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1) || DRAIN_STATUS=$?
-  if [ "$DRAIN_STATUS" -ne 0 ]; then
-    printf 'error: wake drain failed (status %s); inactive reconciliation skipped\n%s\n' \
-      "$DRAIN_STATUS" "$DRAIN_OUT" >&2
-  elif [ -n "$DRAIN_OUT" ]; then
-    if printf '%s\n' "$DRAIN_OUT"; then
-      while IFS= read -r drain_row || [ -n "$drain_row" ]; do
-        IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
-        case "$_key" in
-          inactive-outcome:*)
-            if ! "$SCRIPT_DIR/fm-inactive-reconcile.sh" caller-output-complete \
-              "$_key" "$drain_row" "$$" >/dev/null 2>&1; then
-              printf 'warning: inactive outcome output confirmation deferred for %s\n' "$_key" >&2
-            elif ! "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$drain_row" >/dev/null 2>&1; then
-              printf 'warning: inactive outcome confirmation deferred for %s\n' "$_key" >&2
-            fi
-            ;;
-        esac
-      done <<< "$DRAIN_OUT"
-    else
-      printf 'error: wake presentation failed; inactive outcome confirmations deferred\n' >&2
-    fi
-  else
+  FM_WAKE_DRAIN_DIRECT=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1 || DRAIN_STATUS=$?
+  if [ "$DRAIN_STATUS" -ne 0 ] && [ "$DRAIN_STATUS" -ne 3 ]; then
+    printf 'error: wake drain failed (status %s); inactive reconciliation skipped\n' \
+      "$DRAIN_STATUS" >&2
+  elif [ "$DRAIN_STATUS" = 0 ]; then
     printf '(no queued wakes)\n'
   fi
-  if [ "$DRAIN_STATUS" -eq 0 ]; then
+  if [ "$DRAIN_STATUS" = 0 ] || [ "$DRAIN_STATUS" = 3 ]; then
     INACTIVE_STATUS=0
     INACTIVE_OUT=$("$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_STATUS=$?
     if [ "$INACTIVE_STATUS" -ne 0 ]; then

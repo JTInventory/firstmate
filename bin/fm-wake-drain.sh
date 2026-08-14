@@ -14,9 +14,16 @@ DRAIN_DEDUPED=
 DRAIN_RESTORE=
 DRAIN_PID=${BASHPID:-$$}
 DRAIN_LOCK_HELD=false
+DRAIN_ACTIONABLE=0
 
 present_inactive_row() {
   local key=$1 row=$2 status=0 go emitted worker worker_status=0 presentation_marked=0
+  if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ]; then
+    printf '%s\n' "$row" || return 1
+    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+      output-complete "$key" "$row" || return 1
+    return 0
+  fi
   trap - INT TERM HUP
   go=$(mktemp "$STATE/.wake-presentation.XXXXXX") || return 1
   [ -f "$go" ] && [ ! -L "$go" ] || { rm -f "$go"; return 1; }
@@ -107,7 +114,7 @@ restore_unprocessed_rows() {
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$? restore_status=0
-  if [ "$status" -ne 0 ] && [ "$DRAIN_LOCK_HELD" = true ]; then
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] && [ "$DRAIN_LOCK_HELD" = true ]; then
     if [ -n "$DRAIN_RESTORE" ] && [ -e "$DRAIN_RESTORE" ]; then
       fm_wake_restore_queue "$DRAIN_RESTORE" || restore_status=1
     elif [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ]; then
@@ -161,6 +168,7 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" claim "$_key" "$drain_row" || claim_status=$?
       case "$claim_status" in
         0)
+          DRAIN_ACTIONABLE=1
           if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presenting "$_key" "$drain_row"; then
             restore_unprocessed_rows "$drain_line" || exit 1
             exit 1
@@ -195,6 +203,7 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
         restore_unprocessed_rows "$drain_line" || exit 1
         exit 1
       fi
+      DRAIN_ACTIONABLE=1
       ;;
   esac
 done < "$DRAIN_DEDUPED"
@@ -203,4 +212,7 @@ DRAIN_TMP=
 rm -f "$DRAIN_DEDUPED"
 DRAIN_DEDUPED=
 assert_watcher_liveness
+if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ] && [ "$DRAIN_ACTIONABLE" = 1 ]; then
+  exit 3
+fi
 exit 0
