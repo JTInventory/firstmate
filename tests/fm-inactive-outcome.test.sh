@@ -698,8 +698,8 @@ test_deferred_ack_retries_after_caller_crash() {
     || fail "deferred drain did not retain the presentation claim"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" defer_ack)" = 1 ] \
     || fail "deferred drain did not mark the claim for caller confirmation"
-  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_started)" = 1 ] \
-    || fail "deferred drain did not retain post-output state"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_started)" = 0 ] \
+    || fail "deferred drain advanced output before caller emission"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_complete)" = 0 ] \
     || fail "deferred drain completed output before caller confirmation"
   printf '%s\n' "$row" > "$state/.wake-queue"
@@ -713,15 +713,28 @@ test_deferred_ack_retries_after_caller_crash() {
   rm -f "$state/deferred-x1.meta" "$state/deferred-x1.status" "$state/deferred-x1.turn-ended"
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "pending deferred receipt was not republished after caller crash"
   [ "$(queue_count "$state")" = 1 ] || fail "pending deferred receipt did not get a retry wake"
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
   drain_output="$dir/retry.out"
   drain "$root" "$home" "$fakebin" >"$drain_output" \
-    || fail "retry drain did not recover the deferred acknowledgement"
+    || fail "retry drain did not recover the deferred presentation"
+  ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+      "$RECON" caller-output-complete "inactive-outcome:$fingerprint" "$row" "$$" ) \
+    || fail "caller output confirmation did not recover the retried presentation"
+  ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+      "$RECON" confirm "inactive-outcome:$fingerprint" "$row" ) \
+    || fail "caller confirmation did not finalize the retried presentation"
   [ -f "$state/terminal-outcomes/$fingerprint.presented" ] || fail "retry drain did not acknowledge the recovered receipt"
   [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain left the receipt pending"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain left the deferred claim"
-  [ ! -s "$drain_output" ] || fail "retry drain re-presented output already emitted before the caller crash"
+  [ "$(grep -Fxc "$row" "$drain_output")" = 1 ] || fail "retry drain did not re-present output never emitted by the caller"
   unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_DEFERRED_X1
-  pass "deferred inactive receipts acknowledge stale post-output claims without replay"
+  pass "deferred inactive receipts retry until caller-visible emission"
 }
 
 test_deferred_ack_confirms_after_caller_emission() {
@@ -743,6 +756,12 @@ test_deferred_ack_confirms_after_caller_emission() {
       -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
       FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
       CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+      "$RECON" caller-output-complete "inactive-outcome:$fingerprint" "$row" "$$" ) \
+    || fail "caller output confirmation did not finalize the receipt"
+  ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
       "$RECON" confirm "inactive-outcome:$fingerprint" "$row" ) \
     || fail "caller confirmation did not finalize the receipt"
   [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
@@ -753,6 +772,38 @@ test_deferred_ack_confirms_after_caller_emission() {
     || fail "caller confirmation left the claim"
   unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_DEFERRED_CONFIRM_X1
   pass "deferred inactive receipts finalize after caller emission"
+}
+
+test_deferred_ack_recovers_after_output_confirmation() {
+  local dir root home fakebin state fingerprint row drain_output
+  new_case deferred-output-recovery
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" deferred-output-recovery-x1 deferred-output-recovery-inc
+  export FM_FAKE_CREW_STATE_DEFERRED_OUTPUT_RECOVERY_X1='state: done · source: pane · deferred output recovery'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "deferred output recovery setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
+  drain "$root" "$home" "$fakebin" >"$dir/deferred-output-recovery.out" \
+    || fail "deferred output recovery drain failed"
+  ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+      "$RECON" caller-output-complete "inactive-outcome:$fingerprint" "$row" "$$" ) \
+    || fail "caller output confirmation failed"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain_output="$dir/deferred-output-recovery-retry.out"
+  drain "$root" "$home" "$fakebin" >"$drain_output" \
+    || fail "deferred output recovery retry failed"
+  [ ! -s "$drain_output" ] || fail "confirmed output was presented again after caller crash"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "confirmed output was not acknowledged during recovery"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
+    || fail "confirmed output left a recovery claim"
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_DEFERRED_OUTPUT_RECOVERY_X1
+  pass "deferred inactive receipts recover confirmed output without replay"
 }
 
 test_scan_failure_retries_without_advancing_cadence() {
@@ -1918,6 +1969,41 @@ test_failed_concurrent_send_discards_only_new_record() {
   pass "failed concurrent send discards only its new undelivered record"
 }
 
+test_failed_marked_send_discards_never_bound_record() {
+  local dir root home fakebin state child_home child_state send_out
+  new_case failed-never-bound-send
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/unsafe-secondmate-home"
+  child_state="$child_home/state"
+  mkdir -p "$state/pending-replies" "$child_home/state-real" "$child_home/data" \
+    "$child_home/config" "$child_home/projects"
+  ln -s "$child_home/state-real" "$child_state"
+  printf 'sm-never-bound\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-never-bound never-bound-inc secondmate tmux firstmate:fm-sm-never-bound
+  printf 'home=%s\n' "$child_home" >> "$state/sm-never-bound.meta"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME -u FM_ROOT -u STATE -u FM_PENDING_REPLY_EXISTING_CORR \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-never-bound "never bound request" 2>&1) && fail "never-bound marked send unexpectedly succeeded"
+  [ "$(direct_file_count "$state/pending-replies" '*')" = 0 ] \
+    || fail "never-bound send left an awaiting_report record without a route"
+  [ ! -e "$child_state/.fm-jt-parent-route" ] \
+    || fail "never-bound send installed a route through an unsafe state path"
+  pass "failed marked sends discard expectations without a committed route"
+}
+
 test_drain_restores_only_unprocessed_rows() {
   local dir root home fakebin state first second
   new_case drain-rollback
@@ -2011,6 +2097,7 @@ test_finalized_receipt_rows_are_suppressed
 test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
 test_deferred_ack_confirms_after_caller_emission
+test_deferred_ack_recovers_after_output_confirmation
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
@@ -2033,5 +2120,6 @@ test_route_replacement_rejects_malformed_parent_record
 test_recovery_route_reuse_validates_parent_record
 test_failed_marked_send_restores_record_on_route_cleanup_failure
 test_failed_concurrent_send_discards_only_new_record
+test_failed_marked_send_discards_never_bound_record
 test_drain_restores_only_unprocessed_rows
 test_malformed_or_missing_secondmate_route_fails_closed
