@@ -346,6 +346,28 @@ SH
   pass "find enumeration failures propagate and preserve retry state"
 }
 
+test_find_enumeration_respects_scan_budget() {
+  local dir root home fakebin state
+  new_case find-budget
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" find-budget-x1 find-budget-inc
+  cat > "$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+exit 0
+SH
+  chmod +x "$fakebin/find"
+  export FM_INACTIVE_OUTCOME_BUDGET_SECS=1
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "slow find enumeration exceeded the scan budget without failing"
+  fi
+  [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "budget-exhausted enumeration advanced the cadence marker"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "budget-exhausted enumeration created a receipt"
+  unset FM_INACTIVE_OUTCOME_BUDGET_SECS
+  pass "inactive enumeration is bounded by the per-scan budget"
+}
+
 test_ack_recomputes_fingerprint_from_receipt_fields() {
   local dir root home fakebin state rec fingerprint
   new_case fingerprint-binding
@@ -387,6 +409,30 @@ test_reserved_claim_recovers_to_a_new_wake_row() {
   [ -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "recovered claim did not present its receipt"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "recovered claim was not retired"
   pass "reserved inactive claims recover when the wake row is recreated"
+}
+
+test_presenting_claim_recovers_before_output() {
+  local dir root home fakebin state fingerprint row
+  new_case presenting-claim-recovery
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'presenting-x1|presenting-inc|done|state: done · source: pane · presenting recovery')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=presenting-x1 \
+    incarnation=presenting-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · presenting recovery' kind=ship
+  row='2	2	check	inactive-outcome:'"$fingerprint"$'\trecreated row'
+  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=1\t1\tcheck\tinactive-outcome:%s\told row\nstate=presenting\ncreated_epoch=1\n' \
+    "$fingerprint" "$fingerprint" > "$state/terminal-outcomes/.$fingerprint.claim"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >"$dir/presenting.out" \
+    || fail "drain did not recover a presenting claim"
+  grep -F 'recreated row' "$dir/presenting.out" >/dev/null \
+    || fail "recovered presenting claim did not present the recreated wake"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "recovered presenting claim did not present its receipt"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "recovered presenting claim was not retired"
+  pass "presenting inactive claims recover before output"
 }
 
 test_scan_failure_retries_without_advancing_cadence() {
@@ -590,12 +636,13 @@ test_session_start_drains_before_inactive_scan() {
 }
 
 test_watcher_runs_inactive_cadence() {
-  local dir root home fakebin state out status
+  local dir root home fakebin state out status wake_line inactive_line
   new_case watcher-wiring
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   cp -a "$ROOT/bin/." "$root/bin/"
   write_meta "$state" watcher-x1 watcher-inc
+  printf '1\t1\tsignal\ttask-before\tqueued before watcher scan\n' > "$state/.wake-queue"
   export FM_FAKE_CREW_STATE_WATCHER_X1='state: failed · source: pane · watcher wiring'
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -623,8 +670,14 @@ SH
   [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the inactive outcome wake"
   printf '%s\n' "$out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
     || fail "watcher did not surface the inactive reconciliation result"
+  wake_line=$(printf '%s\n' "$out" | grep -n '^1[[:space:]]\+1[[:space:]]\+signal[[:space:]]\+task-before' | head -1 | cut -d: -f1)
+  inactive_line=$(printf '%s\n' "$out" | grep -n 'check: inactive terminal outcome replay queued' | head -1 | cut -d: -f1)
+  [ -n "$wake_line" ] && [ -n "$inactive_line" ] && [ "$wake_line" -lt "$inactive_line" ] \
+    || fail "watcher did not drain the existing wake before inactive reconciliation"
+  [ "$(awk -F '\t' '$4 == "task-before" { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
+    || fail "watcher left the existing wake queued"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher cadence did not create the inactive receipt"
-  [ "$(queue_count "$state")" = 1 ] || fail "watcher cadence did not retain the inactive outcome wake"
+  [ "$(queue_count "$state")" = 1 ] || fail "watcher cadence did not retain exactly one inactive outcome wake"
   unset FM_FAKE_CREW_STATE_WATCHER_X1
   pass "watcher cadence runs inactive reconciliation and surfaces its wake"
 }
@@ -779,7 +832,8 @@ test_status_log_terminal_is_not_replayed() {
 }
 
 test_valid_secondmate_route_reports_parent_once() {
-  local dir root home fakebin state child_home child_state parent_status corr rec outside parent_record send_out
+  local dir root home fakebin state child_home child_state parent_status corr rec outside send_out
+  local history_corr history_record history_status
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -836,22 +890,57 @@ SH
     fail "valid secondmate route drain failed after symlink removal"
   fi
   [ "$(receipt_count "$child_state" reported)" = 1 ] || fail "valid secondmate route was not reported"
-  [ -f "$child_state/.fm-jt-parent-route" ] || fail "reported secondmate route was cleared before its parent lifecycle resolved"
+  [ ! -e "$child_state/.fm-jt-parent-route" ] || fail "reported secondmate route was not cleared after its parent report"
   grep -F "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status" >/dev/null \
     || fail "valid secondmate route did not append the correlated parent status"
   drain "$root" "$child_home" "$fakebin" >/dev/null
   [ "$(grep -Fc "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status")" = 1 ] \
     || fail "secondmate parent report was duplicated"
-  parent_record="$state/pending-replies/$corr"
-  sed -i 's/^phase=.*/phase=resolved/' "$parent_record"
-  scan "$root" "$child_home" "$fakebin" --startup >/dev/null || fail "resolved history lifecycle scan failed"
-  [ ! -e "$child_state/.fm-jt-parent-route" ] || fail "resolved parent history left a stale route marker"
-  unset FM_FAKE_CREW_STATE_CHILD_X1
+
+  printf 'sm-history\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-history history-parent-inc secondmate tmux firstmate:fm-sm-history
+  printf 'home=%s\n' "$child_home" >> "$state/sm-history.meta"
+  history_status="$state/sm-history.status"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-history "history request" 2>&1) || fail "public fm-send history route setup failed: $send_out"
+  history_corr=
+  for history_record in "$state"/pending-replies/*; do
+    [ -f "$history_record" ] || continue
+    [ "$(basename "$history_record")" = "$corr" ] || history_corr=$(basename "$history_record")
+  done
+  [ -n "$history_corr" ] || fail "public fm-send did not create a distinct history correlation"
+  history_record="$state/pending-replies/$history_corr"
+  sed -i 's/^phase=.*/phase=resolved/' "$history_record"
+  (cd "$root" && env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_archive_terminal "$2" "$3"' \
+    _ "$ROOT" "$state" "$history_corr") \
+    || fail "parent terminal lifecycle did not archive the history record"
+  [ -f "$state/pending-reply-history/$history_corr" ] || fail "parent history record was not archived"
+  write_meta "$child_state" child-history-x1 child-history-inc
+  export FM_FAKE_CREW_STATE_CHILD_HISTORY_X1='state: done · source: pane · history child quiet'
+  scan "$root" "$child_home" "$fakebin" --startup \
+    || fail "pending-reply-history route scan failed"
+  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "pending-reply-history route did not create a pending receipt"
+  rec=$(find "$child_state/terminal-outcomes" -maxdepth 1 -type f -name '*.pending' | head -1)
+  [ "$(receipt_value "$rec" parent_corr)" = "$history_corr" ] \
+    || fail "history route receipt used the wrong parent correlation"
+  drain "$root" "$child_home" "$fakebin" >/dev/null \
+    || fail "pending-reply-history route drain failed"
+  [ "$(receipt_count "$child_state" reported)" = 2 ] || fail "history route receipt was not reported"
+  [ ! -e "$child_state/.fm-jt-parent-route" ] || fail "history route marker was not cleared after presentation"
+  ! grep -F 'inactive terminal outcome replayed: task=child-history-x1' "$history_status" >/dev/null 2>&1 \
+    || fail "resolved history route appended a duplicate parent status"
+  unset FM_FAKE_CREW_STATE_CHILD_X1 FM_FAKE_CREW_STATE_CHILD_HISTORY_X1
   pass "valid secondmate outcomes use the parent status correlation exactly once"
 }
 
 test_concurrent_secondmate_routes_are_rejected() {
-  local dir root home fakebin state child_home child_state marker corr_one corr_two outside
+  local dir root home fakebin state child_home child_state marker corr_one corr_two outside existing_real existing_link
   new_case secondmate-route-concurrent
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -881,6 +970,20 @@ test_concurrent_secondmate_routes_are_rejected() {
   fi
   rm -f "$child_home/.fm-secondmate-home"
   mv "$dir/secondmate-marker" "$child_home/.fm-secondmate-home"
+  existing_real="$dir/existing-real-home"
+  existing_link="$dir/existing-home-link"
+  mkdir -p "$existing_real/state/pending-replies"
+  fm_write_meta "$existing_real/state/pending-replies/$corr_one" \
+    schema=fm-pending-reply.v1 corr_id="$corr_one" task_id=sm-concurrent \
+    parent_home="$existing_real" parent_status="$existing_real/state/sm-concurrent.status" \
+    delivered_epoch=1 phase=resolved
+  ln -s "$existing_real" "$existing_link"
+  printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-concurrent\nparent_home=%s\nparent_status=%s\ncorr_id=%s\n' \
+    "$existing_link" "$existing_real/state/sm-concurrent.status" "$corr_one" > "$marker"
+  if route_write "$corr_two"; then
+    fail "existing secondmate home symlink was accepted during route replacement"
+  fi
+  rm -f "$marker"
   route_write "$corr_one" || fail "initial secondmate route was not written"
   marker_before=$(cat "$marker")
   outside="$dir/temp-target"
@@ -979,8 +1082,10 @@ test_portable_timeout_runner_is_used
 test_portable_timeout_preserves_signal_failure
 test_leading_zero_cadence_is_normalized
 test_find_failure_propagates_without_advancing_scan
+test_find_enumeration_respects_scan_budget
 test_ack_recomputes_fingerprint_from_receipt_fields
 test_reserved_claim_recovers_to_a_new_wake_row
+test_presenting_claim_recovers_before_output
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint

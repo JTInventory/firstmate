@@ -85,12 +85,17 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" claim "$_key" "$drain_row" || claim_status=$?
       case "$claim_status" in
         0)
-          if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$_key" "$drain_row"; then
+          if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presenting "$_key" "$drain_row"; then
             DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
             awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
             exit 1
           fi
           if ! printf '%s\n' "$drain_row"; then
+            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
+            awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
+            exit 1
+          fi
+          if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$_key" "$drain_row"; then
             DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
             awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
             exit 1

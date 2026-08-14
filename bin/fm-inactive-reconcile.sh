@@ -215,7 +215,7 @@ claim_validate() {  # <claim> <fingerprint> <row>
   [ "$(claim_field "$claim" fingerprint)" = "$fp" ] || return 1
   [ "$(claim_field "$claim" row)" = "$row" ] || return 1
   state=$(claim_field "$claim" state)
-  case "$state" in reserved|presented) printf '%s' "$state" ;; *) return 1 ;; esac
+  case "$state" in reserved|presenting|presented) printf '%s' "$state" ;; *) return 1 ;; esac
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -231,7 +231,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     [ "$(claim_field "$claim" schema)" = fm-inactive-outcome-claim.v1 ] || return 2
     [ "$(claim_field "$claim" fingerprint)" = "$fp" ] || return 2
     state=$(claim_field "$claim" state)
-    case "$state" in presented) return 1 ;; reserved) ;; *) return 2 ;; esac
+    case "$state" in presented|presenting|reserved) ;; *) return 2 ;; esac
     old_row=$(claim_field "$claim" row)
     [ -n "$old_row" ] || return 2
     if [ "$old_row" != "$row" ]; then
@@ -243,6 +243,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
       mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
     fi
+    [ "$state" = presented ] && return 1
     return 0
   fi
   mkdir -p "$OUTCOME_DIR" || return 2
@@ -266,6 +267,28 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
   return 0
 }
 
+claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim state tmp line
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  case "$state" in
+    presenting) return 0 ;;
+    reserved) ;;
+    *) return 2 ;;
+  esac
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in state=*) printf 'state=presenting\n' ;; *) printf '%s\n' "$line" ;; esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+}
+
 claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim tmp line
   drain_claim_owner "$row" || return 2
@@ -273,7 +296,7 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   claim=$(claim_path "$fp")
   [ ! -L "$claim" ] || return 2
-  [ "$(claim_validate "$claim" "$fp" "$row")" = reserved ] || return 2
+  [ "$(claim_validate "$claim" "$fp" "$row")" = presenting ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -375,6 +398,44 @@ publish_receipt_and_wake() {
   return "$status"
 }
 
+receipt_existing_core() {
+  local suffix existing expected_fp existing_kind parent_id parent_home parent_status parent_corr
+  RECEIPT_EXISTING_SUFFIX=
+  expected_fp=$(hash_text "$ID|$INC|$OUTCOME|$SNAPSHOT")
+  [ "$expected_fp" = "$FP" ] || return 1
+  for suffix in pending presented reported; do
+    existing=$(receipt_path "$FP" "$suffix")
+    [ ! -L "$existing" ] || return 2
+    [ -e "$existing" ] || continue
+    [ -f "$existing" ] || return 2
+    [ "$(receipt_field "$existing" schema)" = fm-jt-terminal-outcome.v1 ] || return 2
+    [ "$(receipt_field "$existing" fingerprint)" = "$FP" ] || return 2
+    [ "$(receipt_field "$existing" task_id)" = "$ID" ] || return 2
+    [ "$(receipt_field "$existing" incarnation)" = "$INC" ] || return 2
+    [ "$(receipt_field "$existing" outcome)" = "$OUTCOME" ] || return 2
+    [ "$(receipt_field "$existing" terminal_source)" = "$SOURCE" ] || return 2
+    [ "$(receipt_field "$existing" terminal_snapshot)" = "$SNAPSHOT" ] || return 2
+    existing_kind=$(receipt_field "$existing" kind)
+    case "$existing_kind" in ship|scout) parent_id=$(receipt_field "$existing" parent_task_id); parent_home=$(receipt_field "$existing" parent_home); parent_status=$(receipt_field "$existing" parent_status); parent_corr=$(receipt_field "$existing" parent_corr); [ -z "$parent_id" ] && [ -z "$parent_home" ] && [ -z "$parent_status" ] && [ -z "$parent_corr" ] || return 2 ;; secondmate) parent_id=$(receipt_field "$existing" parent_task_id); parent_home=$(receipt_field "$existing" parent_home); parent_status=$(receipt_field "$existing" parent_status); parent_corr=$(receipt_field "$existing" parent_corr); [ -n "$parent_id" ] && case "$parent_home" in /*) ;; *) return 2 ;; esac && case "$parent_status" in /*) ;; *) return 2 ;; esac && printf '%s' "$parent_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 2 ;; *) return 2 ;; esac
+    RECEIPT_EXISTING_SUFFIX=$suffix
+    return 0
+  done
+  return 1
+}
+
+republish_existing_receipt_wake() {
+  local existing task outcome status=0
+  existing=$(receipt_path "$FP" pending)
+  task=$(receipt_field "$existing" task_id)
+  outcome=$(receipt_field "$existing" outcome)
+  FM_WAKE_APPEND_CREATED=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
+    "inactive terminal outcome: task=$task state=$outcome fingerprint=$FP" || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  return "$status"
+}
+
 read_incarnation() {  # <meta> <id>
   local meta=$1 id=$2 token tasktmp window worktree seed rc
   if token=$(meta_value_unique "$meta" spawn_incarnation); then
@@ -415,7 +476,7 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend now activity age line outcome source
-  local snapshot token key route_rc state_tmp state_rc
+  local snapshot token key route_rc state_tmp state_rc existing_rc
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
@@ -471,14 +532,27 @@ reconcile_child() {
   SNAPSHOT=$snapshot
   SOURCE=$source
   KIND=${kind:-ship}
-  if is_secondmate_home; then
-    route_rc=$?
-    [ "$route_rc" = 0 ] || return 0
+  is_secondmate_home
+  route_rc=$?
+  case "$route_rc" in
+    0|1) ;;
+    *) return 0 ;;
+  esac
+  if receipt_existing_core; then
+    if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
+      republish_existing_receipt_wake || return 1
+      if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
+        printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
+      fi
+    fi
+    return 0
+  else
+    existing_rc=$?
+    [ "$existing_rc" = 1 ] || return 1
+  fi
+  if [ "$route_rc" = 0 ]; then
     fm_pending_reply_secondmate_route_validate "$FM_HOME" || return 0
     KIND=secondmate
-  else
-    [ "$?" = 1 ] || return 0
-    KIND=${kind:-ship}
   fi
   key="inactive-outcome:$FP"
   publish_receipt_and_wake || return 1
@@ -527,22 +601,8 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     parent_status=$(receipt_field "$rec" parent_status)
     corr=$(receipt_field "$rec" parent_corr)
     [ -n "$parent_task_id" ] || return 2
-    fm_pending_reply_secondmate_receipt_validate \
-      "$FM_HOME" "$parent_task_id" "$parent_home" "$parent_status" "$corr" || return 2
-    if [ "$FM_PENDING_ROUTE_PHASE" = resolved ] || [ "$FM_PENDING_ROUTE_PHASE" = retired ]; then
-      fm_pending_reply_secondmate_route_clear "$FM_HOME" "$corr" || return 2
-    else
-      line="$outcome [corr=$corr]: inactive terminal outcome replayed: task=$id fingerprint=$fp"
-      [ ! -L "$parent_status" ] || return 2
-      if [ -e "$parent_status" ]; then
-        [ -f "$parent_status" ] || return 2
-      else
-        : > "$parent_status" || return 2
-      fi
-      if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-        printf '%s\n' "$line" >> "$parent_status" || return 2
-      fi
-    fi
+    secondmate_ack_report "$FM_HOME" "$parent_task_id" "$parent_home" \
+      "$parent_status" "$corr" "$outcome" "$id" "$fp" || return 2
     target=$(receipt_path "$fp" reported)
   else
     target=$(receipt_path "$fp" presented)
@@ -558,6 +618,35 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   mv "$rec" "$target" || return 2
   claim_remove "$key" "$row" || return 2
   return 0
+}
+
+secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent-status> <corr> <outcome> <task-id> <fingerprint>
+  local secondmate_home=$1 parent_task_id=$2 parent_home=$3 parent_status=$4 corr=$5 outcome=$6 task_id=$7 fp=$8
+  local parent_state token rc=0 line
+  parent_state="$parent_home/state"
+  fm_pending_reply_txn_lock_acquire "$parent_state" "$corr" token || return 2
+  if ! fm_pending_reply_secondmate_receipt_validate \
+    "$secondmate_home" "$parent_task_id" "$parent_home" "$parent_status" "$corr"; then
+    rc=2
+  elif [ "$FM_PENDING_ROUTE_PHASE" = resolved ] || [ "$FM_PENDING_ROUTE_PHASE" = retired ]; then
+    fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || rc=2
+  else
+    line="$outcome [corr=$corr]: inactive terminal outcome replayed: task=$task_id fingerprint=$fp"
+    [ ! -L "$parent_status" ] || rc=2
+    if [ "$rc" = 0 ] && [ -e "$parent_status" ]; then
+      [ -f "$parent_status" ] || rc=2
+    elif [ "$rc" = 0 ]; then
+      : > "$parent_status" || rc=2
+    fi
+    if [ "$rc" = 0 ] && ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
+      printf '%s\n' "$line" >> "$parent_status" || rc=2
+    fi
+    if [ "$rc" = 0 ]; then
+      fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || rc=2
+    fi
+  fi
+  fm_pending_reply_txn_lock_release "$parent_state" "$corr" "$token" || rc=2
+  return "$rc"
 }
 
 scan_locked() {
@@ -579,7 +668,13 @@ scan_locked() {
   [ -n "$cursor" ] && cursor_seen=0
   find_tmp=$(mktemp "$STATE/.inactive-outcome-find.XXXXXX") || return 1
   [ -f "$find_tmp" ] && [ ! -L "$find_tmp" ] || { rm -f "$find_tmp"; return 1; }
-  if ! find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
+  now=$(date +%s)
+  remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+  if [ "$remaining" -le 0 ]; then
+    rm -f "$find_tmp"
+    return 1
+  fi
+  if ! run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
     \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
     rm -f "$find_tmp"
     return 1
@@ -658,6 +753,10 @@ case "${1:-}" in
   claim)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
     claim_reserve "$2" "$3"
+    ;;
+  presenting)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    claim_mark_presenting "$2" "$3"
     ;;
   presented)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2

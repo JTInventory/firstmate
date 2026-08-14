@@ -560,10 +560,18 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
       case "$existing_status" in /*) ;; *) route_status=1 ;; esac
       printf '%s' "$existing_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || route_status=1
       if [ "$route_status" = 0 ]; then
+        [ -d "$existing_home" ] && [ ! -L "$existing_home" ] || route_status=1
+        [ -d "$existing_home/state" ] && [ ! -L "$existing_home/state" ] || route_status=1
+      fi
+      if [ "$route_status" = 0 ]; then
         existing_state=$(cd "$existing_home/state" 2>/dev/null && pwd -P) || route_status=1
       fi
       if [ "$route_status" = 0 ] \
         && [ "$existing_status" != "$existing_state/$existing_id.status" ]; then
+        route_status=1
+      fi
+      if [ "$route_status" = 0 ] \
+        && [ -L "$existing_state/$existing_id.status" ]; then
         route_status=1
       fi
       if [ "$route_status" = 0 ]; then
@@ -646,6 +654,8 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
     && [ "$seen_parent_home" = 1 ] && [ "$seen_parent_status" = 1 ] \
     && [ "$seen_corr" = 1 ] || return 1
   [ "$schema" = fm-jt-parent-route.v1 ] || return 1
+  [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
+  [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   home_marker="$secondmate_home/.fm-secondmate-home"
   [ -f "$home_marker" ] && [ ! -L "$home_marker" ] || return 1
   marker_id=$(cat "$home_marker" 2>/dev/null || true)
@@ -695,10 +705,6 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
     awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
     *) return 1 ;;
   esac
-  if [ "$phase" = resolved ] || [ "$phase" = retired ]; then
-    fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || return 1
-    return 1
-  fi
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_PARENT_HOME=$parent_abs
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
