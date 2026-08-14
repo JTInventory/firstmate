@@ -20,9 +20,15 @@ present_inactive_row() {
   local key=$1 row=$2 status=0 go emitted worker worker_status=0 presentation_marked=0
   if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ]; then
     printf '%s\n' "$row" || return 1
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-      output-complete "$key" "$row" || return 1
-    return 0
+    if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+      output-complete "$key" "$row"; then
+      return 0
+    fi
+    if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+      presented "$key" "$row" >/dev/null 2>&1; then
+      return 0
+    fi
+    return 3
   fi
   trap - INT TERM HUP
   go=$(mktemp "$STATE/.wake-presentation.XXXXXX") || return 1
@@ -40,11 +46,9 @@ present_inactive_row() {
     done
     printf '%s\n' "$row" || exit 1
     : > "$emitted" || exit 1
-    if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
-      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
-        FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-        output-complete "$key" "$row" || exit 1
-    fi
+    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
+      FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+      output-complete "$key" "$row" || exit 1
   ) &
   worker=$!
   : > "$go" || status=1
@@ -57,11 +61,13 @@ present_inactive_row() {
   fi
   rm -f "$go"
   if [ "$status" -ne 0 ]; then
-    if [ -e "$emitted" ] && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
+    if [ -e "$emitted" ]; then
       if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
         presented "$key" "$row" >/dev/null 2>&1; then
         presentation_marked=1
         status=0
+      else
+        status=3
       fi
     else
       FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
@@ -173,8 +179,14 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
             restore_unprocessed_rows "$drain_line" || exit 1
             exit 1
           fi
-          if ! present_inactive_row "$_key" "$drain_row"; then
-            restore_unprocessed_rows "$drain_line" || exit 1
+          present_status=0
+          present_inactive_row "$_key" "$drain_row" || present_status=$?
+          if [ "$present_status" -ne 0 ]; then
+            if [ "$present_status" = 3 ]; then
+              restore_unprocessed_rows "$((drain_line + 1))" || exit 1
+            else
+              restore_unprocessed_rows "$drain_line" || exit 1
+            fi
             exit 1
           fi
           ;;
