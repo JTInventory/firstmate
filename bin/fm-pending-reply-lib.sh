@@ -519,8 +519,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   local secondmate_home=$1 parent_home=$2 parent_state=$3 secondmate_id=$4 corr=$5
   local marker home_marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
   local existing_schema existing_id existing_home existing_status existing_corr
-  local existing_state existing_record existing_phase existing_active_dir existing_history_dir history_marker
-  local existing_active_record existing_history_record
+  local history_marker
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
@@ -583,51 +582,15 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
         || [ "$existing_id" != "$secondmate_id" ]; then
         route_status=1
       fi
-      case "$existing_home" in /*) ;; *) route_status=1 ;; esac
-      case "$existing_status" in /*) ;; *) route_status=1 ;; esac
-      printf '%s' "$existing_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || route_status=1
       if [ "$route_status" = 0 ]; then
-        [ -d "$existing_home" ] && [ ! -L "$existing_home" ] || route_status=1
-        [ -d "$existing_home/state" ] && [ ! -L "$existing_home/state" ] || route_status=1
-      fi
-      if [ "$route_status" = 0 ]; then
-        existing_state=$(cd "$existing_home/state" 2>/dev/null && pwd -P) || route_status=1
-      fi
-      if [ "$route_status" = 0 ] \
-        && [ "$existing_status" != "$existing_state/$existing_id.status" ]; then
-        route_status=1
-      fi
-      if [ "$route_status" = 0 ] \
-        && [ -L "$existing_state/$existing_id.status" ]; then
-        route_status=1
-      fi
-      if [ "$route_status" = 0 ]; then
-        existing_active_dir=$(fm_pending_reply_dir "$existing_state")
-        [ -d "$existing_active_dir" ] && [ ! -L "$existing_active_dir" ] || route_status=1
-        existing_history_dir=$(fm_pending_reply_history_dir "$existing_state")
-        if [ -e "$existing_history_dir" ] || [ -L "$existing_history_dir" ]; then
-          [ -d "$existing_history_dir" ] && [ ! -L "$existing_history_dir" ] || route_status=1
+        fm_pending_reply_secondmate_route_validate "$secondmate_home" "$existing_corr" \
+          || route_status=1
+        if [ "$route_status" = 0 ]; then
+          case "$FM_PENDING_ROUTE_PHASE" in
+            resolved|retired) ;;
+            *) route_status=1 ;;
+          esac
         fi
-      fi
-      if [ "$route_status" = 0 ]; then
-        existing_active_record="$existing_active_dir/$existing_corr"
-        existing_history_record="$existing_history_dir/$existing_corr"
-        if [ -e "$existing_active_record" ] || [ -L "$existing_active_record" ]; then
-          [ -f "$existing_active_record" ] && [ ! -L "$existing_active_record" ] || route_status=1
-          [ "$route_status" = 0 ] && existing_record="$existing_active_record"
-        elif [ -e "$existing_history_record" ] || [ -L "$existing_history_record" ]; then
-          [ -f "$existing_history_record" ] && [ ! -L "$existing_history_record" ] || route_status=1
-          [ "$route_status" = 0 ] && existing_record="$existing_history_record"
-        else
-          route_status=1
-        fi
-      fi
-      if [ "$route_status" = 0 ]; then
-        existing_phase=$(fm_pending_reply_get "$existing_record" phase)
-        case "$existing_phase" in
-          resolved|retired) ;;
-          *) route_status=1 ;;
-        esac
       fi
       if [ "$route_status" = 0 ] && [ "$existing_corr" != "$corr" ]; then
         history_marker=$(fm_pending_reply_secondmate_route_history_path "$secondmate_home" "$existing_corr")
@@ -891,6 +854,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   FM_PENDING_ROUTE_CORR=$corr
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_SECOND_MATE_ID=$secondmate_id
+  FM_PENDING_ROUTE_PHASE=${phase:-}
   FM_PENDING_ROUTE_MARKER=$marker
   return 0
 }

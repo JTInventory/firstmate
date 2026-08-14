@@ -344,7 +344,7 @@ wake() {
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
-  echo "$wake_output"
+  printf '%s\n' "$wake_output" || exit 1
   while IFS= read -r row || [ -n "$row" ]; do
     IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$row"
     case "$_key" in

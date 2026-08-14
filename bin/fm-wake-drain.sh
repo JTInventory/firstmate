@@ -16,11 +16,14 @@ DRAIN_PID=${BASHPID:-$$}
 DRAIN_LOCK_HELD=false
 
 present_inactive_row() {
-  local key=$1 row=$2 status=0 go worker worker_status=0
+  local key=$1 row=$2 status=0 go emitted worker worker_status=0 presentation_marked=0
   trap - INT TERM HUP
   go=$(mktemp "$STATE/.wake-presentation.XXXXXX") || return 1
   [ -f "$go" ] && [ ! -L "$go" ] || { rm -f "$go"; return 1; }
   rm -f "$go"
+  emitted=$(mktemp "$STATE/.wake-emitted.XXXXXX") || { rm -f "$go"; return 1; }
+  [ -f "$emitted" ] && [ ! -L "$emitted" ] || { rm -f "$go" "$emitted"; return 1; }
+  rm -f "$emitted"
   (
     while [ ! -e "$go" ]; do
       if ! kill -0 "$DRAIN_PID" 2>/dev/null; then
@@ -29,6 +32,7 @@ present_inactive_row() {
       sleep 0.01
     done
     printf '%s\n' "$row" || exit 1
+    : > "$emitted" || exit 1
     FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-complete "$key" "$row" || exit 1
@@ -44,12 +48,28 @@ present_inactive_row() {
   fi
   rm -f "$go"
   if [ "$status" -ne 0 ]; then
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-      presenting "$key" "$row" >/dev/null 2>&1 || true
+    if [ -e "$emitted" ]; then
+      if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        presented "$key" "$row" >/dev/null 2>&1; then
+        presentation_marked=1
+        status=0
+      fi
+    else
+      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        presenting "$key" "$row" >/dev/null 2>&1 || true
+    fi
   fi
-  if [ "$status" = 0 ] && ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$key" "$row"; then
-    status=1
+  if [ "$status" = 0 ] && [ "$presentation_marked" = 0 ]; then
+    if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$key" "$row"; then
+      status=1
+      if [ -e "$emitted" ] \
+        && FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+          presented "$key" "$row" >/dev/null 2>&1; then
+        status=0
+      fi
+    fi
   fi
+  rm -f "$emitted"
   trap 'exit 130' INT
   trap 'exit 143' TERM
   return "$status"
