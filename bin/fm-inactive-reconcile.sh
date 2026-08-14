@@ -60,12 +60,20 @@ CHILD_LOCK_HELD=0
 CHILD_LOCK=
 
 bounded_secs() {
-  local value=$1 fallback=$2 minimum=$3 maximum=$4
+  local value=$1 fallback=$2 minimum=$3 maximum=$4 value_len minimum_len maximum_len LC_ALL=C
   case "$value" in ''|*[!0-9]*) value=$fallback ;; esac
   while [ "${value#0}" != "$value" ]; do value=${value#0}; done
   [ -n "$value" ] || value=0
-  [ "$value" -lt "$minimum" ] && value=$minimum
-  [ "$value" -gt "$maximum" ] && value=$maximum
+  value_len=${#value}
+  minimum_len=${#minimum}
+  maximum_len=${#maximum}
+  if [ "$value_len" -lt "$minimum_len" ] \
+    || { [ "$value_len" -eq "$minimum_len" ] && [[ "$value" < "$minimum" ]]; }; then
+    value=$minimum
+  elif [ "$value_len" -gt "$maximum_len" ] \
+    || { [ "$value_len" -eq "$maximum_len" ] && [[ "$value" > "$maximum" ]]; }; then
+    value=$maximum
+  fi
   printf '%s' "$value"
 }
 
