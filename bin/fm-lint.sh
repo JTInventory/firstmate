@@ -33,7 +33,18 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
 fi
 
 cd "$ROOT" || exit 1
+
+run_shellcheck() {
+  # Keep each source graph bounded on memory-constrained CI and VPS runners.
+  shellcheck --norc -x -P SCRIPTDIR -S warning "$1"
+}
+
 if [ "$#" -gt 0 ]; then
-  exec shellcheck --norc -x -P SCRIPTDIR -S warning "$@"
+  for path in "$@"; do
+    run_shellcheck "$path"
+  done
+  exit 0
 fi
-exec shellcheck --norc -x -P SCRIPTDIR -S warning bin/*.sh tests/*.sh
+for path in bin/*.sh tests/*.sh; do
+  run_shellcheck "$path"
+done
