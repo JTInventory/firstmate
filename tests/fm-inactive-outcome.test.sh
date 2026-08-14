@@ -557,6 +557,27 @@ test_output_started_claim_is_not_reprinted() {
   pass "output-started inactive claims do not reprint after a drain crash"
 }
 
+test_finalized_receipt_rows_are_suppressed() {
+  local dir root home fakebin state fingerprint row
+  new_case finalized-row
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" finalized-x1 finalized-inc
+  export FM_FAKE_CREW_STATE_FINALIZED_X1='state: done · source: pane · finalized row'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "finalized receipt setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  drain "$root" "$home" "$fakebin" >/dev/null || fail "initial finalized receipt drain failed"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >"$dir/stale.out" \
+    || fail "stale finalized receipt row was not safely suppressed"
+  [ ! -s "$dir/stale.out" ] || fail "stale finalized receipt row was printed again"
+  [ "$(receipt_count "$state" presented)" = 1 ] || fail "stale finalized receipt changed receipt state"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "stale finalized receipt left a claim"
+  unset FM_FAKE_CREW_STATE_FINALIZED_X1
+  pass "finalized receipt rows are suppressed after drain rollback"
+}
+
 test_deferred_ack_retries_after_caller_crash() {
   local dir root home fakebin state fingerprint row drain_output rec
   new_case deferred-ack
@@ -578,6 +599,7 @@ test_deferred_ack_retries_after_caller_crash() {
     || fail "deferred drain did not retain the presentation claim"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" defer_ack)" = 1 ] \
     || fail "deferred drain did not mark the claim for caller confirmation"
+  rm -f "$state/deferred-x1.meta" "$state/deferred-x1.status" "$state/deferred-x1.turn-ended"
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "pending deferred receipt was not republished after caller crash"
   [ "$(queue_count "$state")" = 1 ] || fail "pending deferred receipt did not get a retry wake"
   drain_output="$dir/retry.out"
@@ -1592,6 +1614,7 @@ test_ack_recomputes_fingerprint_from_receipt_fields
 test_reserved_claim_recovers_to_a_new_wake_row
 test_presenting_claim_recovers_before_output
 test_output_started_claim_is_not_reprinted
+test_finalized_receipt_rows_are_suppressed
 test_deferred_ack_retries_after_caller_crash
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories

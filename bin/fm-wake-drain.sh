@@ -152,13 +152,13 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
             exit 1
           fi
           ;;
-        1) ;;
+        1|3) ;;
         *)
           restore_unprocessed_rows "$drain_line" || exit 1
           exit "$claim_status"
           ;;
       esac
-      if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
+      if [ "$claim_status" != 3 ] && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
         FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" "$drain_row" || {
           ack_status=$?
           # 1 means the receipt was already acknowledged or is not ours. Any
