@@ -303,27 +303,31 @@ If `no-mistakes doctor` reports problems, fix the environment (auth, daemon) bef
 ### JT app vs pipeline routing
 
 JT Inventory's app code and its data pipeline now live in two different repos.
-Before opening a PR or dispatching a change, resolve which repo owns the work:
+Before opening a PR or dispatching a change, resolve which repo owns the work using this
+precedence order: explicit file ownership, explicit semantic domain, project-name hints,
+directory hints, then deployment target. Earlier rules always beat later ones.
 
-- JT app/UI/design and Firebase Hosting/data-protection configuration (`app/`, `components/`,
-  `lib/`, `design-system/`, `docs/design/`, `firebase.json`, `storage.rules`,
-  `scripts/prepare-firebase-hosting.mjs`, and the deploy workflow) go to
-  `JTInventory/jt-war-room`; a merge on its `main` deploys Firebase Hosting automatically.
-- All pipeline and data changes, including pipeline/data generators and secrets, stay on
-  `JTInventory/Openclaw-Backup` (the OpenClaw monorepo); its CI blocks app paths
-  (`app-code-freeze`) and points to jt-war-room.
+- These exact Firebase Hosting and storage-protection files go to `JTInventory/jt-war-room`:
+  `firebase.json`, `storage.rules`, `scripts/prepare-firebase-hosting.mjs`, and
+  `.github/workflows/deploy.yml`. A merge on its `main` deploys Firebase Hosting automatically.
+- JT app/UI/design work goes to `JTInventory/jt-war-room`. `app/`, `components/`,
+  `design-system/`, and `docs/design/` are directory hints for that domain, not overrides for
+  a more specific semantic match.
+- All pipeline and data changes, including pipeline/data generators and secrets, go to
+  `JTInventory/Openclaw-Backup` (the OpenClaw monorepo). A pipeline/data generator under
+  `app/`, `lib/`, or another broad path stays there; a non-hosting workflow or `lib/` file
+  serving the pipeline/data domain also stays there. A `lib/` or workflow path alone does not
+  decide ownership.
 
-These file/domain rules are authoritative and take precedence over a named project when
-the two conflict. A request that spans both ownership domains must be split into separate
-PRs in the owning repositories; keep each PR scoped to its repository, document the
-dependency and merge order, and cross-link the PRs. Each split PR follows its owning
-repository's existing delivery mode. If the split or ownership is unclear, escalate before
-dispatching rather than routing the work to one repository.
+Explicit file and semantic-domain ownership beats broad directory globs, explicit project-name
+hints, and deployment-target fallback. A mixed-repository request must be split into coordinated
+PRs in the owning repositories; keep each PR scoped to its repository, document the dependency
+and merge order, and cross-link the PRs. If ownership remains mixed or unresolved, escalate before
+dispatching instead of guessing. Use deployment target only as a final fallback for a clearly
+single-repository change.
 
 The canonical definition lives in `jt-war-room`'s README (section « Hébergement ») and in
-`Openclaw-Backup`'s `AGENTS.md`; prefer reading those sources over copied detail. For a
-single-repository path, when in doubt about a path, route the PR to the repo whose merge
-would deploy the change. Do not use that fallback for mixed or unresolved ownership.
+`Openclaw-Backup`'s `AGENTS.md`; prefer reading those sources over copied detail.
 
 ## 7. Task lifecycle
 

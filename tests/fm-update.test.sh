@@ -48,7 +48,7 @@ case "$*" in
       printf 'bash\n'
     fi
     ;;
-  *ppid=*) printf '%s\n' "${FM_FAKE_HARNESS_PID:?}" ;;
+  *ppid=*) exec /usr/bin/ps "$@" ;;
   *lstart=*) exec /usr/bin/ps "$@" ;;
   *) exec /usr/bin/ps "$@" ;;
 esac
