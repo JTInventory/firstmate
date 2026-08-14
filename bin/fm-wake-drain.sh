@@ -67,7 +67,11 @@ present_inactive_row() {
   if [ "$status" -ne 0 ]; then
     if [ -e "$emitted" ]; then
       if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-        presented "$key" "$row" >/dev/null 2>&1; then
+        output-complete "$key" "$row" >/dev/null 2>&1; then
+        status=0
+      elif [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ] \
+        && FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+          presented "$key" "$row" >/dev/null 2>&1; then
         presentation_marked=1
         status=0
       else

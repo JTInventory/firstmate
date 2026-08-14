@@ -792,6 +792,62 @@ test_deferred_ack_retries_after_caller_crash() {
   pass "deferred inactive receipts retry until caller-visible emission"
 }
 
+test_deferred_output_completion_retries_before_confirmation() {
+  local dir root home fakebin state fingerprint row
+  new_case deferred-output-complete-retry
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'deferred-retry-x1|deferred-retry-inc|done|state: done · source: pane · deferred output retry')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=deferred-retry-x1 \
+    incarnation=deferred-retry-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · deferred output retry' kind=ship
+  row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tdeferred output retry row'
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+case "$target" in
+  *.claim)
+    count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
+    if [ "$count" = 2 ]; then
+      exit 91
+    fi
+    ;;
+esac
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
+  drain "$root" "$home" "$fakebin" >"$dir/deferred-retry.out" \
+    || fail "deferred output-complete retry drain failed"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" state)" = presenting ] \
+    || fail "deferred output-complete retry advanced the claim before confirmation"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_complete)" = 1 ] \
+    || fail "deferred output-complete retry did not persist completion"
+  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "deferred output-complete retry consumed the receipt early"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "deferred output-complete retry presented before confirmation"
+  recon_from_root "$root" "$fakebin" "$home" "$state" \
+      caller-output-complete "inactive-outcome:$fingerprint" "$row" \
+    || fail "deferred output-complete retry rejected caller completion"
+  recon_from_root "$root" "$fakebin" "$home" "$state" \
+      confirm "inactive-outcome:$fingerprint" "$row" \
+    || fail "deferred output-complete retry rejected caller confirmation"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "deferred output-complete retry did not finalize after confirmation"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
+    || fail "deferred output-complete retry left a claim"
+  unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
+  pass "deferred output completion retries before caller confirmation"
+}
+
 test_deferred_ack_confirms_after_caller_emission() {
   local dir root home fakebin state fingerprint row drain_output
   new_case deferred-confirm
@@ -2313,6 +2369,7 @@ test_finalized_receipt_rows_are_suppressed
 test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
+test_deferred_output_completion_retries_before_confirmation
 test_deferred_ack_confirms_after_caller_emission
 test_deferred_ack_recovers_after_output_confirmation
 test_pending_receipts_replay_after_child_scan_failure
