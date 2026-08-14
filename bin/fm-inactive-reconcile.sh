@@ -15,6 +15,7 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_CURSOR="$STATE/.inactive-outcome-reconcile.cursor"
+REPORTED_ROUTE_CURSOR="$STATE/.reported-secondmate-route-repair.cursor"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 
 inactive_state_path_is_safe() {
@@ -40,6 +41,7 @@ inactive_state_preflight() {
   inactive_state_path_is_safe "$OUTCOME_DIR" dir || return 1
   inactive_state_path_is_safe "$SCAN_MARKER" file || return 1
   inactive_state_path_is_safe "$SCAN_CURSOR" file || return 1
+  inactive_state_path_is_safe "$REPORTED_ROUTE_CURSOR" file || return 1
   inactive_state_path_is_safe "$FM_WAKE_QUEUE" file || return 1
 }
 
@@ -79,6 +81,7 @@ bounded_secs() {
 
 RECONCILE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_SECS:-900}" 900 60 1800)
 SCAN_BUDGET_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" 10 1 300)
+REPORTED_ROUTE_REPAIR_LIMIT=$(bounded_secs "${FM_REPORTED_ROUTE_REPAIR_LIMIT:-32}" 32 1 256)
 
 meta_value() {  # <meta> <key>
   awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
@@ -276,7 +279,7 @@ claim_rewrite_row() {
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp state existing old_row line output_complete defer_ack
+  local key=$1 row=$2 fp claim tmp state existing old_row line output_started output_emitted output_complete defer_ack
   local defer_generation defer_generation_start receipt_state receipt_rc=0 recorded_report=0 report_rc=1
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
@@ -330,6 +333,8 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       fi
     fi
     if [ "$state" = presenting ]; then
+      output_started=$(claim_field "$claim" output_started 2>/dev/null || true)
+      output_emitted=$(claim_field "$claim" output_emitted 2>/dev/null || true)
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
       if [ "$defer_ack" = 1 ]; then
         defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
@@ -369,6 +374,13 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       if [ "$output_complete" = 1 ]; then
         claim_mark_presented "$key" "$row" || return 2
         return 5
+      fi
+      if [ "$output_emitted" = 1 ]; then
+        if claim_mark_output_complete "$key" "$row"; then
+          claim_mark_presented "$key" "$row" || return 2
+          return 5
+        fi
+        return 6
       fi
       if [ "$defer_ack" = 1 ]; then
         return 0
@@ -425,7 +437,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
 
 claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim state tmp line defer_ack=0 defer_generation= defer_generation_start=
-  local seen_pid=0 seen_output=0 seen_complete=0
+  local seen_pid=0 seen_output=0 seen_emitted=0 seen_complete=0
   local seen_defer_ack=0 seen_defer_generation=0 seen_defer_generation_start=0
   [ "${FM_WAKE_DRAIN_DIRECT:-0}" != 1 ] \
     && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
@@ -451,6 +463,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
       state=*) printf 'state=presenting\n' ;;
       presentation_pid=*) printf 'presentation_pid=%s\n' "${BASHPID:-$$}"; seen_pid=1 ;;
       output_started=*) printf 'output_started=0\n'; seen_output=1 ;;
+      output_emitted=*) printf 'output_emitted=0\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
       defer_ack=*) printf 'defer_ack=%s\n' "$defer_ack"; seen_defer_ack=1 ;;
       defer_generation=*) printf 'defer_generation=%s\n' "$defer_generation"; seen_defer_generation=1 ;;
@@ -460,6 +473,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_pid" = 1 ] || printf 'presentation_pid=%s\n' "${BASHPID:-$$}" >> "$tmp"
   [ "$seen_output" = 1 ] || printf 'output_started=0\n' >> "$tmp"
+  [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
   [ "$seen_defer_ack" = 1 ] || printf 'defer_ack=%s\n' "$defer_ack" >> "$tmp"
   [ "$seen_defer_generation" = 1 ] || printf 'defer_generation=%s\n' "$defer_generation" >> "$tmp"
@@ -471,6 +485,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
 claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-}
   local fp claim state tmp line seen_output=0 seen_complete=0
+  local seen_emitted=0
   case "$owner_required" in
     1) drain_claim_owner "$row" || return 2 ;;
     0)
@@ -492,11 +507,13 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+      output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
+  [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
@@ -504,6 +521,7 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
 
 claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim state tmp line seen_output=0 seen_complete=0
+  local seen_emitted=0
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -516,11 +534,13 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+      output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
+  [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
@@ -542,6 +562,7 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
   claim=$(claim_path "$fp")
   [ ! -L "$claim" ] || return 2
   [ "$(claim_validate "$claim" "$fp" "$row")" = presenting ] || return 2
+  [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -562,7 +583,7 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
 
 claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-}
-  local fp claim state tmp line seen_output=0 seen_complete=0
+  local fp claim state tmp line seen_output=0 seen_emitted=0 seen_complete=0
   case "$owner_required" in
     1) drain_claim_owner "$row" || return 2 ;;
     0) ;; 
@@ -591,11 +612,13 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
     case "$line" in
       state=*) printf 'state=presented\n' ;;
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+      output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
+  [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
@@ -942,35 +965,82 @@ reported_secondmate_receipt_valid() {
 
 repair_reported_secondmate_routes() {
   local scan_started=$1 reported kind corr parent_task_id parent_home parent_status now remaining status=0
+  local cursor='' cursor_found=0 started=1 pass base last processed=0 stop_after=0 cursor_tmp
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
   now=$(date +%s)
   remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
   [ "$remaining" -gt 0 ] || return 1
   FM_LOCK_WAIT_SECS="$remaining" fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  for reported in "$OUTCOME_DIR"/*.reported; do
-    now=$(date +%s)
-    remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
-    [ "$remaining" -gt 0 ] || { status=1; break; }
-    [ -e "$reported" ] || [ -L "$reported" ] || continue
-    [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
-    kind=$(receipt_field "$reported" kind 2>/dev/null || true)
-    case "$kind" in
-      ship|scout) continue ;;
-      secondmate)
-        if ! reported_secondmate_receipt_valid "$reported"; then
-          status=1
-          continue
+  cursor=$(cat "$REPORTED_ROUTE_CURSOR" 2>/dev/null || true)
+  case "$cursor" in
+    '') ;;
+    *.reported)
+      case "$cursor" in *[!A-Za-z0-9._-]*) cursor=;; esac
+      ;;
+    *) cursor=;;
+  esac
+  if [ -n "$cursor" ] && { [ ! -f "$OUTCOME_DIR/$cursor" ] || [ -L "$OUTCOME_DIR/$cursor" ]; }; then
+    cursor=
+  fi
+  [ -n "$cursor" ] && started=0
+  for pass in 1 2; do
+    if [ "$pass" = 2 ]; then
+      [ -n "$cursor" ] && [ "$cursor_found" = 1 ] || break
+      started=1
+      stop_after=0
+    fi
+    for reported in "$OUTCOME_DIR"/*.reported; do
+      [ -e "$reported" ] || [ -L "$reported" ] || continue
+      base=${reported##*/}
+      if [ "$pass" = 1 ] && [ -n "$cursor" ] && [ "$started" = 0 ]; then
+        if [ "$base" = "$cursor" ]; then
+          started=1
+          cursor_found=1
         fi
-        corr=$(receipt_field "$reported" parent_corr)
-        parent_task_id=$(receipt_field "$reported" parent_task_id)
-        parent_home=$(receipt_field "$reported" parent_home)
-        parent_status=$(receipt_field "$reported" parent_status)
-        FM_LOCK_WAIT_SECS="$remaining" fm_pending_reply_secondmate_route_clear_reported \
-          "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || status=1
-        ;;
-      *) status=1 ;;
-    esac
+        continue
+      fi
+      now=$(date +%s)
+      remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+      [ "$remaining" -gt 0 ] || { status=1; break 2; }
+      [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
+      kind=$(receipt_field "$reported" kind 2>/dev/null || true)
+      case "$kind" in
+        ship|scout) : ;;
+        secondmate)
+          if ! reported_secondmate_receipt_valid "$reported"; then
+            status=1
+          else
+            corr=$(receipt_field "$reported" parent_corr)
+            parent_task_id=$(receipt_field "$reported" parent_task_id)
+            parent_home=$(receipt_field "$reported" parent_home)
+            parent_status=$(receipt_field "$reported" parent_status)
+            FM_LOCK_WAIT_SECS="$remaining" fm_pending_reply_secondmate_route_clear_reported \
+              "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || status=1
+          fi
+          ;;
+        *) status=1 ;;
+      esac
+      last=$base
+      processed=$((processed + 1))
+      if [ "$pass" = 2 ] && [ "$base" = "$cursor" ]; then
+        stop_after=1
+      fi
+      [ "$processed" -lt "$REPORTED_ROUTE_REPAIR_LIMIT" ] || break 2
+      [ "$stop_after" = 0 ] || break
+    done
   done
+  if [ "$processed" -gt 0 ]; then
+    if cursor_tmp=$(mktemp "$STATE/.reported-route-repair.cursor.XXXXXX"); then
+      if [ ! -f "$cursor_tmp" ] || [ -L "$cursor_tmp" ] \
+        || ! printf '%s\n' "$last" > "$cursor_tmp" \
+        || ! mv -f "$cursor_tmp" "$REPORTED_ROUTE_CURSOR"; then
+        status=1
+        rm -f "$cursor_tmp"
+      fi
+    else
+      status=1
+    fi
+  fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   return "$status"
 }
@@ -1146,6 +1216,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac
   claim_state=$(claim_validate "$(claim_path "$fp")" "$fp" "$row") || return 2
   [ "$claim_state" = presented ] || return 2
+  [ "$(claim_field "$(claim_path "$fp")" output_complete 2>/dev/null || true)" = 1 ] || return 2
   if [ "$owner_required" = 0 ]; then
     claim_validate_caller_owner "$(claim_path "$fp")" "$expected_generation" || return 2
   fi

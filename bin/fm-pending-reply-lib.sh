@@ -2132,7 +2132,7 @@ fm_pending_reply_tick() {  # <state-dir>
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
-      .*) continue ;;
+      .*|*.cleanup|*.cleanup-meta) continue ;;
     esac
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")

@@ -642,13 +642,16 @@ test_output_completion_failure_does_not_reprint() {
 #!/usr/bin/env bash
 set -u
 target="${!#}"
+source="${@: -2:1}"
 case "$target" in
   *.claim)
-    count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
-    if [ "$count" = 2 ]; then
-      exit 91
+    if grep -Fqx 'output_complete=1' "$source" 2>/dev/null; then
+      count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
+      if [ "$count" = 1 ]; then
+        exit 91
+      fi
     fi
     ;;
 esac
@@ -657,18 +660,33 @@ SH
   chmod +x "$fakebin/mv"
   export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
   export FM_WAKE_DRAIN_DIRECT=1
-  drain "$root" "$home" "$fakebin" >"$dir/output-failure.out" \
-    || fail "output completion failure was not recovered"
+  if drain "$root" "$home" "$fakebin" >"$dir/output-failure.out"; then
+    fail "output completion failure was hidden"
+  fi
   [ "$(grep -Fxc "$row" "$dir/output-failure.out")" = 1 ] \
-    || fail "output completion failure reprinted or lost the emitted row"
+    || fail "output completion failure lost or duplicated the emitted row"
+  [ "$(receipt_count "$state" presented)" = 0 ] \
+    || fail "output completion failure finalized the receipt"
+  [ "$(receipt_count "$state" pending)" = 1 ] \
+    || fail "output completion failure did not retain the receipt"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_started)" = 1 ] \
+    || fail "output completion failure did not retain the emitted marker"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_emitted)" = 1 ] \
+    || fail "output completion failure did not bind emission state"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_complete)" = 0 ] \
+    || fail "output completion failure incorrectly persisted completion"
+  drain "$root" "$home" "$fakebin" >"$dir/output-failure-retry.out" \
+    || fail "output completion retry did not finalize the receipt"
+  [ ! -s "$dir/output-failure-retry.out" ] \
+    || fail "output completion retry reprinted the emitted row"
   [ "$(receipt_count "$state" presented)" = 1 ] \
-    || fail "output completion failure did not finalize the receipt"
+    || fail "output completion retry did not finalize the receipt"
   [ "$(receipt_count "$state" pending)" = 0 ] \
-    || fail "output completion failure left the receipt pending"
+    || fail "output completion retry left the receipt pending"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
-    || fail "output completion failure left a stale claim"
+    || fail "output completion retry left a stale claim"
   unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DIRECT
-  pass "post-output failures finalize without duplicate presentation"
+  pass "post-output failures retry without duplicate presentation"
 }
 
 test_direct_drain_finalizes_after_successful_output() {
@@ -809,13 +827,16 @@ test_deferred_output_completion_retries_before_confirmation() {
 #!/usr/bin/env bash
 set -u
 target="${!#}"
+source="${@: -2:1}"
 case "$target" in
   *.claim)
-    count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
-    if [ "$count" = 2 ]; then
-      exit 91
+    if grep -Fqx 'output_complete=1' "$source" 2>/dev/null; then
+      count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
+      if [ "$count" = 1 ]; then
+        exit 91
+      fi
     fi
     ;;
 esac
@@ -846,6 +867,69 @@ SH
     || fail "deferred output-complete retry left a claim"
   unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
   pass "deferred output completion retries before caller confirmation"
+}
+
+test_deferred_output_completion_failure_retains_emitted_row() {
+  local dir root home fakebin state fingerprint row
+  new_case deferred-output-complete-failure
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'deferred-failure-x1|deferred-failure-inc|done|state: done · source: pane · deferred output failure')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=deferred-failure-x1 \
+    incarnation=deferred-failure-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · deferred output failure' kind=ship
+  row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tdeferred output failure row'
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+source="${@: -2:1}"
+case "$target" in
+  *.claim)
+    if grep -Fqx 'output_complete=1' "$source" 2>/dev/null; then
+      count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
+      [ "$count" -le 2 ] || exec /usr/bin/mv "$@"
+      exit 91
+    fi
+    ;;
+esac
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
+  if drain "$root" "$home" "$fakebin" >"$dir/deferred-failure.out"; then
+    fail "deferred output-complete persistence failure was hidden"
+  fi
+  [ "$(grep -Fxc "$row" "$dir/deferred-failure.out")" = 1 ] \
+    || fail "deferred output-complete failure duplicated or lost the emitted row"
+  [ "$(queue_count "$state")" = 1 ] \
+    || fail "deferred output-complete failure did not retain the wake row"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_started)" = 1 ] \
+    || fail "deferred output-complete failure lost the emitted marker"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_emitted)" = 1 ] \
+    || fail "deferred output-complete failure lost the emission state"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_complete)" = 0 ] \
+    || fail "deferred output-complete failure persisted completion"
+  replace_field "$state/terminal-outcomes/.$fingerprint.claim" defer_generation_start proc:0
+  rm -f "$fakebin/mv"
+  unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
+  drain "$root" "$home" "$fakebin" >"$dir/deferred-failure-retry.out" \
+    || fail "deferred output-complete retry did not recover the emitted row"
+  [ ! -s "$dir/deferred-failure-retry.out" ] \
+    || fail "deferred output-complete retry reprinted the emitted row"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "deferred output-complete retry did not finalize the receipt"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "deferred output-complete retry left the receipt pending"
+  [ "$(queue_count "$state")" = 0 ] \
+    || fail "deferred output-complete retry left the wake queued"
+  pass "deferred output completion failures retain emitted rows for retry"
 }
 
 test_deferred_ack_confirms_after_caller_emission() {
@@ -1662,6 +1746,35 @@ SH
   pass "reported secondmate routes recover after receipt finalization crashes"
 }
 
+test_reported_route_repair_is_bounded() {
+  local dir root home fakebin state fingerprint first second index
+  new_case reported-route-repair-limit
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  mkdir -p "$state/terminal-outcomes"
+  for index in 1 2 3; do
+    fingerprint=$(receipt_fingerprint "reported-limit-x${index}|reported-limit-inc-${index}|done|reported limit ${index}")
+    fm_write_meta "$state/terminal-outcomes/$fingerprint.reported" \
+      schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id="reported-limit-x${index}" \
+      incarnation="reported-limit-inc-${index}" outcome=done terminal_source=pane \
+      terminal_snapshot="reported limit ${index}" kind=ship
+  done
+  export FM_REPORTED_ROUTE_REPAIR_LIMIT=1
+  scan "$root" "$home" "$fakebin" --startup >/dev/null \
+    || fail "bounded reported-receipt maintenance failed on the first scan"
+  first=$(cat "$state/.reported-secondmate-route-repair.cursor" 2>/dev/null || true)
+  [ -n "$first" ] || fail "bounded reported-receipt maintenance did not persist a cursor"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null \
+    || fail "bounded reported-receipt maintenance failed on the second scan"
+  second=$(cat "$state/.reported-secondmate-route-repair.cursor" 2>/dev/null || true)
+  [ -n "$second" ] && [ "$second" != "$first" ] \
+    || fail "bounded reported-receipt maintenance did not advance incrementally"
+  [ "$(receipt_count "$state" reported)" = 3 ] \
+    || fail "bounded reported-receipt maintenance discarded durable receipts"
+  unset FM_REPORTED_ROUTE_REPAIR_LIMIT
+  pass "reported route maintenance advances through bounded receipt batches"
+}
+
 test_secondmate_route_replacement_preserves_old_receipt() {
   local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker history_backup active_route_backup
   new_case secondmate-route-replacement
@@ -2370,6 +2483,7 @@ test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
 test_deferred_output_completion_retries_before_confirmation
+test_deferred_output_completion_failure_retains_emitted_row
 test_deferred_ack_confirms_after_caller_emission
 test_deferred_ack_recovers_after_output_confirmation
 test_pending_receipts_replay_after_child_scan_failure
@@ -2388,6 +2502,7 @@ test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_valid_secondmate_route_reports_parent_once
 test_reported_secondmate_route_repair_after_crash
+test_reported_route_repair_is_bounded
 test_secondmate_route_replacement_preserves_old_receipt
 test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
