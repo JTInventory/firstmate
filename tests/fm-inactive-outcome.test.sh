@@ -850,14 +850,15 @@ test_deferred_ack_retries_after_caller_crash() {
   [ "$(queue_count "$state")" = 1 ] || fail "pending deferred receipt did not get a retry wake"
   row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
   drain_output="$dir/retry.out"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
   drain "$root" "$home" "$fakebin" >"$drain_output" \
-    || fail "retry drain did not retain the uncertain deferred presentation"
-  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "retry drain finalized without caller confirmation"
-  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain lost the receipt"
-  [ -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain discarded the deferred claim"
-  [ ! -s "$drain_output" ] || fail "retry drain re-presented an uncertain row"
+    || fail "retry drain did not recover the deferred confirmation handoff"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "retry drain did not recover the deferred receipt"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain left the receipt pending"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain left the deferred claim"
+  [ ! -s "$drain_output" ] || fail "retry drain re-presented an already emitted row"
   unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_DEFERRED_X1
-  pass "deferred inactive receipts retry until caller-visible emission"
+  pass "deferred inactive receipts recover after caller crash"
 }
 
 test_deferred_output_completion_retries_before_confirmation() {
