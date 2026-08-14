@@ -15,6 +15,21 @@ DRAIN_RESTORE=
 DRAIN_PID=${BASHPID:-$$}
 DRAIN_LOCK_HELD=false
 
+present_inactive_row() {
+  local key=$1 row=$2 status=0
+  trap - INT TERM HUP
+  FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-started "$key" "$row" || status=1
+  if [ "$status" = 0 ] && ! printf '%s\n' "$row"; then
+    status=1
+  fi
+  if [ "$status" = 0 ] && ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$key" "$row"; then
+    status=1
+  fi
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  return "$status"
+}
+
 # Defense in depth for the watcher re-arm chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert watcher liveness here too. A
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
@@ -90,12 +105,7 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
             awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
             exit 1
           fi
-          if ! printf '%s\n' "$drain_row"; then
-            DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
-            awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
-            exit 1
-          fi
-          if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$_key" "$drain_row"; then
+          if ! present_inactive_row "$_key" "$drain_row"; then
             DRAIN_RESTORE="$STATE/.wake-queue.unprocessed.$DRAIN_PID"
             awk -v start="$drain_line" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$DRAIN_RESTORE" || exit 1
             exit 1
