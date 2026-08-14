@@ -231,7 +231,7 @@ claim_validate() {  # <claim> <fingerprint> <row>
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp state existing old_row line output_started
+  local key=$1 row=$2 fp claim tmp state existing old_row line output_started defer_ack
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -262,7 +262,24 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
         return 1
       fi
     fi
-    [ "$state" = presented ] && return 1
+    if [ "$state" = presented ]; then
+      defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
+      if [ "$defer_ack" = 1 ]; then
+        tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+        chmod 600 "$tmp" 2>/dev/null || true
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in
+            state=*) printf 'state=reserved\n' ;;
+            defer_ack=*) printf 'defer_ack=0\n' ;;
+            *) printf '%s\n' "$line" ;;
+          esac
+        done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+        [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+        mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+        return 0
+      fi
+      return 1
+    fi
     return 0
   fi
   mkdir -p "$OUTCOME_DIR" || return 2
@@ -337,7 +354,8 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
 }
 
 claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp line
+  local key=$1 row=$2 fp claim tmp line defer_ack=0 seen_defer=0
+  [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -347,15 +365,20 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in state=*) printf 'state=presented\n' ;; *) printf '%s\n' "$line" ;; esac
+    case "$line" in
+      state=*) printf 'state=presented\n' ;;
+      defer_ack=*) printf 'defer_ack=%s\n' "$defer_ack"; seen_defer=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  [ "$seen_defer" = 1 ] || printf 'defer_ack=%s\n' "$defer_ack" >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_remove() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim
-  drain_claim_owner "$row" || return 2
+  local key=$1 row=$2 owner_required=${3:-1} fp claim
+  case "$owner_required" in 0) ;; 1) drain_claim_owner "$row" || return 2 ;; *) return 2 ;; esac
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   claim=$(claim_path "$fp")
@@ -717,13 +740,17 @@ reconcile_child() {
 }
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
-  local key=$1 row=${2:-} fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
+  local key=$1 row=${2:-} owner_required=${3:-1} fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
   [ -n "$row" ] || return 2
-  drain_claim_owner "$row" || return 2
+  case "$owner_required" in 0|1) ;; *) return 2 ;; esac
+  [ "$owner_required" = 0 ] || drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 0 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac
   claim_state=$(claim_validate "$(claim_path "$fp")" "$fp" "$row") || return 2
   [ "$claim_state" = presented ] || return 2
+  if [ "$owner_required" = 0 ]; then
+    [ "$(claim_field "$(claim_path "$fp")" defer_ack 2>/dev/null || true)" = 1 ] || return 2
+  fi
   rec=$(receipt_path "$fp" pending)
   [ ! -L "$rec" ] || return 2
   if [ ! -e "$rec" ]; then
@@ -737,7 +764,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
           existing_corr=$(receipt_field "$existing" parent_corr)
           fm_pending_reply_secondmate_route_clear "$FM_HOME" "$existing_corr" || return 2
         fi
-        claim_remove "$key" "$row" || return 2
+        claim_remove "$key" "$row" "$owner_required" || return 2
         return 1
       fi
     done
@@ -771,14 +798,14 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     [ -f "$target" ] || return 2
     [ "$(receipt_field "$target" fingerprint)" = "$fp" ] || return 2
     rm -f "$rec" || return 2
-    claim_remove "$key" "$row" || return 2
+    claim_remove "$key" "$row" "$owner_required" || return 2
     return 1
   fi
   mv "$rec" "$target" || return 2
   if [ "$kind" = secondmate ]; then
     fm_pending_reply_secondmate_route_clear "$FM_HOME" "$corr" || return 2
   fi
-  claim_remove "$key" "$row" || return 2
+  claim_remove "$key" "$row" "$owner_required" || return 2
   return 0
 }
 
@@ -954,6 +981,10 @@ case "${1:-}" in
   ack)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
     ack_receipt "$2" "$3"
+    ;;
+  confirm)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    ack_receipt "$2" "$3" 0
     ;;
   claim)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2

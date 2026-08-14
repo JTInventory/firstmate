@@ -363,12 +363,20 @@ if [ "$READ_ONLY" -eq 1 ]; then
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
   DRAIN_STATUS=0
-  DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1) || DRAIN_STATUS=$?
+  DRAIN_OUT=$(FM_WAKE_DRAIN_DEFER_ACK=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1) || DRAIN_STATUS=$?
   if [ "$DRAIN_STATUS" -ne 0 ]; then
     printf 'error: wake drain failed (status %s); inactive reconciliation skipped\n%s\n' \
       "$DRAIN_STATUS" "$DRAIN_OUT" >&2
   elif [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"
+    while IFS= read -r drain_row || [ -n "$drain_row" ]; do
+      IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
+      case "$_key" in
+        inactive-outcome:*)
+          "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$drain_row" >/dev/null 2>&1 || true
+          ;;
+      esac
+    done <<< "$DRAIN_OUT"
   else
     printf '(no queued wakes)\n'
   fi

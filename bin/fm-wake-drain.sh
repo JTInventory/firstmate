@@ -158,15 +158,17 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
           exit "$claim_status"
           ;;
       esac
-      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" "$drain_row" || {
-        ack_status=$?
-        # 1 means the receipt was already acknowledged or is not ours. Any
-        # other failure keeps the drained row durable for a later turn.
-        if [ "$ack_status" != 1 ]; then
-          restore_unprocessed_rows "$drain_line" || exit 1
-          exit "$ack_status"
-        fi
-      }
+      if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" "$drain_row" || {
+          ack_status=$?
+          # 1 means the receipt was already acknowledged or is not ours. Any
+          # other failure keeps the drained row durable for a later turn.
+          if [ "$ack_status" != 1 ]; then
+            restore_unprocessed_rows "$drain_line" || exit 1
+            exit "$ack_status"
+          fi
+        }
+      fi
       ;;
     *)
       if ! printf '%s\n' "$drain_row"; then
