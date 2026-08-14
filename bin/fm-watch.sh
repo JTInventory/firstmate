@@ -683,6 +683,93 @@ mark_all_captain_relevant_surfaced() {
   return "$status"
 }
 
+surface_signal_transaction() {
+  local pending=$1 reason=$2 sf sig f status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    if ! fm_wake_append_locked signal "$(basename "$f")" "$reason"; then
+      status=1
+      break
+    fi
+    if ! mark_surfaced "$f" || ! printf '%s' "$sig" > "$sf"; then
+      status=1
+      break
+    fi
+    if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
+      pause_marker_record_status "$f" || status=1
+    fi
+    [ "$status" = 0 ] || break
+  done <<< "$pending"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  return "$status"
+}
+
+terminal_surface_marker_current() {
+  local task=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status"
+  local marker="$STATE/.hb-terminal-surfaced-$(printf '%s' "$1" | tr ':/.' '___')"
+  local last saved_snapshot saved_spawn current_spawn rc
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
+  marker=$(printf '%s' "$marker")
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ "$(surface_meta_value_unique "$marker" schema 2>/dev/null)" = fm-hb-terminal-surfaced.v1 ] || return 1
+  last=$(last_status_line "$status_file")
+  case "$last" in done:*|failed:*) ;; *) return 1 ;; esac
+  saved_snapshot=$(surface_meta_value_unique "$marker" snapshot 2>/dev/null) || return 1
+  [ "$saved_snapshot" = "$last" ] || return 1
+  saved_spawn=$(surface_meta_value_unique "$marker" spawn_incarnation 2>/dev/null) || return 1
+  if current_spawn=$(surface_meta_value_unique "$meta" spawn_incarnation 2>/dev/null); then
+    [ "$saved_spawn" = "$current_spawn" ] || return 1
+    return 0
+  fi
+  rc=$?
+  [ "$rc" = 1 ] || return 1
+  [ -z "$saved_spawn" ] || return 1
+  [ "$(surface_meta_value_unique "$marker" tasktmp 2>/dev/null)" = "$(surface_meta_value "$meta" tasktmp)" ] || return 1
+  [ "$(surface_meta_value_unique "$marker" window 2>/dev/null)" = "$(surface_meta_value "$meta" window)" ] || return 1
+  [ "$(surface_meta_value_unique "$marker" worktree 2>/dev/null)" = "$(surface_meta_value "$meta" worktree)" ] || return 1
+}
+
+inactive_replay_queued_for_task() {
+  local task=$1
+  [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+  awk -F '\t' -v task="$task" \
+    '$3 == "check" && $4 ~ /^inactive-outcome:/ && index($5, "task=" task " ") { found=1; exit } END { exit !found }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null
+}
+
+surface_terminal_stale_transaction() {
+  local w=$1 h=$2 status=0 task
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  task=$(window_to_task "$w")
+  if terminal_surface_marker_current "$task" || inactive_replay_queued_for_task "$task"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    return 2
+  fi
+  fm_wake_append_locked stale "$w" "stale: $w" || status=1
+  if [ "$status" = 0 ]; then
+    mark_surfaced "$STATE/$(window_to_task "$w").status" || status=1
+  fi
+  if [ "$status" = 0 ]; then
+    printf '%s' "$h" > "$STATE/.stale-$(printf '%s' "$w" | tr ':/.' '___')" || status=1
+    rm -f "$STATE/.stale-since-$(printf '%s' "$w" | tr ':/.' '___')" || status=1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  return "$status"
+}
+
+surface_heartbeat_transaction() {
+  local status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  fm_wake_append_locked heartbeat heartbeat heartbeat || status=1
+  if [ "$status" = 0 ]; then
+    mark_all_captain_relevant_surfaced || status=1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  return "$status"
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -918,22 +1005,7 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_absorbable $files; then
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-      done <<EOF
-$pending
-EOF
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        mark_surfaced "$f" || exit 1
-        printf '%s' "$sig" > "$sf" || exit 1
-        if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
-          pause_marker_record_status "$f"
-        fi
-      done <<EOF
-$pending
-EOF
+      surface_signal_transaction "$pending" "$reason" || exit 1
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -997,9 +1069,13 @@ EOF
         elif stale_is_terminal "$w" "$STATE"; then
           # Terminal status under a stale pane: actionable -> enqueue + exit.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            mark_surfaced "$STATE/$(window_to_task "$w").status" || exit 1
-            printf '%s' "$h" > "$sf" || exit 1
+            terminal_surface_status=0
+            surface_terminal_stale_transaction "$w" "$h" || terminal_surface_status=$?
+            case "$terminal_surface_status" in
+              0) ;;
+              2) continue ;;
+              *) exit "$terminal_surface_status" ;;
+            esac
             rm -f "$ssf" || exit 1
             wake "stale: $w"
           fi
@@ -1081,16 +1157,15 @@ EOF
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
     if afk_present; then
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      surface_heartbeat_transaction || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      surface_heartbeat_transaction || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced || exit 1
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
