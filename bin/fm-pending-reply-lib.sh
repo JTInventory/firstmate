@@ -698,7 +698,8 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
       [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
       [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" = 5 ] || return 1
       fm_pending_reply_secondmate_route_shape "$marker" || return 1
-      current_corr=$(fm_pending_reply_get "$marker" corr_id)
+      fm_pending_reply_secondmate_route_validate "$secondmate_home" "" "$allow_undelivered" || return 1
+      current_corr=$FM_PENDING_ROUTE_CORR
       if [ "$current_corr" != "$wanted_corr" ]; then
         history_marker=$(fm_pending_reply_secondmate_route_history_path "$secondmate_home" "$wanted_corr")
         [ -f "$history_marker" ] && [ ! -L "$history_marker" ] || return 1

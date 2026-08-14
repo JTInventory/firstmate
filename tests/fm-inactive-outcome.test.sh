@@ -397,6 +397,26 @@ test_leading_zero_cadence_is_normalized() {
   pass "leading-zero cadence values are normalized before arithmetic"
 }
 
+test_oversized_cadence_is_clamped() {
+  local dir root home fakebin state
+  new_case oversized-cadence
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" oversized-x1 oversized-inc
+  export FM_FAKE_CREW_STATE_OVERSIZED_X1='state: done · source: pane · oversized cadence'
+  export FM_INACTIVE_OUTCOME_SECS=999999999999999999999999999999999999
+  touch -t 200001010000 "$state/oversized-x1.meta" "$state/oversized-x1.status" \
+    "$state/oversized-x1.turn-ended" || fail "could not age the oversized cadence fixture"
+  touch -t 200001010000 "$state/.inactive-outcome-reconcile" \
+    || fail "could not age the cadence marker"
+  scan "$root" "$home" "$fakebin" >/dev/null \
+    || fail "oversized cadence value prevented reconciliation"
+  [ "$(receipt_count "$state" pending)" = 1 ] \
+    || fail "oversized cadence value was not clamped before arithmetic"
+  unset FM_FAKE_CREW_STATE_OVERSIZED_X1 FM_INACTIVE_OUTCOME_SECS
+  pass "oversized decimal cadence values clamp before arithmetic"
+}
+
 test_find_failure_propagates_without_advancing_scan() {
   local dir root home fakebin state
   new_case find-failure
@@ -1154,7 +1174,7 @@ SH
 }
 
 test_secondmate_route_replacement_preserves_old_receipt() {
-  local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker history_backup
+  local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker history_backup active_route_backup
   new_case secondmate-route-replacement
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1208,6 +1228,17 @@ SH
   [ -n "$corr_b" ] || fail "replacement route did not create a new correlation"
   [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$corr_b" ] \
     || fail "replacement route did not publish the new correlation"
+  active_route_backup="$dir/active-route-backup"
+  cp "$child_state/.fm-jt-parent-route" "$active_route_backup"
+  replace_field "$child_state/.fm-jt-parent-route" parent_home "$dir/not-a-parent-home"
+  : > "$child_state/.wake-queue"
+  scan "$root" "$child_home" "$fakebin" --startup \
+    || fail "malformed active route scan failed"
+  [ "$(queue_count "$child_state")" = 0 ] \
+    || fail "malformed active route fell through to history"
+  [ "$(receipt_count "$child_state" pending)" = 1 ] \
+    || fail "malformed active route consumed the old receipt"
+  cp "$active_route_backup" "$child_state/.fm-jt-parent-route"
   history_backup="$dir/history-route-backup"
   [ -f "$child_state/.fm-jt-parent-route-history.$corr_a" ] \
     || fail "replacement route did not retain the old correlation history marker"
@@ -1464,6 +1495,7 @@ test_portable_timeout_runner_is_used
 test_portable_timeout_preserves_signal_failure
 test_portable_timeout_expires_child
 test_leading_zero_cadence_is_normalized
+test_oversized_cadence_is_clamped
 test_find_failure_propagates_without_advancing_scan
 test_find_enumeration_respects_scan_budget
 test_ack_recomputes_fingerprint_from_receipt_fields
