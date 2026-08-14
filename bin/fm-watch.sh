@@ -688,6 +688,11 @@ surface_signal_transaction() {
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   while IFS=$(printf '\t') read -r sf sig f; do
     [ -n "$sf" ] || continue
+    if terminal_signal_suppressed "$f"; then
+      printf '%s' "$sig" > "$sf" || status=1
+      [ "$status" = 0 ] || break
+      continue
+    fi
     if ! fm_wake_append_locked signal "$(basename "$f")" "$reason"; then
       status=1
       break
@@ -737,6 +742,21 @@ inactive_replay_queued_for_task() {
   awk -F '\t' -v task="$task" \
     '$3 == "check" && $4 ~ /^inactive-outcome:/ && index($5, "task=" task " ") { found=1; exit } END { exit !found }' \
     "$FM_WAKE_QUEUE" 2>/dev/null
+}
+
+terminal_signal_suppressed() {
+  local f=$1 task last retry
+  last=$(last_status_line "$f")
+  case "$last" in
+    done:*|failed:*) ;;
+    *) return 1 ;;
+  esac
+  task=$(basename "$f" .status)
+  terminal_surface_marker_current "$task" && return 0
+  inactive_replay_queued_for_task "$task" && return 0
+  retry=$(_hb_surface_retry_path "$task")
+  surface_retry_matches_current "$retry" "$task" "$last" && return 0
+  return 1
 }
 
 surface_terminal_stale_transaction() {

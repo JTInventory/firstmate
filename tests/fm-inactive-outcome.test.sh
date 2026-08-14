@@ -590,9 +590,10 @@ test_output_started_claim_is_not_reprinted() {
   drain "$root" "$home" "$fakebin" >"$dir/output-started.out" \
     || fail "drain did not recover an output-started claim"
   [ ! -s "$dir/output-started.out" ] || fail "output-started claim was printed a second time"
-  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "output-started claim did not acknowledge its receipt"
-  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "output-started claim was not retired"
-  pass "output-started inactive claims do not reprint after a drain crash"
+  [ "$(queue_count "$state")" = 1 ] || fail "output-started claim lost its retry wake"
+  [ -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "output-started claim was discarded"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "output-started claim finalized without confirmation"
+  pass "output-started inactive claims fail closed after a drain crash"
 }
 
 test_uncertain_output_claim_fails_closed() {
@@ -613,7 +614,7 @@ test_uncertain_output_claim_fails_closed() {
   drain "$root" "$home" "$fakebin" >"$dir/uncertain-output.out" \
     || fail "uncertain output claim drain failed"
   [ ! -s "$dir/uncertain-output.out" ] || fail "uncertain output claim was reprinted"
-  [ "$(queue_count "$state")" = 0 ] || fail "uncertain output claim left a wake queued"
+  [ "$(queue_count "$state")" = 1 ] || fail "uncertain output claim lost its retry wake"
   [ -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "uncertain output claim was discarded"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_confirmed)" = 0 ] \
     || fail "uncertain output claim was finalized without caller-visible confirmation"
@@ -637,16 +638,17 @@ test_presented_claim_is_acknowledged_in_deferred_drain() {
   printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=%s\nstate=presented\noutput_started=1\noutput_complete=1\ndefer_ack=0\ncreated_epoch=1\n' \
     "$fingerprint" "$row" > "$state/terminal-outcomes/.$fingerprint.claim"
   printf '%s\n' "$row" > "$state/.wake-queue"
-  if ! FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
+  if FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
     drain "$root" "$home" "$fakebin" >"$dir/presented-claim.out"; then
-    fail "deferred drain did not acknowledge a completed presentation"
+    fail "deferred drain accepted an incomplete presented claim"
   fi
   [ ! -s "$dir/presented-claim.out" ] || fail "deferred drain re-presented a completed claim"
-  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
-    || fail "deferred drain did not finalize the completed presentation"
-  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
-    || fail "deferred drain left the completed presentation claim"
-  pass "deferred drains recover completed presentations without duplication"
+  [ "$(queue_count "$state")" = 1 ] || fail "deferred drain consumed an incomplete presented claim"
+  [ -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
+    || fail "deferred drain discarded an incomplete presented claim"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.reported" ] \
+    || fail "deferred drain reported an incomplete presented claim"
+  pass "deferred drains fail closed on incomplete presented claims"
 }
 
 test_pre_output_claim_retries_after_crash() {
@@ -849,11 +851,11 @@ test_deferred_ack_retries_after_caller_crash() {
   row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
   drain_output="$dir/retry.out"
   drain "$root" "$home" "$fakebin" >"$drain_output" \
-    || fail "retry drain did not recover the deferred presentation"
-  [ -f "$state/terminal-outcomes/$fingerprint.presented" ] || fail "retry drain did not acknowledge the recovered receipt"
-  [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain left the receipt pending"
-  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain left the deferred claim"
-  [ ! -s "$drain_output" ] || fail "retry drain re-presented an already emitted row"
+    || fail "retry drain did not retain the uncertain deferred presentation"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "retry drain finalized without caller confirmation"
+  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain lost the receipt"
+  [ -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain discarded the deferred claim"
+  [ ! -s "$drain_output" ] || fail "retry drain re-presented an uncertain row"
   unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_DEFERRED_X1
   pass "deferred inactive receipts retry until caller-visible emission"
 }
@@ -968,16 +970,16 @@ SH
   rm -f "$fakebin/mv"
   unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
   drain "$root" "$home" "$fakebin" >"$dir/deferred-failure-retry.out" \
-    || fail "deferred output-complete retry did not recover the emitted row"
+    || fail "deferred output-complete retry did not retain the emitted row"
   [ ! -s "$dir/deferred-failure-retry.out" ] \
     || fail "deferred output-complete retry reprinted the emitted row"
-  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
-    || fail "deferred output-complete retry did not finalize the receipt"
-  [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] \
-    || fail "deferred output-complete retry left the receipt pending"
-  [ "$(queue_count "$state")" = 0 ] \
-    || fail "deferred output-complete retry left the wake queued"
-  pass "deferred output completion failures retain emitted rows for retry"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "deferred output-complete retry finalized without caller confirmation"
+  [ -e "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "deferred output-complete retry lost the receipt"
+  [ "$(queue_count "$state")" = 1 ] \
+    || fail "deferred output-complete retry lost the wake"
+  pass "deferred output completion failures retain uncertain rows"
 }
 
 test_deferred_ack_confirms_after_caller_emission() {

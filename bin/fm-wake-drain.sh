@@ -15,9 +15,11 @@ DRAIN_RESTORE=
 DRAIN_PID=${BASHPID:-$$}
 DRAIN_LOCK_HELD=false
 DRAIN_ACTIONABLE=0
+DRAIN_CURRENT_RETAINED=0
 
 present_inactive_row() {
   local key=$1 row=$2 status=0 go emitted worker worker_status=0
+  local _epoch _seq _kind _queued_key payload
   if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ]; then
     FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-started "$key" "$row" >/dev/null 2>&1 || return 1
@@ -35,6 +37,12 @@ present_inactive_row() {
       return 3
     fi
     return 3
+  fi
+  if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ]; then
+    IFS=$(printf '\t') read -r _epoch _seq _kind _queued_key payload <<< "$row"
+    [ "$_queued_key" = "$key" ] || return 3
+    fm_wake_append_if_absent_locked retained check "$key" "$payload" || return 3
+    DRAIN_CURRENT_RETAINED=1
   fi
   trap - INT TERM HUP
   go=$(mktemp "$STATE/.wake-presentation.XXXXXX") || return 1
@@ -192,18 +200,24 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
             exit 1
           fi
           present_status=0
+          DRAIN_CURRENT_RETAINED=0
           present_inactive_row "$_key" "$drain_row" || present_status=$?
           if [ "$present_status" -ne 0 ]; then
-            if [ "$present_status" = 3 ]; then
-              restore_unprocessed_rows "$drain_line" || exit 1
-            else
-              restore_unprocessed_rows "$drain_line" || exit 1
-            fi
+            restore_start=$drain_line
+            [ "$DRAIN_CURRENT_RETAINED" = 1 ] && restore_start=$((drain_line + 1))
+            restore_unprocessed_rows "$restore_start" || exit 1
             exit 1
           fi
           ;;
         1|5) ;;
-        3|4) ;;
+        3) ;;
+        4)
+          restore_unprocessed_rows "$drain_line" || exit 1
+          fm_wake_restore_queue "$DRAIN_RESTORE" || exit 1
+          rm -f "$DRAIN_RESTORE"
+          DRAIN_RESTORE=
+          exit 0
+          ;;
         6)
           restore_unprocessed_rows "$drain_line" || exit 1
           exit 1
