@@ -87,12 +87,8 @@ RECONCILE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_SECS:-900}" 900 60 1800)
 SCAN_BUDGET_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" 10 1 300)
 REPORTED_ROUTE_REPAIR_LIMIT=$(bounded_secs "${FM_REPORTED_ROUTE_REPAIR_LIMIT:-32}" 32 1 256)
 PENDING_RECEIPT_REPUBLISH_LIMIT=$(bounded_secs "${FM_PENDING_RECEIPT_REPUBLISH_LIMIT:-32}" 32 1 256)
-MAINTENANCE_RESERVE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_MAINTENANCE_RESERVE_SECS:-2}" 2 0 60)
-[ "$MAINTENANCE_RESERVE_SECS" -lt "$SCAN_BUDGET_SECS" ] \
-  || MAINTENANCE_RESERVE_SECS=$((SCAN_BUDGET_SECS - 1))
-DIRECT_SCAN_BUDGET_SECS=$((SCAN_BUDGET_SECS - MAINTENANCE_RESERVE_SECS))
-MAINTENANCE_FIRST_STAGE_SECS=$((MAINTENANCE_RESERVE_SECS / 2))
-MAINTENANCE_SECOND_STAGE_SECS=$((MAINTENANCE_RESERVE_SECS - MAINTENANCE_FIRST_STAGE_SECS))
+MAINTENANCE_TURN_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_MAINTENANCE_RESERVE_SECS:-1}" 1 1 60)
+DIRECT_SCAN_BUDGET_SECS=$SCAN_BUDGET_SECS
 
 meta_value() {  # <meta> <key>
   awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
@@ -290,7 +286,7 @@ claim_rewrite_row() {
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp state existing old_row line output_started output_emitted output_complete defer_ack
+  local key=$1 row=$2 fp claim tmp state existing old_row line output_started output_emitted output_complete output_confirmed defer_ack
   local defer_generation defer_generation_start receipt_state receipt_rc=0 recorded_report=0 report_rc=1
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
@@ -346,6 +342,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     if [ "$state" = presenting ]; then
       output_started=$(claim_field "$claim" output_started 2>/dev/null || true)
       output_emitted=$(claim_field "$claim" output_emitted 2>/dev/null || true)
+      output_confirmed=$(claim_field "$claim" output_confirmed 2>/dev/null || true)
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
       if [ "$defer_ack" = 1 ]; then
         defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
@@ -367,6 +364,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
         presenting|reserved)
           claim_mark_presenting "$key" "$row" || return 2
           claim_mark_output_complete "$key" "$row" || return 2
+          claim_mark_output_confirmed "$key" "$row" || return 2
           claim_mark_presented "$key" "$row" || return 2
           return 5
           ;;
@@ -383,10 +381,12 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
         fi
       fi
       if [ "$output_complete" = 1 ]; then
+        [ "$output_confirmed" != 0 ] || return 4
         claim_mark_presented "$key" "$row" || return 2
         return 5
       fi
       if [ "$output_emitted" = 1 ]; then
+        [ "$output_confirmed" != 0 ] || return 4
         if claim_mark_output_complete "$key" "$row"; then
           claim_mark_presented "$key" "$row" || return 2
           return 5
@@ -434,6 +434,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     if [ "$recorded_report" = 1 ]; then
       claim_mark_presenting "$key" "$row" || return 2
       claim_mark_output_complete "$key" "$row" || return 2
+      claim_mark_output_confirmed "$key" "$row" || return 2
       claim_mark_presented "$key" "$row" || return 2
       return 5
     fi
@@ -520,12 +521,15 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
+      output_confirmed=*) printf 'output_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)" ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
+  grep -Fq '^output_confirmed=' "$tmp" || \
+    printf 'output_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)" >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -547,12 +551,14 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=0\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
+      output_confirmed=*) printf 'output_confirmed=0\n' ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
+  grep -Fq '^output_confirmed=' "$tmp" || printf 'output_confirmed=0\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -574,12 +580,38 @@ claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
+      output_confirmed=*) printf 'output_confirmed=0\n' ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
+  grep -Fq '^output_confirmed=' "$tmp" || printf 'output_confirmed=0\n' >> "$tmp"
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+}
+
+claim_mark_output_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim state tmp line seen_confirmed=0
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  [ "$state" = presenting ] || return 2
+  [ "$(claim_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      output_confirmed=*) printf 'output_confirmed=1\n'; seen_confirmed=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -601,6 +633,7 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
   [ ! -L "$claim" ] || return 2
   [ "$(claim_validate "$claim" "$fp" "$row")" = presenting ] || return 2
   [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_field "$claim" output_confirmed 2>/dev/null || true)" != 0 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -621,7 +654,7 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
 
 claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-}
-  local fp claim state tmp line seen_output=0 seen_emitted=0 seen_complete=0
+  local fp claim state tmp line seen_output=0 seen_emitted=0 seen_complete=0 seen_confirmed=0
   case "$owner_required" in
     1) drain_claim_owner "$row" || return 2 ;;
     0) ;; 
@@ -652,12 +685,14 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
+      output_confirmed=*) printf 'output_confirmed=1\n'; seen_confirmed=1 ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
+  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1083,6 +1118,24 @@ repair_reported_secondmate_routes() {
   return "$status"
 }
 
+maintenance_has_reported_receipts() {
+  local reported
+  [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
+  for reported in "$OUTCOME_DIR"/*.reported; do
+    [ -e "$reported" ] && [ -f "$reported" ] && [ ! -L "$reported" ] && return 0
+  done
+  return 1
+}
+
+maintenance_has_pending_receipts() {
+  local pending
+  [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
+  for pending in "$OUTCOME_DIR"/*.pending; do
+    [ -e "$pending" ] && [ -f "$pending" ] && [ ! -L "$pending" ] && return 0
+  done
+  return 1
+}
+
 republish_pending_receipt() {
   local pending=$1
   prepare_pending_receipt "$pending" || return 1
@@ -1199,12 +1252,67 @@ read_incarnation() {  # <meta> <id>
   printf 'legacy-%s' "${digest:0:32}"
 }
 
+surface_retry_valid() {
+  awk -F= '
+    BEGIN {
+      allowed["schema"]=1; allowed["task"]=1; allowed["snapshot"]=1
+      allowed["spawn_incarnation"]=1; allowed["tasktmp"]=1
+      allowed["window"]=1; allowed["worktree"]=1
+      required["schema"]=1; required["task"]=1; required["snapshot"]=1
+      required["spawn_incarnation"]=1; required["tasktmp"]=1
+      required["window"]=1; required["worktree"]=1
+      valid=1
+    }
+    /^[^=]+=/ {
+      key=$1
+      if (!(key in allowed) || (key in seen)) valid=0
+      seen[key]=1
+      values[key]=substr($0, index($0, "=") + 1)
+      next
+    }
+    { valid=0 }
+    END {
+      for (key in required) if (!(key in seen)) valid=0
+      exit !(valid && values["schema"] == "fm-hb-surface-retry.v1" && values["task"] != "" && values["snapshot"] != "")
+    }
+  ' "$1" 2>/dev/null
+}
+
+surface_retry_matches_current() {
+  local retry=$1 id=$2 meta=$3 status_file current_snapshot saved_snapshot saved_spawn
+  local current_spawn current_tasktmp current_window current_worktree rc
+  [ -f "$retry" ] && [ ! -L "$retry" ] || return 1
+  surface_retry_valid "$retry" || return 1
+  [ "$(meta_value_unique "$retry" task 2>/dev/null)" = "$id" ] || return 1
+  status_file="$STATE/$id.status"
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
+  current_snapshot=$(awk 'NF { line=$0 } END { if (line == "") exit 1; print line }' "$status_file" 2>/dev/null) || return 1
+  saved_snapshot=$(meta_value_unique "$retry" snapshot 2>/dev/null) || return 1
+  [ "$saved_snapshot" = "$current_snapshot" ] || return 1
+  saved_spawn=$(meta_value_unique "$retry" spawn_incarnation 2>/dev/null) || return 1
+  if current_spawn=$(meta_value_unique "$meta" spawn_incarnation 2>/dev/null); then
+    [ "$saved_spawn" = "$current_spawn" ] || return 1
+    return 0
+  fi
+  rc=$?
+  [ "$rc" = 1 ] || return 1
+  [ -z "$saved_spawn" ] || return 1
+  current_tasktmp=$(meta_value "$meta" tasktmp)
+  current_window=$(meta_value "$meta" window)
+  current_worktree=$(meta_value "$meta" worktree)
+  [ "$(meta_value_unique "$retry" tasktmp 2>/dev/null)" = "$current_tasktmp" ] || return 1
+  [ "$(meta_value_unique "$retry" window 2>/dev/null)" = "$current_window" ] || return 1
+  [ "$(meta_value_unique "$retry" worktree 2>/dev/null)" = "$current_worktree" ] || return 1
+}
+
 terminal_outcome_surfaced() {
-  local id=$1 meta=$2 outcome=$3 key raw marker marker_snapshot marker_spawn
-  local current_spawn current_tasktmp current_window current_worktree
+  local id=$1 meta=$2 outcome=$3 key raw marker retry marker_snapshot marker_spawn current_snapshot
+  local current_spawn current_tasktmp current_window current_worktree status_file
   key=$(printf '%s' "$id" | tr ':/.' '___')
   raw="$STATE/.hb-surfaced-$key"
   marker="$STATE/.hb-terminal-surfaced-$key"
+  retry="$STATE/.hb-surface-retry-$key"
+  surface_retry_matches_current "$retry" "$id" "$meta" && return 0
   [ -f "$raw" ] && [ ! -L "$raw" ] || return 1
   raw=$(cat "$raw" 2>/dev/null || true)
   [ -n "$raw" ] || return 1
@@ -1213,6 +1321,10 @@ terminal_outcome_surfaced() {
     *) return 1 ;;
   esac
   [ "${raw%%:*}" = "$outcome" ] || return 1
+  status_file="$STATE/$id.status"
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
+  current_snapshot=$(awk 'NF { line=$0 } END { if (line == "") exit 1; print line }' "$status_file" 2>/dev/null) || return 1
+  [ "$raw" = "$current_snapshot" ] || return 1
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   awk -F= '
     BEGIN {
@@ -1531,47 +1643,41 @@ scan_locked() {
   scan_started=$now
   scan_deadline=$((scan_started + DIRECT_SCAN_BUDGET_SECS))
   run_maintenance() {
-    [ "$MAINTENANCE_RESERVE_SECS" -gt 0 ] || return 0
     maintenance_started=$(date +%s)
-    if [ "$MAINTENANCE_RESERVE_SECS" = 1 ]; then
-      maintenance_phase=$(cat "$MAINTENANCE_PHASE_CURSOR" 2>/dev/null || true)
-      case "$maintenance_phase" in pending|reported) ;; *) maintenance_phase=pending ;; esac
-      if [ "$maintenance_phase" = pending ]; then
-        maintenance_deadline=$((maintenance_started + MAINTENANCE_RESERVE_SECS))
-        if ! republish_pending_receipts "$maintenance_deadline"; then
-          maintenance_status=1
-        fi
-        maintenance_next_phase=reported
-      else
-        maintenance_deadline=$((maintenance_started + MAINTENANCE_RESERVE_SECS))
-        if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
-          maintenance_status=1
-        fi
-        maintenance_next_phase=pending
-      fi
-      maintenance_phase_tmp=$(mktemp "$STATE/.inactive-outcome-maintenance.cursor.XXXXXX") || {
-        maintenance_status=1
-        return 0
-      }
-      if [ ! -f "$maintenance_phase_tmp" ] || [ -L "$maintenance_phase_tmp" ] \
-        || ! printf '%s\n' "$maintenance_next_phase" > "$maintenance_phase_tmp" \
-        || ! mv -f "$maintenance_phase_tmp" "$MAINTENANCE_PHASE_CURSOR"; then
-        maintenance_status=1
-        rm -f "$maintenance_phase_tmp"
-      fi
-      return 0
+    [ "$maintenance_started" -lt "$scan_deadline" ] || return 0
+    maintenance_deadline=$((maintenance_started + MAINTENANCE_TURN_SECS))
+    [ "$maintenance_deadline" -gt "$scan_deadline" ] && maintenance_deadline=$scan_deadline
+    maintenance_phase=$(cat "$MAINTENANCE_PHASE_CURSOR" 2>/dev/null || true)
+    case "$maintenance_phase" in pending|reported) ;; *) maintenance_phase=pending ;; esac
+    if [ "$maintenance_phase" = pending ] \
+      && ! maintenance_has_pending_receipts \
+      && maintenance_has_reported_receipts; then
+      maintenance_phase=reported
+    elif [ "$maintenance_phase" = reported ] \
+      && ! maintenance_has_reported_receipts \
+      && maintenance_has_pending_receipts; then
+      maintenance_phase=pending
     fi
-    if [ "$MAINTENANCE_FIRST_STAGE_SECS" -gt 0 ]; then
-      maintenance_deadline=$((maintenance_started + MAINTENANCE_FIRST_STAGE_SECS))
+    if [ "$maintenance_phase" = pending ]; then
       if ! republish_pending_receipts "$maintenance_deadline"; then
         maintenance_status=1
       fi
-    fi
-    if [ "$MAINTENANCE_SECOND_STAGE_SECS" -gt 0 ]; then
-      maintenance_deadline=$((maintenance_started + MAINTENANCE_RESERVE_SECS))
+      maintenance_next_phase=reported
+    else
       if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
         maintenance_status=1
       fi
+      maintenance_next_phase=pending
+    fi
+    maintenance_phase_tmp=$(mktemp "$STATE/.inactive-outcome-maintenance.cursor.XXXXXX") || {
+      maintenance_status=1
+      return 0
+    }
+    if [ ! -f "$maintenance_phase_tmp" ] || [ -L "$maintenance_phase_tmp" ] \
+      || ! printf '%s\n' "$maintenance_next_phase" > "$maintenance_phase_tmp" \
+      || ! mv -f "$maintenance_phase_tmp" "$MAINTENANCE_PHASE_CURSOR"; then
+      maintenance_status=1
+      rm -f "$maintenance_phase_tmp"
     fi
   }
   cursor=$(cat "$SCAN_CURSOR" 2>/dev/null || true)
@@ -1716,6 +1822,10 @@ case "${1:-}" in
   output-emitted)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
     claim_mark_output_emitted "$2" "$3"
+    ;;
+  output-confirmed)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    claim_mark_output_confirmed "$2" "$3"
     ;;
   output-complete)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2

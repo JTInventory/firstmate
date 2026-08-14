@@ -559,6 +559,29 @@ surface_retry_valid() {
   ' "$1" 2>/dev/null
 }
 
+surface_retry_matches_current() {
+  local retry=$1 task=$2 last=$3 meta="$STATE/$2.meta" current_spawn saved_spawn
+  local current_tasktmp current_window current_worktree rc
+  surface_retry_valid "$retry" || return 1
+  [ "$(surface_meta_value_unique "$retry" task 2>/dev/null)" = "$task" ] || return 1
+  [ "$(surface_meta_value_unique "$retry" snapshot 2>/dev/null)" = "$last" ] || return 1
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  saved_spawn=$(surface_meta_value_unique "$retry" spawn_incarnation 2>/dev/null) || return 1
+  if current_spawn=$(surface_meta_value_unique "$meta" spawn_incarnation 2>/dev/null); then
+    [ "$saved_spawn" = "$current_spawn" ] || return 1
+    return 0
+  fi
+  rc=$?
+  [ "$rc" = 1 ] || return 1
+  [ -z "$saved_spawn" ] || return 1
+  current_tasktmp=$(surface_meta_value "$meta" tasktmp)
+  current_window=$(surface_meta_value "$meta" window)
+  current_worktree=$(surface_meta_value "$meta" worktree)
+  [ "$(surface_meta_value_unique "$retry" tasktmp 2>/dev/null)" = "$current_tasktmp" ] || return 1
+  [ "$(surface_meta_value_unique "$retry" window 2>/dev/null)" = "$current_window" ] || return 1
+  [ "$(surface_meta_value_unique "$retry" worktree 2>/dev/null)" = "$current_worktree" ] || return 1
+}
+
 surface_retry_write() {
   local task=$1 last=$2 meta="$STATE/$1.meta" retry tmp spawn_incarnation tasktmp window worktree rc
   spawn_incarnation= tasktmp= window= worktree=
@@ -595,6 +618,10 @@ surface_retry_repair() {
     tasktmp=$(surface_meta_value "$retry" tasktmp)
     window=$(surface_meta_value "$retry" window)
     worktree=$(surface_meta_value "$retry" worktree)
+    if ! surface_retry_matches_current "$retry" "$task" "$last"; then
+      status=1
+      continue
+    fi
     if ! mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
       "$tasktmp" "$window" "$worktree"; then
       status=1
@@ -613,6 +640,10 @@ surface_retry_repair() {
       sig=$(stat_sig "$status_file") || { status=1; continue; }
       sf="$STATE/.seen-$(basename "$status_file" | tr '.' '_')"
       printf '%s' "$sig" > "$sf" || { status=1; continue; }
+    fi
+    if ! surface_retry_matches_current "$retry" "$task" "$last"; then
+      status=1
+      continue
     fi
     rm -f "$retry" || status=1
   done
