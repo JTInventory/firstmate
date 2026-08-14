@@ -479,6 +479,30 @@ run_check_capture() {
 # fleet-scan can tell apart a captain-relevant status that already woke firstmate
 # from one that has not - the latter being a per-wake-path miss it must surface.
 _hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+_hb_terminal_surfaced_path() { printf '%s/.hb-terminal-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+
+mark_terminal_surfaced() {
+  local task=$1 last=$2 meta marker tmp spawn_incarnation tasktmp window worktree
+  case "$(status_line_verb "$last")" in
+    done|failed) ;;
+    *) return 0 ;;
+  esac
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  spawn_incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); count++ } END { exit !(count == 1) }' "$meta" 2>/dev/null || true)
+  tasktmp=$(awk -F= '$1 == "tasktmp" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
+  window=$(awk -F= '$1 == "window" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
+  worktree=$(awk -F= '$1 == "worktree" { print substr($0, index($0, "=") + 1); exit }' "$meta" 2>/dev/null || true)
+  marker=$(_hb_terminal_surfaced_path "$task")
+  tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
+  if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\n' \
+    "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" > "$tmp" \
+    || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  return 0
+}
 
 # Record a status file's captain-relevant last line as surfaced (no-op for a
 # non-captain-relevant or empty status). Call AFTER the wake is enqueued, so the
@@ -490,6 +514,7 @@ mark_surfaced() {  # <status-file>
   [ -n "$last" ] || return 0
   status_is_captain_relevant "$last" || return 0
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+  mark_terminal_surfaced "$task" "$last"
 }
 
 # Mark every current captain-relevant status as surfaced. Called after the
@@ -500,6 +525,7 @@ mark_all_captain_relevant_surfaced() {
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+    mark_terminal_surfaced "$task" "$last"
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
@@ -621,7 +647,19 @@ while :; do
     exit 1
   fi
   if [ -n "$inactive_out" ]; then
-    wake "check: inactive terminal outcome replay queued"
+    inactive_drain_output=
+    inactive_drain_status=0
+    inactive_drain_output=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
+      FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" "$SCRIPT_DIR/fm-wake-drain.sh") \
+      || inactive_drain_status=$?
+    case "$inactive_drain_status" in
+      0)
+        [ -n "$inactive_drain_output" ] || exit 1
+        wake "$inactive_drain_output"
+        ;;
+      3) exit 3 ;;
+      *) exit "$inactive_drain_status" ;;
+    esac
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
