@@ -229,13 +229,13 @@ receipt_value() {
 }
 
 receipt_fingerprint() {
-  local value=$1
+  local value=$1 kind=${2:-ship}
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
+    printf '%s' "$value|$kind" | shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$value" | sha256sum | awk '{print $1}'
+    printf '%s' "$value|$kind" | sha256sum | awk '{print $1}'
   else
-    printf '%s' "$value" | cksum | awk '{print $1}'
+    return 1
   fi
 }
 
@@ -361,6 +361,28 @@ test_portable_timeout_preserves_signal_failure() {
   pass "portable timeout preserves signal failures"
 }
 
+test_portable_timeout_expires_child() {
+  local dir root home fakebin state
+  new_case portable-timeout-expiry
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" expiry-x1 expiry-inc
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+printf 'state: done · source: pane · should time out\n'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  export FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT=1 FM_INACTIVE_OUTCOME_BUDGET_SECS=1
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "portable timeout fallback allowed an expired child"
+  fi
+  [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "portable timeout expiry advanced the cadence marker"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "portable timeout expiry created a receipt"
+  unset FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT FM_INACTIVE_OUTCOME_BUDGET_SECS
+  pass "portable timeout fallback propagates child expiry"
+}
+
 test_leading_zero_cadence_is_normalized() {
   local dir root home fakebin state
   new_case leading-zero-cadence
@@ -418,7 +440,7 @@ SH
 
 test_ack_recomputes_fingerprint_from_receipt_fields() {
   local dir root home fakebin state rec fingerprint field tampered
-  for field in task_id incarnation outcome terminal_snapshot; do
+  for field in task_id incarnation outcome terminal_snapshot kind; do
     new_case "fingerprint-binding-$field"
     dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
     state="$home/state"
@@ -432,6 +454,7 @@ test_ack_recomputes_fingerprint_from_receipt_fields() {
       incarnation) tampered=tampered-inc ;;
       outcome) tampered=failed ;;
       terminal_snapshot) tampered='tampered snapshot' ;;
+      kind) tampered=secondmate ;;
     esac
     replace_field "$rec" "$field" "$tampered"
     if drain "$root" "$home" "$fakebin" >/dev/null 2>&1; then
@@ -1076,6 +1099,72 @@ SH
   pass "valid secondmate outcomes use the parent status correlation exactly once"
 }
 
+test_secondmate_route_replacement_preserves_old_receipt() {
+  local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker
+  new_case secondmate-route-replacement
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$state/pending-replies"
+  printf 'sm-replace\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-replace parent-replace-inc secondmate tmux firstmate:fm-sm-replace
+  printf 'home=%s\n' "$child_home" >> "$state/sm-replace.meta"
+  write_meta "$child_state" child-replace-x1 child-replace-inc
+  parent_status="$state/sm-replace.status"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{cursor_y}"*) printf '1\n' ;;
+  *capture-pane*) : ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-replace "first request" 2>&1) || fail "initial public route setup failed: $send_out"
+  corr_a=$(basename "$(direct_first_file "$state/pending-replies" '*')")
+  [ -n "$corr_a" ] || fail "initial route did not create a correlation"
+  export FM_FAKE_CREW_STATE_CHILD_REPLACE_X1='state: done · source: pane · old route receipt'
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null || fail "old route scan failed"
+  rec=$(direct_first_file "$child_state/terminal-outcomes" '*.pending')
+  [ -n "$rec" ] || fail "old route did not create a pending receipt"
+  replace_field "$state/pending-replies/$corr_a" phase resolved
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-replace "replacement request" 2>&1) || fail "replacement public route setup failed: $send_out"
+  corr_b=
+  for marker in "$state"/pending-replies/*; do
+    [ -f "$marker" ] || continue
+    [ "$(basename "$marker")" = "$corr_a" ] || corr_b=$(basename "$marker")
+  done
+  [ -n "$corr_b" ] || fail "replacement route did not create a new correlation"
+  [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$corr_b" ] \
+    || fail "replacement route did not publish the new correlation"
+  drain "$root" "$child_home" "$fakebin" >/dev/null \
+    || fail "old receipt did not drain after route replacement"
+  [ "$(receipt_count "$child_state" reported)" = 1 ] || fail "old route receipt was not reported"
+  [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$corr_b" ] \
+    || fail "old receipt cleanup removed the replacement route"
+  [ ! -e "$child_state/.fm-jt-parent-route-history.$corr_a" ] \
+    || fail "old route history was not retired after acknowledgement"
+  unset FM_FAKE_CREW_STATE_CHILD_REPLACE_X1
+  pass "secondmate route replacement preserves correlation-scoped old receipts"
+}
+
 test_concurrent_secondmate_routes_are_rejected() {
   local dir root home fakebin state child_home child_state marker corr_one corr_two outside existing_real existing_link
   local existing_record record_backup existing_history history_backup clear_real clear_link
@@ -1196,7 +1285,7 @@ test_drain_restores_only_unprocessed_rows() {
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   first=$(receipt_fingerprint 'first-x1|first-inc|done|done')
-  second=$(receipt_fingerprint 'second-x1|second-inc|failed|failed')
+  second=$(receipt_fingerprint 'second-x1|second-inc|failed|failed' secondmate)
   mkdir -p "$state/terminal-outcomes"
   fm_write_meta "$state/terminal-outcomes/$first.pending" \
     schema=fm-jt-terminal-outcome.v1 fingerprint="$first" task_id=first-x1 \
@@ -1268,6 +1357,7 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
 test_done_and_failed_are_replayed_once
 test_portable_timeout_runner_is_used
 test_portable_timeout_preserves_signal_failure
+test_portable_timeout_expires_child
 test_leading_zero_cadence_is_normalized
 test_find_failure_propagates_without_advancing_scan
 test_find_enumeration_respects_scan_budget
@@ -1289,6 +1379,7 @@ test_herdr_identity_and_default_captain_refusal
 test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_valid_secondmate_route_reports_parent_once
+test_secondmate_route_replacement_preserves_old_receipt
 test_concurrent_secondmate_routes_are_rejected
 test_drain_restores_only_unprocessed_rows
 test_malformed_or_missing_secondmate_route_fails_closed

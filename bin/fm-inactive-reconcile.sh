@@ -113,7 +113,7 @@ hash_text() {
   elif command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$1" | sha256sum | awk '{print $1}'
   else
-    printf '%s' "$1" | cksum | awk '{print $1}'
+    return 1
   fi
 }
 
@@ -195,7 +195,11 @@ claim_field() {  # <claim> <key>
 drain_claim_owner() {
   local row=$1 owner parent_pid drain_file drain_dir state_dir
   owner=$(fm_lock_link_owner "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true)
-  parent_pid=${PPID:-}
+  if [ "${FM_WAKE_DRAIN_DELEGATED:-0}" = 1 ]; then
+    parent_pid=${FM_WAKE_DRAIN_PARENT_PID:-}
+  else
+    parent_pid=${PPID:-}
+  fi
   drain_file=${FM_WAKE_DRAIN_FILE:-}
   [ -n "$owner" ] && [ -n "$parent_pid" ] && [ -n "$row" ] && [ -n "$drain_file" ] || return 1
   [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$parent_pid" ] || return 1
@@ -436,7 +440,7 @@ publish_receipt_and_wake() {
 receipt_existing_core() {
   local suffix existing expected_fp existing_kind parent_id parent_home parent_status parent_corr
   RECEIPT_EXISTING_SUFFIX=
-  expected_fp=$(hash_text "$ID|$INC|$OUTCOME|$SNAPSHOT")
+  expected_fp=$(hash_text "$ID|$INC|$OUTCOME|$SNAPSHOT|$KIND") || return 1
   [ "$expected_fp" = "$FP" ] || return 1
   for suffix in pending presented reported; do
     existing=$(receipt_path "$FP" "$suffix")
@@ -549,7 +553,7 @@ publish_secondmate_receipt_and_wake() {
 }
 
 read_incarnation() {  # <meta> <id>
-  local meta=$1 id=$2 token tasktmp window worktree seed rc token_present=0
+  local meta=$1 id=$2 token tasktmp window worktree seed digest rc token_present=0
   if token=$(meta_value_unique "$meta" spawn_incarnation); then
     token_present=1
   else
@@ -575,7 +579,8 @@ read_incarnation() {  # <meta> <id>
   else
     seed="legacy|window=$window|worktree=$worktree"
   fi
-  printf 'legacy-%s' "$(hash_text "$seed" | cut -c1-32)"
+  digest=$(hash_text "$seed") || return 1
+  printf 'legacy-%s' "${digest:0:32}"
 }
 
 child_cleanup() {
@@ -597,7 +602,7 @@ reconcile_child() {
   herdr_identity_allowed "$meta" || return 0
   CHILD_LOCK="$STATE/.spawn-$id.lock"
   FM_LOCK_WAIT_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_LOCK_WAIT_SECS:-30}" 30 0 300)
-  fm_lock_acquire_wait "$CHILD_LOCK" || return 0
+  fm_lock_acquire_wait "$CHILD_LOCK" || return 75
   CHILD_LOCK_HELD=1
   trap child_cleanup EXIT INT TERM
   # Teardown/relaunch can replace or remove metadata only after the same lock is
@@ -638,7 +643,6 @@ reconcile_child() {
   [ -n "$source" ] && [ "$source" != none ] || return 0
   snapshot=$(single_line "$line")
   INC=$(read_incarnation "$meta" "$id") || return 0
-  FP=$(hash_text "$id|$INC|$outcome|$snapshot")
   ID=$id
   OUTCOME=$outcome
   SNAPSHOT=$snapshot
@@ -650,6 +654,8 @@ reconcile_child() {
     0|1) ;;
     *) return 0 ;;
   esac
+  [ "$route_rc" = 0 ] && KIND=secondmate
+  FP=$(hash_text "$id|$INC|$outcome|$snapshot|$KIND") || return 1
   if [ "$route_rc" = 0 ]; then
     publish_secondmate_receipt_and_wake || return 1
     if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
@@ -708,7 +714,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   parent_task_id=$(receipt_field "$rec" parent_task_id)
   outcome=$(receipt_field "$rec" outcome)
   snapshot=$(receipt_field "$rec" terminal_snapshot)
-  expected_fp=$(hash_text "$id|$incarnation|$outcome|$snapshot")
+  expected_fp=$(hash_text "$id|$incarnation|$outcome|$snapshot|$kind") || return 2
   [ "$expected_fp" = "$fp" ] || return 2
   case "$kind" in ship|scout|secondmate) ;; *) return 2 ;; esac
   if [ "$kind" = secondmate ]; then
@@ -833,7 +839,8 @@ scan_locked() {
   done < "$find_tmp"
   rm -f "$find_tmp" || return 1
   [ "$scan_failed" = 0 ] || return "$rc"
-  if [ "$complete" = 1 ] && [ "$cursor_seen" = 0 ]; then
+  [ "$complete" = 1 ] || return 1
+  if [ "$cursor_seen" = 0 ]; then
     return 1
   fi
   if [ "$complete" = 1 ]; then

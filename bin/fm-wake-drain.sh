@@ -16,13 +16,41 @@ DRAIN_PID=${BASHPID:-$$}
 DRAIN_LOCK_HELD=false
 
 present_inactive_row() {
-  local key=$1 row=$2 status=0
+  local key=$1 row=$2 status=0 go worker worker_status=0
   trap - INT TERM HUP
-  if ! printf '%s\n' "$row"; then
+  go=$(mktemp "$STATE/.wake-presentation.XXXXXX") || return 1
+  [ -f "$go" ] && [ ! -L "$go" ] || { rm -f "$go"; return 1; }
+  rm -f "$go"
+  (
+    while [ ! -e "$go" ]; do
+      if ! kill -0 "$DRAIN_PID" 2>/dev/null; then
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
+          FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+          output-started "$key" "$row" || exit 1
+        break
+      fi
+      sleep 0.01
+    done
+    printf '%s\n' "$row"
+  ) &
+  worker=$!
+  if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-started "$key" "$row"; then
     status=1
   fi
-  if [ "$status" = 0 ] && ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-started "$key" "$row"; then
-    status=1
+  if [ "$status" = 0 ]; then
+    : > "$go" || status=1
+  fi
+  if [ "$status" = 0 ]; then
+    wait "$worker" || worker_status=$?
+    [ "$worker_status" = 0 ] || status=1
+  else
+    kill "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+  fi
+  rm -f "$go"
+  if [ "$status" -ne 0 ]; then
+    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+      presenting "$key" "$row" >/dev/null 2>&1 || true
   fi
   if [ "$status" = 0 ] && ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$key" "$row"; then
     status=1
