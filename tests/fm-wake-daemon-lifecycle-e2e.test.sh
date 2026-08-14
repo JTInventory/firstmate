@@ -31,6 +31,7 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
+# shellcheck disable=SC2034 # consumed by sourced wake-helpers.sh functions
 TMP_ROOT=$(fm_test_tmproot fm-wake-daemon-e2e)
 trap fm_test_watch_cleanup_exit EXIT
 
