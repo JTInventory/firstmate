@@ -817,6 +817,9 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
     awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
+    delivery_unknown)
+      [ "$allow_undelivered" = 2 ] || return 1
+      ;;
     *) return 1 ;;
   esac
   case "$allow_undelivered" in

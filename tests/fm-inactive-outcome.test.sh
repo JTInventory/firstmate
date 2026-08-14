@@ -557,6 +557,41 @@ test_output_started_claim_is_not_reprinted() {
   pass "output-started inactive claims do not reprint after a drain crash"
 }
 
+test_deferred_ack_retries_after_caller_crash() {
+  local dir root home fakebin state fingerprint row drain_output rec
+  new_case deferred-ack
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" deferred-x1 deferred-inc
+  export FM_FAKE_CREW_STATE_DEFERRED_X1='state: done · source: pane · deferred presentation'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "deferred receipt setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  [ -n "$row" ] || fail "deferred receipt did not queue its wake"
+  drain_output="$dir/deferred.out"
+  if ! FM_WAKE_DRAIN_DEFER_ACK=1 drain "$root" "$home" "$fakebin" >"$drain_output"; then
+    fail "deferred wake drain failed"
+  fi
+  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] || fail "deferred drain consumed the receipt before caller confirmation"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "deferred drain finalized the receipt before caller confirmation"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" state)" = presented ] \
+    || fail "deferred drain did not retain the presentation claim"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" defer_ack)" = 1 ] \
+    || fail "deferred drain did not mark the claim for caller confirmation"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "pending deferred receipt was not republished after caller crash"
+  [ "$(queue_count "$state")" = 1 ] || fail "pending deferred receipt did not get a retry wake"
+  drain_output="$dir/retry.out"
+  drain "$root" "$home" "$fakebin" >"$drain_output" \
+    || fail "retry drain did not recover the deferred presentation"
+  [ -f "$state/terminal-outcomes/$fingerprint.presented" ] || fail "retry drain did not acknowledge the recovered receipt"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain left the receipt pending"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain left the deferred claim"
+  grep -F 'task=deferred-x1' "$drain_output" >/dev/null \
+    || fail "retry drain did not re-present the deferred row"
+  unset FM_FAKE_CREW_STATE_DEFERRED_X1
+  pass "deferred inactive receipts remain retryable until caller confirmation"
+}
+
 test_scan_failure_retries_without_advancing_cadence() {
   local dir root home fakebin state wake_dir wake_removed
   new_case scan-failure
@@ -1254,6 +1289,13 @@ SH
   [ "$(receipt_count "$child_state" pending)" = 1 ] \
     || fail "mismatched history marker consumed the old receipt"
   cp "$history_backup" "$child_state/.fm-jt-parent-route-history.$corr_a"
+  replace_field "$state/pending-replies/$corr_b" phase delivery_unknown
+  : > "$child_state/.wake-queue"
+  scan "$root" "$child_home" "$fakebin" --startup \
+    || fail "delivery-unknown active route scan failed"
+  [ "$(queue_count "$child_state")" = 1 ] \
+    || fail "delivery-unknown active route blocked the matching history receipt"
+  replace_field "$state/pending-replies/$corr_b" phase awaiting_report
   scan "$root" "$child_home" "$fakebin" --startup \
     || fail "pending old-route receipt was not reconciled after route replacement"
   [ "$(queue_count "$child_state")" = 1 ] \
@@ -1550,6 +1592,7 @@ test_ack_recomputes_fingerprint_from_receipt_fields
 test_reserved_claim_recovers_to_a_new_wake_row
 test_presenting_claim_recovers_before_output
 test_output_started_claim_is_not_reprinted
+test_deferred_ack_retries_after_caller_crash
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint

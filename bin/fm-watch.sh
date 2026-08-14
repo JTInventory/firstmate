@@ -339,11 +339,22 @@ event_wait_herdr() {
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
 wake() {
+  local wake_output=$1 row _epoch _seq _kind _key _payload confirm_status
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
-  echo "$1"
+  echo "$wake_output"
+  while IFS= read -r row || [ -n "$row" ]; do
+    IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$row"
+    case "$_key" in
+      inactive-outcome:*)
+        confirm_status=0
+        "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$row" >/dev/null 2>&1 || confirm_status=$?
+        [ "$confirm_status" = 0 ] || [ "$confirm_status" = 1 ] || exit "$confirm_status"
+        ;;
+    esac
+  done <<< "$wake_output"
   exit 0
 }
 
@@ -583,7 +594,7 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
-  if ! wake_drain_out=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1); then
+  if ! wake_drain_out=$(FM_WAKE_DRAIN_DEFER_ACK=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1); then
     printf '%s\n' "$wake_drain_out" >&2
     exit 1
   fi
