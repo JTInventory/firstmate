@@ -683,6 +683,20 @@ fm_wake_append_if_absent_locked() {  # <result-var> <kind> <key> <payload>
   return "$status"
 }
 
+fm_wake_remove_key_locked() {
+  local key=$1 tmp
+  [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+  [ -e "$FM_WAKE_QUEUE" ] || return 0
+  [ -f "$FM_WAKE_QUEUE" ] || return 1
+  tmp=$(mktemp "$STATE/.wake-queue.remove.XXXXXX") || return 1
+  if ! awk -F '\t' -v wanted="$key" '$4 != wanted { print }' "$FM_WAKE_QUEUE" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  [ ! -L "$FM_WAKE_QUEUE" ] || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$FM_WAKE_QUEUE" || { rm -f "$tmp"; return 1; }
+}
+
 fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
   local status=0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {

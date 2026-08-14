@@ -252,6 +252,37 @@ claim_field() {  # <claim> <key>
   meta_value_unique "$1" "$2"
 }
 
+claim_binary_field() {  # <claim> <key>
+  local value
+  value=$(claim_field "$1" "$2") || return 1
+  case "$value" in
+    0|1) printf '%s' "$value" ;;
+    *) return 1 ;;
+  esac
+}
+
+claim_binary_fields_valid() {
+  local claim=$1 field value rc
+  for field in output_started output_emitted output_complete output_confirmed caller_confirmed; do
+    value=$(awk -F= -v wanted="$field" '
+      $1 == wanted { count++; value=substr($0, index($0, "=") + 1) }
+      END {
+        if (count == 0) exit 1
+        if (count != 1) exit 2
+        print value
+      }
+    ' "$claim" 2>/dev/null)
+    rc=$?
+    case "$rc" in
+      1) continue ;;
+      0)
+        case "$value" in 0|1) ;; *) return 1 ;; esac
+        ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 claim_receipt_state() {
   local fp=$1 suffix path found=
   for suffix in pending presented reported; do
@@ -328,7 +359,7 @@ claim_rewrite_row() {
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp state existing old_row line output_started output_emitted output_complete output_confirmed defer_ack
+  local key=$1 row=$2 fp claim tmp state existing old_row line output_started output_emitted output_complete output_confirmed caller_confirmed defer_ack
   local defer_generation defer_generation_start receipt_state receipt_rc=0 recorded_report=0 report_rc=1
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
@@ -370,6 +401,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     case "$state" in presented|presenting|reserved) ;; *) return 2 ;; esac
     old_row=$(claim_field "$claim" row)
     [ -n "$old_row" ] || return 2
+    claim_binary_fields_valid "$claim" || return 2
     if [ "$state" = presented ]; then
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
       if [ "$defer_ack" = 1 ]; then
@@ -378,13 +410,15 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
         if claim_defer_generation_live "$defer_generation" "$defer_generation_start"; then
           return 4
         fi
-        [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+        [ "$(claim_binary_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
       fi
     fi
     if [ "$state" = presenting ]; then
       output_started=$(claim_field "$claim" output_started 2>/dev/null || true)
       output_emitted=$(claim_field "$claim" output_emitted 2>/dev/null || true)
+      output_complete=$(claim_field "$claim" output_complete 2>/dev/null || true)
       output_confirmed=$(claim_field "$claim" output_confirmed 2>/dev/null || true)
+      caller_confirmed=$(claim_field "$claim" caller_confirmed 2>/dev/null || true)
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
       if [ "$defer_ack" = 1 ]; then
         defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
@@ -398,7 +432,38 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       claim_rewrite_row "$claim" "$row" || return 2
     fi
     if [ "$state" = presented ] && [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ]; then
+      [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+      [ "$(claim_binary_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
+      [ "$(claim_binary_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+      [ "$(claim_binary_field "$claim" output_confirmed 2>/dev/null || true)" = 1 ] || return 2
+      [ "$(claim_binary_field "$claim" caller_confirmed 2>/dev/null || true)" = 1 ] || return 2
       return 5
+    fi
+    if [ "$state" = presenting ] && [ "$defer_ack" = 1 ]; then
+      case "$caller_confirmed" in
+        1)
+          [ "$output_started" = 1 ] || return 2
+          [ "$output_emitted" = 1 ] || return 2
+          [ "$output_complete" = 1 ] || return 2
+          [ "$output_confirmed" = 1 ] || return 2
+          claim_mark_presented_recovered "$key" "$row" || return 2
+          return 5
+          ;;
+        ''|0) ;;
+        *) return 2 ;;
+      esac
+      case "$output_emitted" in
+        ''|0) ;;
+        1) [ "$output_confirmed" = 1 ] || return 2 ;;
+        *) return 2 ;;
+      esac
+      case "$output_complete" in
+        ''|0) ;;
+        1) return 4 ;;
+        *) return 2 ;;
+      esac
+      [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] || return 4
+      return 0
     fi
     if [ "$recorded_report" = 1 ]; then
       case "$state" in
@@ -413,7 +478,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       esac
     fi
     if [ "$state" = presenting ]; then
-      output_complete=$(claim_field "$claim" output_complete 2>/dev/null || true)
+      output_complete=$(claim_binary_field "$claim" output_complete 2>/dev/null || true)
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
       if [ "$defer_ack" = 1 ]; then
         defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
@@ -423,12 +488,12 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
         fi
       fi
       if [ "$output_complete" = 1 ]; then
-        [ "$output_confirmed" != 0 ] || return 4
+        [ "$output_confirmed" = 1 ] || return 4
         claim_mark_presented "$key" "$row" || return 2
         return 5
       fi
       if [ "$output_emitted" = 1 ]; then
-        [ "$output_confirmed" != 0 ] || return 4
+        [ "$output_confirmed" = 1 ] || return 4
         if claim_mark_output_complete "$key" "$row"; then
           claim_mark_presented "$key" "$row" || return 2
           return 5
@@ -491,7 +556,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
 
 claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim state tmp line defer_ack=0 defer_generation= defer_generation_start=
-  local seen_pid=0 seen_output=0 seen_emitted=0 seen_complete=0
+  local seen_pid=0 seen_output=0 seen_emitted=0 seen_complete=0 seen_caller_confirmed=0
   local seen_defer_ack=0 seen_defer_generation=0 seen_defer_generation_start=0
   [ "${FM_WAKE_DRAIN_DIRECT:-0}" != 1 ] \
     && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
@@ -510,6 +575,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
     presenting|reserved) ;;
     *) return 2 ;;
   esac
+  claim_binary_fields_valid "$claim" || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -519,6 +585,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=0\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=0\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
+      caller_confirmed=*) printf 'caller_confirmed=0\n'; seen_caller_confirmed=1 ;;
       defer_ack=*) printf 'defer_ack=%s\n' "$defer_ack"; seen_defer_ack=1 ;;
       defer_generation=*) printf 'defer_generation=%s\n' "$defer_generation"; seen_defer_generation=1 ;;
       defer_generation_start=*) printf 'defer_generation_start=%s\n' "$defer_generation_start"; seen_defer_generation_start=1 ;;
@@ -529,6 +596,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   [ "$seen_output" = 1 ] || printf 'output_started=0\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
+  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
   [ "$seen_defer_ack" = 1 ] || printf 'defer_ack=%s\n' "$defer_ack" >> "$tmp"
   [ "$seen_defer_generation" = 1 ] || printf 'defer_generation=%s\n' "$defer_generation" >> "$tmp"
   [ "$seen_defer_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$defer_generation_start" >> "$tmp"
@@ -539,7 +607,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
 claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-}
   local fp claim state tmp line seen_output=0 seen_complete=0
-  local seen_emitted=0
+  local seen_emitted=0 seen_confirmed=0 seen_caller_confirmed=0 confirmed_value caller_confirmed_value
   case "$owner_required" in
     1) drain_claim_owner "$row" || return 2 ;;
     0)
@@ -553,8 +621,11 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   [ "$state" = presenting ] || return 2
+  claim_binary_fields_valid "$claim" || return 2
   if [ "$owner_required" = 0 ]; then
     claim_validate_caller_owner "$claim" "$expected_generation" || return 2
+    [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+    [ "$(claim_binary_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
   fi
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
@@ -563,22 +634,39 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
-      output_confirmed=*) printf 'output_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)" ;;
+      output_confirmed=*)
+        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        confirmed_value=${line#output_confirmed=}
+        case "$confirmed_value" in 0|1) ;; *) rm -f "$tmp"; return 2 ;; esac
+        [ "$owner_required" = 0 ] && confirmed_value=1
+        printf 'output_confirmed=%s\n' "$confirmed_value"
+        seen_confirmed=1
+        ;;
+      caller_confirmed=*)
+        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        caller_confirmed_value=${line#caller_confirmed=}
+        case "$caller_confirmed_value" in 0|1) ;; *) rm -f "$tmp"; return 2 ;; esac
+        [ "$owner_required" = 0 ] && caller_confirmed_value=1
+        printf 'caller_confirmed=%s\n' "$caller_confirmed_value"
+        seen_caller_confirmed=1
+        ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
-  grep -Fq '^output_confirmed=' "$tmp" || \
+  [ "$seen_confirmed" = 1 ] || \
     printf 'output_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)" >> "$tmp"
+  [ "$seen_caller_confirmed" = 1 ] || \
+    printf 'caller_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)" >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim state tmp line seen_output=0 seen_complete=0
-  local seen_emitted=0
+  local seen_emitted=0 seen_confirmed=0 seen_caller_confirmed=0
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -586,6 +674,7 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   [ "$state" = presenting ] || return 2
+  claim_binary_fields_valid "$claim" || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -593,20 +682,31 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=0\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
-      output_confirmed=*) printf 'output_confirmed=0\n' ;;
+      output_confirmed=*)
+        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'output_confirmed=0\n'
+        seen_confirmed=1
+        ;;
+      caller_confirmed=*)
+        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'caller_confirmed=0\n'
+        seen_caller_confirmed=1
+        ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
-  grep -Fq '^output_confirmed=' "$tmp" || printf 'output_confirmed=0\n' >> "$tmp"
+  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=0\n' >> "$tmp"
+  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim state tmp line seen_output=0 seen_emitted=0 seen_complete=0
+  local seen_confirmed=0 seen_caller_confirmed=0
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -614,7 +714,8 @@ claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   [ "$state" = presenting ] || return 2
-  [ "$(claim_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+  claim_binary_fields_valid "$claim" || return 2
+  [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -622,20 +723,30 @@ claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
-      output_confirmed=*) printf 'output_confirmed=0\n' ;;
+      output_confirmed=*)
+        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'output_confirmed=0\n'
+        seen_confirmed=1
+        ;;
+      caller_confirmed=*)
+        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'caller_confirmed=0\n'
+        seen_caller_confirmed=1
+        ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
-  grep -Fq '^output_confirmed=' "$tmp" || printf 'output_confirmed=0\n' >> "$tmp"
+  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=0\n' >> "$tmp"
+  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_output_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim state tmp line seen_confirmed=0
+  local key=$1 row=$2 fp claim state tmp line seen_confirmed=0 seen_caller_confirmed=0
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -643,60 +754,95 @@ claim_mark_output_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   [ "$state" = presenting ] || return 2
-  [ "$(claim_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
-  [ "$(claim_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
+  claim_binary_fields_valid "$claim" || return 2
+  [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      output_confirmed=*) printf 'output_confirmed=1\n'; seen_confirmed=1 ;;
+      output_confirmed=*)
+        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'output_confirmed=1\n'
+        seen_confirmed=1
+        ;;
+      caller_confirmed=*)
+        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'caller_confirmed=0\n'
+        seen_caller_confirmed=1
+        ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n' >> "$tmp"
+  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp line defer_ack=0 defer_generation= defer_generation_start=
-  local seen_defer_ack=0 seen_defer_generation=0 seen_defer_generation_start=0
-  [ "${FM_WAKE_DRAIN_DIRECT:-0}" != 1 ] \
-    && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
-  if [ "$defer_ack" = 1 ]; then
-    defer_generation=${FM_WAKE_DRAIN_GENERATION:-}
-    case "$defer_generation" in ''|*[!0-9]*|0) return 2 ;; esac
-    defer_generation_start=$(fm_pid_start "$defer_generation") || return 2
-  fi
+  local key=$1 row=$2 fp claim state tmp line defer_ack defer_generation defer_generation_start
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   claim=$(claim_path "$fp")
   [ ! -L "$claim" ] || return 2
-  [ "$(claim_validate "$claim" "$fp" "$row")" = presenting ] || return 2
-  [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
-  [ "$(claim_field "$claim" output_confirmed 2>/dev/null || true)" != 0 ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  [ "$state" = presenting ] || return 2
+  claim_binary_fields_valid "$claim" || return 2
+  [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" output_confirmed 2>/dev/null || true)" = 1 ] || return 2
+  defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null) || return 2
+  case "$defer_ack" in 0) ;; 1)
+    defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null) || return 2
+    defer_generation_start=$(claim_field "$claim" defer_generation_start 2>/dev/null) || return 2
+    case "$defer_generation" in ''|*[!0-9]*|0) return 2 ;; esac
+    [ -n "$defer_generation_start" ] || return 2
+    [ "$(claim_binary_field "$claim" caller_confirmed 2>/dev/null || true)" = 1 ] || return 2
+    ;;
+    *) return 2 ;;
+  esac
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       state=*) printf 'state=presented\n' ;;
-      defer_ack=*) printf 'defer_ack=%s\n' "$defer_ack"; seen_defer_ack=1 ;;
-      defer_generation=*) printf 'defer_generation=%s\n' "$defer_generation"; seen_defer_generation=1 ;;
-      defer_generation_start=*) printf 'defer_generation_start=%s\n' "$defer_generation_start"; seen_defer_generation_start=1 ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_defer_ack" = 1 ] || printf 'defer_ack=%s\n' "$defer_ack" >> "$tmp"
-  [ "$seen_defer_generation" = 1 ] || printf 'defer_generation=%s\n' "$defer_generation" >> "$tmp"
-  [ "$seen_defer_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$defer_generation_start" >> "$tmp"
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+}
+
+claim_mark_presented_recovered() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim state tmp line
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  [ "$state" = presenting ] || return 2
+  claim_binary_fields_valid "$claim" || return 2
+  [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" output_confirmed 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$claim" caller_confirmed 2>/dev/null || true)" = 1 ] || return 2
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in state=*) printf 'state=presented\n' ;; *) printf '%s\n' "$line" ;; esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-}
-  local fp claim state tmp line seen_output=0 seen_emitted=0 seen_complete=0 seen_confirmed=0
+  local fp claim state tmp line seen_output=0 seen_emitted=0 seen_complete=0 seen_confirmed=0 seen_caller_confirmed=0
   case "$owner_required" in
     1) drain_claim_owner "$row" || return 2 ;;
     0) ;; 
@@ -707,12 +853,22 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   claim=$(claim_path "$fp")
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  claim_binary_fields_valid "$claim" || return 2
   if [ "$owner_required" = 0 ]; then
     claim_validate_caller_owner "$claim" "$expected_generation" || return 2
+    [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
+    [ "$(claim_binary_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
+    [ "$(claim_binary_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+    [ "$(claim_binary_field "$claim" output_confirmed 2>/dev/null || true)" = 1 ] || return 2
+    [ "$(claim_binary_field "$claim" caller_confirmed 2>/dev/null || true)" = 1 ] || return 2
   fi
   case "$state" in
     presented)
-      [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+      [ "$(claim_binary_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+      [ "$(claim_binary_field "$claim" output_confirmed 2>/dev/null || true)" = 1 ] || return 2
+      if [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ]; then
+        [ "$(claim_binary_field "$claim" caller_confirmed 2>/dev/null || true)" = 1 ] || return 2
+      fi
       return 0
       ;;
     presenting) ;;
@@ -727,7 +883,17 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
       output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
       output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
       output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
-      output_confirmed=*) printf 'output_confirmed=1\n'; seen_confirmed=1 ;;
+      output_confirmed=*)
+        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'output_confirmed=1\n'
+        seen_confirmed=1
+        ;;
+      caller_confirmed=*)
+        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+        [ "$owner_required" = 0 ] || { rm -f "$tmp"; return 2; }
+        printf 'caller_confirmed=1\n'
+        seen_caller_confirmed=1
+        ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
@@ -735,6 +901,7 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
   [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
   [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n' >> "$tmp"
+  [ "$owner_required" = 0 ] && [ "$seen_caller_confirmed" = 1 ] || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1095,10 +1262,11 @@ reported_secondmate_receipt_valid() {
 }
 
 receipt_candidates() {
-  local suffix=$1
+  local suffix=$1 seconds=${2:-1}
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
+  case "$seconds" in ''|*[!0-9]*|0) return 0 ;; esac
   if command -v perl >/dev/null 2>&1; then
-    perl - "$OUTCOME_DIR" "$suffix" <<'PERL'
+    run_bounded_child "$seconds" perl - "$OUTCOME_DIR" "$suffix" <<'PERL'
 use strict;
 use warnings;
 my ($dir, $suffix) = @ARGV;
@@ -1141,6 +1309,8 @@ repair_reported_secondmate_routes() {
       [ -n "$cursor" ] || break
       started=1
     fi
+    remaining=$(budget_remaining_secs "$scan_deadline")
+    [ "$remaining" -gt 0 ] || { status=1; break; }
     while IFS= read -r -d '' reported; do
       case "$reported" in "$OUTCOME_DIR"/*/*) continue ;; esac
       base=${reported##*/}
@@ -1178,7 +1348,7 @@ repair_reported_secondmate_routes() {
       last=$base
       processed=$((processed + 1))
       [ "$processed" -lt "$REPORTED_ROUTE_REPAIR_LIMIT" ] || break 2
-    done < <(receipt_candidates reported)
+    done < <(receipt_candidates reported "$remaining")
   done
   if [ "$processed" -gt 0 ]; then
     if cursor_tmp=$(mktemp "$STATE/.reported-route-repair.cursor.XXXXXX"); then
@@ -1232,6 +1402,8 @@ republish_pending_receipts() {
       [ -n "$cursor" ] || break
       started=1
     fi
+    remaining=$(budget_remaining_secs "$scan_deadline")
+    [ "$remaining" -gt 0 ] || { status=1; break; }
     while IFS= read -r -d '' pending; do
       case "$pending" in "$OUTCOME_DIR"/*/*) continue ;; esac
       base=${pending##*/}
@@ -1257,7 +1429,7 @@ republish_pending_receipts() {
       last=$base
       processed=$((processed + 1))
       [ "$processed" -lt "$PENDING_RECEIPT_REPUBLISH_LIMIT" ] || break 2
-    done < <(receipt_candidates pending)
+    done < <(receipt_candidates pending "$remaining")
   done
   if [ "$processed" -gt 0 ]; then
     if cursor_tmp=$(mktemp "$STATE/.pending-receipt-republish.cursor.XXXXXX"); then
@@ -1420,16 +1592,32 @@ terminal_outcome_surfaced() {
 }
 
 replay_surface_marker() {
-  local id=$1 meta=$2 snapshot=$3 incarnation=$4 key raw marker tmp tasktmp window worktree
+  local id=$1 meta=$2 snapshot=$3 incarnation=$4 key raw marker retry tmp tasktmp window worktree
+  local marker_incarnation explicit_incarnation rc
   key=$(printf '%s' "$id" | tr ':/.' '___')
   raw="$STATE/.hb-surfaced-$key"
   marker="$STATE/.hb-terminal-surfaced-$key"
+  retry="$STATE/.hb-surface-retry-$key"
   tasktmp=$(meta_value "$meta" tasktmp)
   window=$(meta_value "$meta" window)
   worktree=$(meta_value "$meta" worktree)
+  if explicit_incarnation=$(meta_value_unique "$meta" spawn_incarnation); then
+    marker_incarnation=$incarnation
+  else
+    rc=$?
+    [ "$rc" = 1 ] || return 1
+    marker_incarnation=
+  fi
+  tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
+  if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\n' \
+    "$id" "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" > "$tmp" \
+    || ! mv -f "$tmp" "$retry"; then
+    rm -f "$tmp"
+    return 1
+  fi
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\n' \
-    "$snapshot" "$incarnation" "$tasktmp" "$window" "$worktree" > "$tmp" \
+    "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" > "$tmp" \
     || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
@@ -1439,6 +1627,7 @@ replay_surface_marker() {
     rm -f "$tmp"
     return 1
   fi
+  rm -f "$retry" || return 1
 }
 
 replay_receipt_exists() {
@@ -1575,7 +1764,13 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac
   claim_state=$(claim_validate "$(claim_path "$fp")" "$fp" "$row") || return 2
   [ "$claim_state" = presented ] || return 2
-  [ "$(claim_field "$(claim_path "$fp")" output_complete 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$(claim_path "$fp")" output_started 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$(claim_path "$fp")" output_emitted 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$(claim_path "$fp")" output_complete 2>/dev/null || true)" = 1 ] || return 2
+  [ "$(claim_binary_field "$(claim_path "$fp")" output_confirmed 2>/dev/null || true)" = 1 ] || return 2
+  if [ "$(claim_field "$(claim_path "$fp")" defer_ack 2>/dev/null || true)" = 1 ]; then
+    [ "$(claim_binary_field "$(claim_path "$fp")" caller_confirmed 2>/dev/null || true)" = 1 ] || return 2
+  fi
   if [ "$owner_required" = 0 ]; then
     claim_validate_caller_owner "$(claim_path "$fp")" "$expected_generation" || return 2
   fi
@@ -1597,6 +1792,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
             "$(receipt_field "$existing" parent_status)" || return 2
         fi
         claim_remove "$key" "$row" "$owner_required" "$expected_generation" || return 2
+        fm_wake_remove_key_locked "$key" || return 2
         return 1
       fi
     done
@@ -1635,6 +1831,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     fi
     rm -f "$rec" || return 2
     claim_remove "$key" "$row" "$owner_required" "$expected_generation" || return 2
+    fm_wake_remove_key_locked "$key" || return 2
     return 1
   fi
   mv "$rec" "$target" || return 2
@@ -1643,6 +1840,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
       "$parent_task_id" "$parent_home" "$parent_status" || return 2
   fi
   claim_remove "$key" "$row" "$owner_required" "$expected_generation" || return 2
+  fm_wake_remove_key_locked "$key" || return 2
   return 0
 }
 
