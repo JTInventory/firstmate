@@ -496,14 +496,16 @@ fm_pending_reply_secondmate_route_lock_path() {  # <secondmate-home>
 
 fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <parent-state> <secondmate-id> <corr-id>
   local secondmate_home=$1 parent_home=$2 parent_state=$3 secondmate_id=$4 corr=$5
-  local marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
+  local marker home_marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
   local existing_schema existing_id existing_home existing_status existing_corr
   local existing_state existing_record existing_phase
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
+  home_marker="$secondmate_home/.fm-secondmate-home"
+  [ -f "$home_marker" ] && [ ! -L "$home_marker" ] || return 1
   case "$secondmate_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  marker_id=$(cat "$secondmate_home/.fm-secondmate-home" 2>/dev/null || true)
+  marker_id=$(cat "$home_marker" 2>/dev/null || true)
   [ "$marker_id" = "$secondmate_id" ] || return 1
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   [ -d "$parent_home/state" ] && [ ! -L "$parent_home/state" ] || return 1
@@ -517,20 +519,22 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
     [ -f "$status_path" ] || return 1
   fi
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
-  tmp="$marker.tmp.${BASHPID:-$$}"
+  route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
+  if ! fm_lock_acquire_wait "$route_lock"; then
+    return 1
+  fi
+  tmp=$(mktemp "$secondmate_home/state/.fm-jt-parent-route.XXXXXX") || {
+    fm_lock_release "$route_lock" || true
+    return 1
+  }
   {
     printf 'schema=fm-jt-parent-route.v1\n'
     printf 'secondmate_id=%s\n' "$secondmate_id"
     printf 'parent_home=%s\n' "$parent_abs"
     printf 'parent_status=%s\n' "$status_path"
     printf 'corr_id=%s\n' "$corr"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } > "$tmp" || { rm -f "$tmp"; fm_lock_release "$route_lock" || true; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
-  route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
-  if ! fm_lock_acquire_wait "$route_lock"; then
-    rm -f "$tmp"
-    return 1
-  fi
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     if [ -f "$marker" ] && [ ! -L "$marker" ] \
       && [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" = 5 ]; then
@@ -620,6 +624,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   FM_PENDING_ROUTE_PARENT_HOME=
   FM_PENDING_ROUTE_CORR=
   FM_PENDING_ROUTE_SECOND_MATE_ID=
+  FM_PENDING_ROUTE_PHASE=
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   schema='' secondmate_id='' parent_home='' parent_status='' corr=''
@@ -674,6 +679,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   else
     return 1
   fi
+  [ "$(fm_pending_reply_get "$rec" schema)" = fm-pending-reply.v1 ] || return 1
   record_task=$(fm_pending_reply_get "$rec" task_id)
   record_home=$(fm_pending_reply_get "$rec" parent_home)
   record_status=$(fm_pending_reply_get "$rec" parent_status)
@@ -689,6 +695,10 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
     awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
     *) return 1 ;;
   esac
+  if [ "$phase" = resolved ] || [ "$phase" = retired ]; then
+    fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || return 1
+    return 1
+  fi
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_PARENT_HOME=$parent_abs
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
@@ -753,6 +763,7 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
     awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
     *) return 1 ;;
   esac
+  FM_PENDING_ROUTE_PHASE=$phase
   return 0
 }
 
