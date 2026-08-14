@@ -1269,6 +1269,82 @@ fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
   return 1
 }
 
+fm_pending_reply_undelivered_cleanup_meta_path() {  # <state-dir> <corr_id>
+  printf '%s.cleanup-meta' "$(fm_pending_reply_active_path "$1" "$2")"
+}
+
+fm_pending_reply_undelivered_cleanup_meta_valid() {  # <meta-path> <corr-id> <secondmate-home>
+  local meta=$1 corr=$2 secondmate_home=$3
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  awk -F= '
+    BEGIN { schema=corr=home=0; valid=1 }
+    NF != 2 { valid=0; next }
+    $1 == "schema" { schema++; next }
+    $1 == "corr_id" { corr++; next }
+    $1 == "secondmate_home" { home++; next }
+    { valid=0 }
+    END { if (schema != 1 || corr != 1 || home != 1) valid=0; exit !valid }
+  ' "$meta" 2>/dev/null || return 1
+  [ "$(fm_pending_reply_get "$meta" schema)" = fm-undelivered-cleanup.v1 ] || return 1
+  [ "$(fm_pending_reply_get "$meta" corr_id)" = "$corr" ] || return 1
+  [ "$(fm_pending_reply_get "$meta" secondmate_home)" = "$secondmate_home" ] || return 1
+}
+
+fm_pending_reply_schedule_undelivered_cleanup() {  # <state-dir> <corr-id> <secondmate-home>
+  local state=$1 corr=$2 secondmate_home=$3 dir meta tmp
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  case "$secondmate_home" in
+    /*)
+      case "$secondmate_home" in *$'\n'*|*'='*) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  meta=$(fm_pending_reply_undelivered_cleanup_meta_path "$state" "$corr")
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    fm_pending_reply_undelivered_cleanup_meta_valid "$meta" "$corr" "$secondmate_home"
+    return $?
+  fi
+  tmp=$(mktemp "$dir/.cleanup-meta.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  {
+    printf 'schema=fm-undelivered-cleanup.v1\n'
+    printf 'corr_id=%s\n' "$corr"
+    printf 'secondmate_home=%s\n' "$secondmate_home"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ln "$tmp" "$meta" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  fm_pending_reply_undelivered_cleanup_meta_valid "$meta" "$corr" "$secondmate_home"
+}
+
+fm_pending_reply_retry_undelivered_cleanup() {  # <state-dir> <meta-path>
+  local state=$1 meta=$2 corr secondmate_home token rc=0
+  corr=$(fm_pending_reply_get "$meta" corr_id)
+  secondmate_home=$(fm_pending_reply_get "$meta" secondmate_home)
+  fm_pending_reply_undelivered_cleanup_meta_valid "$meta" "$corr" "$secondmate_home" || return 1
+  fm_pending_reply_txn_lock_acquire "$state" "$corr" token || return 1
+  if ! fm_pending_reply_discard_undelivered "$state" "$corr" 1; then
+    fm_pending_reply_restore_undelivered "$state" "$corr" || true
+    rc=1
+  elif ! fm_pending_reply_secondmate_route_clear_undelivered "$secondmate_home" "$corr"; then
+    fm_pending_reply_restore_undelivered "$state" "$corr" || true
+    rc=1
+  elif ! fm_pending_reply_finish_undelivered "$state" "$corr"; then
+    rc=1
+  fi
+  fm_pending_reply_txn_lock_release "$state" "$corr" "$token" || rc=1
+  if [ "$rc" = 0 ]; then
+    rm -f "$meta" || rc=1
+  fi
+  return "$rc"
+}
+
 # Drop an undelivered expectation after a failed send so transport failure does
 # not masquerade as a missed report later.
 fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
@@ -1316,13 +1392,17 @@ fm_pending_reply_restore_undelivered() {  # <state-dir> <corr_id>
 }
 
 fm_pending_reply_finish_undelivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec backup
+  local state=$1 corr=$2 rec backup meta
   rec=$(fm_pending_reply_path "$state" "$corr")
   backup="${rec}.cleanup"
+  meta=$(fm_pending_reply_undelivered_cleanup_meta_path "$state" "$corr")
   [ ! -L "$backup" ] || return 1
-  [ -e "$backup" ] || return 0
-  [ -f "$backup" ] || return 1
-  rm -f "$backup"
+  [ ! -L "$meta" ] || return 1
+  if [ -e "$backup" ]; then
+    [ -f "$backup" ] || return 1
+    rm -f "$backup" || return 1
+  fi
+  [ ! -e "$meta" ] || rm -f "$meta"
 }
 
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
@@ -2040,11 +2120,15 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home
+  local state=$1 dir rec corr task_id phase delivered meta cleanup_meta backend target label busy sm_home
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  for cleanup_meta in "$dir"/*.cleanup-meta; do
+    [ -e "$cleanup_meta" ] || [ -L "$cleanup_meta" ] || continue
+    fm_pending_reply_retry_undelivered_cleanup "$state" "$cleanup_meta" || true
+  done
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in

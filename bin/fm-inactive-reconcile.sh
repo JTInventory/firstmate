@@ -255,6 +255,16 @@ claim_validate() {  # <claim> <fingerprint> <row>
   case "$state" in reserved|presenting|presented) printf '%s' "$state" ;; *) return 1 ;; esac
 }
 
+claim_validate_caller_owner() {  # <claim> <caller-pid>
+  local claim=$1 caller_pid=$2 caller_start
+  [ -f "$claim" ] && [ ! -L "$claim" ] || return 1
+  case "$caller_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ] || return 1
+  [ "$(claim_field "$claim" defer_generation 2>/dev/null || true)" = "$caller_pid" ] || return 1
+  caller_start=$(claim_field "$claim" defer_generation_start 2>/dev/null || true)
+  fm_pid_start_matches_stored "$caller_pid" "$caller_start"
+}
+
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim tmp state existing old_row line output_complete defer_ack
   local defer_generation defer_generation_start receipt_state receipt_rc=0 recorded_report=0 report_rc=1
@@ -399,7 +409,8 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim state tmp line defer_ack=0 defer_generation= defer_generation_start=
   local seen_pid=0 seen_output=0 seen_complete=0
   local seen_defer_ack=0 seen_defer_generation=0 seen_defer_generation_start=0
-  [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
+  [ "${FM_WAKE_DRAIN_DIRECT:-0}" != 1 ] \
+    && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
   if [ "$defer_ack" = 1 ]; then
     defer_generation=${FM_WAKE_DRAIN_GENERATION:-}
     case "$defer_generation" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -456,10 +467,7 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   [ "$state" = presenting ] || return 2
   if [ "$owner_required" = 0 ]; then
-    [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ] || return 2
-    [ "$(claim_field "$claim" defer_generation 2>/dev/null || true)" = "$expected_generation" ] || return 2
-    fm_pid_start_matches_stored "$expected_generation" \
-      "$(claim_field "$claim" defer_generation_start 2>/dev/null || true)" || return 2
+    claim_validate_caller_owner "$claim" "$expected_generation" || return 2
   fi
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
@@ -503,7 +511,8 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
 claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim tmp line defer_ack=0 defer_generation= defer_generation_start=
   local seen_defer_ack=0 seen_defer_generation=0 seen_defer_generation_start=0
-  [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
+  [ "${FM_WAKE_DRAIN_DIRECT:-0}" != 1 ] \
+    && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] && defer_ack=1
   if [ "$defer_ack" = 1 ]; then
     defer_generation=${FM_WAKE_DRAIN_GENERATION:-}
     case "$defer_generation" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -534,12 +543,21 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
 }
 
 claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim state tmp line seen_output=0 seen_complete=0
+  local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-}
+  local fp claim state tmp line seen_output=0 seen_complete=0
+  case "$owner_required" in
+    1) drain_claim_owner "$row" || return 2 ;;
+    0) ;; 
+    *) return 2 ;;
+  esac
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   claim=$(claim_path "$fp")
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  if [ "$owner_required" = 0 ]; then
+    claim_validate_caller_owner "$claim" "$expected_generation" || return 2
+  fi
   case "$state" in
     presented)
       [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
@@ -566,11 +584,15 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
 }
 
 claim_remove() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 owner_required=${3:-1} fp claim
-  case "$owner_required" in 0) ;; 1) drain_claim_owner "$row" || return 2 ;; *) return 2 ;; esac
+  local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-} fp claim
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   claim=$(claim_path "$fp")
+  case "$owner_required" in
+    0) claim_validate_caller_owner "$claim" "$expected_generation" || return 2 ;;
+    1) drain_claim_owner "$row" || return 2 ;;
+    *) return 2 ;;
+  esac
   [ ! -L "$claim" ] || return 2
   [ -e "$claim" ] || return 0
   claim_validate "$claim" "$fp" "$row" >/dev/null || return 2
@@ -1097,7 +1119,8 @@ reconcile_child() {
 }
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
-  local key=$1 row=${2:-} owner_required=${3:-1} fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
+  local key=$1 row=${2:-} owner_required=${3:-1} expected_generation=${4:-}
+  local fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
   [ -n "$row" ] || return 2
   case "$owner_required" in 0|1) ;; *) return 2 ;; esac
   [ "$owner_required" = 0 ] || drain_claim_owner "$row" || return 2
@@ -1106,7 +1129,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   claim_state=$(claim_validate "$(claim_path "$fp")" "$fp" "$row") || return 2
   [ "$claim_state" = presented ] || return 2
   if [ "$owner_required" = 0 ]; then
-    [ "$(claim_field "$(claim_path "$fp")" defer_ack 2>/dev/null || true)" = 1 ] || return 2
+    claim_validate_caller_owner "$(claim_path "$fp")" "$expected_generation" || return 2
   fi
   rec=$(receipt_path "$fp" pending)
   [ ! -L "$rec" ] || return 2
@@ -1125,7 +1148,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
             "$(receipt_field "$existing" parent_home)" \
             "$(receipt_field "$existing" parent_status)" || return 2
         fi
-        claim_remove "$key" "$row" "$owner_required" || return 2
+        claim_remove "$key" "$row" "$owner_required" "$expected_generation" || return 2
         return 1
       fi
     done
@@ -1163,7 +1186,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
         "$parent_task_id" "$parent_home" "$parent_status" || return 2
     fi
     rm -f "$rec" || return 2
-    claim_remove "$key" "$row" "$owner_required" || return 2
+    claim_remove "$key" "$row" "$owner_required" "$expected_generation" || return 2
     return 1
   fi
   mv "$rec" "$target" || return 2
@@ -1171,25 +1194,25 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     fm_pending_reply_secondmate_route_clear_reported "$FM_HOME" "$corr" \
       "$parent_task_id" "$parent_home" "$parent_status" || return 2
   fi
-  claim_remove "$key" "$row" "$owner_required" || return 2
+  claim_remove "$key" "$row" "$owner_required" "$expected_generation" || return 2
   return 0
 }
 
 confirm_receipt() {
-  local status=0
+  local status=0 caller_pid=${PPID:-}
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 2
-  claim_mark_confirmed "$1" "$2" || status=$?
+  claim_mark_confirmed "$1" "$2" 0 "$caller_pid" || status=$?
   if [ "$status" = 0 ]; then
-    ack_receipt "$1" "$2" 0 || status=$?
+    ack_receipt "$1" "$2" 0 "$caller_pid" || status=$?
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=2
   return "$status"
 }
 
 caller_output_complete() {
-  local status=0
+  local status=0 caller_pid=${PPID:-}
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 2
-  claim_mark_output_complete "$1" "$2" 0 "$3" || status=$?
+  claim_mark_output_complete "$1" "$2" 0 "$caller_pid" || status=$?
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=2
   return "$status"
 }
@@ -1259,7 +1282,7 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
 
 scan_locked() {
   local startup=${1:-0} marker_mtime now age cursor meta id started=1 cursor_seen=1
-  local scan_started remaining rc complete=1 scan_failed=0 find_tmp
+  local scan_started remaining rc complete=1 scan_failed=0 find_tmp maintenance_status=0
   inactive_state_preflight || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
   now=$(date +%s)
@@ -1268,26 +1291,46 @@ scan_locked() {
     [ "$age" -ge "$RECONCILE_SECS" ] || return 0
   fi
   scan_started=$now
+  run_maintenance() {
+    if ! republish_pending_receipts "$scan_started"; then
+      maintenance_status=1
+    fi
+    if ! repair_reported_secondmate_routes "$scan_started"; then
+      maintenance_status=1
+    fi
+  }
   cursor=$(cat "$SCAN_CURSOR" 2>/dev/null || true)
   if [ -n "$cursor" ] && { [ ! -f "$STATE/$cursor.meta" ] || [ -L "$STATE/$cursor.meta" ]; }; then
     cursor=
   fi
   if [ -n "$cursor" ]; then started=0; fi
   [ -n "$cursor" ] && cursor_seen=0
-  find_tmp=$(mktemp "$STATE/.inactive-outcome-find.XXXXXX") || return 1
-  [ -f "$find_tmp" ] && [ ! -L "$find_tmp" ] || { rm -f "$find_tmp"; return 1; }
+  find_tmp=$(mktemp "$STATE/.inactive-outcome-find.XXXXXX") || {
+    run_maintenance
+    return 1
+  }
+  [ -f "$find_tmp" ] && [ ! -L "$find_tmp" ] || {
+    rm -f "$find_tmp"
+    run_maintenance
+    return 1
+  }
   now=$(date +%s)
   remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
   if [ "$remaining" -le 0 ]; then
     rm -f "$find_tmp"
+    run_maintenance
     return 1
   fi
-  if ! run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
+  if run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
     \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
-    rm -f "$find_tmp"
-    return 1
+    :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=1
+    complete=0
+    scan_failed=1
   fi
-  while IFS= read -r -d '' meta; do
+  while [ "$scan_failed" = 0 ] && IFS= read -r -d '' meta; do
     now=$(date +%s)
     remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
     if [ "$remaining" -le 0 ]; then
@@ -1322,15 +1365,21 @@ scan_locked() {
       break
     fi
   done < "$find_tmp"
-  rm -f "$find_tmp" || return 1
-  [ "$scan_failed" = 0 ] || return "$rc"
+  if rm -f "$find_tmp"; then
+    :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=1
+    complete=0
+    scan_failed=1
+  fi
+  run_maintenance
+  if [ "$scan_failed" = 1 ]; then
+    [ "$rc" -ne 0 ] || rc=1
+    return "$rc"
+  fi
   [ "$complete" = 1 ] || return 1
-  if ! repair_reported_secondmate_routes "$scan_started"; then
-    return 1
-  fi
-  if ! republish_pending_receipts "$scan_started"; then
-    return 1
-  fi
+  [ "$maintenance_status" = 0 ] || return 1
   if [ "$cursor_seen" = 0 ]; then
     return 1
   fi
@@ -1394,8 +1443,8 @@ case "${1:-}" in
     claim_mark_output_complete "$2" "$3"
     ;;
   caller-output-complete)
-    [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || exit 2
-    caller_output_complete "$2" "$3" "$4"
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    caller_output_complete "$2" "$3"
     ;;
   presented)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
