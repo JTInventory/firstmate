@@ -608,6 +608,51 @@ test_pre_output_claim_retries_after_crash() {
   pass "pre-output claims retry until emission completes"
 }
 
+test_output_completion_failure_does_not_reprint() {
+  local dir root home fakebin state fingerprint row
+  new_case output-completion-failure
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'output-failure-x1|output-failure-inc|done|state: done · source: pane · output failure' )
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=output-failure-x1 \
+    incarnation=output-failure-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · output failure' kind=ship
+  row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\toutput completion failure row'
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+case "$target" in
+  *.claim)
+    count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
+    if [ "$count" = 2 ]; then
+      exit 91
+    fi
+    ;;
+esac
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
+  drain "$root" "$home" "$fakebin" >"$dir/output-failure.out" \
+    || fail "output completion failure was not recovered"
+  [ "$(grep -Fxc "$row" "$dir/output-failure.out")" = 1 ] \
+    || fail "output completion failure reprinted or lost the emitted row"
+  [ "$(receipt_count "$state" presented)" = 1 ] \
+    || fail "output completion failure did not finalize the receipt"
+  [ "$(receipt_count "$state" pending)" = 0 ] \
+    || fail "output completion failure left the receipt pending"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
+    || fail "output completion failure left a stale claim"
+  unset FM_FAIL_CLAIM_MOVE
+  pass "post-output failures finalize without duplicate presentation"
+}
+
 test_finalized_receipt_rows_are_suppressed() {
   local dir root home fakebin state fingerprint row
   new_case finalized-row
@@ -947,8 +992,24 @@ SH
     || fail "watcher did not surface the inactive reconciliation result"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher cadence did not create the inactive receipt"
   [ "$(queue_count "$state")" = 1 ] || fail "watcher cadence did not retain exactly one inactive outcome wake"
+  set +e
+  ( cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+      FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+      FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      FM_WATCHER_HEARTBEAT=999999 "$root/bin/fm-watch.sh" ) | head -n 0
+  status=${PIPESTATUS[0]}
+  set -u
+  [ "$status" -ne 0 ] || fail "watcher treated a broken presentation pipe as success"
+  [ "$(receipt_count "$state" pending)" = 1 ] \
+    || fail "watcher consumed the inactive receipt after presentation failure"
+  [ -e "$state/terminal-outcomes/.$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending).claim" ] \
+    || fail "watcher did not retain a retryable presentation claim"
   unset FM_FAKE_CREW_STATE_WATCHER_X1
-  pass "watcher cadence runs inactive reconciliation and surfaces its wake"
+  pass "watcher cadence gates acknowledgement on successful output"
 }
 
 test_legacy_metadata_uses_stable_fallback() {
@@ -1632,6 +1693,41 @@ SH
   pass "concurrent secondmate routes fail closed without overwriting"
 }
 
+test_route_replacement_rejects_malformed_parent_record() {
+  local dir root home fakebin state child_home child_state marker corr_one corr_two
+  new_case malformed-route-replacement
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  marker="$child_state/.fm-jt-parent-route"
+  corr_one=0123456789abcdef
+  corr_two=1123456789abcdef
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" \
+    "$state/pending-replies"
+  printf 'sm-malformed\n' > "$child_home/.fm-secondmate-home"
+  fm_write_meta "$state/pending-replies/$corr_one" \
+    schema=fm-pending-reply.v1 corr_id="$corr_one" task_id=sm-malformed \
+    parent_home="$home" parent_status="$state/sm-malformed.status" \
+    delivered_epoch=1 phase=resolved
+  route_write() {
+    env PATH="$fakebin:$PATH" FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c \
+      '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+      _ "$ROOT" "$child_home" "$home" "$state" sm-malformed "$1"
+  }
+  route_write "$corr_one" || fail "malformed replacement fixture route was not written"
+  replace_field "$state/pending-replies/$corr_one" task_id wrong-task
+  if route_write "$corr_two"; then
+    fail "route replacement accepted a mismatched existing parent record"
+  fi
+  [ "$(receipt_value "$marker" corr_id)" = "$corr_one" ] \
+    || fail "malformed parent record replacement changed the active route"
+  [ ! -e "$child_state/.fm-jt-parent-route-history.$corr_one" ] \
+    || fail "malformed parent record replacement archived an invalid route"
+  pass "route replacement validates the complete existing parent record"
+}
+
 test_failed_concurrent_send_discards_only_new_record() {
   local dir root home fakebin state child_home child_state marker old_corr send_out
   new_case failed-concurrent-send
@@ -1766,6 +1862,7 @@ test_reserved_claim_recovers_to_a_new_wake_row
 test_presenting_claim_recovers_before_output
 test_output_started_claim_is_not_reprinted
 test_pre_output_claim_retries_after_crash
+test_output_completion_failure_does_not_reprint
 test_finalized_receipt_rows_are_suppressed
 test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
@@ -1787,6 +1884,7 @@ test_reported_secondmate_route_repair_after_crash
 test_secondmate_route_replacement_preserves_old_receipt
 test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
+test_route_replacement_rejects_malformed_parent_record
 test_failed_concurrent_send_discards_only_new_record
 test_drain_restores_only_unprocessed_rows
 test_malformed_or_missing_secondmate_route_fails_closed

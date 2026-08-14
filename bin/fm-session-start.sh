@@ -369,15 +369,20 @@ else
     printf 'error: wake drain failed (status %s); inactive reconciliation skipped\n%s\n' \
       "$DRAIN_STATUS" "$DRAIN_OUT" >&2
   elif [ -n "$DRAIN_OUT" ]; then
-    printf '%s\n' "$DRAIN_OUT"
-    while IFS= read -r drain_row || [ -n "$drain_row" ]; do
-      IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
-      case "$_key" in
-        inactive-outcome:*)
-          "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$drain_row" >/dev/null 2>&1 || true
-          ;;
-      esac
-    done <<< "$DRAIN_OUT"
+    if printf '%s\n' "$DRAIN_OUT"; then
+      while IFS= read -r drain_row || [ -n "$drain_row" ]; do
+        IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
+        case "$_key" in
+          inactive-outcome:*)
+            if ! "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$drain_row" >/dev/null 2>&1; then
+              printf 'warning: inactive outcome confirmation deferred for %s\n' "$_key" >&2
+            fi
+            ;;
+        esac
+      done <<< "$DRAIN_OUT"
+    else
+      printf 'error: wake presentation failed; inactive outcome confirmations deferred\n' >&2
+    fi
   else
     printf '(no queued wakes)\n'
   fi
