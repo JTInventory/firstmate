@@ -709,7 +709,7 @@ reconcile_child() {
 }
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
-  local key=$1 row=${2:-} fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing claim_state
+  local key=$1 row=${2:-} fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
   [ -n "$row" ] || return 2
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 0 ;; esac
@@ -724,6 +724,11 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
       if [ -e "$existing" ]; then
         [ -f "$existing" ] || return 2
         [ "$(receipt_field "$existing" fingerprint)" = "$fp" ] || return 2
+        existing_kind=$(receipt_field "$existing" kind)
+        if [ "$existing_kind" = secondmate ]; then
+          existing_corr=$(receipt_field "$existing" parent_corr)
+          fm_pending_reply_secondmate_route_clear "$FM_HOME" "$existing_corr" || return 2
+        fi
         claim_remove "$key" "$row" || return 2
         return 1
       fi
@@ -762,6 +767,9 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     return 1
   fi
   mv "$rec" "$target" || return 2
+  if [ "$kind" = secondmate ]; then
+    fm_pending_reply_secondmate_route_clear "$FM_HOME" "$corr" || return 2
+  fi
   claim_remove "$key" "$row" || return 2
   return 0
 }
@@ -824,9 +832,6 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
   fi
   if [ "$route_lock_held" = 1 ]; then
     fm_lock_release "$route_lock" || rc=2
-  fi
-  if [ "$rc" = 0 ]; then
-    fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || rc=2
   fi
   fm_pending_reply_txn_lock_release "$parent_state" "$corr" "$token" || rc=2
   return "$rc"

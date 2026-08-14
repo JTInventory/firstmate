@@ -757,7 +757,7 @@ SH
 }
 
 test_watcher_runs_inactive_cadence() {
-  local dir root home fakebin state out status wake_line inactive_line
+  local dir root home fakebin state out second_out status
   new_case watcher-wiring
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -788,15 +788,26 @@ SH
     FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
     "$root/bin/fm-watch.sh" 2>&1)
   status=$?
-  [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the inactive outcome wake"
-  printf '%s\n' "$out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
-    || fail "watcher did not surface the inactive reconciliation result"
-  wake_line=$(printf '%s\n' "$out" | grep -n '^1[[:space:]]\+1[[:space:]]\+signal[[:space:]]\+task-before' | head -1 | cut -d: -f1)
-  inactive_line=$(printf '%s\n' "$out" | grep -n 'check: inactive terminal outcome replay queued' | head -1 | cut -d: -f1)
-  [ -n "$wake_line" ] && [ -n "$inactive_line" ] && [ "$wake_line" -lt "$inactive_line" ] \
-    || fail "watcher did not drain the existing wake before inactive reconciliation"
+  [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the queued wake"
+  printf '%s\n' "$out" | grep -F $'1\t1\tsignal\ttask-before\tqueued before watcher scan' >/dev/null \
+    || fail "watcher did not surface the existing wake first"
   [ "$(awk -F '\t' '$4 == "task-before" { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
     || fail "watcher left the existing wake queued"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher scanned inactive outcomes before draining the queued wake"
+
+  second_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
+    FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
+    FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 FM_FAKE_PANE_PATH="$home" \
+    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
+    "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the inactive outcome wake"
+  printf '%s\n' "$second_out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
+    || fail "watcher did not surface the inactive reconciliation result"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher cadence did not create the inactive receipt"
   [ "$(queue_count "$state")" = 1 ] || fail "watcher cadence did not retain exactly one inactive outcome wake"
   unset FM_FAKE_CREW_STATE_WATCHER_X1
@@ -969,7 +980,7 @@ test_status_log_terminal_is_not_replayed() {
 
 test_valid_secondmate_route_reports_parent_once() {
   local dir root home fakebin state child_home child_state parent_status corr rec outside send_out route_backup
-  local outside_parent outside_parent_link
+  local outside_parent outside_parent_link fail_move_once
   local history_corr history_record history_status active_record active_backup
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
@@ -1062,6 +1073,31 @@ SH
   fi
   [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "symlinked parent status lost the pending receipt"
   rm -f "$parent_status"
+  fail_move_once="$dir/fail-mv-once"
+  : > "$fail_move_once"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  case "$arg" in
+    *.pending)
+      if [ -e "${FM_TEST_FAIL_MOVE_ONCE:?}" ]; then
+        rm -f "$FM_TEST_FAIL_MOVE_ONCE"
+        exit 42
+      fi
+      ;;
+  esac
+done
+exec /bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  export FM_TEST_FAIL_MOVE_ONCE="$fail_move_once"
+  if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
+    fail "secondmate acknowledgement hid a receipt move failure"
+  fi
+  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "receipt move failure consumed the pending receipt"
+  [ -f "$child_state/.fm-jt-parent-route" ] || fail "receipt move failure cleared the route before transition"
+  rm -f "$fakebin/mv"
   if ! drain "$root" "$child_home" "$fakebin" >"$dir/second-drain.out" 2>&1; then
     cat "$dir/second-drain.out" >&2
     fail "valid secondmate route drain failed after symlink removal"
@@ -1073,6 +1109,7 @@ SH
   drain "$root" "$child_home" "$fakebin" >/dev/null
   [ "$(grep -Fc "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status")" = 1 ] \
     || fail "secondmate parent report was duplicated"
+  unset FM_TEST_FAIL_MOVE_ONCE
 
   printf 'sm-history\n' > "$child_home/.fm-secondmate-home"
   write_meta "$state" sm-history history-parent-inc secondmate tmux firstmate:fm-sm-history
@@ -1117,7 +1154,7 @@ SH
 }
 
 test_secondmate_route_replacement_preserves_old_receipt() {
-  local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker
+  local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker history_backup
   new_case secondmate-route-replacement
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1171,7 +1208,19 @@ SH
   [ -n "$corr_b" ] || fail "replacement route did not create a new correlation"
   [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$corr_b" ] \
     || fail "replacement route did not publish the new correlation"
+  history_backup="$dir/history-route-backup"
+  [ -f "$child_state/.fm-jt-parent-route-history.$corr_a" ] \
+    || fail "replacement route did not retain the old correlation history marker"
+  cp "$child_state/.fm-jt-parent-route-history.$corr_a" "$history_backup"
+  replace_field "$child_state/.fm-jt-parent-route-history.$corr_a" corr_id "$corr_b"
   : > "$child_state/.wake-queue"
+  scan "$root" "$child_home" "$fakebin" --startup \
+    || fail "mismatched history marker scan failed"
+  [ "$(queue_count "$child_state")" = 0 ] \
+    || fail "mismatched history marker created a wake for the wrong route"
+  [ "$(receipt_count "$child_state" pending)" = 1 ] \
+    || fail "mismatched history marker consumed the old receipt"
+  cp "$history_backup" "$child_state/.fm-jt-parent-route-history.$corr_a"
   scan "$root" "$child_home" "$fakebin" --startup \
     || fail "pending old-route receipt was not reconciled after route replacement"
   [ "$(queue_count "$child_state")" = 1 ] \
