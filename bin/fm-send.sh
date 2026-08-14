@@ -98,16 +98,19 @@ clear_new_pending_route() {
 }
 
 discard_new_pending_reply() {
-  if ! clear_new_pending_route; then
-    echo "error: failed to clear the secondmate pending-reply route; parent record was preserved" >&2
-    return 1
-  fi
+  local route_status=0 discard_status=0
+  clear_new_pending_route || route_status=1
   if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
     && ! fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR"; then
-    echo "error: failed to discard the undelivered pending-reply record" >&2
-    return 1
+    discard_status=1
   fi
-  return 0
+  if [ "$route_status" = 1 ]; then
+    echo "error: failed to clear the secondmate pending-reply route; undelivered record cleanup continued" >&2
+  fi
+  if [ "$discard_status" = 1 ]; then
+    echo "error: failed to discard the undelivered pending-reply record" >&2
+  fi
+  [ "$route_status" = 0 ] && [ "$discard_status" = 0 ]
 }
 
 case "$RAW_TARGET" in

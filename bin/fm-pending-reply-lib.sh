@@ -677,7 +677,43 @@ fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
 }
 
 fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <corr-id>
-  fm_pending_reply_secondmate_route_clear_with_mode "$1" "$2" 1
+  local secondmate_home=$1 corr=$2 marker route_lock current_corr status=0
+  [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
+  [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
+  fm_lock_acquire_wait "$route_lock" || return 1
+  marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    if [ ! -f "$marker" ] || [ -L "$marker" ] \
+      || [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" != 5 ] \
+      || ! fm_pending_reply_secondmate_route_shape "$marker"; then
+      fm_lock_release "$route_lock" || true
+      return 0
+    fi
+    current_corr=$(fm_pending_reply_get "$marker" corr_id)
+    if [ "$current_corr" != "$corr" ]; then
+      fm_lock_release "$route_lock" || true
+      return 0
+    fi
+  else
+    marker=$(fm_pending_reply_secondmate_route_history_path "$secondmate_home" "$corr")
+    if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+      fm_lock_release "$route_lock" || true
+      return 0
+    fi
+    if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+      fm_lock_release "$route_lock" || true
+      return 0
+    fi
+  fi
+  if fm_pending_reply_secondmate_route_validate "$secondmate_home" "$corr" 1; then
+    rm -f "$FM_PENDING_ROUTE_MARKER" || status=1
+  else
+    status=1
+  fi
+  fm_lock_release "$route_lock" || status=1
+  return "$status"
 }
 
 fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] [<allow-undelivered>]
@@ -698,7 +734,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
       [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
       [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" = 5 ] || return 1
       fm_pending_reply_secondmate_route_shape "$marker" || return 1
-      fm_pending_reply_secondmate_route_validate "$secondmate_home" "" "$allow_undelivered" || return 1
+      fm_pending_reply_secondmate_route_validate "$secondmate_home" "" 2 || return 1
       current_corr=$FM_PENDING_ROUTE_CORR
       if [ "$current_corr" != "$wanted_corr" ]; then
         history_marker=$(fm_pending_reply_secondmate_route_history_path "$secondmate_home" "$wanted_corr")
@@ -783,12 +819,20 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
     awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
     *) return 1 ;;
   esac
-  if [ "$allow_undelivered" = 1 ]; then
-    [ -z "$delivered" ] || return 1
-    [ "$phase" = awaiting_report ] || return 1
-  else
-    [ -n "$delivered" ] || return 1
-  fi
+  case "$allow_undelivered" in
+    1)
+      [ -z "$delivered" ] || return 1
+      [ "$phase" = awaiting_report ] || return 1
+      ;;
+    2)
+      if [ -z "$delivered" ]; then
+        case "$phase" in awaiting_report|delivery_unknown) ;; *) return 1 ;; esac
+      fi
+      ;;
+    *)
+      [ -n "$delivered" ] || return 1
+      ;;
+  esac
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_PARENT_HOME=$parent_abs
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
