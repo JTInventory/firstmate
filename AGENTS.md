@@ -313,9 +313,17 @@ Before opening a PR or dispatching a change, resolve which repo owns the work:
   `JTInventory/Openclaw-Backup` (the OpenClaw monorepo); its CI blocks app paths
   (`app-code-freeze`) and points to jt-war-room.
 
+These file/domain rules are authoritative and take precedence over a named project when
+the two conflict. A request that spans both ownership domains must be split into separate
+PRs in the owning repositories; keep each PR scoped to its repository, document the
+dependency and merge order, and cross-link the PRs. Each split PR follows its owning
+repository's existing delivery mode. If the split or ownership is unclear, escalate before
+dispatching rather than routing the work to one repository.
+
 The canonical definition lives in `jt-war-room`'s README (section « Hébergement ») and in
-`Openclaw-Backup`'s `AGENTS.md`; prefer reading those sources over copied detail. When in doubt
-about a path, route the PR to the repo whose merge would deploy the change.
+`Openclaw-Backup`'s `AGENTS.md`; prefer reading those sources over copied detail. For a
+single-repository path, when in doubt about a path, route the PR to the repo whose merge
+would deploy the change. Do not use that fallback for mixed or unresolved ownership.
 
 ## 7. Task lifecycle
 
@@ -324,9 +332,9 @@ about a path, route the PR to the repo whose merge would deploy the change.
 **Resolve the project first.**
 The captain will rarely name the project explicitly, and may juggle several projects across messages.
 Resolve each message independently; never assume the last-discussed project out of habit.
-Use these signals in order:
+Use these signals in order after applying the authoritative file/domain routing rules above:
 
-1. An explicit project name in the message wins.
+1. An explicit project name in the message wins when it does not conflict with file/domain ownership.
 2. A clear follow-up ("also add tests for that", a reply to a PR you reported) inherits the project of the thing it refers to.
 3. Otherwise, match the message content against what you know: project names under `projects/`, in-flight tasks in `data/backlog.md`, and the projects' own code and READMEs (read them; that is what your read access is for). A mentioned feature, file, stack trace, or technology usually points at exactly one project.
 4. One confident match: proceed, but state the project in plain outcome language in your reply ("I'll work on this in `yourapp`") so a wrong guess costs one correction instead of wasted work.
