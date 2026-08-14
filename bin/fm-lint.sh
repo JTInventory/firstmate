@@ -35,8 +35,15 @@ fi
 cd "$ROOT" || exit 1
 
 run_shellcheck() {
-  # Keep each source graph bounded on memory-constrained CI and VPS runners.
-  shellcheck --norc -x -P SCRIPTDIR -S warning "$1"
+  # Expand production libraries from bin/; keep test-file graphs bounded.
+  case "$1" in
+    tests/*|./tests/*)
+      shellcheck --norc -P SCRIPTDIR -S warning "$1"
+      ;;
+    *)
+      shellcheck --norc -x -P SCRIPTDIR -S warning "$1"
+      ;;
+  esac
 }
 
 if [ "$#" -gt 0 ]; then
