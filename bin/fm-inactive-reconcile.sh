@@ -509,7 +509,7 @@ republish_existing_receipt_wake() {
 }
 
 publish_secondmate_receipt_and_wake() {
-  local route_lock status=0 existing_rc
+  local route_lock status=0 existing_rc pending pending_corr pending_parent_id pending_parent_home pending_parent_status
   FM_WAKE_APPEND_CREATED=0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if [ -L "$FM_HOME" ] || [ ! -d "$FM_HOME" ] || [ -L "$FM_HOME/state" ] || [ ! -d "$FM_HOME/state" ]; then
@@ -521,12 +521,37 @@ publish_secondmate_receipt_and_wake() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
     return 1
   fi
-  if ! fm_pending_reply_secondmate_route_validate "$FM_HOME"; then
+  KIND=secondmate
+  pending=$(receipt_path "$FP" pending)
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    [ -f "$pending" ] && [ ! -L "$pending" ] || status=1
+    if [ "$status" = 0 ]; then
+      pending_corr=$(receipt_field "$pending" parent_corr)
+      printf '%s' "$pending_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || status=1
+    fi
+    if [ "$status" = 0 ] && ! fm_pending_reply_secondmate_route_validate "$FM_HOME" "$pending_corr"; then
+      fm_lock_release "$route_lock" || true
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+      return 0
+    fi
+    if [ "$status" = 0 ]; then
+      pending_parent_id=$(receipt_field "$pending" parent_task_id)
+      pending_parent_home=$(receipt_field "$pending" parent_home)
+      pending_parent_status=$(receipt_field "$pending" parent_status)
+      [ "$pending_parent_id" = "$FM_PENDING_ROUTE_SECOND_MATE_ID" ] || status=1
+      [ "$pending_parent_home" = "$FM_PENDING_ROUTE_PARENT_HOME" ] || status=1
+      [ "$pending_parent_status" = "$FM_PENDING_ROUTE_PARENT_STATUS" ] || status=1
+    fi
+  elif ! fm_pending_reply_secondmate_route_validate "$FM_HOME"; then
     fm_lock_release "$route_lock" || true
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
     return 0
   fi
-  KIND=secondmate
+  [ "$status" = 0 ] || {
+    fm_lock_release "$route_lock" || true
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    return 1
+  }
   if receipt_existing_core; then
     if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
       fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \

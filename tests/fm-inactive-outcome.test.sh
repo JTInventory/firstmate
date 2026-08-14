@@ -1154,6 +1154,11 @@ SH
   [ -n "$corr_b" ] || fail "replacement route did not create a new correlation"
   [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$corr_b" ] \
     || fail "replacement route did not publish the new correlation"
+  : > "$child_state/.wake-queue"
+  scan "$root" "$child_home" "$fakebin" --startup \
+    || fail "pending old-route receipt was not reconciled after route replacement"
+  [ "$(queue_count "$child_state")" = 1 ] \
+    || fail "pending old-route receipt did not get a matching history wake"
   drain "$root" "$child_home" "$fakebin" >/dev/null \
     || fail "old receipt did not drain after route replacement"
   [ "$(receipt_count "$child_state" reported)" = 1 ] || fail "old route receipt was not reported"
@@ -1163,6 +1168,40 @@ SH
     || fail "old route history was not retired after acknowledgement"
   unset FM_FAKE_CREW_STATE_CHILD_REPLACE_X1
   pass "secondmate route replacement preserves correlation-scoped old receipts"
+}
+
+test_undelivered_secondmate_route_cleanup_is_idempotent() {
+  local dir root home fakebin state child_home child_state marker corr
+  new_case secondmate-undelivered-cleanup
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  marker="$child_state/.fm-jt-parent-route"
+  corr=0123456789abcdef
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$state/pending-replies"
+  printf 'sm-cleanup\n' > "$child_home/.fm-secondmate-home"
+  fm_write_meta "$state/pending-replies/$corr" \
+    schema=fm-pending-reply.v1 corr_id="$corr" task_id=sm-cleanup \
+    parent_home="$home" parent_status="$state/sm-cleanup.status" phase=awaiting_report delivered_epoch=
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+    _ "$ROOT" "$child_home" "$home" "$state" sm-cleanup "$corr" \
+    || fail "undelivered route fixture was not written"
+  [ -f "$marker" ] || fail "undelivered route fixture is missing"
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_clear_undelivered "$2" "$3"' \
+    _ "$ROOT" "$child_home" "$corr" \
+    || fail "undelivered route cleanup rejected an awaiting report"
+  [ ! -e "$marker" ] || fail "undelivered route cleanup left a stale marker"
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_clear_undelivered "$2" "$3"' \
+    _ "$ROOT" "$child_home" "$corr" \
+    || fail "undelivered route cleanup was not idempotent"
+  pass "undelivered secondmate route cleanup is safe and idempotent"
 }
 
 test_concurrent_secondmate_routes_are_rejected() {
@@ -1380,6 +1419,7 @@ test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_valid_secondmate_route_reports_parent_once
 test_secondmate_route_replacement_preserves_old_receipt
+test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
 test_drain_restores_only_unprocessed_rows
 test_malformed_or_missing_secondmate_route_fails_closed

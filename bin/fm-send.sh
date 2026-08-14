@@ -93,7 +93,7 @@ TARGET_HOME=
 clear_new_pending_route() {
   if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
     && [ -n "$TARGET_HOME" ]; then
-    fm_pending_reply_secondmate_route_clear "$TARGET_HOME" "$PENDING_REPLY_CORR"
+    fm_pending_reply_secondmate_route_clear_undelivered "$TARGET_HOME" "$PENDING_REPLY_CORR"
   fi
 }
 

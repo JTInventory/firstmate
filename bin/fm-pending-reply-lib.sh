@@ -651,8 +651,8 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   return "$route_status"
 }
 
-fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
-  local secondmate_home=$1 corr=$2 marker route_lock status=0
+fm_pending_reply_secondmate_route_clear_with_mode() {  # <secondmate-home> <corr-id> <allow-undelivered>
+  local secondmate_home=$1 corr=$2 allow_undelivered=${3:-0} marker route_lock status=0
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
@@ -663,7 +663,7 @@ fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
   fi
   route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
   fm_lock_acquire_wait "$route_lock" || return 1
-  if fm_pending_reply_secondmate_route_validate "$secondmate_home" "$corr"; then
+  if fm_pending_reply_secondmate_route_validate "$secondmate_home" "$corr" "$allow_undelivered"; then
     rm -f "$FM_PENDING_ROUTE_MARKER" || status=1
   else
     status=1
@@ -672,8 +672,16 @@ fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
   return "$status"
 }
 
-fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>]
-  local secondmate_home=$1 wanted_corr=${2:-} marker line key value schema marker_id secondmate_id current_corr history_marker
+fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
+  fm_pending_reply_secondmate_route_clear_with_mode "$1" "$2" 0
+}
+
+fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <corr-id>
+  fm_pending_reply_secondmate_route_clear_with_mode "$1" "$2" 1
+}
+
+fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] [<allow-undelivered>]
+  local secondmate_home=$1 wanted_corr=${2:-} allow_undelivered=${3:-0} marker line key value schema marker_id secondmate_id current_corr history_marker
   local parent_home parent_status corr parent_abs state_abs expected_status rec active_rec history_rec history_dir
   local phase delivered record_home record_status record_task record_corr home_marker
   local seen_schema=0 seen_secondmate_id=0 seen_parent_home=0 seen_parent_status=0 seen_corr=0
@@ -768,12 +776,17 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>]
   [ "$record_status" = "$expected_status" ] || return 1
   [ "$record_corr" = "$corr" ] || return 1
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-  [ -n "$delivered" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
     awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
     *) return 1 ;;
   esac
+  if [ "$allow_undelivered" = 1 ]; then
+    [ -z "$delivered" ] || return 1
+    [ "$phase" = awaiting_report ] || return 1
+  else
+    [ -n "$delivered" ] || return 1
+  fi
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_PARENT_HOME=$parent_abs
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
