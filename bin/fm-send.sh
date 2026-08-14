@@ -99,10 +99,12 @@ clear_new_pending_route() {
 
 discard_new_pending_reply() {
   local route_status=0 discard_status=0
-  clear_new_pending_route || route_status=1
   if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
     && ! fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR"; then
     discard_status=1
+  fi
+  if [ "$discard_status" = 0 ]; then
+    clear_new_pending_route || route_status=1
   fi
   if [ "$route_status" = 1 ]; then
     echo "error: failed to clear the secondmate pending-reply route; undelivered record cleanup continued" >&2
