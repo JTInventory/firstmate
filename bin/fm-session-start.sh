@@ -363,7 +363,8 @@ if [ "$READ_ONLY" -eq 1 ]; then
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
   DRAIN_STATUS=0
-  DRAIN_OUT=$(FM_WAKE_DRAIN_DEFER_ACK=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1) || DRAIN_STATUS=$?
+  DRAIN_OUT=$(FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
+    "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1) || DRAIN_STATUS=$?
   if [ "$DRAIN_STATUS" -ne 0 ]; then
     printf 'error: wake drain failed (status %s); inactive reconciliation skipped\n%s\n' \
       "$DRAIN_STATUS" "$DRAIN_OUT" >&2

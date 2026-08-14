@@ -546,7 +546,7 @@ test_output_started_claim_is_not_reprinted() {
     incarnation=output-started-inc outcome=done terminal_source=pane \
     terminal_snapshot='state: done · source: pane · output started' kind=ship
   row='2	2	check	inactive-outcome:'"$fingerprint"$'\tpost-output row'
-  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=1\t1\tcheck\tinactive-outcome:%s\told row\nstate=presenting\noutput_started=1\ncreated_epoch=1\n' \
+  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=1\t1\tcheck\tinactive-outcome:%s\told row\nstate=presenting\noutput_started=1\noutput_complete=1\ncreated_epoch=1\n' \
     "$fingerprint" "$fingerprint" > "$state/terminal-outcomes/.$fingerprint.claim"
   printf '%s\n' "$row" > "$state/.wake-queue"
   drain "$root" "$home" "$fakebin" >"$dir/output-started.out" \
@@ -555,6 +555,30 @@ test_output_started_claim_is_not_reprinted() {
   [ -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "output-started claim did not acknowledge its receipt"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "output-started claim was not retired"
   pass "output-started inactive claims do not reprint after a drain crash"
+}
+
+test_pre_output_claim_retries_after_crash() {
+  local dir root home fakebin state fingerprint row
+  new_case pre-output-claim
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'pre-output-x1|pre-output-inc|done|state: done · source: pane · pre-output')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=pre-output-x1 \
+    incarnation=pre-output-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · pre-output' kind=ship
+  row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tpre-output row'
+  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=%s\nstate=presenting\noutput_started=1\ncreated_epoch=1\n' \
+    "$fingerprint" "$row" > "$state/terminal-outcomes/.$fingerprint.claim"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >"$dir/pre-output.out" \
+    || fail "pre-output claim did not recover"
+  grep -F 'pre-output row' "$dir/pre-output.out" >/dev/null \
+    || fail "pre-output claim was suppressed before successful emission"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "pre-output retry did not finalize the receipt"
+  pass "pre-output claims retry until emission completes"
 }
 
 test_finalized_receipt_rows_are_suppressed() {
@@ -590,7 +614,8 @@ test_deferred_ack_retries_after_caller_crash() {
   row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
   [ -n "$row" ] || fail "deferred receipt did not queue its wake"
   drain_output="$dir/deferred.out"
-  if ! FM_WAKE_DRAIN_DEFER_ACK=1 drain "$root" "$home" "$fakebin" >"$drain_output"; then
+  if ! FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
+    drain "$root" "$home" "$fakebin" >"$drain_output"; then
     fail "deferred wake drain failed"
   fi
   [ -f "$state/terminal-outcomes/$fingerprint.pending" ] || fail "deferred drain consumed the receipt before caller confirmation"
@@ -599,6 +624,13 @@ test_deferred_ack_retries_after_caller_crash() {
     || fail "deferred drain did not retain the presentation claim"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" defer_ack)" = 1 ] \
     || fail "deferred drain did not mark the claim for caller confirmation"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >"$dir/live-deferred.out" \
+    || fail "live deferred claim drain failed"
+  [ ! -s "$dir/live-deferred.out" ] || fail "live deferred claim was presented twice"
+  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "live deferred claim was acknowledged before caller confirmation"
+  replace_field "$state/terminal-outcomes/.$fingerprint.claim" defer_generation 99999999
   rm -f "$state/deferred-x1.meta" "$state/deferred-x1.status" "$state/deferred-x1.turn-ended"
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "pending deferred receipt was not republished after caller crash"
   [ "$(queue_count "$state")" = 1 ] || fail "pending deferred receipt did not get a retry wake"
@@ -1179,6 +1211,8 @@ SH
     cat "$dir/second-drain.out" >&2
     fail "valid secondmate route drain failed after symlink removal"
   fi
+  ! grep -F 'inactive-outcome:' "$dir/second-drain.out" >/dev/null \
+    || fail "already-recorded parent report was presented again"
   [ "$(receipt_count "$child_state" reported)" = 1 ] || fail "valid secondmate route was not reported"
   [ ! -e "$child_state/.fm-jt-parent-route" ] || fail "reported secondmate route was not cleared after its parent report"
   grep -F "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status" >/dev/null \
@@ -1614,6 +1648,7 @@ test_ack_recomputes_fingerprint_from_receipt_fields
 test_reserved_claim_recovers_to_a_new_wake_row
 test_presenting_claim_recovers_before_output
 test_output_started_claim_is_not_reprinted
+test_pre_output_claim_retries_after_crash
 test_finalized_receipt_rows_are_suppressed
 test_deferred_ack_retries_after_caller_crash
 test_scan_failure_retries_without_advancing_cadence
