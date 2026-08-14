@@ -595,6 +595,33 @@ test_output_started_claim_is_not_reprinted() {
   pass "output-started inactive claims do not reprint after a drain crash"
 }
 
+test_uncertain_output_claim_fails_closed() {
+  local dir root home fakebin state fingerprint row
+  new_case uncertain-output-claim
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'uncertain-output-x1|uncertain-output-inc|done|state: done · source: pane · uncertain output')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=uncertain-output-x1 \
+    incarnation=uncertain-output-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · uncertain output' kind=ship
+  row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tuncertain output row'
+  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=%s\nstate=presenting\noutput_started=1\noutput_emitted=1\noutput_complete=0\noutput_confirmed=0\ncreated_epoch=1\n' \
+    "$fingerprint" "$row" > "$state/terminal-outcomes/.$fingerprint.claim"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >"$dir/uncertain-output.out" \
+    || fail "uncertain output claim drain failed"
+  [ ! -s "$dir/uncertain-output.out" ] || fail "uncertain output claim was reprinted"
+  [ "$(queue_count "$state")" = 0 ] || fail "uncertain output claim left a wake queued"
+  [ -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "uncertain output claim was discarded"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_confirmed)" = 0 ] \
+    || fail "uncertain output claim was finalized without caller-visible confirmation"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "uncertain output claim was acknowledged"
+  pass "uncertain output claims fail closed without reprinting"
+}
+
 test_presented_claim_is_acknowledged_in_deferred_drain() {
   local dir root home fakebin state fingerprint row
   new_case presented-claim-ack
@@ -1502,6 +1529,31 @@ SH
     || fail "surface-marker failure did not retain its retry transaction"
   [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" -ge 1 ] \
     || fail "surface-marker failure did not retain its queued wake"
+  export FM_FAKE_CREW_STATE_SURFACE_MARKER_X1='state: done · source: pane · marker retry'
+  set +e
+  out=$(scan "$root" "$home" "$fakebin" --startup 2>&1)
+  status=$?
+  set -u
+  [ "$status" = 0 ] || fail "surface-marker retry suppression scan failed: $out"
+  [ "$(receipt_count "$state" pending)" = 0 ] \
+    || fail "unresolved surface-marker retry created a duplicate receipt"
+  export FM_FAKE_CREW_STATE_SURFACE_MARKER_X1='state: working · source: pane · marker retry'
+  printf 'done: surface marker newer\n' > "$state/surface-marker-x1.status"
+  set +e
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "stale surface-marker retry was repaired"
+  [ -f "$state/.hb-surface-retry-surface-marker-x1" ] \
+    || fail "stale surface-marker retry was discarded"
+  printf 'done: surface marker retry\n' > "$state/surface-marker-x1.status"
   rm -f "$fakebin/mv"
   out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
@@ -2688,6 +2740,7 @@ test_ack_recomputes_fingerprint_from_receipt_fields
 test_reserved_claim_recovers_to_a_new_wake_row
 test_presenting_claim_recovers_before_output
 test_output_started_claim_is_not_reprinted
+test_uncertain_output_claim_fails_closed
 test_pre_output_claim_retries_after_crash
 test_output_completion_failure_does_not_reprint
 test_direct_drain_finalizes_after_successful_output
