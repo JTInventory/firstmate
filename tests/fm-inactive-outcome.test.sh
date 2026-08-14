@@ -1020,7 +1020,7 @@ test_pending_receipts_replay_after_child_scan_failure() {
 }
 
 test_scan_failure_retries_without_advancing_cadence() {
-  local dir root home fakebin state wake_dir wake_removed
+  local dir root home fakebin state wake_dir wake_removed retry_out
   new_case scan-failure
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1063,7 +1063,9 @@ SH
   esac
   mv "$wake_removed" "$wake_dir"
   export FM_BREAK_QUEUE=0
-  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "retry after child failure did not complete"
+  if ! retry_out=$(scan "$root" "$home" "$fakebin" --startup 2>&1); then
+    fail "retry after child failure did not complete: $retry_out"
+  fi
   [ "$(receipt_count "$state" pending)" = 2 ] || fail "failed child was skipped on retry"
   unset FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK FM_WAKE_QUEUE_DIR FM_WAKE_QUEUE_REMOVED FM_BREAK_QUEUE
   pass "scan failures preserve retry state and cadence"
@@ -1238,6 +1240,35 @@ SH
   pass "session-start drains existing wakes before inactive reconciliation"
 }
 
+test_session_start_generation_bound_replay() {
+  local dir root home fakebin state out status
+  new_case session-start-generation
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" session-bound-x1 session-bound-inc
+  export FM_FAKE_CREW_STATE_SESSION_BOUND_X1='state: done · source: pane · session generation'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null \
+    || fail "session-start generation fixture did not queue an inactive outcome"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "session-start generation fixture did not retain a pending receipt"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux \
+    "$root/bin/fm-session-start.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "session-start generation-bound replay failed: $out"
+  printf '%s\n' "$out" | grep -F 'inactive-outcome:' >/dev/null \
+    || fail "session-start did not emit the inactive row for caller confirmation"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "session-start did not acknowledge the generation-bound replay"
+  [ "$(receipt_count "$state" presented)" = 1 ] || fail "session-start did not finalize the generation-bound replay"
+  [ "$(queue_count "$state")" = 0 ] || fail "session-start left the generation-bound replay queued"
+  unset FM_FAKE_CREW_STATE_SESSION_BOUND_X1
+  pass "session-start acknowledges inactive outcomes through its generation"
+}
+
 test_watcher_runs_inactive_cadence() {
   local dir root home fakebin state out second_out status fingerprint
   new_case watcher-wiring
@@ -1398,6 +1429,81 @@ SH
   [ "$(queue_count "$state")" = 1 ] || fail "new incarnation did not queue its inactive wake"
   unset FM_FAKE_CREW_STATE_SURFACED_X1
   pass "terminal replay suppression is bound to surfaced status and incarnation"
+}
+
+test_surface_marker_failure_is_retryable() {
+  local dir root home fakebin state out status
+  new_case surface-marker-failure
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" surface-marker-x1 surface-marker-inc
+  printf 'done: surface marker retry\n' > "$state/surface-marker-x1.status"
+  : > "$state/surface-marker-x1.turn-ended"
+  touch "$state/surface-marker-x1.meta" "$state/surface-marker-x1.status" "$state/surface-marker-x1.turn-ended"
+  export FM_FAKE_CREW_STATE_SURFACE_MARKER_X1='state: working · source: pane · marker retry'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+  *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
+  *"#{window_name}"*) printf '%s\n' firstmate ;;
+  capture-pane) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+case "$target" in
+  *.hb-terminal-surfaced-*) exit 91 ;;
+esac
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  set +e
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "surface-marker failure was treated as success"
+  [ -f "$state/.hb-surface-retry-surface-marker-x1" ] \
+    || fail "surface-marker failure did not retain its retry transaction"
+  [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" -ge 1 ] \
+    || fail "surface-marker failure did not retain its queued wake"
+  rm -f "$fakebin/mv"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "surface-marker retry failed: $out"
+  [ ! -e "$state/.hb-surface-retry-surface-marker-x1" ] \
+    || fail "surface-marker retry transaction was not cleared"
+  [ -f "$state/.hb-terminal-surfaced-surface-marker-x1" ] \
+    || fail "surface-marker retry did not persist the terminal marker"
+  [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
+    || fail "surface-marker retry left the wake queued"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null \
+    || fail "surface-marker retry follow-up scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] \
+    || fail "surface-marker retry caused an inactive receipt replay"
+  unset FM_FAKE_CREW_STATE_SURFACE_MARKER_X1
+  pass "surface-marker failures retain and repair their wake transaction"
 }
 
 test_legacy_metadata_uses_stable_fallback() {
@@ -2577,8 +2683,10 @@ test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
 test_spawn_publishes_incarnation_token
 test_session_start_drains_before_inactive_scan
+test_session_start_generation_bound_replay
 test_watcher_runs_inactive_cadence
 test_surfaced_terminal_is_not_replayed
+test_surface_marker_failure_is_retryable
 test_legacy_metadata_uses_stable_fallback
 test_empty_spawn_incarnation_is_rejected
 test_relaunch_and_teardown_races_recheck_under_spawn_lock
