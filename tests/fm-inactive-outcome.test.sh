@@ -194,7 +194,9 @@ drain() {
   ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
       -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
-      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" "$DRAIN" )
+      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+      FM_WAKE_DRAIN_DEFER_ACK="${FM_WAKE_DRAIN_DEFER_ACK:-0}" \
+      FM_WAKE_DRAIN_GENERATION="${FM_WAKE_DRAIN_GENERATION:-}" "$DRAIN" )
 }
 
 write_meta() {
@@ -686,16 +688,20 @@ test_deferred_ack_retries_after_caller_crash() {
   row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
   [ -n "$row" ] || fail "deferred receipt did not queue its wake"
   drain_output="$dir/deferred.out"
-  if ! FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
-    drain "$root" "$home" "$fakebin" >"$drain_output"; then
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
+  if ! drain "$root" "$home" "$fakebin" >"$drain_output"; then
     fail "deferred wake drain failed"
   fi
   [ -f "$state/terminal-outcomes/$fingerprint.pending" ] || fail "deferred drain consumed the receipt before caller confirmation"
   [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "deferred drain finalized the receipt before caller confirmation"
-  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" state)" = presented ] \
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" state)" = presenting ] \
     || fail "deferred drain did not retain the presentation claim"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" defer_ack)" = 1 ] \
     || fail "deferred drain did not mark the claim for caller confirmation"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_started)" = 1 ] \
+    || fail "deferred drain did not retain post-output state"
+  [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_complete)" = 0 ] \
+    || fail "deferred drain completed output before caller confirmation"
   printf '%s\n' "$row" > "$state/.wake-queue"
   drain "$root" "$home" "$fakebin" >"$dir/live-deferred.out" \
     || fail "live deferred claim drain failed"
@@ -714,8 +720,39 @@ test_deferred_ack_retries_after_caller_crash() {
   [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain left the receipt pending"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain left the deferred claim"
   [ ! -s "$drain_output" ] || fail "retry drain re-presented output already emitted before the caller crash"
-  unset FM_FAKE_CREW_STATE_DEFERRED_X1
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_DEFERRED_X1
   pass "deferred inactive receipts acknowledge stale post-output claims without replay"
+}
+
+test_deferred_ack_confirms_after_caller_emission() {
+  local dir root home fakebin state fingerprint row drain_output
+  new_case deferred-confirm
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" deferred-confirm-x1 deferred-confirm-inc
+  export FM_FAKE_CREW_STATE_DEFERRED_CONFIRM_X1='state: done · source: pane · deferred confirmation'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "deferred confirmation setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  drain_output="$dir/deferred-confirm.out"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
+  drain "$root" "$home" "$fakebin" >"$drain_output" \
+    || fail "deferred confirmation drain failed"
+  printf '%s\n' "$(cat "$drain_output")" > "$dir/caller-visible.out"
+  ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+      CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+      "$RECON" confirm "inactive-outcome:$fingerprint" "$row" ) \
+    || fail "caller confirmation did not finalize the receipt"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
+    || fail "caller confirmation did not move the receipt"
+  [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "caller confirmation left the receipt pending"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
+    || fail "caller confirmation left the claim"
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_DEFERRED_CONFIRM_X1
+  pass "deferred inactive receipts finalize after caller emission"
 }
 
 test_scan_failure_retries_without_advancing_cadence() {
@@ -1973,6 +2010,7 @@ test_output_completion_failure_does_not_reprint
 test_finalized_receipt_rows_are_suppressed
 test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
+test_deferred_ack_confirms_after_caller_emission
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
