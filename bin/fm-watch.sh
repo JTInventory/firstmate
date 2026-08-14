@@ -583,6 +583,14 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  if ! wake_drain_out=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1); then
+    printf '%s\n' "$wake_drain_out" >&2
+    exit 1
+  fi
+  if [ -n "$wake_drain_out" ]; then
+    printf '%s\n' "$wake_drain_out"
+  fi
+
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
