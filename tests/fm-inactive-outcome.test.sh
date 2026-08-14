@@ -1228,6 +1228,8 @@ SH
   [ -n "$corr_b" ] || fail "replacement route did not create a new correlation"
   [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$corr_b" ] \
     || fail "replacement route did not publish the new correlation"
+  replace_field "$state/pending-replies/$corr_b" phase awaiting_report
+  replace_field "$state/pending-replies/$corr_b" delivered_epoch ''
   active_route_backup="$dir/active-route-backup"
   cp "$child_state/.fm-jt-parent-route" "$active_route_backup"
   replace_field "$child_state/.fm-jt-parent-route" parent_home "$dir/not-a-parent-home"
@@ -1415,6 +1417,52 @@ SH
   pass "concurrent secondmate routes fail closed without overwriting"
 }
 
+test_failed_concurrent_send_discards_only_new_record() {
+  local dir root home fakebin state child_home child_state marker old_corr send_out
+  new_case failed-concurrent-send
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  marker="$child_state/.fm-jt-parent-route"
+  old_corr=0123456789abcdef
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$child_home/projects" \
+    "$state/pending-replies"
+  printf 'sm-race\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-race parent-race-inc secondmate tmux firstmate:fm-sm-race
+  printf 'home=%s\n' "$child_home" >> "$state/sm-race.meta"
+  fm_write_meta "$state/pending-replies/$old_corr" \
+    schema=fm-pending-reply.v1 corr_id="$old_corr" task_id=sm-race \
+    parent_home="$home" parent_status="$state/sm-race.status" \
+    delivered_epoch=1 phase=awaiting_report
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+    _ "$ROOT" "$child_home" "$home" "$state" sm-race "$old_corr" \
+    || fail "existing concurrent route was not written"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME -u FM_ROOT -u STATE -u FM_PENDING_REPLY_EXISTING_CORR \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-race "competing request" 2>&1) && fail "concurrent route bind unexpectedly succeeded"
+  [ "$(direct_file_count "$state/pending-replies" '*')" = 1 ] \
+    || fail "failed concurrent send left a new pending-reply record"
+  [ -f "$state/pending-replies/$old_corr" ] \
+    || fail "failed concurrent send discarded the unrelated active record"
+  [ "$(receipt_value "$state/pending-replies/$old_corr" phase)" = awaiting_report ] \
+    || fail "failed concurrent send changed the unrelated route phase"
+  [ "$(receipt_value "$state/pending-replies/$old_corr" delivered_epoch)" = 1 ] \
+    || fail "failed concurrent send changed the unrelated delivery state"
+  [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$old_corr" ] \
+    || fail "failed concurrent send replaced the unrelated active route"
+  pass "failed concurrent send discards only its new undelivered record"
+}
+
 test_drain_restores_only_unprocessed_rows() {
   local dir root home fakebin state first second
   new_case drain-rollback
@@ -1519,5 +1567,6 @@ test_valid_secondmate_route_reports_parent_once
 test_secondmate_route_replacement_preserves_old_receipt
 test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
+test_failed_concurrent_send_discards_only_new_record
 test_drain_restores_only_unprocessed_rows
 test_malformed_or_missing_secondmate_route_fails_closed
