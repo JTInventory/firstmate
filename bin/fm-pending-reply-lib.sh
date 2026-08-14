@@ -773,7 +773,7 @@ fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <co
       || [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" != 5 ] \
       || ! fm_pending_reply_secondmate_route_shape "$marker"; then
       fm_lock_release "$route_lock" || true
-      return 0
+      return 1
     fi
     current_corr=$(fm_pending_reply_get "$marker" corr_id)
     if [ "$current_corr" != "$corr" ]; then
@@ -788,7 +788,7 @@ fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <co
     fi
     if [ ! -f "$marker" ] || [ -L "$marker" ]; then
       fm_lock_release "$route_lock" || true
-      return 0
+      return 1
     fi
   fi
   if fm_pending_reply_secondmate_route_validate "$secondmate_home" "$corr" 3; then

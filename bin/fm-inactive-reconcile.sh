@@ -207,8 +207,7 @@ claim_receipt_state() {
     [ ! -L "$path" ] || return 2
     [ -e "$path" ] || continue
     [ -f "$path" ] || return 2
-    [ "$(receipt_field "$path" schema)" = fm-jt-terminal-outcome.v1 ] || return 2
-    [ "$(receipt_field "$path" fingerprint)" = "$fp" ] || return 2
+    prepare_pending_receipt "$path" || return 2
     [ -z "$found" ] || return 2
     found=$suffix
   done
@@ -265,6 +264,17 @@ claim_validate_caller_owner() {  # <claim> <caller-pid>
   fm_pid_start_matches_stored "$caller_pid" "$caller_start"
 }
 
+claim_rewrite_row() {
+  local claim=$1 row=$2 tmp line
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-row.XXXXXX") || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in row=*) printf 'row=%s\n' "$row" ;; *) printf '%s\n' "$line" ;; esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 1; }
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 1; }
+}
+
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim tmp state existing old_row line output_complete defer_ack
   local defer_generation defer_generation_start receipt_state receipt_rc=0 recorded_report=0 report_rc=1
@@ -308,15 +318,6 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     case "$state" in presented|presenting|reserved) ;; *) return 2 ;; esac
     old_row=$(claim_field "$claim" row)
     [ -n "$old_row" ] || return 2
-    if [ "$old_row" != "$row" ]; then
-      tmp=$(mktemp "$OUTCOME_DIR/.claim-row.XXXXXX") || return 2
-      chmod 600 "$tmp" 2>/dev/null || true
-      while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in row=*) printf 'row=%s\n' "$row" ;; *) printf '%s\n' "$line" ;; esac
-      done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-      [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-      mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
-    fi
     if [ "$state" = presented ]; then
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
       if [ "$defer_ack" = 1 ]; then
@@ -326,8 +327,23 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
           return 4
         fi
         [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
-        return 5
       fi
+    fi
+    if [ "$state" = presenting ]; then
+      defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
+      if [ "$defer_ack" = 1 ]; then
+        defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
+        defer_generation_start=$(claim_field "$claim" defer_generation_start 2>/dev/null || true)
+        if claim_defer_generation_live "$defer_generation" "$defer_generation_start"; then
+          return 4
+        fi
+      fi
+    fi
+    if [ "$old_row" != "$row" ]; then
+      claim_rewrite_row "$claim" "$row" || return 2
+    fi
+    if [ "$state" = presented ] && [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ]; then
+      return 5
     fi
     if [ "$recorded_report" = 1 ]; then
       case "$state" in
@@ -342,10 +358,6 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     fi
     if [ "$state" = presenting ]; then
       output_complete=$(claim_field "$claim" output_complete 2>/dev/null || true)
-      if [ "$output_complete" = 1 ]; then
-        claim_mark_presented "$key" "$row" || return 2
-        return 5
-      fi
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
       if [ "$defer_ack" = 1 ]; then
         defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
@@ -353,6 +365,12 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
         if claim_defer_generation_live "$defer_generation" "$defer_generation_start"; then
           return 4
         fi
+      fi
+      if [ "$output_complete" = 1 ]; then
+        claim_mark_presented "$key" "$row" || return 2
+        return 5
+      fi
+      if [ "$defer_ack" = 1 ]; then
         return 0
       fi
     fi
@@ -1138,8 +1156,8 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
       [ ! -L "$existing" ] || return 2
       if [ -e "$existing" ]; then
         [ -f "$existing" ] || return 2
-        [ "$(receipt_field "$existing" fingerprint)" = "$fp" ] || return 2
-        existing_kind=$(receipt_field "$existing" kind)
+        prepare_pending_receipt "$existing" || return 2
+        existing_kind=$KIND
         if [ "$existing_kind" = secondmate ]; then
           reported_secondmate_receipt_valid "$existing" || return 2
           existing_corr=$(receipt_field "$existing" parent_corr)

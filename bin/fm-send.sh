@@ -101,7 +101,7 @@ clear_new_pending_route() {
 
 discard_new_pending_reply() {
   local route_status=0 discard_status=0
-  if [ "$PENDING_REPLY_CREATED" = 1 ] && [ "$PENDING_ROUTE_COMMITTED" = 1 ] \
+  if [ "$PENDING_REPLY_CREATED" = 1 ] \
     && [ -n "$PENDING_REPLY_CORR" ] \
     && [ -n "$TARGET_HOME" ] \
     && ! fm_pending_reply_schedule_undelivered_cleanup \
