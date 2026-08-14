@@ -69,6 +69,7 @@ jobs:
           /bin/bash --version | head -1
           /bin/bash -n bin/fm-slot-owner-lib.sh
           /bin/bash tests/fm-worker-isolation.test.sh
+          /bin/bash tests/fm-inactive-outcome.test.sh
 
   invariants:
     name: Repo invariants

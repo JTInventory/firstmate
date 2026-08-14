@@ -528,6 +528,11 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
     fm_lock_release "$route_lock" || true
     return 1
   }
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || {
+    rm -f "$tmp"
+    fm_lock_release "$route_lock" || true
+    return 1
+  }
   {
     printf 'schema=fm-jt-parent-route.v1\n'
     printf 'secondmate_id=%s\n' "$secondmate_id"
@@ -616,7 +621,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
 }
 
 fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
-  local secondmate_home=$1 corr=$2 marker route_lock existing_corr status=0
+  local secondmate_home=$1 corr=$2 marker route_lock status=0
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
@@ -625,14 +630,11 @@ fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
   fm_lock_acquire_wait "$route_lock" || return 1
-  if [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" != 5 ]; then
-    status=1
-  else
-    existing_corr=$(fm_pending_reply_get "$marker" corr_id)
-  [ "$existing_corr" = "$corr" ] || status=1
-  fi
-  if [ "$status" = 0 ]; then
+  if fm_pending_reply_secondmate_route_validate "$secondmate_home" \
+    && [ "$FM_PENDING_ROUTE_CORR" = "$corr" ]; then
     rm -f "$marker" || status=1
+  else
+    status=1
   fi
   fm_lock_release "$route_lock" || status=1
   return "$status"
@@ -699,7 +701,8 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home>
   if [ -e "$active_rec" ] || [ -L "$active_rec" ]; then
     [ -f "$active_rec" ] && [ ! -L "$active_rec" ] || return 1
     rec=$active_rec
-  elif [ -f "$history_rec" ] && [ ! -L "$history_rec" ]; then
+  elif [ -e "$history_rec" ] || [ -L "$history_rec" ]; then
+    [ -f "$history_rec" ] && [ ! -L "$history_rec" ] || return 1
     rec=$history_rec
   else
     return 1
@@ -740,6 +743,7 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   home_marker="$secondmate_home/.fm-secondmate-home"
   [ -f "$home_marker" ] && [ ! -L "$home_marker" ] || return 1
   marker_id=$(cat "$home_marker" 2>/dev/null || true)
+  case "$secondmate_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ "$marker_id" = "$secondmate_id" ] || return 1
   case "$parent_home" in /*) ;; *) return 1 ;; esac
   case "$parent_status" in /*) ;; *) return 1 ;; esac
@@ -761,9 +765,11 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   fi
   active_rec="$state_abs/pending-replies/$corr"
   history_rec="$history_dir/$corr"
-  if [ -f "$active_rec" ] && [ ! -L "$active_rec" ]; then
+  if [ -e "$active_rec" ] || [ -L "$active_rec" ]; then
+    [ -f "$active_rec" ] && [ ! -L "$active_rec" ] || return 1
     rec=$active_rec
-  elif [ -f "$history_rec" ] && [ ! -L "$history_rec" ]; then
+  elif [ -e "$history_rec" ] || [ -L "$history_rec" ]; then
+    [ -f "$history_rec" ] && [ ! -L "$history_rec" ] || return 1
     rec=$history_rec
   else
     return 1

@@ -695,13 +695,22 @@ fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
 }
 
 fm_wake_restore_queue() {
-  local drained=$1 restore
-  restore="$STATE/.wake-queue.restore.$(fm_current_pid)"
+  local drained=$1 restore status=0
+  [ -f "$drained" ] && [ ! -L "$drained" ] || return 1
+  [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+  restore=$(mktemp "$STATE/.wake-queue.restore.XXXXXX") || return 1
+  [ -f "$restore" ] && [ ! -L "$restore" ] || { rm -f "$restore"; return 1; }
   if [ -e "$FM_WAKE_QUEUE" ]; then
-    cat "$drained" "$FM_WAKE_QUEUE" > "$restore" && mv "$restore" "$FM_WAKE_QUEUE"
+    [ -f "$FM_WAKE_QUEUE" ] || { rm -f "$restore"; return 1; }
+    cat "$drained" "$FM_WAKE_QUEUE" > "$restore" || status=1
   else
-    mv "$drained" "$FM_WAKE_QUEUE"
+    cat "$drained" > "$restore" || status=1
   fi
+  if [ "$status" = 0 ]; then
+    [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE" || status=1
+  fi
+  [ "$status" = 0 ] || rm -f "$restore"
+  return "$status"
 }
 
 fm_wake_print_deduped() {
