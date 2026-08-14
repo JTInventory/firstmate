@@ -22,7 +22,11 @@ present_inactive_row() {
     printf '%s\n' "$row" || return 1
     if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-complete "$key" "$row"; then
-      return 0
+      if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        presented "$key" "$row" >/dev/null 2>&1; then
+        return 0
+      fi
+      return 3
     fi
     if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       presented "$key" "$row" >/dev/null 2>&1; then

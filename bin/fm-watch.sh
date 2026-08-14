@@ -596,11 +596,14 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  drain_output=
   drain_status=0
-  FM_WAKE_DRAIN_DIRECT=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1 || drain_status=$?
+  drain_output=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
+    FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" "$SCRIPT_DIR/fm-wake-drain.sh") \
+    || drain_status=$?
   case "$drain_status" in
-    0) ;;
-    3) wake "check: wake queue drained" ;;
+    0) [ -n "$drain_output" ] && wake "$drain_output" ;;
+    3) exit 3 ;;
     *) exit "$drain_status" ;;
   esac
 
