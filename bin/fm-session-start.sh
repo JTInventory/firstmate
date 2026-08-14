@@ -374,7 +374,10 @@ else
         IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
         case "$_key" in
           inactive-outcome:*)
-            if ! "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$drain_row" >/dev/null 2>&1; then
+            if ! "$SCRIPT_DIR/fm-inactive-reconcile.sh" caller-output-complete \
+              "$_key" "$drain_row" "$$" >/dev/null 2>&1; then
+              printf 'warning: inactive outcome output confirmation deferred for %s\n' "$_key" >&2
+            elif ! "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$drain_row" >/dev/null 2>&1; then
               printf 'warning: inactive outcome confirmation deferred for %s\n' "$_key" >&2
             fi
             ;;

@@ -87,10 +87,12 @@ shift
 MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
+PENDING_ROUTE_COMMITTED=0
 TARGET_TASK_ID=
 TARGET_HOME=
 
 clear_new_pending_route() {
+  [ "$PENDING_ROUTE_COMMITTED" = 1 ] || return 0
   if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
     && [ -n "$TARGET_HOME" ]; then
     fm_pending_reply_secondmate_route_clear_undelivered "$TARGET_HOME" "$PENDING_REPLY_CORR"
@@ -173,8 +175,11 @@ else
       exit 1
     fi
     TARGET_HOME=$(fm_meta_get "$meta" home)
-    if ! fm_pending_reply_secondmate_route_write \
+    if fm_pending_reply_secondmate_route_write \
       "$TARGET_HOME" "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$PENDING_REPLY_CORR"; then
+      PENDING_ROUTE_COMMITTED=${FM_PENDING_REPLY_ROUTE_COMMITTED:-0}
+    else
+      PENDING_ROUTE_COMMITTED=${FM_PENDING_REPLY_ROUTE_COMMITTED:-0}
       discard_new_pending_reply || exit 1
       echo "error: failed to bind the secondmate pending-reply route for $TARGET_TASK_ID" >&2
       exit 1

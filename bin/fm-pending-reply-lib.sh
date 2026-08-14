@@ -81,6 +81,7 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='(^|[^[:alnum:]_])corr=([A-Fa-f0-9]{16})($|[^[:alnum:]_])'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
+FM_PENDING_REPLY_ROUTE_COMMITTED=0
 
 fm_pending_reply_now() {
   if [ -n "${FM_PENDING_REPLY_NOW:-}" ]; then
@@ -589,6 +590,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   local marker home_marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
   local existing_schema existing_id existing_home existing_status existing_corr existing_rec existing_delivered route_mode
   local history_marker
+  FM_PENDING_REPLY_ROUTE_COMMITTED=0
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
@@ -654,6 +656,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
             || route_status=1
         fi
         if [ "$route_status" = 0 ]; then
+          FM_PENDING_REPLY_ROUTE_COMMITTED=1
           rm -f "$tmp"
           fm_lock_release "$route_lock" || return 1
           return 0
@@ -688,7 +691,11 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
     fi
   fi
   if [ "$route_status" = 0 ]; then
-    mv -f "$tmp" "$marker" || route_status=1
+    if mv -f "$tmp" "$marker"; then
+      FM_PENDING_REPLY_ROUTE_COMMITTED=1
+    else
+      route_status=1
+    fi
   fi
   [ "$route_status" = 0 ] || rm -f "$tmp"
   fm_lock_release "$route_lock" || route_status=1

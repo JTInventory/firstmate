@@ -349,6 +349,8 @@ wake() {
     IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$row"
     case "$_key" in
       inactive-outcome:*)
+        "$SCRIPT_DIR/fm-inactive-reconcile.sh" caller-output-complete \
+          "$_key" "$row" "$WATCHER_PID" >/dev/null 2>&1 || exit 1
         confirm_status=0
         "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$row" >/dev/null 2>&1 || confirm_status=$?
         [ "$confirm_status" = 0 ] || [ "$confirm_status" = 1 ] || exit "$confirm_status"

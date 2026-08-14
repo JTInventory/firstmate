@@ -337,16 +337,13 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
         return 5
       fi
       defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
-      if [ "$(claim_field "$claim" output_started 2>/dev/null || true)" = 1 ] \
-        && [ "$defer_ack" = 1 ]; then
+      if [ "$defer_ack" = 1 ]; then
         defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
         defer_generation_start=$(claim_field "$claim" defer_generation_start 2>/dev/null || true)
         if claim_defer_generation_live "$defer_generation" "$defer_generation_start"; then
           return 4
         fi
-        claim_mark_output_complete "$key" "$row" || return 2
-        claim_mark_presented "$key" "$row" || return 2
-        return 5
+        return 0
       fi
     fi
     if [ "$state" = presented ]; then
@@ -443,14 +440,27 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
 }
 
 claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim state tmp line seen_output=0 seen_complete=0
-  drain_claim_owner "$row" || return 2
+  local key=$1 row=$2 owner_required=${3:-1} expected_generation=${4:-}
+  local fp claim state tmp line seen_output=0 seen_complete=0
+  case "$owner_required" in
+    1) drain_claim_owner "$row" || return 2 ;;
+    0)
+      case "$expected_generation" in ''|*[!0-9]*|0) return 2 ;; esac
+      ;;
+    *) return 2 ;;
+  esac
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   claim=$(claim_path "$fp")
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   [ "$state" = presenting ] || return 2
+  if [ "$owner_required" = 0 ]; then
+    [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ] || return 2
+    [ "$(claim_field "$claim" defer_generation 2>/dev/null || true)" = "$expected_generation" ] || return 2
+    fm_pid_start_matches_stored "$expected_generation" \
+      "$(claim_field "$claim" defer_generation_start 2>/dev/null || true)" || return 2
+  fi
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -1176,6 +1186,14 @@ confirm_receipt() {
   return "$status"
 }
 
+caller_output_complete() {
+  local status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 2
+  claim_mark_output_complete "$1" "$2" 0 "$3" || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=2
+  return "$status"
+}
+
 secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent-status> <corr> <outcome> <task-id> <fingerprint>
   local secondmate_home=$1 parent_task_id=$2 parent_home=$3 parent_status=$4 corr=$5 outcome=$6 task_id=$7 fp=$8
   local parent_state token route_lock route_marker route_history line phase rc=0 route_lock_held=0 marker_present=0 report_recorded=0
@@ -1374,6 +1392,10 @@ case "${1:-}" in
   output-complete)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
     claim_mark_output_complete "$2" "$3"
+    ;;
+  caller-output-complete)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || exit 2
+    caller_output_complete "$2" "$3" "$4"
     ;;
   presented)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
