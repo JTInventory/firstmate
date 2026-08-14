@@ -498,7 +498,8 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   local secondmate_home=$1 parent_home=$2 parent_state=$3 secondmate_id=$4 corr=$5
   local marker home_marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
   local existing_schema existing_id existing_home existing_status existing_corr
-  local existing_state existing_record existing_phase
+  local existing_state existing_record existing_phase existing_active_dir existing_history_dir
+  local existing_active_record existing_history_record
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
@@ -575,10 +576,22 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
         route_status=1
       fi
       if [ "$route_status" = 0 ]; then
-        if [ -f "$(fm_pending_reply_active_path "$existing_state" "$existing_corr")" ]; then
-          existing_record=$(fm_pending_reply_active_path "$existing_state" "$existing_corr")
-        elif [ -f "$(fm_pending_reply_history_dir "$existing_state")/$existing_corr" ]; then
-          existing_record="$(fm_pending_reply_history_dir "$existing_state")/$existing_corr"
+        existing_active_dir=$(fm_pending_reply_dir "$existing_state")
+        [ -d "$existing_active_dir" ] && [ ! -L "$existing_active_dir" ] || route_status=1
+        existing_history_dir=$(fm_pending_reply_history_dir "$existing_state")
+        if [ -e "$existing_history_dir" ] || [ -L "$existing_history_dir" ]; then
+          [ -d "$existing_history_dir" ] && [ ! -L "$existing_history_dir" ] || route_status=1
+        fi
+      fi
+      if [ "$route_status" = 0 ]; then
+        existing_active_record="$existing_active_dir/$existing_corr"
+        existing_history_record="$existing_history_dir/$existing_corr"
+        if [ -e "$existing_active_record" ] || [ -L "$existing_active_record" ]; then
+          [ -f "$existing_active_record" ] && [ ! -L "$existing_active_record" ] || route_status=1
+          [ "$route_status" = 0 ] && existing_record="$existing_active_record"
+        elif [ -e "$existing_history_record" ] || [ -L "$existing_history_record" ]; then
+          [ -f "$existing_history_record" ] && [ ! -L "$existing_history_record" ] || route_status=1
+          [ "$route_status" = 0 ] && existing_record="$existing_history_record"
         else
           route_status=1
         fi
@@ -604,6 +617,8 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
 
 fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
   local secondmate_home=$1 corr=$2 marker route_lock existing_corr status=0
+  [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
+  [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1

@@ -435,6 +435,29 @@ test_presenting_claim_recovers_before_output() {
   pass "presenting inactive claims recover before output"
 }
 
+test_output_started_claim_is_not_reprinted() {
+  local dir root home fakebin state fingerprint row
+  new_case output-started-claim
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'output-started-x1|output-started-inc|done|state: done · source: pane · output started')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=output-started-x1 \
+    incarnation=output-started-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · output started' kind=ship
+  row='2	2	check	inactive-outcome:'"$fingerprint"$'\tpost-output row'
+  printf 'schema=fm-inactive-outcome-claim.v1\nfingerprint=%s\nrow=1\t1\tcheck\tinactive-outcome:%s\told row\nstate=presenting\noutput_started=1\ncreated_epoch=1\n' \
+    "$fingerprint" "$fingerprint" > "$state/terminal-outcomes/.$fingerprint.claim"
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  drain "$root" "$home" "$fakebin" >"$dir/output-started.out" \
+    || fail "drain did not recover an output-started claim"
+  [ ! -s "$dir/output-started.out" ] || fail "output-started claim was printed a second time"
+  [ -e "$state/terminal-outcomes/$fingerprint.presented" ] || fail "output-started claim did not acknowledge its receipt"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "output-started claim was not retired"
+  pass "output-started inactive claims do not reprint after a drain crash"
+}
+
 test_scan_failure_retries_without_advancing_cadence() {
   local dir root home fakebin state wake_dir wake_removed
   new_case scan-failure
@@ -700,6 +723,21 @@ test_legacy_metadata_uses_stable_fallback() {
   pass "legacy metadata receives a stable fallback incarnation"
 }
 
+test_empty_spawn_incarnation_is_rejected() {
+  local dir root home fakebin state
+  new_case empty-spawn-incarnation
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" empty-inc-x1 empty-inc
+  sed -i 's/^spawn_incarnation=.*/spawn_incarnation=/' "$state/empty-inc-x1.meta"
+  export FM_FAKE_CREW_STATE_EMPTY_INC_X1='state: done · source: pane · malformed incarnation'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "empty incarnation scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "explicit empty incarnation used the legacy fallback"
+  [ "$(queue_count "$state")" = 0 ] || fail "explicit empty incarnation created a wake"
+  unset FM_FAKE_CREW_STATE_EMPTY_INC_X1
+  pass "explicit empty spawn incarnations fail closed"
+}
+
 test_relaunch_and_teardown_races_recheck_under_spawn_lock() {
   local dir root home fakebin state holder scanner ready release
   new_case races
@@ -833,6 +871,7 @@ test_status_log_terminal_is_not_replayed() {
 
 test_valid_secondmate_route_reports_parent_once() {
   local dir root home fakebin state child_home child_state parent_status corr rec outside send_out
+  local outside_parent outside_parent_link
   local history_corr history_record history_status
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
@@ -876,6 +915,17 @@ SH
   [ "$(receipt_value "$rec" parent_corr)" = "$corr" ] || fail "secondmate receipt did not persist its parent correlation"
   [ "$(receipt_value "$rec" parent_home)" = "$home" ] || fail "secondmate receipt did not persist its parent home"
   [ "$(receipt_value "$rec" parent_status)" = "$parent_status" ] || fail "secondmate receipt did not persist its parent status path"
+  outside_parent="$dir/outside-parent"
+  outside_parent_link="$dir/outside-parent-link"
+  mkdir -p "$outside_parent/state"
+  ln -s "$outside_parent" "$outside_parent_link"
+  sed -i "s|^parent_home=.*|parent_home=$outside_parent_link|" "$rec"
+  if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
+    fail "secondmate acknowledgement accepted a symlinked parent home"
+  fi
+  [ ! -e "$outside_parent/state/pending-replies/.txn-$corr.lock" ] \
+    || fail "secondmate acknowledgement acquired a transaction lock before path validation"
+  sed -i "s|^parent_home=.*|parent_home=$home|" "$rec"
   outside="$dir/outside-status"
   printf 'outside\n' > "$outside"
   rm -f "$parent_status"
@@ -941,6 +991,7 @@ SH
 
 test_concurrent_secondmate_routes_are_rejected() {
   local dir root home fakebin state child_home child_state marker corr_one corr_two outside existing_real existing_link
+  local existing_record record_backup existing_history history_backup clear_real clear_link
   new_case secondmate-route-concurrent
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -984,6 +1035,29 @@ test_concurrent_secondmate_routes_are_rejected() {
     fail "existing secondmate home symlink was accepted during route replacement"
   fi
   rm -f "$marker"
+  existing_record="$existing_real/state/pending-replies/$corr_one"
+  record_backup="$dir/record-backup"
+  mv "$existing_record" "$record_backup"
+  ln -s "$record_backup" "$existing_record"
+  printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-concurrent\nparent_home=%s\nparent_status=%s\ncorr_id=%s\n' \
+    "$existing_real" "$existing_real/state/sm-concurrent.status" "$corr_one" > "$marker"
+  if route_write "$corr_two"; then
+    fail "symlinked active secondmate record was accepted during route replacement"
+  fi
+  rm -f "$marker" "$existing_record"
+  mv "$record_backup" "$existing_record"
+  existing_history="$existing_real/state/pending-reply-history/$corr_one"
+  history_backup="$dir/history-backup"
+  mkdir -p "$existing_real/state/pending-reply-history"
+  mv "$existing_record" "$history_backup"
+  ln -s "$history_backup" "$existing_history"
+  printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-concurrent\nparent_home=%s\nparent_status=%s\ncorr_id=%s\n' \
+    "$existing_real" "$existing_real/state/sm-concurrent.status" "$corr_one" > "$marker"
+  if route_write "$corr_two"; then
+    fail "symlinked history secondmate record was accepted during route replacement"
+  fi
+  rm -f "$marker" "$existing_history"
+  mv "$history_backup" "$existing_record"
   route_write "$corr_one" || fail "initial secondmate route was not written"
   marker_before=$(cat "$marker")
   outside="$dir/temp-target"
@@ -999,6 +1073,18 @@ test_concurrent_secondmate_routes_are_rejected() {
     fail "concurrent secondmate route was silently replaced"
   fi
   [ "$(cat "$marker")" = "$marker_before" ] || fail "concurrent route rejection changed the active marker"
+  clear_real="$dir/clear-real"
+  clear_link="$dir/clear-link"
+  mkdir -p "$clear_real/state"
+  printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-concurrent\nparent_home=%s\nparent_status=%s\ncorr_id=%s\n' \
+    "$home" "$state/sm-concurrent.status" "$corr_one" > "$clear_real/state/.fm-jt-parent-route"
+  ln -s "$clear_real" "$clear_link"
+  if env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_clear "$2" "$3"' \
+    _ "$ROOT" "$clear_link" "$corr_one"; then
+    fail "route cleanup followed a symlinked secondmate home"
+  fi
+  [ -e "$clear_real/state/.fm-jt-parent-route" ] || fail "unsafe route cleanup removed the target marker"
   pass "concurrent secondmate routes fail closed without overwriting"
 }
 
@@ -1086,6 +1172,7 @@ test_find_enumeration_respects_scan_budget
 test_ack_recomputes_fingerprint_from_receipt_fields
 test_reserved_claim_recovers_to_a_new_wake_row
 test_presenting_claim_recovers_before_output
+test_output_started_claim_is_not_reprinted
 test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
@@ -1093,6 +1180,7 @@ test_spawn_publishes_incarnation_token
 test_session_start_drains_before_inactive_scan
 test_watcher_runs_inactive_cadence
 test_legacy_metadata_uses_stable_fallback
+test_empty_spawn_incarnation_is_rejected
 test_relaunch_and_teardown_races_recheck_under_spawn_lock
 test_parent_home_secondmate_records_are_skipped
 test_herdr_identity_and_default_captain_refusal

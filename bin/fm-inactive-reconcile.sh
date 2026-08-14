@@ -219,7 +219,7 @@ claim_validate() {  # <claim> <fingerprint> <row>
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim tmp state existing old_row line
+  local key=$1 row=$2 fp claim tmp state existing old_row line output_started
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -242,6 +242,13 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
       [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
       mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+    fi
+    if [ "$state" = presenting ]; then
+      output_started=$(claim_field "$claim" output_started 2>/dev/null || true)
+      if [ "$output_started" = 1 ]; then
+        claim_mark_presented "$key" "$row" || return 2
+        return 1
+      fi
     fi
     [ "$state" = presented ] && return 1
     return 0
@@ -268,7 +275,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
 }
 
 claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim state tmp line
+  local key=$1 row=$2 fp claim state tmp line seen_pid=0 seen_output=0
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -276,15 +283,43 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   case "$state" in
-    presenting) return 0 ;;
-    reserved) ;;
+    presenting|reserved) ;;
     *) return 2 ;;
   esac
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in state=*) printf 'state=presenting\n' ;; *) printf '%s\n' "$line" ;; esac
+    case "$line" in
+      state=*) printf 'state=presenting\n' ;;
+      presentation_pid=*) printf 'presentation_pid=%s\n' "${BASHPID:-$$}"; seen_pid=1 ;;
+      output_started=*) printf 'output_started=0\n'; seen_output=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
   done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  [ "$seen_pid" = 1 ] || printf 'presentation_pid=%s\n' "${BASHPID:-$$}" >> "$tmp"
+  [ "$seen_output" = 1 ] || printf 'output_started=0\n' >> "$tmp"
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+}
+
+claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim state tmp line seen_output=0
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  [ "$state" = presenting ] || return 2
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -437,18 +472,18 @@ republish_existing_receipt_wake() {
 }
 
 read_incarnation() {  # <meta> <id>
-  local meta=$1 id=$2 token tasktmp window worktree seed rc
+  local meta=$1 id=$2 token tasktmp window worktree seed rc token_present=0
   if token=$(meta_value_unique "$meta" spawn_incarnation); then
-    :
+    token_present=1
   else
     rc=$?
     [ "$rc" = 1 ] || return 1
     token=
   fi
-  case "$token" in
-    ''|legacy-unknown|*[!A-Za-z0-9._:-]*) token= ;;
-  esac
-  if [ -n "$token" ]; then
+  if [ "$token_present" = 1 ]; then
+    case "$token" in
+      ''|legacy-unknown|*[!A-Za-z0-9._:-]*) return 1 ;;
+    esac
     printf '%s' "$token"
     return 0
   fi
@@ -623,6 +658,8 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
 secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent-status> <corr> <outcome> <task-id> <fingerprint>
   local secondmate_home=$1 parent_task_id=$2 parent_home=$3 parent_status=$4 corr=$5 outcome=$6 task_id=$7 fp=$8
   local parent_state token rc=0 line
+  fm_pending_reply_secondmate_receipt_validate \
+    "$secondmate_home" "$parent_task_id" "$parent_home" "$parent_status" "$corr" || return 2
   parent_state="$parent_home/state"
   fm_pending_reply_txn_lock_acquire "$parent_state" "$corr" token || return 2
   if ! fm_pending_reply_secondmate_receipt_validate \
@@ -757,6 +794,10 @@ case "${1:-}" in
   presenting)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
     claim_mark_presenting "$2" "$3"
+    ;;
+  output-started)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    claim_mark_output_started "$2" "$3"
     ;;
   presented)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
