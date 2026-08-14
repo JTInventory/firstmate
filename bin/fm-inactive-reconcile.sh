@@ -16,6 +16,7 @@ OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_CURSOR="$STATE/.inactive-outcome-reconcile.cursor"
 REPORTED_ROUTE_CURSOR="$STATE/.reported-secondmate-route-repair.cursor"
+PENDING_RECEIPT_CURSOR="$STATE/.pending-receipt-republish.cursor"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 
 inactive_state_path_is_safe() {
@@ -42,6 +43,7 @@ inactive_state_preflight() {
   inactive_state_path_is_safe "$SCAN_MARKER" file || return 1
   inactive_state_path_is_safe "$SCAN_CURSOR" file || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_CURSOR" file || return 1
+  inactive_state_path_is_safe "$PENDING_RECEIPT_CURSOR" file || return 1
   inactive_state_path_is_safe "$FM_WAKE_QUEUE" file || return 1
 }
 
@@ -82,6 +84,7 @@ bounded_secs() {
 RECONCILE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_SECS:-900}" 900 60 1800)
 SCAN_BUDGET_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" 10 1 300)
 REPORTED_ROUTE_REPAIR_LIMIT=$(bounded_secs "${FM_REPORTED_ROUTE_REPAIR_LIMIT:-32}" 32 1 256)
+PENDING_RECEIPT_REPUBLISH_LIMIT=$(bounded_secs "${FM_PENDING_RECEIPT_REPUBLISH_LIMIT:-32}" 32 1 256)
 
 meta_value() {  # <meta> <key>
   awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
@@ -1060,18 +1063,73 @@ republish_pending_receipt() {
 
 republish_pending_receipts() {
   local scan_started=$1 pending now remaining status=0
+  local cursor='' pass started=1 boundary='' stop_after=0
+  local base last='' processed=0 cursor_tmp
+  local LC_ALL=C
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
-  for pending in "$OUTCOME_DIR"/*.pending; do
-    [ -e "$pending" ] || [ -L "$pending" ] || continue
-    now=$(date +%s)
-    remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
-    [ "$remaining" -gt 0 ] || return 1
-    if ! FM_LOCK_WAIT_SECS="$remaining" republish_pending_receipt "$pending"; then
-      status=1
-    elif [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
-      printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$ID" "$OUTCOME" "$FP"
+  cursor=$(cat "$PENDING_RECEIPT_CURSOR" 2>/dev/null || true)
+  case "$cursor" in
+    '') ;;
+    *.pending)
+      base=${cursor%.pending}
+      case "$base" in ''|*[!A-Fa-f0-9]*) cursor=;; esac
+      ;;
+    *) cursor=;;
+  esac
+  [ -n "$cursor" ] && started=0
+  for pass in 1 2; do
+    if [ "$pass" = 2 ]; then
+      [ -n "$cursor" ] || break
+      started=1
+      stop_after=0
     fi
+    for pending in "$OUTCOME_DIR"/*.pending; do
+      [ -e "$pending" ] || [ -L "$pending" ] || continue
+      base=${pending##*/}
+      if [ "$pass" = 1 ] && [ -n "$cursor" ] && [ "$started" = 0 ]; then
+        if [ "$base" = "$cursor" ]; then
+          started=1
+          continue
+        fi
+        if [[ "$base" > "$cursor" ]]; then
+          started=1
+          [ -n "$boundary" ] || boundary=$base
+        else
+          continue
+        fi
+      fi
+      if [ "$pass" = 2 ] && [ -n "$boundary" ] && [ "$base" = "$boundary" ]; then
+        break
+      fi
+      now=$(date +%s)
+      remaining=$((SCAN_BUDGET_SECS - (now - scan_started)))
+      [ "$remaining" -gt 0 ] || { status=1; break 2; }
+      if ! FM_LOCK_WAIT_SECS="$remaining" republish_pending_receipt "$pending"; then
+        status=1
+      elif [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
+        printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$ID" "$OUTCOME" "$FP"
+      fi
+      last=$base
+      processed=$((processed + 1))
+      if [ "$pass" = 2 ] && [ "$base" = "$cursor" ]; then
+        stop_after=1
+      fi
+      [ "$processed" -lt "$PENDING_RECEIPT_REPUBLISH_LIMIT" ] || break 2
+      [ "$stop_after" = 0 ] || break
+    done
   done
+  if [ "$processed" -gt 0 ]; then
+    if cursor_tmp=$(mktemp "$STATE/.pending-receipt-republish.cursor.XXXXXX"); then
+      if [ ! -f "$cursor_tmp" ] || [ -L "$cursor_tmp" ] \
+        || ! printf '%s\n' "$last" > "$cursor_tmp" \
+        || ! mv -f "$cursor_tmp" "$PENDING_RECEIPT_CURSOR"; then
+        status=1
+        rm -f "$cursor_tmp"
+      fi
+    else
+      status=1
+    fi
+  fi
   return "$status"
 }
 
@@ -1104,6 +1162,60 @@ read_incarnation() {  # <meta> <id>
   fi
   digest=$(hash_text "$seed") || return 1
   printf 'legacy-%s' "${digest:0:32}"
+}
+
+terminal_outcome_surfaced() {
+  local id=$1 meta=$2 outcome=$3 key raw marker marker_snapshot marker_spawn
+  local current_spawn current_tasktmp current_window current_worktree
+  key=$(printf '%s' "$id" | tr ':/.' '___')
+  raw="$STATE/.hb-surfaced-$key"
+  marker="$STATE/.hb-terminal-surfaced-$key"
+  [ -f "$raw" ] && [ ! -L "$raw" ] || return 1
+  raw=$(cat "$raw" 2>/dev/null || true)
+  [ -n "$raw" ] || return 1
+  case "$raw" in
+    done:*|failed:*) ;;
+    *) return 1 ;;
+  esac
+  [ "${raw%%:*}" = "$outcome" ] || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  awk -F= '
+    BEGIN {
+      allowed["schema"]=1; allowed["snapshot"]=1; allowed["spawn_incarnation"]=1
+      allowed["tasktmp"]=1; allowed["window"]=1; allowed["worktree"]=1
+      required["schema"]=1; required["snapshot"]=1; required["spawn_incarnation"]=1
+      required["tasktmp"]=1; required["window"]=1; required["worktree"]=1
+      valid=1
+    }
+    /^[^=]+=/{
+      key=$1
+      if (!(key in allowed) || (key in seen)) valid=0
+      seen[key]=1
+      values[key]=substr($0, index($0, "=") + 1)
+      next
+    }
+    { valid=0 }
+    END {
+      for (key in required) if (!(key in seen)) valid=0
+      exit !(valid && values["schema"] == "fm-hb-terminal-surfaced.v1")
+    }
+  ' "$marker" 2>/dev/null || return 1
+  marker_snapshot=$(meta_value_unique "$marker" snapshot 2>/dev/null) || return 1
+  [ "$marker_snapshot" = "$raw" ] || return 1
+  marker_spawn=$(meta_value_unique "$marker" spawn_incarnation 2>/dev/null) || return 1
+  current_spawn=
+  if current_spawn=$(meta_value_unique "$meta" spawn_incarnation 2>/dev/null); then
+    [ "$marker_spawn" = "$current_spawn" ] || return 1
+  else
+    [ -z "$marker_spawn" ] || return 1
+    current_tasktmp=$(meta_value "$meta" tasktmp)
+    current_window=$(meta_value "$meta" window)
+    current_worktree=$(meta_value "$meta" worktree)
+    [ "$(meta_value_unique "$marker" tasktmp 2>/dev/null)" = "$current_tasktmp" ] || return 1
+    [ "$(meta_value_unique "$marker" window 2>/dev/null)" = "$current_window" ] || return 1
+    [ "$(meta_value_unique "$marker" worktree 2>/dev/null)" = "$current_worktree" ] || return 1
+  fi
+  return 0
 }
 
 child_cleanup() {
@@ -1171,6 +1283,7 @@ reconcile_child() {
   SNAPSHOT=$snapshot
   SOURCE=$source
   KIND=${kind:-ship}
+  terminal_outcome_surfaced "$id" "$meta" "$outcome" && return 0
   is_secondmate_home
   route_rc=$?
   case "$route_rc" in

@@ -520,6 +520,7 @@ fm_pending_reply_record_validate() {  # <record-path> <state-dir> <corr-id> <tas
       exit !valid
     }
   ' "$rec" 2>/dev/null || return 1
+  [ "$(fm_pending_reply_get "$rec" schema)" = fm-pending-reply.v1 ] || return 1
   printf '%s' "$wanted_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_abs=$(cd "$state" 2>/dev/null && pwd -P) || return 1

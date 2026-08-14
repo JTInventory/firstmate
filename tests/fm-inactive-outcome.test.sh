@@ -1239,7 +1239,7 @@ SH
 }
 
 test_watcher_runs_inactive_cadence() {
-  local dir root home fakebin state out second_out third_out status fingerprint
+  local dir root home fakebin state out second_out status fingerprint
   new_case watcher-wiring
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1277,6 +1277,7 @@ SH
     || fail "watcher left the existing wake queued"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher scanned inactive outcomes before draining the queued wake"
 
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
   second_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
@@ -1288,25 +1289,10 @@ SH
     "$root/bin/fm-watch.sh" 2>&1)
   status=$?
   [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the inactive outcome wake"
-  printf '%s\n' "$second_out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
-    || fail "watcher did not surface the inactive reconciliation result"
-  [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher cadence did not create the inactive receipt"
-  [ "$(queue_count "$state")" = 1 ] || fail "watcher cadence did not retain exactly one inactive outcome wake"
-
-  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
-  third_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
-    FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
-    FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 FM_FAKE_PANE_PATH="$home" \
-    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
-    "$root/bin/fm-watch.sh" 2>&1)
-  status=$?
-  [ "$status" = 0 ] || fail "watcher cadence failed while draining the inactive outcome wake"
-  printf '%s\n' "$third_out" | grep -F 'inactive-outcome:' >/dev/null \
-    || fail "watcher did not surface the exact inactive outcome wake"
+  printf '%s\n' "$second_out" | grep -F 'inactive-outcome:' >/dev/null \
+    || fail "watcher did not surface the exact inactive outcome wake in the scan turn"
+  ! printf '%s\n' "$second_out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
+    || fail "watcher emitted a second generic inactive wake"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher cadence did not acknowledge the inactive receipt"
   [ "$(receipt_count "$state" presented)" = 1 ] || fail "watcher cadence did not finalize the inactive receipt"
   [ "$(queue_count "$state")" = 0 ] || fail "watcher cadence did not consume the inactive outcome wake"
@@ -1315,19 +1301,36 @@ SH
   write_meta "$state" watcher-failure-x1 watcher-failure-inc
   export FM_FAKE_CREW_STATE_WATCHER_FAILURE_X1='state: failed · source: pane · watcher output failure'
   rm -f "$state/.inactive-outcome-reconcile"
-  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
-    FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
-    FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 FM_FAKE_PANE_PATH="$home" \
-    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
-    "$root/bin/fm-watch.sh" 2>&1)
+  mv "$root/bin/fm-wake-drain.sh" "$root/bin/fm-wake-drain.real"
+  cat > "$root/bin/fm-wake-drain.sh" <<SH
+#!/usr/bin/env bash
+set -u
+count_file="\${FM_STATE_OVERRIDE}/.drain-count"
+count=\$(cat "\$count_file" 2>/dev/null || echo 0)
+count=\$((count + 1))
+printf '%s\n' "\$count" > "\$count_file"
+if [ "\$count" = 2 ]; then
+  exit 3
+fi
+exec "$root/bin/fm-wake-drain.real"
+SH
+  chmod +x "$root/bin/fm-wake-drain.sh"
+  set +e
+  ( cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_INACTIVE_OUTCOME_SECS=60 FM_INACTIVE_OUTCOME_BUDGET_SECS=10 \
+      FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
+      FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 FM_FAKE_PANE_PATH="$home" \
+      FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 \
+      "$root/bin/fm-watch.sh" ) > "$dir/failed-scan.out" 2>&1
   status=$?
-  [ "$status" = 0 ] || fail "watcher cadence failed while queuing the failure fixture"
+  set -u
+  [ "$status" = 3 ] || fail "watcher did not fail closed when the same-turn drain failed"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "watcher failure fixture did not create one pending receipt"
   [ "$(queue_count "$state")" = 1 ] || fail "watcher failure fixture did not retain one wake"
+  mv "$root/bin/fm-wake-drain.real" "$root/bin/fm-wake-drain.sh"
   set +e
   ( cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
@@ -1346,6 +1349,55 @@ SH
     || fail "watcher did not retain a retryable presentation claim"
   unset FM_FAKE_CREW_STATE_WATCHER_X1 FM_FAKE_CREW_STATE_WATCHER_FAILURE_X1
   pass "watcher cadence gates acknowledgement on successful output"
+}
+
+test_surfaced_terminal_is_not_replayed() {
+  local dir root home fakebin state out status
+  new_case surfaced-terminal
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" surfaced-x1 surfaced-inc
+  printf 'done: surfaced terminal\n' > "$state/surfaced-x1.status"
+  : > "$state/surfaced-x1.turn-ended"
+  touch "$state/surfaced-x1.meta" "$state/surfaced-x1.status" "$state/surfaced-x1.turn-ended"
+  export FM_FAKE_CREW_STATE_SURFACED_X1='state: done · source: pane · surfaced terminal'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+  *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
+  *"#{window_name}"*) printf '%s\n' firstmate ;;
+  capture-pane) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCHER_HEARTBEAT=999999 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  [ "$status" = 0 ] || fail "watcher did not surface the terminal status: $out"
+  [ -f "$state/.hb-surfaced-surfaced-x1" ] || fail "watcher did not persist the surfaced status"
+  [ -f "$state/.hb-terminal-surfaced-surfaced-x1" ] || fail "watcher did not persist the incarnation-bound terminal marker"
+  set_old_mtime "$state/surfaced-x1.meta" "$state/surfaced-x1.status" "$state/surfaced-x1.turn-ended"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "already surfaced terminal outcome was replayed"
+  [ "$(queue_count "$state")" = 0 ] || fail "already surfaced terminal outcome queued a wake"
+  replace_field "$state/surfaced-x1.meta" spawn_incarnation resurfaced-inc
+  set_old_mtime "$state/surfaced-x1.meta" "$state/surfaced-x1.status" "$state/surfaced-x1.turn-ended"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "new incarnation was incorrectly suppressed by an old surface marker"
+  [ "$(queue_count "$state")" = 1 ] || fail "new incarnation did not queue its inactive wake"
+  unset FM_FAKE_CREW_STATE_SURFACED_X1
+  pass "terminal replay suppression is bound to surfaced status and incarnation"
 }
 
 test_legacy_metadata_uses_stable_fallback() {
@@ -1773,6 +1825,37 @@ test_reported_route_repair_is_bounded() {
     || fail "bounded reported-receipt maintenance discarded durable receipts"
   unset FM_REPORTED_ROUTE_REPAIR_LIMIT
   pass "reported route maintenance advances through bounded receipt batches"
+}
+
+test_pending_receipt_republish_is_bounded() {
+  local dir root home fakebin state fingerprint first second index
+  new_case pending-receipt-republish-limit
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  mkdir -p "$state/terminal-outcomes"
+  for index in 1 2 3; do
+    fingerprint=$(receipt_fingerprint "pending-limit-x${index}|pending-limit-inc-${index}|done|pending limit ${index}")
+    fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+      schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id="pending-limit-x${index}" \
+      incarnation="pending-limit-inc-${index}" outcome=done terminal_source=pane \
+      terminal_snapshot="pending limit ${index}" kind=ship
+  done
+  export FM_PENDING_RECEIPT_REPUBLISH_LIMIT=1
+  scan "$root" "$home" "$fakebin" --startup >/dev/null \
+    || fail "bounded pending-receipt maintenance failed on the first scan"
+  first=$(cat "$state/.pending-receipt-republish.cursor" 2>/dev/null || true)
+  [ -n "$first" ] || fail "bounded pending-receipt maintenance did not persist a cursor"
+  [ "$(queue_count "$state")" = 1 ] || fail "bounded pending-receipt maintenance exceeded its first batch"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null \
+    || fail "bounded pending-receipt maintenance failed on the second scan"
+  second=$(cat "$state/.pending-receipt-republish.cursor" 2>/dev/null || true)
+  [ -n "$second" ] && [ "$second" != "$first" ] \
+    || fail "bounded pending-receipt maintenance did not rotate its cursor"
+  [ "$(queue_count "$state")" = 2 ] || fail "bounded pending-receipt maintenance did not republish the next receipt"
+  [ "$(receipt_count "$state" pending)" = 3 ] \
+    || fail "bounded pending-receipt maintenance discarded durable receipts"
+  unset FM_PENDING_RECEIPT_REPUBLISH_LIMIT
+  pass "pending-receipt maintenance rotates bounded receipt batches"
 }
 
 test_secondmate_route_replacement_preserves_old_receipt() {
@@ -2436,6 +2519,8 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
   scan "$root" "$child_home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$child_state" pending)" = 0 ] || fail "malformed secondmate parent route was not fail-closed"
   [ ! -e "$parent_status" ] || fail "malformed secondmate route wrote parent status"
+  parent_status="$home/state/sm-x1.status"
+  : > "$parent_status"
   printf 'schema=fm-jt-parent-route.v1\nsecondmate_id=sm-x1\nparent_home=%s\nparent_status=%s\ncorr_id=0123456789abcdef\n' \
     "$home" "$parent_status" > "$child_state/.fm-jt-parent-route"
   fm_write_meta "$home/state/pending-replies/0123456789abcdef" \
@@ -2493,6 +2578,7 @@ test_reused_task_id_gets_new_fingerprint
 test_spawn_publishes_incarnation_token
 test_session_start_drains_before_inactive_scan
 test_watcher_runs_inactive_cadence
+test_surfaced_terminal_is_not_replayed
 test_legacy_metadata_uses_stable_fallback
 test_empty_spawn_incarnation_is_rejected
 test_relaunch_and_teardown_races_recheck_under_spawn_lock
@@ -2503,6 +2589,7 @@ test_status_log_terminal_is_not_replayed
 test_valid_secondmate_route_reports_parent_once
 test_reported_secondmate_route_repair_after_crash
 test_reported_route_repair_is_bounded
+test_pending_receipt_republish_is_bounded
 test_secondmate_route_replacement_preserves_old_receipt
 test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
