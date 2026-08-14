@@ -17,6 +17,7 @@ SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_CURSOR="$STATE/.inactive-outcome-reconcile.cursor"
 REPORTED_ROUTE_CURSOR="$STATE/.reported-secondmate-route-repair.cursor"
 PENDING_RECEIPT_CURSOR="$STATE/.pending-receipt-republish.cursor"
+MAINTENANCE_PHASE_CURSOR="$STATE/.inactive-outcome-maintenance.cursor"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 
 inactive_state_path_is_safe() {
@@ -44,6 +45,7 @@ inactive_state_preflight() {
   inactive_state_path_is_safe "$SCAN_CURSOR" file || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_CURSOR" file || return 1
   inactive_state_path_is_safe "$PENDING_RECEIPT_CURSOR" file || return 1
+  inactive_state_path_is_safe "$MAINTENANCE_PHASE_CURSOR" file || return 1
   inactive_state_path_is_safe "$FM_WAKE_QUEUE" file || return 1
 }
 
@@ -85,11 +87,12 @@ RECONCILE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_SECS:-900}" 900 60 1800)
 SCAN_BUDGET_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" 10 1 300)
 REPORTED_ROUTE_REPAIR_LIMIT=$(bounded_secs "${FM_REPORTED_ROUTE_REPAIR_LIMIT:-32}" 32 1 256)
 PENDING_RECEIPT_REPUBLISH_LIMIT=$(bounded_secs "${FM_PENDING_RECEIPT_REPUBLISH_LIMIT:-32}" 32 1 256)
-MAINTENANCE_RESERVE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_MAINTENANCE_RESERVE_SECS:-2}" 2 1 60)
-[ "$MAINTENANCE_RESERVE_SECS" -le "$SCAN_BUDGET_SECS" ] || MAINTENANCE_RESERVE_SECS=$SCAN_BUDGET_SECS
+MAINTENANCE_RESERVE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_MAINTENANCE_RESERVE_SECS:-2}" 2 0 60)
+[ "$MAINTENANCE_RESERVE_SECS" -lt "$SCAN_BUDGET_SECS" ] \
+  || MAINTENANCE_RESERVE_SECS=$((SCAN_BUDGET_SECS - 1))
 DIRECT_SCAN_BUDGET_SECS=$((SCAN_BUDGET_SECS - MAINTENANCE_RESERVE_SECS))
-MAINTENANCE_STAGE_SECS=$((MAINTENANCE_RESERVE_SECS / 2))
-[ "$MAINTENANCE_STAGE_SECS" -gt 0 ] || MAINTENANCE_STAGE_SECS=1
+MAINTENANCE_FIRST_STAGE_SECS=$((MAINTENANCE_RESERVE_SECS / 2))
+MAINTENANCE_SECOND_STAGE_SECS=$((MAINTENANCE_RESERVE_SECS - MAINTENANCE_FIRST_STAGE_SECS))
 
 meta_value() {  # <meta> <key>
   awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
@@ -537,6 +540,33 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
   [ ! -L "$claim" ] || return 2
   state=$(claim_validate "$claim" "$fp" "$row") || return 2
   [ "$state" = presenting ] || return 2
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+      output_emitted=*) printf 'output_emitted=0\n'; seen_emitted=1 ;;
+      output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
+  [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n' >> "$tmp"
+  [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+}
+
+claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim state tmp line seen_output=0 seen_emitted=0 seen_complete=0
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  [ "$state" = presenting ] || return 2
+  [ "$(claim_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
@@ -1490,6 +1520,7 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
 scan_locked() {
   local startup=${1:-0} marker_mtime now age cursor meta id started=1 cursor_seen=1
   local scan_started scan_deadline maintenance_deadline remaining rc complete=1 scan_failed=0 find_tmp maintenance_status=0
+  local maintenance_started maintenance_phase maintenance_next_phase maintenance_phase_tmp
   inactive_state_preflight || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
   now=$(date +%s)
@@ -1500,13 +1531,47 @@ scan_locked() {
   scan_started=$now
   scan_deadline=$((scan_started + DIRECT_SCAN_BUDGET_SECS))
   run_maintenance() {
-    maintenance_deadline=$(( $(date +%s) + MAINTENANCE_STAGE_SECS ))
-    if ! republish_pending_receipts "$maintenance_deadline"; then
-      maintenance_status=1
+    [ "$MAINTENANCE_RESERVE_SECS" -gt 0 ] || return 0
+    maintenance_started=$(date +%s)
+    if [ "$MAINTENANCE_RESERVE_SECS" = 1 ]; then
+      maintenance_phase=$(cat "$MAINTENANCE_PHASE_CURSOR" 2>/dev/null || true)
+      case "$maintenance_phase" in pending|reported) ;; *) maintenance_phase=pending ;; esac
+      if [ "$maintenance_phase" = pending ]; then
+        maintenance_deadline=$((maintenance_started + MAINTENANCE_RESERVE_SECS))
+        if ! republish_pending_receipts "$maintenance_deadline"; then
+          maintenance_status=1
+        fi
+        maintenance_next_phase=reported
+      else
+        maintenance_deadline=$((maintenance_started + MAINTENANCE_RESERVE_SECS))
+        if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
+          maintenance_status=1
+        fi
+        maintenance_next_phase=pending
+      fi
+      maintenance_phase_tmp=$(mktemp "$STATE/.inactive-outcome-maintenance.cursor.XXXXXX") || {
+        maintenance_status=1
+        return 0
+      }
+      if [ ! -f "$maintenance_phase_tmp" ] || [ -L "$maintenance_phase_tmp" ] \
+        || ! printf '%s\n' "$maintenance_next_phase" > "$maintenance_phase_tmp" \
+        || ! mv -f "$maintenance_phase_tmp" "$MAINTENANCE_PHASE_CURSOR"; then
+        maintenance_status=1
+        rm -f "$maintenance_phase_tmp"
+      fi
+      return 0
     fi
-    maintenance_deadline=$(( $(date +%s) + MAINTENANCE_STAGE_SECS ))
-    if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
-      maintenance_status=1
+    if [ "$MAINTENANCE_FIRST_STAGE_SECS" -gt 0 ]; then
+      maintenance_deadline=$((maintenance_started + MAINTENANCE_FIRST_STAGE_SECS))
+      if ! republish_pending_receipts "$maintenance_deadline"; then
+        maintenance_status=1
+      fi
+    fi
+    if [ "$MAINTENANCE_SECOND_STAGE_SECS" -gt 0 ]; then
+      maintenance_deadline=$((maintenance_started + MAINTENANCE_RESERVE_SECS))
+      if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
+        maintenance_status=1
+      fi
     fi
   }
   cursor=$(cat "$SCAN_CURSOR" 2>/dev/null || true)
@@ -1647,6 +1712,10 @@ case "${1:-}" in
   output-started)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
     claim_mark_output_started "$2" "$3"
+    ;;
+  output-emitted)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2
+    claim_mark_output_emitted "$2" "$3"
     ;;
   output-complete)
     [ -n "${2:-}" ] && [ -n "${3:-}" ] || exit 2

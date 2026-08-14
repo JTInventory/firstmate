@@ -475,6 +475,27 @@ SH
   pass "inactive enumeration is bounded by the per-scan budget"
 }
 
+test_minimum_budget_preserves_direct_scan() {
+  local dir root home fakebin state
+  new_case minimum-direct-scan
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" minimum-x1 minimum-inc
+  cat > "$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+printf '%s\0' "$1/minimum-x1.meta"
+SH
+  chmod +x "$fakebin/find"
+  export FM_FAKE_CREW_STATE_MINIMUM_X1='state: done · source: pane · minimum direct scan'
+  export FM_INACTIVE_OUTCOME_BUDGET_SECS=1
+  scan "$root" "$home" "$fakebin" --startup >/dev/null \
+    || fail "minimum scan budget skipped the direct child scan"
+  [ "$(receipt_count "$state" pending)" = 1 ] \
+    || fail "minimum scan budget did not reconcile the direct child"
+  unset FM_FAKE_CREW_STATE_MINIMUM_X1 FM_INACTIVE_OUTCOME_BUDGET_SECS
+  pass "minimum scan budget preserves the direct child scan"
+}
+
 test_ack_recomputes_fingerprint_from_receipt_fields() {
   local dir root home fakebin state rec fingerprint field tampered
   for field in task_id incarnation outcome terminal_snapshot kind; do
@@ -2662,6 +2683,7 @@ test_leading_zero_cadence_is_normalized
 test_oversized_cadence_is_clamped
 test_find_failure_propagates_without_advancing_scan
 test_find_enumeration_respects_scan_budget
+test_minimum_budget_preserves_direct_scan
 test_ack_recomputes_fingerprint_from_receipt_fields
 test_reserved_claim_recovers_to_a_new_wake_row
 test_presenting_claim_recovers_before_output
