@@ -594,7 +594,8 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
-  if ! wake_drain_out=$(FM_WAKE_DRAIN_DEFER_ACK=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1); then
+  if ! wake_drain_out=$(FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" \
+    "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1); then
     printf '%s\n' "$wake_drain_out" >&2
     exit 1
   fi

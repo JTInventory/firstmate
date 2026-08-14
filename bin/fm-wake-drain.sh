@@ -24,22 +24,17 @@ present_inactive_row() {
   (
     while [ ! -e "$go" ]; do
       if ! kill -0 "$DRAIN_PID" 2>/dev/null; then
-        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
-          FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-          output-started "$key" "$row" || exit 1
         break
       fi
       sleep 0.01
     done
-    printf '%s\n' "$row"
+    printf '%s\n' "$row" || exit 1
+    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
+      FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+      output-complete "$key" "$row" || exit 1
   ) &
   worker=$!
-  if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-started "$key" "$row"; then
-    status=1
-  fi
-  if [ "$status" = 0 ]; then
-    : > "$go" || status=1
-  fi
+  : > "$go" || status=1
   if [ "$status" = 0 ]; then
     wait "$worker" || worker_status=$?
     [ "$worker_status" = 0 ] || status=1
@@ -152,13 +147,15 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
             exit 1
           fi
           ;;
-        1|3) ;;
+        1|5) ;;
+        3|4) ;;
         *)
           restore_unprocessed_rows "$drain_line" || exit 1
           exit "$claim_status"
           ;;
       esac
-      if [ "$claim_status" != 3 ] && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
+      if [ "$claim_status" != 3 ] && [ "$claim_status" != 4 ] \
+        && { [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ] || [ "$claim_status" = 5 ]; }; then
         FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" "$drain_row" || {
           ack_status=$?
           # 1 means the receipt was already acknowledged or is not ours. Any
