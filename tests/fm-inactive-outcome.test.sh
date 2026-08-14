@@ -709,14 +709,13 @@ test_deferred_ack_retries_after_caller_crash() {
   [ "$(queue_count "$state")" = 1 ] || fail "pending deferred receipt did not get a retry wake"
   drain_output="$dir/retry.out"
   drain "$root" "$home" "$fakebin" >"$drain_output" \
-    || fail "retry drain did not recover the deferred presentation"
+    || fail "retry drain did not recover the deferred acknowledgement"
   [ -f "$state/terminal-outcomes/$fingerprint.presented" ] || fail "retry drain did not acknowledge the recovered receipt"
   [ ! -e "$state/terminal-outcomes/$fingerprint.pending" ] || fail "retry drain left the receipt pending"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] || fail "retry drain left the deferred claim"
-  grep -F 'task=deferred-x1' "$drain_output" >/dev/null \
-    || fail "retry drain did not re-present the deferred row"
+  [ ! -s "$drain_output" ] || fail "retry drain re-presented output already emitted before the caller crash"
   unset FM_FAKE_CREW_STATE_DEFERRED_X1
-  pass "deferred inactive receipts remain retryable until caller confirmation"
+  pass "deferred inactive receipts acknowledge stale post-output claims without replay"
 }
 
 test_scan_failure_retries_without_advancing_cadence() {
@@ -1728,6 +1727,114 @@ test_route_replacement_rejects_malformed_parent_record() {
   pass "route replacement validates the complete existing parent record"
 }
 
+test_recovery_route_reuse_validates_parent_record() {
+  local dir root home fakebin state child_home child_state marker corr
+  new_case recovery-route-reuse
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  marker="$child_state/.fm-jt-parent-route"
+  corr=0123456789abcdef
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$state/pending-replies"
+  printf 'sm-reuse\n' > "$child_home/.fm-secondmate-home"
+  fm_write_meta "$state/pending-replies/$corr" \
+    schema=fm-pending-reply.v1 corr_id="$corr" task_id=sm-reuse \
+    parent_home="$home" parent_status="$state/sm-reuse.status" \
+    delivered_epoch=1 phase=recovery_sending
+  route_write() {
+    env PATH="$fakebin:$PATH" FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c \
+      '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+      _ "$ROOT" "$child_home" "$home" "$state" sm-reuse "$1"
+  }
+  route_write "$corr" || fail "recovery route fixture was not written"
+  marker_before=$(cat "$marker")
+  replace_field "$state/pending-replies/$corr" task_id wrong-task
+  if route_write "$corr"; then
+    fail "recovery route reuse accepted a mismatched parent record"
+  fi
+  [ "$(cat "$marker")" = "$marker_before" ] || fail "mismatched recovery route reuse changed the marker"
+  if env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_corr_reusable "$2" "$3" sm-reuse' \
+    _ "$ROOT" "$state" "$corr"; then
+    fail "recovery resend reused a mismatched parent record"
+  fi
+  replace_field "$state/pending-replies/$corr" task_id sm-reuse
+  printf 'task_id=sm-reuse\n' >> "$state/pending-replies/$corr"
+  if route_write "$corr"; then
+    fail "recovery route reuse accepted duplicate parent fields"
+  fi
+  if env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_corr_reusable "$2" "$3" sm-reuse' \
+    _ "$ROOT" "$state" "$corr"; then
+    fail "recovery resend reused duplicate parent fields"
+  fi
+  pass "recovery route reuse validates the complete parent record"
+}
+
+test_failed_marked_send_restores_record_on_route_cleanup_failure() {
+  local dir root home fakebin state child_home child_state marker flag rec corr send_out
+  new_case failed-marked-cleanup
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  marker="$child_state/.fm-jt-parent-route"
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$child_home/projects"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  printf 'sm-cleanup\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-cleanup cleanup-inc secondmate tmux firstmate:fm-sm-cleanup
+  printf 'home=%s\n' "$child_home" >> "$state/sm-cleanup.meta"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  flag="$dir/fail-route-clear-once"
+  : > "$flag"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  if [ "$arg" = "${FM_TEST_CLEANUP_ROUTE:-}" ] && [ -e "${FM_TEST_CLEANUP_ROUTE_ONCE:-}" ]; then
+    /bin/rm -f "$FM_TEST_CLEANUP_ROUTE_ONCE"
+    exit 42
+  fi
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  export FM_TEST_CLEANUP_ROUTE="$marker" FM_TEST_CLEANUP_ROUTE_ONCE="$flag"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK \
+    -u FM_AGENT_OWNER_HOME -u FM_ROOT -u STATE -u FM_PENDING_REPLY_EXISTING_CORR \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-cleanup "cleanup request" 2>&1) && fail "marked send cleanup failure was hidden"
+  rec=$(direct_first_file "$state/pending-replies" '*')
+  [ -f "$rec" ] || fail "route cleanup failure orphaned the parent expectation"
+  corr=$(basename "$rec")
+  [ "$(receipt_value "$marker" corr_id)" = "$corr" ] || fail "route cleanup failure changed the active route"
+  [ ! -e "$rec.cleanup" ] || fail "route cleanup failure left a hidden record backup"
+  rm -f "$fakebin/rm"
+  unset FM_TEST_CLEANUP_ROUTE FM_TEST_CLEANUP_ROUTE_ONCE
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_discard_undelivered "$2" "$3" 1 && fm_pending_reply_secondmate_route_clear_undelivered "$4" "$3" && fm_pending_reply_finish_undelivered "$2" "$3"' \
+    _ "$ROOT" "$state" "$corr" "$child_home" \
+    || fail "marked send cleanup did not retry transactionally"
+  [ ! -e "$rec" ] || fail "marked send cleanup retry left the parent record"
+  [ ! -e "$marker" ] || fail "marked send cleanup retry left the route"
+  pass "failed marked sends restore parent records across route cleanup failures"
+}
+
 test_failed_concurrent_send_discards_only_new_record() {
   local dir root home fakebin state child_home child_state marker old_corr send_out
   new_case failed-concurrent-send
@@ -1885,6 +1992,8 @@ test_secondmate_route_replacement_preserves_old_receipt
 test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
 test_route_replacement_rejects_malformed_parent_record
+test_recovery_route_reuse_validates_parent_record
+test_failed_marked_send_restores_record_on_route_cleanup_failure
 test_failed_concurrent_send_discards_only_new_record
 test_drain_restores_only_unprocessed_rows
 test_malformed_or_missing_secondmate_route_fails_closed

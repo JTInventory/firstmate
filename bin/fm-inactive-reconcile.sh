@@ -297,16 +297,6 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     case "$state" in presented|presenting|reserved) ;; *) return 2 ;; esac
     old_row=$(claim_field "$claim" row)
     [ -n "$old_row" ] || return 2
-    if [ "$state" = presented ]; then
-      defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
-      if [ "$defer_ack" = 1 ]; then
-        defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
-        defer_generation_start=$(claim_field "$claim" defer_generation_start 2>/dev/null || true)
-        if claim_defer_generation_live "$defer_generation" "$defer_generation_start"; then
-          return 4
-        fi
-      fi
-    fi
     if [ "$old_row" != "$row" ]; then
       tmp=$(mktemp "$OUTCOME_DIR/.claim-row.XXXXXX") || return 2
       chmod 600 "$tmp" 2>/dev/null || true
@@ -315,6 +305,18 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
       [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
       mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+    fi
+    if [ "$state" = presented ]; then
+      defer_ack=$(claim_field "$claim" defer_ack 2>/dev/null || true)
+      if [ "$defer_ack" = 1 ]; then
+        defer_generation=$(claim_field "$claim" defer_generation 2>/dev/null || true)
+        defer_generation_start=$(claim_field "$claim" defer_generation_start 2>/dev/null || true)
+        if claim_defer_generation_live "$defer_generation" "$defer_generation_start"; then
+          return 4
+        fi
+        [ "$(claim_field "$claim" output_complete 2>/dev/null || true)" = 1 ] || return 2
+        return 5
+      fi
     fi
     if [ "$recorded_report" = 1 ]; then
       case "$state" in

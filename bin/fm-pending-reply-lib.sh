@@ -481,6 +481,75 @@ fm_pending_reply_get() {  # <record-path> <key>
   grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_pending_reply_record_validate() {  # <record-path> <state-dir> <corr-id> <task-id>
+  local rec=$1 state=$2 wanted_corr=$3 wanted_task=$4
+  local record_corr record_task parent_home parent_status parent_abs state_abs expected_status delivered phase
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  awk -F= '
+    BEGIN {
+      allowed["schema"]=1; allowed["corr_id"]=1; allowed["task_id"]=1
+      allowed["parent_home"]=1; allowed["parent_status"]=1
+      allowed["parent_status_scan_signature"]=1; allowed["request_summary"]=1
+      allowed["created_epoch"]=1; allowed["delivered_epoch"]=1; allowed["phase"]=1
+      allowed["turn_seen_busy"]=1; allowed["request_turn_completed_epoch"]=1
+      allowed["recovery_attempted_epoch"]=1; allowed["recovery_sender_pid"]=1
+      allowed["recovery_sender_identity"]=1; allowed["recovery_sent_epoch"]=1
+      allowed["recovery_delivery_outcome"]=1; allowed["recovery_turn_seen_busy"]=1
+      allowed["recovery_turn_completed_epoch"]=1; allowed["escalated_epoch"]=1
+      allowed["resolved_epoch"]=1; allowed["resolved_via"]=1; allowed["retired_epoch"]=1
+      allowed["retired_via"]=1; allowed["retired_from"]=1
+      allowed["retirement_staged_epoch"]=1; allowed["retirement_history_state"]=1
+      allowed["retirement_staged_from"]=1; allowed["retirement_source_state"]=1
+      allowed["wrong_home_hits"]=1; allowed["wrong_home_sightings"]=1
+      allowed["wrong_home_scan_signature"]=1; allowed["grace_secs"]=1
+      required["schema"]=1; required["corr_id"]=1; required["task_id"]=1
+      required["parent_home"]=1; required["parent_status"]=1
+      required["delivered_epoch"]=1; required["phase"]=1
+      valid=1
+    }
+    /^[^=]+=/{
+      key=$1
+      if (!(key in allowed) || (key in seen)) valid=0
+      seen[key]=1
+      next
+    }
+    { valid=0 }
+    END {
+      for (key in required) if (!(key in seen)) valid=0
+      exit !valid
+    }
+  ' "$rec" 2>/dev/null || return 1
+  printf '%s' "$wanted_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_abs=$(cd "$state" 2>/dev/null && pwd -P) || return 1
+  record_corr=$(fm_pending_reply_get "$rec" corr_id)
+  record_task=$(fm_pending_reply_get "$rec" task_id)
+  [ "$record_corr" = "$wanted_corr" ] || return 1
+  [ "$record_task" = "$wanted_task" ] || return 1
+  parent_home=$(fm_pending_reply_get "$rec" parent_home)
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  case "$parent_home:$parent_status" in /*:/*) ;; *) return 1 ;; esac
+  [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
+  parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
+  [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
+  [ "$parent_abs/state" = "$state_abs" ] || return 1
+  [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
+  expected_status="$state_abs/$wanted_task.status"
+  [ "$parent_status" = "$expected_status" ] || return 1
+  [ ! -L "$expected_status" ] || return 1
+  if [ -e "$expected_status" ]; then
+    [ -f "$expected_status" ] || return 1
+  fi
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  case "$delivered" in *[!0-9]*) return 1 ;; esac
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in
+    awaiting_report|delivery_unknown|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
 # JT secondmate outcome routing uses the existing parent-owned pending-reply
 # record and its corr= acknowledgement grammar. This small marker only binds a
 # secondmate home to that already-owned record; it is not a second parent
@@ -518,7 +587,7 @@ fm_pending_reply_secondmate_route_shape() {  # <marker-path>
 fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <parent-state> <secondmate-id> <corr-id>
   local secondmate_home=$1 parent_home=$2 parent_state=$3 secondmate_id=$4 corr=$5
   local marker home_marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
-  local existing_schema existing_id existing_home existing_status existing_corr
+  local existing_schema existing_id existing_home existing_status existing_corr existing_rec existing_delivered route_mode
   local history_marker
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
@@ -574,9 +643,21 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
         && [ "$existing_home" = "$parent_abs" ] \
         && [ "$existing_status" = "$status_path" ] \
         && [ "$existing_corr" = "$corr" ]; then
-        rm -f "$tmp"
-        fm_lock_release "$route_lock" || return 1
-        return 0
+        existing_rec=$(fm_pending_reply_active_path "$state_abs" "$existing_corr")
+        if ! fm_pending_reply_record_validate "$existing_rec" "$state_abs" "$existing_corr" "$secondmate_id"; then
+          route_status=1
+        else
+          existing_delivered=$(fm_pending_reply_get "$existing_rec" delivered_epoch)
+          route_mode=3
+          [ -n "$existing_delivered" ] && route_mode=4
+          fm_pending_reply_secondmate_route_validate "$secondmate_home" "$existing_corr" "$route_mode" \
+            || route_status=1
+        fi
+        if [ "$route_status" = 0 ]; then
+          rm -f "$tmp"
+          fm_lock_release "$route_lock" || return 1
+          return 0
+        fi
       fi
       if [ "$existing_schema" != fm-jt-parent-route.v1 ] \
         || [ "$existing_id" != "$secondmate_id" ]; then
@@ -800,15 +881,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
     return 1
   fi
   if [ -n "$rec" ]; then
-    [ "$(fm_pending_reply_get "$rec" schema)" = fm-pending-reply.v1 ] || return 1
-    record_task=$(fm_pending_reply_get "$rec" task_id)
-    record_home=$(fm_pending_reply_get "$rec" parent_home)
-    record_status=$(fm_pending_reply_get "$rec" parent_status)
-    record_corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ "$record_task" = "$secondmate_id" ] || return 1
-    [ "$record_home" = "$parent_abs" ] || return 1
-    [ "$record_status" = "$expected_status" ] || return 1
-    [ "$record_corr" = "$corr" ] || return 1
+    fm_pending_reply_record_validate "$rec" "$state_abs" "$corr" "$secondmate_id" || return 1
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
     phase=$(fm_pending_reply_get "$rec" phase)
     case "$phase" in
@@ -920,11 +993,12 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
 }
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
-  local state=$1 corr=$2 task_id=$3 rec phase
+  local state=$1 corr=$2 task_id=$3 rec phase delivered
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   rec=$(fm_pending_reply_active_path "$state" "$corr")
-  [ -f "$rec" ] || return 1
-  [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
+  fm_pending_reply_record_validate "$rec" "$state" "$corr" "$task_id" || return 1
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -n "$delivered" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
     awaiting_report|recovery_sending|recovery_sent) return 0 ;;
@@ -1189,14 +1263,57 @@ fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
 # Drop an undelivered expectation after a failed send so transport failure does
 # not masquerade as a missed report later.
 fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec delivered marker
+  local state=$1 corr=$2 keep_backup=${3:-0} rec delivered marker backup
+  case "$keep_backup" in 0|1) ;; *) return 1 ;; esac
   rec=$(fm_pending_reply_path "$state" "$corr")
-  [ -f "$rec" ] || return 0
+  backup="${rec}.cleanup"
+  [ ! -L "$rec" ] && [ ! -L "$backup" ] || return 1
+  if [ ! -e "$rec" ]; then
+    if [ "$keep_backup" = 0 ] && [ -e "$backup" ]; then
+      rm -f "$backup" || return 1
+    fi
+    return 0
+  fi
+  [ -f "$rec" ] || return 1
+  if [ -e "$backup" ]; then
+    [ -f "$backup" ] || return 1
+    cmp -s "$rec" "$backup" || return 1
+    rm -f "$backup" || return 1
+  fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
   rm -f "$marker" 2>/dev/null || true
-  rm -f "$rec"
+  if [ "$keep_backup" = 1 ]; then
+    ln "$rec" "$backup" || return 1
+  fi
+  rm -f "$rec" || return 1
+  [ "$keep_backup" = 1 ] || rm -f "$backup"
+}
+
+fm_pending_reply_restore_undelivered() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec backup
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  backup="${rec}.cleanup"
+  [ ! -L "$rec" ] && [ ! -L "$backup" ] || return 1
+  if [ -e "$rec" ]; then
+    [ -f "$rec" ] && [ -f "$backup" ] || return 1
+    cmp -s "$rec" "$backup" || return 1
+    rm -f "$backup"
+    return $?
+  fi
+  [ -f "$backup" ] || return 1
+  mv "$backup" "$rec"
+}
+
+fm_pending_reply_finish_undelivered() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec backup
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  backup="${rec}.cleanup"
+  [ ! -L "$backup" ] || return 1
+  [ -e "$backup" ] || return 0
+  [ -f "$backup" ] || return 1
+  rm -f "$backup"
 }
 
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
