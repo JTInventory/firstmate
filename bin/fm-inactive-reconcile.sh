@@ -768,7 +768,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
 
 secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent-status> <corr> <outcome> <task-id> <fingerprint>
   local secondmate_home=$1 parent_task_id=$2 parent_home=$3 parent_status=$4 corr=$5 outcome=$6 task_id=$7 fp=$8
-  local parent_state token rc=0 line
+  local parent_state token route_lock route_marker route_history line phase rc=0 route_lock_held=0 marker_present=0 report_recorded=0
   fm_pending_reply_secondmate_receipt_validate \
     "$secondmate_home" "$parent_task_id" "$parent_home" "$parent_status" "$corr" || return 2
   parent_state="$parent_home/state"
@@ -776,22 +776,57 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
   if ! fm_pending_reply_secondmate_receipt_validate \
     "$secondmate_home" "$parent_task_id" "$parent_home" "$parent_status" "$corr"; then
     rc=2
-  elif [ "$FM_PENDING_ROUTE_PHASE" = resolved ] || [ "$FM_PENDING_ROUTE_PHASE" = retired ]; then
-    fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || rc=2
   else
+    phase=$FM_PENDING_ROUTE_PHASE
     line="$outcome [corr=$corr]: inactive terminal outcome replayed: task=$task_id fingerprint=$fp"
     [ ! -L "$parent_status" ] || rc=2
     if [ "$rc" = 0 ] && [ -e "$parent_status" ]; then
       [ -f "$parent_status" ] || rc=2
+    fi
+    if [ "$rc" = 0 ] && [ -f "$parent_status" ] \
+      && grep -Fqx "$line" "$parent_status" 2>/dev/null; then
+      report_recorded=1
+    fi
+    route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
+    if [ "$rc" = 0 ] && fm_lock_acquire_wait "$route_lock"; then
+      route_lock_held=1
     elif [ "$rc" = 0 ]; then
-      : > "$parent_status" || rc=2
+      rc=2
     fi
-    if [ "$rc" = 0 ] && ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-      printf '%s\n' "$line" >> "$parent_status" || rc=2
+    if [ "$route_lock_held" = 1 ]; then
+      route_marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
+      route_history=$(fm_pending_reply_secondmate_route_history_path "$secondmate_home" "$corr")
+      if [ -e "$route_marker" ] || [ -L "$route_marker" ] \
+        || [ -e "$route_history" ] || [ -L "$route_history" ]; then
+        marker_present=1
+      fi
+      if [ "$marker_present" = 1 ]; then
+        fm_pending_reply_secondmate_route_validate "$secondmate_home" "$corr" || rc=2
+      elif [ "$phase" != resolved ] \
+        && [ "$phase" != retired ] \
+        && [ "$report_recorded" != 1 ]; then
+        rc=2
+      fi
+      if [ "$rc" = 0 ] \
+        && [ "$phase" != resolved ] \
+        && [ "$phase" != retired ] \
+        && [ "$report_recorded" != 1 ]; then
+        if [ ! -e "$parent_status" ]; then
+          : > "$parent_status" || rc=2
+        fi
+        if [ "$rc" = 0 ] && ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
+          printf '%s\n' "$line" >> "$parent_status" || rc=2
+        fi
+      fi
+      fm_lock_release "$route_lock" || rc=2
+      route_lock_held=0
     fi
-    if [ "$rc" = 0 ]; then
-      fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || rc=2
-    fi
+  fi
+  if [ "$route_lock_held" = 1 ]; then
+    fm_lock_release "$route_lock" || rc=2
+  fi
+  if [ "$rc" = 0 ]; then
+    fm_pending_reply_secondmate_route_clear "$secondmate_home" "$corr" || rc=2
   fi
   fm_pending_reply_txn_lock_release "$parent_state" "$corr" "$token" || rc=2
   return "$rc"

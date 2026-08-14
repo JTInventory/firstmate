@@ -968,7 +968,7 @@ test_status_log_terminal_is_not_replayed() {
 }
 
 test_valid_secondmate_route_reports_parent_once() {
-  local dir root home fakebin state child_home child_state parent_status corr rec outside send_out
+  local dir root home fakebin state child_home child_state parent_status corr rec outside send_out route_backup
   local outside_parent outside_parent_link
   local history_corr history_record history_status active_record active_backup
   new_case secondmate-route-valid
@@ -1013,6 +1013,23 @@ SH
   [ "$(receipt_value "$rec" parent_corr)" = "$corr" ] || fail "secondmate receipt did not persist its parent correlation"
   [ "$(receipt_value "$rec" parent_home)" = "$home" ] || fail "secondmate receipt did not persist its parent home"
   [ "$(receipt_value "$rec" parent_status)" = "$parent_status" ] || fail "secondmate receipt did not persist its parent status path"
+  route_backup="$dir/route-backup"
+  mv "$child_state/.fm-jt-parent-route" "$route_backup"
+  if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
+    fail "secondmate acknowledgement accepted a missing route marker"
+  fi
+  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "missing route marker consumed the pending receipt"
+  ! grep -Fq "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status" 2>/dev/null \
+    || fail "missing route marker wrote parent status"
+  mv "$route_backup" "$child_state/.fm-jt-parent-route"
+  replace_field "$child_state/.fm-jt-parent-route" corr_id 1123456789abcdef
+  if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
+    fail "secondmate acknowledgement accepted a mismatched route marker"
+  fi
+  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "mismatched route marker consumed the pending receipt"
+  ! grep -Fq "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status" 2>/dev/null \
+    || fail "mismatched route marker wrote parent status"
+  replace_field "$child_state/.fm-jt-parent-route" corr_id "$corr"
   active_record="$state/pending-replies/$corr"
   active_backup="$dir/active-record-backup"
   mkdir -p "$state/pending-reply-history"
