@@ -95,7 +95,7 @@ new_world() {
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
-  write_primary_proof "$w" "fm-update-$name"
+  write_primary_proof "$w"
 
   printf '%s\n' "$w"
 }
@@ -129,17 +129,18 @@ new_protocol_migration_world() {
   git -C "$w/seed" add bin
   git -C "$w/seed" commit -qm protocol-v3
   git -C "$w/seed" push -q origin main
-  write_primary_proof "$w" "fm-update-$name"
+  write_primary_proof "$w"
   printf '%s\n' "$w"
 }
 
 write_primary_proof() {
-  local w=$1 token=$2
-  fm_test_write_primary_attestation "$w/main" \
-    "$w/home/state/.primary-attestation" "$token" "$FM_FAKE_HARNESS_PID" \
-    || fail "could not establish primary attestation for $w"
-  printf '%s|codex:%s|fallback\n' "$FM_FAKE_HARNESS_PID" "$FM_UPDATE_THREAD_ID" \
-    > "$w/home/state/.lock"
+  local w=$1
+  ( cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$ROOT/bin/fm-lock.sh" bootstrap >/dev/null ) \
+    || fail "could not establish primary session lock for $w"
 }
 
 primary_attestation_token() {

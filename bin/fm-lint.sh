@@ -37,7 +37,7 @@ cd "$ROOT" || exit 1
 run_shellcheck() {
   # Expand production libraries from bin/; keep test-file graphs bounded.
   case "$1" in
-    tests/*|./tests/*)
+    tests/*|./tests/*|"$ROOT"/tests/*)
       shellcheck --norc -P SCRIPTDIR -S warning "$1"
       ;;
     *)
