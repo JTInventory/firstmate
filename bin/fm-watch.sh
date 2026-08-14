@@ -588,7 +588,7 @@ while :; do
     exit 1
   fi
   if [ -n "$wake_drain_out" ]; then
-    printf '%s\n' "$wake_drain_out"
+    wake "$wake_drain_out"
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated

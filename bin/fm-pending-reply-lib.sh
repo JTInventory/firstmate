@@ -730,6 +730,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
     && [ "$seen_parent_home" = 1 ] && [ "$seen_parent_status" = 1 ] \
     && [ "$seen_corr" = 1 ] || return 1
   [ "$schema" = fm-jt-parent-route.v1 ] || return 1
+  [ -z "$wanted_corr" ] || [ "$corr" = "$wanted_corr" ] || return 1
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   home_marker="$secondmate_home/.fm-secondmate-home"
