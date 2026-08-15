@@ -1801,7 +1801,7 @@ repair_reported_secondmate_routes() {
 }
 
 republish_pending_receipt() {
-  local pending=$1 task_lock meta window backend current_incarnation status=0 rc
+  local pending=$1 task_lock meta window backend current_incarnation current_kind status=0 rc
   local deadline_ms=${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-} now_ms remaining_ms wait_secs
   FM_WAKE_APPEND_CREATED=0
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
@@ -1809,53 +1809,59 @@ republish_pending_receipt() {
     [ ! -e "$pending" ] && [ ! -L "$pending" ] && return 0
     return 1
   fi
-  case "$KIND" in
-    ship|scout)
-      meta="$STATE/$ID.meta"
-      [ -f "$meta" ] && [ ! -L "$meta" ] || return 75
-      herdr_identity_allowed "$meta" || return 75
-      task_lock="$STATE/.spawn-$ID.lock"
-      FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-30}" fm_lock_acquire_wait "$task_lock" || return 75
-      if [ ! -f "$meta" ] || [ -L "$meta" ] \
-        || [ "$(meta_value "$meta" kind)" != "$KIND" ] \
-        || ! herdr_identity_allowed "$meta"; then
-        status=75
-      elif current_incarnation=$(read_incarnation "$meta" "$ID" 2>/dev/null); then
-        [ "$current_incarnation" = "$INC" ] || status=75
-        if [ "$status" = 0 ]; then
-          window=$(meta_value_unique "$meta" window 2>/dev/null) || status=75
-          if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
-            :
-          else
-            rc=$?
-            [ "$rc" = 1 ] || status=75
-            backend=tmux
-          fi
-        fi
-        if [ "$status" = 0 ]; then
-          if [ -n "$deadline_ms" ]; then
-            now_ms=$(clock_millis)
-            remaining_ms=$((deadline_ms - now_ms))
-            [ "$remaining_ms" -gt 0 ] || status=75
-            wait_secs=$((remaining_ms / 1000))
-          else
-            wait_secs=${FM_LOCK_WAIT_SECS:-30}
-          fi
-          if [ "$status" = 0 ]; then
-            FM_LOCK_WAIT_SECS="$wait_secs" republish_existing_receipt_wake \
-              "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
-          fi
-        fi
+  case "$KIND" in ship|scout|secondmate) ;; *) return 1 ;; esac
+  meta="$STATE/$ID.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 75
+  herdr_identity_allowed "$meta" || return 75
+  task_lock="$STATE/.spawn-$ID.lock"
+  FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-30}" fm_lock_acquire_wait "$task_lock" || return 75
+  if [ ! -f "$meta" ] || [ -L "$meta" ] \
+    || ! herdr_identity_allowed "$meta"; then
+    status=75
+  elif current_kind=$(meta_value_unique "$meta" kind 2>/dev/null); then
+    case "$KIND:$current_kind" in
+      ship:ship|scout:scout|secondmate:ship|secondmate:scout) : ;;
+      *) status=75 ;;
+    esac
+  else
+    status=75
+  fi
+  if [ "$status" = 0 ] && current_incarnation=$(read_incarnation "$meta" "$ID" 2>/dev/null); then
+    [ "$current_incarnation" = "$INC" ] || status=75
+    if [ "$status" = 0 ]; then
+      window=$(meta_value_unique "$meta" window 2>/dev/null) || status=75
+      if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
+        :
       else
-        status=75
+        rc=$?
+        [ "$rc" = 1 ] || status=75
+        backend=tmux
       fi
-      fm_lock_release "$task_lock" || status=1
-      return "$status"
-      ;;
-    secondmate)
-      publish_secondmate_receipt_and_wake
-      ;;
-  esac
+    fi
+    if [ "$status" = 0 ]; then
+      if [ -n "$deadline_ms" ]; then
+        now_ms=$(clock_millis)
+        remaining_ms=$((deadline_ms - now_ms))
+        [ "$remaining_ms" -gt 0 ] || status=75
+        wait_secs=$((remaining_ms / 1000))
+      else
+        wait_secs=${FM_LOCK_WAIT_SECS:-30}
+      fi
+      if [ "$status" = 0 ]; then
+        if [ "$KIND" = secondmate ]; then
+          FM_LOCK_WAIT_SECS="$wait_secs" publish_secondmate_receipt_and_wake \
+            "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
+        else
+          FM_LOCK_WAIT_SECS="$wait_secs" republish_existing_receipt_wake \
+            "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
+        fi
+      fi
+    fi
+  else
+    status=75
+  fi
+  fm_lock_release "$task_lock" || status=1
+  return "$status"
 }
 
 republish_pending_receipts() {
