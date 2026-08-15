@@ -226,6 +226,7 @@ write_meta() {
   printf 'working: fixture\n' > "$state/$id.status"
   : > "$state/$id.turn-ended"
   set_old_mtime "$file" "$state/$id.status" "$state/$id.turn-ended"
+  case "$kind" in ship|scout) write_idle_proof "$state" "$id" "$backend" "$window" ;; esac
 }
 
 write_legacy_meta() {
@@ -238,6 +239,24 @@ write_legacy_meta() {
   printf 'working: fixture\n' > "$state/$id.status"
   : > "$state/$id.turn-ended"
   set_old_mtime "$state/$id.meta" "$state/$id.status" "$state/$id.turn-ended"
+  write_idle_proof "$state" "$id" "$backend" "$window"
+}
+
+write_idle_proof() {
+  local state=$1 id=$2 backend=$3 window=$4 hash
+  if command -v md5 >/dev/null 2>&1; then
+    hash=$(printf '%s' 'idle prompt' | md5 -q)
+  else
+    hash=$(printf '%s' 'idle prompt' | md5sum | awk '{print $1}')
+  fi
+  mkdir -p "$state/.pane-idle"
+  printf '%s\n' "$hash" > "$state/.hash-$(printf '%s' "$window" | tr ':/.' '___')"
+  printf '2\n' > "$state/.count-$(printf '%s' "$window" | tr ':/.' '___')"
+  ( cd "$ROOT" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_write "$2" "$3" "$4" "$5" "$6" "$7" "$8"' _ \
+      "$ROOT" "$state" "$state/$id.meta" "$id" "$window" "$backend" "$hash" 2 ) \
+    || fail "idle proof fixture could not be written"
 }
 
 receipt_value() {
@@ -1155,6 +1174,7 @@ test_reused_task_id_gets_new_fingerprint() {
   export FM_FAKE_CREW_STATE_REUSED_X1='state: done · source: pane · first run quiet'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   replace_field "$state/reused-x1.meta" spawn_incarnation incarnation-new
+  write_idle_proof "$state" reused-x1 tmux tmux:fm-reused-x1
   set_old_mtime "$state/reused-x1.meta"
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 2 ] || fail "reused task id did not create a new incarnation receipt"
@@ -1474,6 +1494,7 @@ SH
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "already surfaced terminal outcome was replayed"
   [ "$(queue_count "$state")" = 0 ] || fail "already surfaced terminal outcome queued a wake"
   replace_field "$state/surfaced-x1.meta" spawn_incarnation resurfaced-inc
+  write_idle_proof "$state" surfaced-x1 tmux tmux:fm-surfaced-x1
   set_old_mtime "$state/surfaced-x1.meta" "$state/surfaced-x1.status" "$state/surfaced-x1.turn-ended"
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "new incarnation was incorrectly suppressed by an old surface marker"
@@ -1713,6 +1734,7 @@ test_relaunch_and_teardown_races_recheck_under_spawn_lock() {
   scanner=$!
   sleep 1
   replace_field "$state/relaunch-x1.meta" spawn_incarnation new-inc
+  write_idle_proof "$state" relaunch-x1 tmux tmux:fm-relaunch-x1
   : > "$release"
   wait "$holder" || fail "spawn-lock relaunch fixture failed"
   wait "$scanner" || fail "relaunch reconciliation fixture failed"
@@ -1765,7 +1787,7 @@ test_herdr_identity_and_default_captain_refusal() {
   new_case herdr-identity
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
-  write_meta "$state" herdr-good good-inc ship herdr firstmate:pane
+  write_meta "$state" herdr-good good-inc ship herdr firstmate:pane-good
   printf 'herdr_session=firstmate\nherdr_workspace_id=ws\nherdr_tab_id=tab\nherdr_pane_id=pane\n' >> "$state/herdr-good.meta"
   printf 'herdr_session=default\n' >> "$state/herdr-good.meta"
   write_meta "$state" herdr-unique unique-inc ship herdr firstmate:pane
@@ -1820,6 +1842,38 @@ test_status_log_terminal_is_not_replayed() {
   [ "$(queue_count "$state")" = 0 ] || fail "stale status-log done created an actionable wake"
   unset FM_FAKE_CREW_STATE_STALE_X1
   pass "status-log terminal output remains fail-closed"
+}
+
+test_pane_idle_proof_is_required_and_bound() {
+  local dir root home fakebin state proof key
+  new_case pane-idle-proof
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" pane-proof-x1 pane-proof-inc
+  export FM_FAKE_CREW_STATE_PANE_PROOF_X1='state: done · source: pane · proof required'
+  proof="$state/.pane-idle/pane-proof-x1"
+  key=$(printf '%s' tmux:fm-pane-proof-x1 | tr ':/.' '___')
+  rm -f "$proof"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "missing pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "missing pane-idle proof was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  replace_field "$proof" observed_epoch 1
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "stale pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "stale pane-idle proof was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  printf '%s\n' 00000000000000000000000000000000 > "$state/.hash-$key"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "changed pane-idle hash scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "changed pane-idle hash was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  replace_field "$state/pane-proof-x1.meta" spawn_incarnation pane-proof-inc-2
+  set_old_mtime "$state/pane-proof-x1.meta"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "mismatched incarnation scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "mismatched pane-idle incarnation was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "valid pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "valid pane-idle proof was not accepted"
+  unset FM_FAKE_CREW_STATE_PANE_PROOF_X1
+  pass "inactive replay requires a fresh identity-bound pane-idle proof"
 }
 
 test_valid_secondmate_route_reports_parent_once() {
@@ -2911,6 +2965,7 @@ test_parent_home_secondmate_records_are_skipped
 test_herdr_identity_and_default_captain_refusal
 test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
+test_pane_idle_proof_is_required_and_bound
 test_valid_secondmate_route_reports_parent_once
 test_deferred_recorded_secondmate_finishes_without_output
 test_reported_secondmate_route_repair_after_crash

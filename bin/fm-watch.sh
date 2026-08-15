@@ -49,6 +49,8 @@ mkdir -p "$STATE"
 # capture plus the existing hash/busy checks. Keep the wake policy unchanged.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-pane-idle-lib.sh
+. "$SCRIPT_DIR/fm-pane-idle-lib.sh"
 # shellcheck source=bin/fm-watch-events-lib.sh
 . "$SCRIPT_DIR/fm-watch-events-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -256,7 +258,7 @@ triage_log() {
 }
 
 hash_pane() {
-  if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+  fm_pane_idle_hash
 }
 
 window_kind() {
@@ -1246,6 +1248,15 @@ EOF
       # where every verified harness renders its busy indicator) so busy-looking
       # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
+        idle_meta=$(fm_pane_idle_meta_for_window "$STATE" "$w" 2>/dev/null || true)
+        if [ -n "$idle_meta" ]; then
+          idle_task=${idle_meta##*/}
+          idle_task=${idle_task%.meta}
+          idle_backend=$(fm_backend_of_meta "$idle_meta")
+          fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n" || exit 1
+        else
+          fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
+        fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if ! afk_present; then
@@ -1317,6 +1328,7 @@ EOF
           fi
         fi
       else
+        fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
         # Pane busy is proven activity once two samples agree; a first baseline
         # sample must preserve a declared pause marker across watcher restarts.
         if [ "$n" -ge 2 ]; then
@@ -1327,6 +1339,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
       # Pane content changed: the crew is active again, so reset pause and
       # escalation timers before a later pause starts a fresh cadence. During
       # the first baseline after a watcher restart, preserve an existing pause

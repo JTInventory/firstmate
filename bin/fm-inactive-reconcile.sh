@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "inactive outcome reconciliation" || exit 1
+# shellcheck source=bin/fm-pane-idle-lib.sh
+. "$SCRIPT_DIR/fm-pane-idle-lib.sh"
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -20,6 +22,7 @@ PENDING_RECEIPT_CURSOR="$STATE/.pending-receipt-republish.cursor"
 MAINTENANCE_PHASE_CURSOR="$STATE/.inactive-outcome-maintenance.cursor"
 MAINTENANCE_ORDER_CURSOR="$STATE/.inactive-outcome-maintenance-order.cursor"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
+PANE_IDLE_DIR="$STATE/.pane-idle"
 
 inactive_state_path_is_safe() {
   local path=$1 kind=$2
@@ -48,6 +51,7 @@ inactive_state_preflight() {
   inactive_state_path_is_safe "$PENDING_RECEIPT_CURSOR" file || return 1
   inactive_state_path_is_safe "$MAINTENANCE_PHASE_CURSOR" file || return 1
   inactive_state_path_is_safe "$MAINTENANCE_ORDER_CURSOR" file || return 1
+  inactive_state_path_is_safe "$PANE_IDLE_DIR" dir || return 1
   inactive_state_path_is_safe "$FM_WAKE_QUEUE" file || return 1
 }
 
@@ -58,6 +62,8 @@ inactive_state_preflight || {
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
@@ -1561,36 +1567,7 @@ republish_pending_receipts() {
   return "$status"
 }
 
-read_incarnation() {  # <meta> <id>
-  local meta=$1 id=$2 token tasktmp window worktree seed digest rc token_present=0
-  if token=$(meta_value_unique "$meta" spawn_incarnation); then
-    token_present=1
-  else
-    rc=$?
-    [ "$rc" = 1 ] || return 1
-    token=
-  fi
-  if [ "$token_present" = 1 ]; then
-    case "$token" in
-      ''|legacy-unknown|*[!A-Za-z0-9._:-]*) return 1 ;;
-    esac
-    printf '%s' "$token"
-    return 0
-  fi
-  # Legacy metadata has no incarnation token. Prefer the per-task temp root,
-  # then bind the fallback to the old endpoint/worktree identity. This is only
-  # a compatibility boundary; a new spawn always writes spawn_incarnation.
-  tasktmp=$(meta_value "$meta" tasktmp)
-  window=$(meta_value "$meta" window)
-  worktree=$(meta_value "$meta" worktree)
-  if [ -n "$tasktmp" ]; then
-    seed="legacy|tasktmp=$tasktmp"
-  else
-    seed="legacy|window=$window|worktree=$worktree"
-  fi
-  digest=$(hash_text "$seed") || return 1
-  printf 'legacy-%s' "${digest:0:32}"
-}
+read_incarnation() { fm_pane_idle_read_incarnation "$@"; }
 
 surface_retry_valid() {
   awk -F= '
@@ -1841,7 +1818,7 @@ child_cleanup() {
 }
 
 reconcile_child() {
-  local id=$1 meta="$STATE/$1.meta" kind backend now activity age line outcome source
+  local id=$1 meta="$STATE/$1.meta" kind backend window now activity age line outcome source
   local snapshot token key route_rc state_tmp state_rc existing_rc surface_status
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -1892,6 +1869,15 @@ reconcile_child() {
   [ -n "$source" ] && [ "$source" != none ] || return 0
   snapshot=$(single_line "$line")
   INC=$(read_incarnation "$meta" "$id") || return 0
+  window=$(meta_value_unique "$meta" window) || return 0
+  if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
+    :
+  else
+    state_rc=$?
+    [ "$state_rc" = 1 ] || return 0
+    backend=tmux
+  fi
+  fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS" || return 0
   ID=$id
   OUTCOME=$outcome
   SNAPSHOT=$snapshot
@@ -2140,6 +2126,9 @@ scan_locked() {
     [ "$age" -ge "$RECONCILE_SECS" ] || return 0
   fi
   run_maintenance() {
+    maintenance_phase=$(cat "$MAINTENANCE_PHASE_CURSOR" 2>/dev/null || true)
+    case "$maintenance_phase" in pending|reported) ;; *) maintenance_phase=pending ;; esac
+    maintenance_next_phase=$maintenance_phase
     maintenance_started=$(clock_millis)
     if [ "$maintenance_started" -ge "$scan_deadline" ]; then
       maintenance_deferred=1
@@ -2147,8 +2136,6 @@ scan_locked() {
     fi
     maintenance_deadline=$((maintenance_started + MAINTENANCE_TURN_SECS * 1000))
     [ "$maintenance_deadline" -gt "$scan_deadline" ] && maintenance_deadline=$scan_deadline
-    maintenance_phase=$(cat "$MAINTENANCE_PHASE_CURSOR" 2>/dev/null || true)
-    case "$maintenance_phase" in pending|reported) ;; *) maintenance_phase=pending ;; esac
     if [ "$maintenance_phase" = pending ]; then
       if ! republish_pending_receipts "$maintenance_deadline"; then
         if [ "$(clock_millis)" -ge "$scan_deadline" ]; then
