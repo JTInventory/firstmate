@@ -842,7 +842,7 @@ fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <co
 fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] [<allow-undelivered>]
   local secondmate_home=$1 wanted_corr=${2:-} allow_undelivered=${3:-0} marker line key value schema marker_id secondmate_id current_corr history_marker
   local parent_home parent_status corr parent_abs state_abs parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
-  local phase delivered record_home record_status record_task record_corr home_marker
+  local phase delivered record_home record_home_abs record_status record_task record_corr home_marker
   local seen_schema=0 seen_secondmate_id=0 seen_parent_home=0 seen_parent_status=0 seen_corr=0
   FM_PENDING_ROUTE_PARENT_STATUS=
   FM_PENDING_ROUTE_PARENT_HOME=
@@ -937,6 +937,10 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   fi
   if [ -n "$rec" ]; then
     fm_pending_reply_record_validate "$rec" "$state_abs" "$corr" "$secondmate_id" || return 1
+    record_home=$(fm_pending_reply_get "$rec" parent_home)
+    [ -d "$record_home" ] && [ ! -L "$record_home" ] || return 1
+    record_home_abs=$(cd "$record_home" 2>/dev/null && pwd -P) || return 1
+    [ "$record_home_abs" = "$parent_abs" ] || return 1
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
     phase=$(fm_pending_reply_get "$rec" phase)
     case "$phase" in

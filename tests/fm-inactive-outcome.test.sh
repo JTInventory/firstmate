@@ -2010,7 +2010,7 @@ test_secondmate_route_accepts_effective_state_overrides() {
 
 test_valid_secondmate_route_reports_parent_once() {
   local dir root home fakebin state child_home child_state parent_status corr rec outside send_out route_backup
-  local outside_parent outside_parent_link fail_move_once
+  local outside_parent outside_parent_link other_parent fail_move_once
   local history_corr history_record history_status active_record active_backup
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
@@ -2059,6 +2059,14 @@ SH
   [ "$(receipt_value "$rec" parent_corr)" = "$corr" ] || fail "secondmate receipt did not persist its parent correlation"
   [ "$(receipt_value "$rec" parent_home)" = "$home" ] || fail "secondmate receipt did not persist its parent home"
   [ "$(receipt_value "$rec" parent_status)" = "$parent_status" ] || fail "secondmate receipt did not persist its parent status path"
+  other_parent="$dir/other-parent"
+  mkdir -p "$other_parent"
+  replace_field "$state/pending-replies/$corr" parent_home "$other_parent"
+  if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
+    fail "secondmate acknowledgement accepted a mismatched real parent home"
+  fi
+  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "mismatched real parent home consumed the pending receipt"
+  replace_field "$state/pending-replies/$corr" parent_home "$home"
   route_backup="$dir/route-backup"
   mv "$child_state/.fm-jt-parent-route" "$route_backup"
   if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then

@@ -1842,6 +1842,15 @@ repair_reported_secondmate_routes() {
         fi
         continue
       fi
+      if [ ! -e "$reported" ] && [ ! -L "$reported" ]; then
+        last=$base
+        processed=$((processed + 1))
+        if [ "$processed" -ge "$REPORTED_ROUTE_REPAIR_LIMIT" ]; then
+          batch_complete=0
+          break 2
+        fi
+        continue
+      fi
       [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
       kind=$(receipt_field "$reported" kind 2>/dev/null || true)
       if [ ! -e "$reported" ] && [ ! -L "$reported" ]; then
