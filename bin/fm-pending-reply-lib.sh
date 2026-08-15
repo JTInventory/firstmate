@@ -679,7 +679,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
           route_status=1
         else
           existing_delivered=$(fm_pending_reply_get "$existing_rec" delivered_epoch)
-          route_mode=3
+          route_mode=2
           [ -n "$existing_delivered" ] && route_mode=4
           fm_pending_reply_secondmate_route_validate "$secondmate_home" "$existing_corr" "$route_mode" \
             || route_status=1
@@ -1077,7 +1077,8 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   [ -n "$delivered" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
-    awaiting_report|recovery_sending|recovery_sent) return 0 ;;
+    awaiting_report|delivery_unknown) return 0 ;;
+    recovery_sending|recovery_sent) [ -n "$delivered" ] && return 0 ;;
   esac
   return 1
 }

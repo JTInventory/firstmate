@@ -848,7 +848,7 @@ test_finalized_receipt_rows_are_suppressed() {
 }
 
 test_drain_processes_bounded_batches() {
-  local dir root home fakebin state first second
+  local dir root home fakebin state first second remainder
   new_case drain-batch
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -860,10 +860,17 @@ test_drain_processes_bounded_batches() {
     || fail "bounded wake drain failed"
   grep -Fqx "$first" "$dir/drain.out" || fail "bounded wake drain skipped its first row"
   ! grep -Fqx "$second" "$dir/drain.out" || fail "bounded wake drain processed beyond its batch"
-  [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
-    || fail "bounded wake drain did not restore the remainder"
-  grep -Fqx "$second" "$state/.wake-queue" || fail "bounded wake drain restored the wrong remainder"
+  [ -f "$state/.wake-queue.cursor" ] || fail "bounded wake drain did not persist its offset"
+  remainder=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_queue_stream_from_offset "$FM_WAKE_QUEUE" "$(awk -F= '\''$1 == "offset" { print $2 }'\'' "$FM_WAKE_QUEUE.cursor")"' \
+    _ "$ROOT" | sed '/^$/d')
+  [ "$remainder" = "$second" ] || fail "bounded wake drain restored the wrong remainder"
   unset FM_WAKE_DRAIN_BATCH_ROWS
+  drain "$root" "$home" "$fakebin" > "$dir/drain-remainder.out" \
+    || fail "bounded wake drain did not resume its durable offset"
+  grep -Fqx "$second" "$dir/drain-remainder.out" || fail "durable offset skipped the remainder"
+  [ ! -e "$state/.wake-queue.cursor" ] || fail "durable offset was not cleared after drain completion"
+  [ ! -s "$state/.wake-queue" ] || fail "bounded wake drain left processed rows queued"
   pass "wake drain restores unprocessed bounded batches"
 }
 
@@ -2256,6 +2263,9 @@ test_watcher_bounded_metadata_fail_closed() {
       deadline=$(fm_pane_idle_now_ms)
       if window_kind tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
       if window_backend tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
+      fresh_deadline=$(( $(fm_pane_idle_now_ms) + 1000 ))
+      [ "$(recorded_windows "$fresh_deadline")" = tmux:fm-bounded-metadata-x1 ] || exit 1
+      [ "$(window_kind tmux:fm-bounded-metadata-x1 "$fresh_deadline")" = ship ] || exit 1
       exit 0
     ' _ "$root"
   status=$?
@@ -3202,6 +3212,13 @@ test_recovery_route_reuse_validates_parent_record() {
       _ "$ROOT" "$child_home" "$home" "$state" sm-reuse "$1"
   }
   route_write "$corr" || fail "recovery route fixture was not written"
+  replace_field "$state/pending-replies/$corr" phase awaiting_report
+  replace_field "$state/pending-replies/$corr" delivered_epoch ''
+  route_write "$corr" || fail "undelivered same-route recovery was rejected"
+  replace_field "$state/pending-replies/$corr" phase delivery_unknown
+  route_write "$corr" || fail "delivery-unknown same-route recovery was rejected"
+  replace_field "$state/pending-replies/$corr" phase recovery_sending
+  replace_field "$state/pending-replies/$corr" delivered_epoch 1
   marker_before=$(cat "$marker")
   replace_field "$state/pending-replies/$corr" task_id wrong-task
   if route_write "$corr"; then

@@ -71,12 +71,27 @@ fm_pane_idle_compare_files() {
 }
 
 fm_pane_idle_path_stamp() {
-  local path=$1 stamp
-  stamp=$(stat -c '%Y:%y' "$path" 2>/dev/null) && {
-    printf '%s' "$stamp"
-    return 0
-  }
-  stat -f '%m' "$path" 2>/dev/null
+  local path=$1 deadline_ms=${2:-}
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  fm_pane_idle_run_bounded_perl "$deadline_ms" "$path" <<'PERL'
+use strict;
+use warnings;
+use Digest::SHA qw(sha256_hex);
+use Time::HiRes qw(stat);
+
+my $state = shift @ARGV;
+opendir(my $dh, $state) or exit 1;
+my @entries = sort grep { /\.meta\z/ && !/[\r\n]/ } readdir($dh);
+closedir($dh) or exit 1;
+my $stamp = '';
+for my $entry (@entries) {
+  my $path = "$state/$entry";
+  next unless -f $path && !-l $path;
+  my @info = stat($path) or exit 1;
+  $stamp .= join("\0", $entry, @info[0, 1, 2, 7, 9, 10]) . "\0";
+}
+print sha256_hex($stamp);
+PERL
 }
 
 fm_pane_idle_meta_index_collect() {
@@ -122,7 +137,7 @@ fm_pane_idle_meta_index_collect() {
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
       return 124
     fi
-    state_stamp=$(fm_pane_idle_path_stamp "$state") || return 1
+    state_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || return $?
     entries_stamp=
     if [ -f "$entries_path" ] && [ ! -L "$entries_path" ] \
       && [ -f "$entries_complete_path" ] && [ ! -L "$entries_complete_path" ] \
@@ -183,7 +198,7 @@ PERL
         rm -f "$entries_sorted_tmp"
         return "$rc"
       fi
-      post_state_stamp=$(fm_pane_idle_path_stamp "$state") || {
+      post_state_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
         rm -f "$entries_sorted_tmp"
         return 1
       }
@@ -560,7 +575,7 @@ PERL
     rm -f "$output"
     return "$rc"
   fi
-  post_state_stamp=$(fm_pane_idle_path_stamp "$state") || {
+  post_state_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
     rm -f "$output"
     return 1
   }
@@ -601,7 +616,7 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
   else
     mkdir "$progress_dir" || return 1
   fi
-  stamp=$(fm_pane_idle_path_stamp "$state") || return 1
+  stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || return $?
   snapshot="$progress_dir/snapshot"
   if [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
     [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
@@ -619,7 +634,7 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
       return 124
     fi
-    stamp=$(fm_pane_idle_path_stamp "$state") || return 1
+    stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || return $?
     tmp=$(mktemp "$snapshot.XXXXXX") || return 1
     [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
     fm_pane_idle_meta_index_collect "$state" "$tmp" "$deadline_ms"
@@ -628,7 +643,7 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
       rm -f "$tmp"
       return "$rc"
     fi
-    post_stamp=$(fm_pane_idle_path_stamp "$state") || {
+    post_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
       rm -f "$tmp"
       return 1
     }
@@ -885,7 +900,7 @@ fm_pane_idle_meta_index_persist() {
   elif [ "$snapshot_changed" != 1 ] && [ -n "$cursor" ]; then
     started=0
   fi
-  publish_stamp=$(fm_pane_idle_path_stamp "$state") || {
+  publish_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
     rm -f "$snapshot_tmp"
     return 1
   }
@@ -927,7 +942,7 @@ fm_pane_idle_meta_index_persist() {
     return 124
   fi
   fm_pane_idle_meta_index_reclaim "$directory" "$deadline_ms" "$snapshot_source" || return $?
-  final_stamp=$(fm_pane_idle_path_stamp "$state") || return 1
+  final_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || return $?
   if [ "$final_stamp" != "$publish_stamp" ]; then
     rm -f "$ready_path"
     return 124

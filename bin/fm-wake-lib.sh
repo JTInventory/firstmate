@@ -701,6 +701,7 @@ fm_wake_remove_key_locked() {
   fi
   [ ! -L "$FM_WAKE_QUEUE" ] || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$FM_WAKE_QUEUE" || { rm -f "$tmp"; return 1; }
+  rm -f "$(fm_wake_queue_cursor_path)" || return 1
 }
 
 fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
@@ -728,6 +729,7 @@ fm_wake_restore_queue() {
   fi
   if [ "$status" = 0 ]; then
     [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE" || status=1
+    [ "$status" = 0 ] && rm -f "$(fm_wake_queue_cursor_path)" || status=1
   fi
   [ "$status" = 0 ] || rm -f "$restore"
   return "$status"
@@ -745,6 +747,144 @@ fm_wake_queue_signature() {
   else
     stat -c '%d:%i:%s:%Y:%y' "$queue" 2>/dev/null
   fi
+}
+
+fm_wake_queue_cursor_path() {
+  printf '%s.cursor' "$FM_WAKE_QUEUE"
+}
+
+fm_wake_queue_identity() {
+  local queue=$1
+  [ -f "$queue" ] && [ ! -L "$queue" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%d:%i:%z' "$queue" 2>/dev/null
+  else
+    stat -c '%d:%i:%s' "$queue" 2>/dev/null
+  fi
+}
+
+fm_wake_queue_cursor_write() {
+  local offset=$1 cursor identity tmp
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  identity=$(fm_wake_queue_identity "$FM_WAKE_QUEUE") || return 1
+  cursor=$(fm_wake_queue_cursor_path)
+  [ ! -L "$cursor" ] || return 1
+  tmp=$(mktemp "$cursor.XXXXXX") || return 1
+  if ! printf 'schema=fm-wake-queue-cursor.v1\nidentity=%s\noffset=%s\n' \
+    "$identity" "$offset" > "$tmp" || [ -L "$cursor" ] || ! mv -f "$tmp" "$cursor"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fm_wake_queue_cursor_read() {
+  local cursor identity current offset schema_count identity_count offset_count
+  cursor=$(fm_wake_queue_cursor_path)
+  [ -f "$cursor" ] && [ ! -L "$cursor" ] || return 1
+  schema_count=$(awk -F= '$1 == "schema" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' "$cursor" 2>/dev/null) || return 1
+  [ "$schema_count" = fm-wake-queue-cursor.v1 ] || return 1
+  identity_count=$(awk -F= '$1 == "identity" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$cursor" 2>/dev/null) || return 1
+  offset=$(awk -F= '$1 == "offset" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' "$cursor" 2>/dev/null) || return 1
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  case "$identity_count" in *:*:*) ;; *) return 1 ;; esac
+  current=$(fm_wake_queue_identity "$FM_WAKE_QUEUE") || return 1
+  [ "${current%%:*}" = "${identity_count%%:*}" ] || return 1
+  current=${current#*:}; identity_count=${identity_count#*:}
+  [ "${current%%:*}" = "${identity_count%%:*}" ] || return 1
+  current=${current#*:}
+  [ "$offset" -le "$current" ] || return 1
+  if [ "$offset" -gt 0 ]; then
+    perl - "$FM_WAKE_QUEUE" "$offset" <<'PERL' || return 1
+use strict;
+use warnings;
+my ($path, $offset) = @ARGV;
+open(my $fh, '<', $path) or exit 1;
+binmode($fh);
+seek($fh, $offset - 1, 0) or exit 1;
+my $byte = getc($fh);
+close($fh) or exit 1;
+exit(defined($byte) && $byte eq "\n" ? 0 : 1);
+PERL
+  fi
+  FM_WAKE_QUEUE_CURSOR_OFFSET=$offset
+}
+
+fm_wake_queue_stream_from_offset() {
+  local queue=$1 offset=$2
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  perl - "$queue" "$offset" <<'PERL'
+use strict;
+use warnings;
+my ($path, $offset) = @ARGV;
+open(my $fh, '<', $path) or exit 1;
+binmode($fh);
+seek($fh, $offset, 0) or exit 1;
+while (defined(my $line = <$fh>)) {
+  print $line or exit 1;
+}
+close($fh) or exit 1;
+PERL
+}
+
+fm_wake_queue_offset_after_rows() {
+  local queue=$1 offset=$2 rows=$3
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  case "$rows" in ''|*[!0-9]*) return 1 ;; esac
+  perl - "$queue" "$offset" "$rows" <<'PERL'
+use strict;
+use warnings;
+my ($path, $offset, $rows) = @ARGV;
+open(my $fh, '<', $path) or exit 1;
+binmode($fh);
+seek($fh, $offset, 0) or exit 1;
+my $next = $offset;
+for (1 .. $rows) {
+  my $line = <$fh>;
+  last unless defined $line;
+  $next = tell($fh);
+  defined($next) or exit 1;
+}
+print $next;
+close($fh) or exit 1;
+PERL
+}
+
+fm_wake_install_queue_cursor_atomic() {
+  local drained=$1 offset=$2 restore expected current status=0
+  [ -f "$drained" ] && [ ! -L "$drained" ] || return 1
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  for attempt in 1 2 3 4 5 6 7 8; do
+    status=0
+    expected=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || return 1
+    restore=$(mktemp "$STATE/.wake-queue.cursor-install.XXXXXX") || return 1
+    if [ -e "$FM_WAKE_QUEUE" ]; then
+      if [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
+        cat "$drained" "$FM_WAKE_QUEUE" > "$restore" || status=1
+      else
+        status=1
+      fi
+    else
+      cat "$drained" > "$restore" || status=1
+    fi
+    if [ "${status:-0}" -ne 0 ]; then
+      rm -f "$restore"
+      return 1
+    fi
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || { rm -f "$restore"; return 1; }
+    current=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || status=1
+    if [ "${status:-0}" -eq 0 ] && [ "$current" = "$expected" ] \
+      && [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE"; then
+      status=0
+      fm_wake_queue_cursor_write "$offset" || status=1
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+      [ "$status" -eq 0 ] && return 0
+      return 1
+    fi
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    rm -f "$restore"
+    status=0
+  done
+  return 1
 }
 
 fm_wake_restore_queue_atomic() {
@@ -768,6 +908,8 @@ fm_wake_restore_queue_atomic() {
     current=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || status=1
     if [ "$status" -eq 0 ] && [ "$current" = "$expected" ] \
       && [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE"; then
+      rm -f "$(fm_wake_queue_cursor_path)" || status=1
+      [ "$status" -ne 0 ] && { fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true; return 1; }
       fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
       return 0
     fi

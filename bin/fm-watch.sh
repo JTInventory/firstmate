@@ -268,7 +268,12 @@ hash_pane() {
 window_kind() {
   local w=$1 deadline_ms=${2:-} meta mw kind
   if [ -n "$deadline_ms" ]; then
-    if ! meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null); then
+    if [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ]; then
+      meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
+    else
+      meta=$(fm_pane_idle_meta_for_window_direct "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
+    fi
+    if [ -z "$meta" ]; then
       return 1
     fi
     kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
@@ -292,7 +297,12 @@ window_kind() {
 window_backend() {  # <window>
   local w=$1 deadline_ms=${2:-} meta
   if [ -n "$deadline_ms" ]; then
-    if ! meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null); then
+    if [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ]; then
+      meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
+    else
+      meta=$(fm_pane_idle_meta_for_window_direct "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
+    fi
+    if [ -z "$meta" ]; then
       return 1
     fi
     case "$(grep '^backend=' "$meta" | cut -d= -f2- || true)" in
@@ -1394,17 +1404,18 @@ EOF
     124) ;;
     *) exit "$pane_idle_index_status" ;;
   esac
+  pane_idle_scan_deadline=$(( $(fm_pane_idle_now_ms) + PANE_IDLE_INDEX_BUDGET_SECS * 1000 ))
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, except while a declared pause
     # marker is active so the same bounded re-surface cadence still applies.
     kind=
-    kind=$(window_kind "$w" "$pane_idle_index_deadline") || continue
+    kind=$(window_kind "$w" "$pane_idle_scan_deadline") || continue
     if [ "$kind" = secondmate ]; then
       key=$(printf '%s' "$w" | tr ':/.' '___')
       [ -e "$STATE/.paused-$key" ] || continue
     fi
-    backend=$(window_backend "$w" "$pane_idle_index_deadline") || continue
+    backend=$(window_backend "$w" "$pane_idle_scan_deadline") || continue
     if ! tail40=$(fm_backend_capture "$backend" "$w" 40 2>/dev/null); then
       reason="check: backend capture failed for $w (backend=$backend); inspect the runtime endpoint and task metadata"
       fm_wake_append check "$w" "$reason" || exit 1
@@ -1426,16 +1437,16 @@ EOF
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         if [ "$kind" != secondmate ]; then
           idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
-            "$pane_idle_index_deadline" 2>/dev/null || true)
+            "$pane_idle_scan_deadline" 2>/dev/null || true)
           if [ -n "$idle_meta" ]; then
             idle_task=${idle_meta##*/}
             idle_task=${idle_task%.meta}
             idle_backend=$(fm_backend_of_meta "$idle_meta")
             if ! fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n"; then
               fm_pane_idle_clear "$STATE" "$idle_task" || true
-              fm_pane_idle_meta_index_build "$STATE" "$pane_idle_index_deadline" force || true
+              fm_pane_idle_meta_index_build "$STATE" "$pane_idle_scan_deadline" force || true
               refreshed_idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
-                "$pane_idle_index_deadline" 2>/dev/null || true)
+                "$pane_idle_scan_deadline" 2>/dev/null || true)
               if [ -n "$refreshed_idle_meta" ] && [ -f "$refreshed_idle_meta" ] \
                 && [ ! -L "$refreshed_idle_meta" ]; then
                 refreshed_idle_task=${refreshed_idle_meta##*/}
@@ -1447,7 +1458,7 @@ EOF
               fi
             fi
           else
-            fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_index_deadline" || true
+            fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || true
           fi
         fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
@@ -1521,7 +1532,7 @@ EOF
           fi
         fi
       else
-        fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_index_deadline" || exit 1
+        fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || exit 1
         # Pane busy is proven activity once two samples agree; a first baseline
         # sample must preserve a declared pause marker across watcher restarts.
         if [ "$n" -ge 2 ]; then
@@ -1532,7 +1543,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_index_deadline" || exit 1
+      fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || exit 1
       # Pane content changed: the crew is active again, so reset pause and
       # escalation timers before a later pause starts a fresh cadence. During
       # the first baseline after a watcher restart, preserve an existing pause
@@ -1542,7 +1553,7 @@ EOF
       fi
       rm -f "$ssf"
     fi
-  done < <(recorded_windows "$pane_idle_index_deadline")
+  done < <(recorded_windows "$pane_idle_scan_deadline")
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
