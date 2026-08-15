@@ -1240,29 +1240,6 @@ while :; do
     *) exit "$drain_status" ;;
   esac
 
-  # The helper owns its bounded cadence and receipt idempotence. A non-empty
-  # result means it appended an inactive-outcome wake, so surface that wake in
-  # this watcher turn without probing panes or scraping secondmate chat here.
-  if ! inactive_out=$("$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>&1); then
-    printf '%s\n' "$inactive_out" >&2
-    exit 1
-  fi
-  if [ -n "$inactive_out" ]; then
-    inactive_drain_output=
-    inactive_drain_status=0
-    inactive_drain_output=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
-      FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" "$SCRIPT_DIR/fm-wake-drain.sh") \
-      || inactive_drain_status=$?
-    case "$inactive_drain_status" in
-      0)
-        [ -n "$inactive_drain_output" ] || exit 1
-        wake "$inactive_drain_output"
-        ;;
-      3) exit 3 ;;
-      *) exit "$inactive_drain_status" ;;
-    esac
-  fi
-
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
@@ -1314,7 +1291,7 @@ EOF
   # remembers the hash already classified).
   pane_idle_index_deadline=$(( $(fm_pane_idle_now_ms) + PANE_IDLE_INDEX_BUDGET_SECS * 1000 ))
   pane_idle_index_status=0
-  fm_pane_idle_meta_index_build "$STATE" "$pane_idle_index_deadline" force || pane_idle_index_status=$?
+  fm_pane_idle_meta_index_build "$STATE" "$pane_idle_index_deadline" || pane_idle_index_status=$?
   case "$pane_idle_index_status" in
     0) ;;
     124) ;;

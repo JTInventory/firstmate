@@ -25,9 +25,32 @@ fm_pane_idle_now_ms() {
   fi
 }
 
+fm_pane_idle_budget_secs() {
+  local deadline_ms=$1 now
+  case "$deadline_ms" in ''|*[!0-9]*) printf '300'; return 0 ;; esac
+  now=$(fm_pane_idle_now_ms)
+  [ "$deadline_ms" -gt "$now" ] || return 1
+  printf '%s' "$(((deadline_ms - now + 999) / 1000))"
+}
+
+fm_pane_idle_run_bounded_child() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : ($status >> 8))' "$seconds" "$@"
+  else
+    return 125
+  fi
+}
+
 fm_pane_idle_meta_index_collect() {
-  local state=$1 output=$2 deadline_ms=${3:-} worker rc
-  local cursor_path records_path complete_path seen_path
+  local state=$1 output=$2 deadline_ms=${3:-} worker rc remaining sorted_tmp
+  local cursor_path records_path complete_path seen_path aggregate_path aggregate_cursor_path
+  local aggregate_complete_path sorted_path sorted_complete_path
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   [ ! -L "$output" ] || return 1
@@ -36,20 +59,28 @@ fm_pane_idle_meta_index_collect() {
   records_path="$state/.pane-idle-meta-index.scan.records"
   complete_path="$state/.pane-idle-meta-index.scan.complete"
   seen_path="$state/.pane-idle-meta-index.scan.seen"
-  for path in "$cursor_path" "$records_path" "$complete_path" "$seen_path"; do
+  aggregate_path="$state/.pane-idle-meta-index.scan.aggregate"
+  aggregate_cursor_path="$state/.pane-idle-meta-index.scan.aggregate.cursor"
+  aggregate_complete_path="$state/.pane-idle-meta-index.scan.aggregate.complete"
+  sorted_path="$state/.pane-idle-meta-index.scan.sorted"
+  sorted_complete_path="$state/.pane-idle-meta-index.scan.sorted.complete"
+  for path in "$cursor_path" "$records_path" "$complete_path" "$seen_path" \
+    "$aggregate_path" "$aggregate_cursor_path" "$aggregate_complete_path" \
+    "$sorted_path" "$sorted_complete_path"; do
     if [ -e "$path" ] || [ -L "$path" ]; then
       [ -f "$path" ] && [ ! -L "$path" ] || return 1
     fi
   done
   if [ -e "$complete_path" ]; then
-    rm -f "$cursor_path" "$records_path" "$seen_path" || return 1
-    rm -f "$complete_path" || return 1
+    rm -f "$cursor_path" "$records_path" "$seen_path" "$aggregate_path" \
+      "$aggregate_cursor_path" "$aggregate_complete_path" "$sorted_path" \
+      "$sorted_complete_path" "$complete_path" || return 1
   fi
   if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
     return 124
   fi
   command -v perl >/dev/null 2>&1 || return 125
-  perl - "$state" "$cursor_path" "$records_path" "$complete_path" "$seen_path" "$deadline_ms" "$output" <<'PERL' &
+  perl - "$state" "$cursor_path" "$records_path" "$complete_path" "$seen_path" "$deadline_ms" <<'PERL' &
 use strict;
 use warnings;
 use Fcntl qw(:DEFAULT);
@@ -109,22 +140,6 @@ sub expired {
   return defined($deadline) && int(time() * 1000) >= $deadline;
 }
 
-sub seen_entry {
-  my ($entry) = @_;
-  return 0 unless -e $seen_path;
-  my $fh = open_read($seen_path) or return -1;
-  while (defined(my $line = <$fh>)) {
-    return -2 if expired();
-    chomp $line;
-    if ($line eq $entry) {
-      close($fh) or return -1;
-      return 1;
-    }
-  }
-  close($fh) or return -1;
-  return 0;
-}
-
 my $cursor = '';
 if (-e $cursor_path) {
   my $cfh = open_read($cursor_path) or exit 1;
@@ -132,6 +147,7 @@ if (-e $cursor_path) {
   chomp $cursor;
   close($cfh) or exit 1;
 }
+$cursor = '' if $cursor ne '' && $cursor ne 'EOF' && $cursor !~ /^\d+\z/;
 
 while (1) {
   exit 124 if expired();
@@ -144,73 +160,49 @@ while (1) {
     my $sfh = open_append($seen_path) or exit 1;
     close($sfh) or exit 1;
   }
+  exit 0 if $cursor eq 'EOF';
   opendir(my $dh, $state) or exit 1;
-  my $next = '';
+  if ($cursor ne '') {
+    seekdir($dh, 0 + $cursor) or exit 1;
+  }
   while (defined(my $entry = readdir($dh))) {
     exit 124 if expired();
-    next unless $entry =~ /\.meta\z/;
-    exit 1 if $entry =~ /[\r\n]/;
-    my $seen = seen_entry($entry);
-    exit 124 if $seen == -2;
-    exit 1 if $seen < 0;
-    next if $seen == 1;
+    my $next_cursor = telldir($dh);
+    exit 1 unless defined($next_cursor);
+    if ($entry !~ /\.meta\z/ || $entry =~ /[\r\n]/) {
+      write_atomic($cursor_path, "$next_cursor\n") or exit 1;
+      $cursor = $next_cursor;
+      next;
+    }
     my $path = "$state/$entry";
-    next unless -f $path && !-l $path;
-    $next = $entry;
-    last;
+    if (-f $path && !-l $path) {
+      my $fh = open_read($path) or exit 1;
+      my ($window, $window_count) = ('', 0);
+      while (defined(my $line = <$fh>)) {
+        exit 124 if expired();
+        chomp $line;
+        next unless $line =~ /^window=(.*)\z/;
+        $window = $1;
+        $window_count++;
+      }
+      close($fh) or exit 1;
+      if ($window_count == 1 && $window ne '') {
+        my $rfh = open_append($records_path) or exit 1;
+        binmode($rfh);
+        print $rfh $path, "\0", $window, "\0", "1", "\0" or exit 1;
+        close($rfh) or exit 1;
+      }
+    }
+    my $sfh = open_append($seen_path) or exit 1;
+    print $sfh $entry, "\n" or exit 1;
+    close($sfh) or exit 1;
+    write_atomic($cursor_path, "$next_cursor\n") or exit 1;
+    $cursor = $next_cursor;
   }
   closedir($dh) or exit 1;
-  last if $next eq '';
-  my $path = "$state/$next";
-  if (-f $path && !-l $path) {
-    my $fh = open_read($path) or exit 1;
-    my ($window, $window_count) = ('', 0);
-    while (defined(my $line = <$fh>)) {
-      exit 124 if expired();
-      chomp $line;
-      next unless $line =~ /^window=(.*)\z/;
-      $window = $1;
-      $window_count++;
-    }
-    close($fh) or exit 1;
-    if ($window_count == 1 && $window ne '') {
-      my $rfh = open_append($records_path) or exit 1;
-      binmode($rfh);
-      print $rfh $path, "\0", $window, "\0", "1", "\0" or exit 1;
-      close($rfh) or exit 1;
-    }
-  }
-  my $sfh = open_append($seen_path) or exit 1;
-  print $sfh $next, "\n" or exit 1;
-  close($sfh) or exit 1;
-  write_atomic($cursor_path, "$next\n") or exit 1;
-  $cursor = $next;
+  write_atomic($cursor_path, "EOF\n") or exit 1;
+  $cursor = 'EOF';
 }
-
-my $rfh = open_read($records_path) or exit 1;
-binmode($rfh);
-local $/ = "\0";
-my (%seen, %first_meta, %window_counts);
-while (defined(my $path = <$rfh>)) {
-  chomp $path;
-  my $window = <$rfh>;
-  my $count = <$rfh>;
-  last unless defined($window) && defined($count);
-  chomp $window;
-  chomp $count;
-  next if $seen{$path}++;
-  next unless $window ne '' && $count =~ /^\d+\z/;
-  $first_meta{$window} = $path unless exists $window_counts{$window};
-  $window_counts{$window} += $count;
-}
-close($rfh) or exit 1;
-my $ofh = open_output($output) or exit 1;
-binmode($ofh);
-for my $window (sort keys %window_counts) {
-  print $ofh $first_meta{$window}, "\0", $window, "\0", $window_counts{$window}, "\0" or exit 1;
-}
-close($ofh) or exit 1;
-write_atomic($complete_path, "complete\n") or exit 1;
 PERL
   worker=$!
   while kill -0 "$worker" 2>/dev/null; do
@@ -230,7 +222,176 @@ PERL
     rm -f "$output"
     return "$rc"
   fi
-  for path in "$output" "$records_path" "$complete_path" "$seen_path"; do
+  if [ ! -e "$aggregate_complete_path" ]; then
+    remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
+      rm -f "$output"
+      return 124
+    }
+    if fm_pane_idle_run_bounded_child "$remaining" perl - "$records_path" \
+      "$aggregate_path" "$aggregate_cursor_path" "$aggregate_complete_path" <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT);
+
+my ($records_path, $aggregate_path, $cursor_path, $complete_path) = @ARGV;
+my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sub open_read {
+  my ($path) = @_;
+  return undef if -l $path || !-f $path;
+  my $fh;
+  sysopen($fh, $path, O_RDONLY | $nofollow) or return undef;
+  return $fh;
+}
+sub open_append {
+  my ($path) = @_;
+  return undef if -l $path;
+  my $flags = O_WRONLY | O_APPEND;
+  if (-e $path) {
+    return undef unless -f $path;
+    $flags |= $nofollow;
+  } else {
+    $flags |= O_CREAT | O_EXCL;
+  }
+  my $fh;
+  sysopen($fh, $path, $flags, 0600) or return undef;
+  return $fh;
+}
+sub write_atomic {
+  my ($path, $value) = @_;
+  return 0 if -l $path;
+  my $tmp = "$path.tmp.$$";
+  my $fh;
+  sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or return 0;
+  binmode($fh);
+  return 0 unless print($fh $value) && close($fh);
+  return 0 if -l $path;
+  rename($tmp, $path) or return 0;
+  return 1;
+}
+my $offset = 0;
+if (-e $cursor_path) {
+  my $cfh = open_read($cursor_path) or exit 1;
+  my $value = <$cfh> // '';
+  close($cfh) or exit 1;
+  chomp $value;
+  $value =~ /^\d+\z/ or exit 1;
+  $offset = 0 + $value;
+}
+my $rfh = open_read($records_path) or exit 1;
+seek($rfh, $offset, 0) or exit 1;
+my $afh = open_append($aggregate_path) or exit 1;
+binmode($rfh);
+binmode($afh);
+local $/ = "\0";
+while (defined(my $meta = <$rfh>)) {
+  my $window = <$rfh>;
+  my $count = <$rfh>;
+  last unless defined($window) && defined($count);
+  $meta =~ s/\0\z// or exit 1;
+  $window =~ s/\0\z// or exit 1;
+  $count =~ s/\0\z// or exit 1;
+  $window =~ /^\S+\z/ or exit 1;
+  $count =~ /^\d+\z/ or exit 1;
+  print $afh unpack('H*', $window), "\t", unpack('H*', $meta), "\n" or exit 1;
+  my $position = tell($rfh);
+  defined($position) or exit 1;
+  write_atomic($cursor_path, "$position\n") or exit 1;
+}
+close($rfh) or exit 1;
+close($afh) or exit 1;
+write_atomic($complete_path, "complete\n") or exit 1;
+PERL
+    then :
+    else
+      rc=$?
+      [ "$rc" -ne 0 ] || rc=124
+      rm -f "$output"
+      return "$rc"
+    fi
+  fi
+  if [ ! -e "$sorted_complete_path" ]; then
+    remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
+      rm -f "$output"
+      return 124
+    }
+    sorted_tmp=$(mktemp "$sorted_path.XXXXXX") || {
+      rm -f "$output"
+      return 1
+    }
+    [ -f "$sorted_tmp" ] && [ ! -L "$sorted_tmp" ] || {
+      rm -f "$sorted_tmp" "$output"
+      return 1
+    }
+    if fm_pane_idle_run_bounded_child "$remaining" env LC_ALL=C sort -u \
+      "$aggregate_path" > "$sorted_tmp" \
+      && [ ! -L "$sorted_path" ] && mv -f "$sorted_tmp" "$sorted_path" \
+      && fm_pane_idle_meta_index_cursor_write "$sorted_complete_path" complete; then
+      :
+    else
+      rc=$?
+      [ "$rc" -ne 0 ] || rc=124
+      rm -f "$sorted_tmp" "$output"
+      return "$rc"
+    fi
+  fi
+  remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
+    rm -f "$output"
+    return 124
+  }
+  if fm_pane_idle_run_bounded_child "$remaining" perl - "$sorted_path" "$output" <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT);
+
+my ($sorted_path, $output) = @ARGV;
+my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+open(my $sfh, '<', $sorted_path) or exit 1;
+binmode($sfh);
+my $ofh;
+sysopen($ofh, $output, O_WRONLY | O_TRUNC | $nofollow) or exit 1;
+binmode($ofh);
+my ($window, $first_meta, $count) = ('', '', 0);
+sub flush_window {
+  return unless $count;
+  print $ofh $first_meta, "\0", $window, "\0", $count, "\0" or exit 1;
+}
+while (defined(my $line = <$sfh>)) {
+  chomp $line;
+  my ($window_hex, $meta_hex) = split(/\t/, $line, 2);
+  exit 1 unless defined($window_hex) && defined($meta_hex)
+    && $window_hex =~ /\A(?:[0-9A-Fa-f]{2})*\z/
+    && $meta_hex =~ /\A(?:[0-9A-Fa-f]{2})*\z/;
+  my $current_window = pack('H*', $window_hex);
+  my $current_meta = pack('H*', $meta_hex);
+  if ($current_window ne $window) {
+    flush_window();
+    $window = $current_window;
+    $first_meta = $current_meta;
+    $count = 1;
+  } else {
+    $count++;
+  }
+}
+close($sfh) or exit 1;
+flush_window();
+close($ofh) or exit 1;
+PERL
+  then :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=124
+    rm -f "$output"
+    return "$rc"
+  fi
+  fm_pane_idle_meta_index_cursor_write "$complete_path" complete || {
+    rm -f "$output"
+    return 1
+  }
+  for path in "$output" "$records_path" "$complete_path" "$seen_path" \
+    "$aggregate_path" "$aggregate_complete_path" "$sorted_path" \
+    "$sorted_complete_path"; do
     [ -f "$path" ] && [ ! -L "$path" ] || {
       rm -f "$output"
       return 1
@@ -520,17 +681,31 @@ while (defined(my $key = <$cfh>)) {
   $current{$key} = 1 if $key =~ /^[0-9A-Fa-f]{64}\z/;
 }
 close($cfh) or exit 1;
+my $cursor = 0;
+if (-e $cursor_path) {
+  open(my $rfh, '<', $cursor_path) or exit 1;
+  my $value = <$rfh> // '';
+  close($rfh) or exit 1;
+  chomp $value;
+  $cursor = 0 + $value if $value =~ /^\d+\z/;
+}
 opendir(my $dh, $directory) or exit 1;
+seekdir($dh, $cursor) or exit 1 if $cursor;
 while (defined(my $entry = readdir($dh))) {
   exit 124 if expired();
-  next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
-  my $path = "$directory/$entry";
-  exit 1 if -l $path;
-  next unless -e $path;
-  exit 1 unless -f $path;
-  next if exists $current{$entry};
-  unlink($path) or exit 1;
-  write_progress($cursor_path, $entry) or exit 1;
+  my $next_cursor = telldir($dh);
+  defined($next_cursor) or exit 1;
+  if ($entry =~ /^[0-9A-Fa-f]{64}\z/) {
+    my $path = "$directory/$entry";
+    exit 1 if -l $path;
+    if (-e $path) {
+      exit 1 unless -f $path;
+      if (!exists $current{$entry}) {
+        unlink($path) or exit 1;
+      }
+    }
+  }
+  write_progress($cursor_path, $next_cursor) or exit 1;
 }
 closedir($dh) or exit 1;
 PERL

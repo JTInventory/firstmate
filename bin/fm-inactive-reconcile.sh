@@ -297,16 +297,19 @@ inactive_retry_file_prepare() {
 }
 
 inactive_append_nul_value() {
-  local target=$1 value=$2 tmp
+  local target=$1 value=$2 deadline_ms=${3-} now
   [ -f "$target" ] && [ ! -L "$target" ] || return 1
-  tmp=$(mktemp "$target.XXXXXX") || return 1
-  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  if ! cat "$target" > "$tmp" || ! printf '%s\0' "$value" >> "$tmp"; then
-    rm -f "$tmp"
-    return 1
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  if [ -n "$deadline_ms" ]; then
+    now=$(clock_millis)
+    [ "$now" -lt "$deadline_ms" ] || return 124
   fi
-  [ ! -L "$target" ] || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
+  [ ! -L "$target" ] || return 1
+  printf '%s\0' "$value" >> "$target" || return 1
+  if [ -n "$deadline_ms" ]; then
+    now=$(clock_millis)
+    [ "$now" -lt "$deadline_ms" ] || return 124
+  fi
 }
 
 inactive_pending_offset() {
@@ -399,35 +402,108 @@ inactive_nul_contains_from_offset() {
 }
 
 inactive_pending_retry_filter_duplicates() {
-  local pending=$1 retry=$2 deadline_ms=${3:-} offset value found tmp
+  local pending=$1 retry=$2 deadline_ms= offset tags sorted tmp rc remaining tab
+  [ "$#" -ge 3 ] && deadline_ms=$3
+  [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
   [ -f "$retry" ] && [ ! -L "$retry" ] || return 1
-  offset=$(inactive_pending_offset "${pending}.offset") || return 1
-  tmp=$(mktemp "$retry.XXXXXX") || return 1
-  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  while IFS= read -r -d '' value; do
-    if [ -n "$deadline_ms" ] && [ "$(clock_millis)" -ge "$deadline_ms" ]; then
-      rm -f "$tmp"
-      return 124
-    fi
-    inactive_nul_contains_from_offset "$pending" "$offset" "$value" "$deadline_ms"
-    found=$?
-    case "$found" in
-      0) continue ;;
-      124) rm -f "$tmp"; return 124 ;;
-      1) ;;
-      *) rm -f "$tmp"; return 1 ;;
-    esac
-    inactive_nul_contains_from_offset "$tmp" 0 "$value" "$deadline_ms"
-    found=$?
-    case "$found" in
-      0) continue ;;
-      124) rm -f "$tmp"; return 124 ;;
-      1) printf '%s\0' "$value" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
-      *) rm -f "$tmp"; return 1 ;;
-    esac
-  done < "$retry"
-  [ ! -L "$retry" ] || { rm -f "$tmp"; return 1; }
+  offset=$(inactive_pending_offset "$pending.offset") || return 1
+  tags=$(mktemp "$retry.tags.XXXXXX") || return 1
+  sorted=$(mktemp "$retry.sorted.XXXXXX") || { rm -f "$tags"; return 1; }
+  tmp=$(mktemp "$retry.filtered.XXXXXX") || {
+    rm -f "$tags" "$sorted"
+    return 1
+  }
+  [ -f "$tags" ] && [ ! -L "$tags" ] || { rm -f "$tags" "$sorted" "$tmp"; return 1; }
+  [ -f "$sorted" ] && [ ! -L "$sorted" ] || { rm -f "$tags" "$sorted" "$tmp"; return 1; }
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tags" "$sorted" "$tmp"; return 1; }
+  remaining=$(budget_remaining_secs "$deadline_ms")
+  [ "$remaining" -gt 0 ] || { rm -f "$tags" "$sorted" "$tmp"; return 124; }
+  if run_bounded_child "$remaining" perl - "$pending" "$offset" "$retry" > "$tags" <<'PERL'
+use strict;
+use warnings;
+
+my ($pending, $offset, $retry) = @ARGV;
+sub emit_file {
+  my ($path, $skip) = @_;
+  open(my $fh, '<', $path) or exit 1;
+  binmode($fh);
+  local $/ = "\0";
+  while (defined(my $value = <$fh>)) {
+    if ($skip > 0) {
+      $skip--;
+      next;
+    }
+    $value =~ s/\0\z// or exit 1;
+    print unpack('H*', $value), "\tP\n" or exit 1;
+  }
+  close($fh) or exit 1;
+}
+emit_file($pending, $offset + 0);
+open(my $rfh, '<', $retry) or exit 1;
+binmode($rfh);
+local $/ = "\0";
+while (defined(my $value = <$rfh>)) {
+  $value =~ s/\0\z// or exit 1;
+  print unpack('H*', $value), "\tR\n" or exit 1;
+}
+close($rfh) or exit 1;
+PERL
+  then :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=124
+    rm -f "$tags" "$sorted" "$tmp"
+    return "$rc"
+  fi
+  remaining=$(budget_remaining_secs "$deadline_ms")
+  [ "$remaining" -gt 0 ] || { rm -f "$tags" "$sorted" "$tmp"; return 124; }
+  tab=$(printf '\t')
+  if run_bounded_child "$remaining" env LC_ALL=C sort -t "$tab" -k1,1 -k2,2 "$tags" > "$sorted"; then :; else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=124
+    rm -f "$tags" "$sorted" "$tmp"
+    return "$rc"
+  fi
+  remaining=$(budget_remaining_secs "$deadline_ms")
+  [ "$remaining" -gt 0 ] || { rm -f "$tags" "$sorted" "$tmp"; return 124; }
+  if run_bounded_child "$remaining" perl - "$sorted" > "$tmp" <<'PERL'
+use strict;
+use warnings;
+
+my $path = shift @ARGV;
+open(my $fh, '<', $path) or exit 1;
+my ($last, $has_pending, $has_retry, $value) = ('', 0, 0, '');
+sub flush_group {
+  return unless $last ne '' && $has_retry && !$has_pending;
+  print $value, "\0" or exit 1;
+}
+while (defined(my $line = <$fh>)) {
+  chomp $line;
+  my ($key, $kind) = split(/\t/, $line, 2);
+  exit 1 unless defined($key) && defined($kind) && $key =~ /\A(?:[0-9A-Fa-f]{2})*\z/ && $kind =~ /\A[PR]\z/;
+  if ($key ne $last) {
+    flush_group();
+    $last = $key;
+    $has_pending = 0;
+    $has_retry = 0;
+    $value = pack('H*', $key);
+  }
+  $has_pending = 1 if $kind eq 'P';
+  $has_retry = 1 if $kind eq 'R';
+}
+close($fh) or exit 1;
+flush_group();
+PERL
+  then :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=124
+    rm -f "$tags" "$sorted" "$tmp"
+    return "$rc"
+  fi
+  [ ! -L "$retry" ] || { rm -f "$tags" "$sorted" "$tmp"; return 1; }
   mv -f "$tmp" "$retry" || { rm -f "$tmp"; return 1; }
+  rm -f "$tags" "$sorted" || return 1
 }
 
 inactive_pending_merge_retry() {
@@ -622,92 +698,6 @@ run_bounded_child() {  # <seconds> <command> [args...]
   else
     return 125
   fi
-}
-
-inactive_order_find_paths() {
-  local deadline_ms=$1 input=$2 output=$3 lines_tmp sorted_tmp remaining rc
-  command -v sort >/dev/null 2>&1 || return 125
-  lines_tmp=$(mktemp "$STATE/.inactive-outcome-find-lines.XXXXXX") || return 1
-  sorted_tmp=$(mktemp "$STATE/.inactive-outcome-find-sorted.XXXXXX") || {
-    rm -f "$lines_tmp"
-    return 1
-  }
-  [ -f "$lines_tmp" ] && [ ! -L "$lines_tmp" ] || {
-    rm -f "$lines_tmp" "$sorted_tmp"
-    return 1
-  }
-  [ -f "$sorted_tmp" ] && [ ! -L "$sorted_tmp" ] || {
-    rm -f "$lines_tmp" "$sorted_tmp"
-    return 1
-  }
-  remaining=$(budget_remaining_secs "$deadline_ms")
-  if [ "$remaining" -le 0 ]; then
-    rm -f "$lines_tmp" "$sorted_tmp"
-    return 124
-  fi
-  if run_bounded_child "$remaining" perl - "$input" > "$lines_tmp" <<'PERL'
-use strict;
-use warnings;
-
-my $input = shift @ARGV;
-open(my $fh, '<', $input) or exit 1;
-binmode($fh);
-local $/ = "\0";
-while (defined(my $path = <$fh>)) {
-  $path =~ s/\0\z// or exit 1;
-  exit 1 if $path =~ /[\r\n]/;
-  print $path, "\n" or exit 1;
-}
-close($fh) or exit 1;
-PERL
-  then
-    :
-  else
-    rc=$?
-    [ "$rc" -ne 0 ] || rc=124
-    rm -f "$lines_tmp" "$sorted_tmp"
-    return "$rc"
-  fi
-  remaining=$(budget_remaining_secs "$deadline_ms")
-  if [ "$remaining" -le 0 ]; then
-    rm -f "$lines_tmp" "$sorted_tmp"
-    return 124
-  fi
-  if run_bounded_child "$remaining" env LC_ALL=C sort "$lines_tmp" > "$sorted_tmp"; then
-    :
-  else
-    rc=$?
-    [ "$rc" -ne 0 ] || rc=124
-    rm -f "$lines_tmp" "$sorted_tmp"
-    return "$rc"
-  fi
-  remaining=$(budget_remaining_secs "$deadline_ms")
-  if [ "$remaining" -le 0 ]; then
-    rm -f "$lines_tmp" "$sorted_tmp" "$output"
-    return 124
-  fi
-  if run_bounded_child "$remaining" perl - "$sorted_tmp" > "$output" <<'PERL'
-use strict;
-use warnings;
-
-my $input = shift @ARGV;
-open(my $fh, '<', $input) or exit 1;
-while (defined(my $path = <$fh>)) {
-  chomp $path;
-  print $path, "\0" or exit 1;
-}
-close($fh) or exit 1;
-PERL
-  then
-    :
-  else
-    rc=$?
-    [ "$rc" -ne 0 ] || rc=124
-    rm -f "$lines_tmp" "$sorted_tmp" "$output"
-    return "$rc"
-  fi
-  rm -f "$lines_tmp" "$sorted_tmp" || return 1
-  [ -f "$output" ] && [ ! -L "$output" ] || return 1
 }
 
 receipt_path() {  # <fingerprint> <suffix>
@@ -1644,7 +1634,6 @@ replay_pane_idle_publication_valid() {
   local meta=$1 id=$2 window=$3 backend=$4 incarnation=$5
   local deadline_ms=${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-} now_ms remaining_ms capture_secs
   if [ "${FM_INACTIVE_OUTCOME_CHILD_BOUND:-0}" = 1 ]; then
-    unset FM_PANE_IDLE_META_INDEX_DIR
     fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$incarnation" "$RECONCILE_SECS"
     return $?
   fi
@@ -2143,7 +2132,14 @@ repair_reported_secondmate_routes() {
         fi
         continue
       fi
-      [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
+      [ -f "$reported" ] && [ ! -L "$reported" ] || {
+        status=1
+        candidate_retain=1
+        batch_consumed=$((batch_consumed - 1))
+        batch_complete=0
+        MAINTENANCE_ENUM_FAILED=1
+        break 2
+      }
       kind=$(receipt_field "$reported" kind 2>/dev/null || true)
       if [ ! -e "$reported" ] && [ ! -L "$reported" ]; then
         last=$base
@@ -2192,10 +2188,16 @@ repair_reported_secondmate_routes() {
             break 2
           fi
         fi
-        if ! inactive_append_nul_value "$retry_path" "$reported"; then
+        inactive_append_nul_value "$retry_path" "$reported" "$maintenance_deadline"
+        append_rc=$?
+        if [ "$append_rc" -ne 0 ]; then
           batch_consumed=$((batch_consumed - 1))
           batch_complete=0
-          MAINTENANCE_ENUM_FAILED=1
+          if [ "$append_rc" = 124 ]; then
+            MAINTENANCE_DEADLINE_EXPIRED=1
+          else
+            MAINTENANCE_ENUM_FAILED=1
+          fi
           break 2
         fi
         continue
@@ -2475,10 +2477,16 @@ republish_pending_receipts() {
               break 2
             fi
           fi
-          if ! inactive_append_nul_value "$retry_path" "$pending"; then
+          inactive_append_nul_value "$retry_path" "$pending" "$maintenance_deadline"
+          append_rc=$?
+          if [ "$append_rc" -ne 0 ]; then
             batch_consumed=$((batch_consumed - 1))
             batch_complete=0
-            MAINTENANCE_ENUM_FAILED=1
+            if [ "$append_rc" = 124 ]; then
+              MAINTENANCE_DEADLINE_EXPIRED=1
+            else
+              MAINTENANCE_ENUM_FAILED=1
+            fi
             break 2
           fi
           continue
@@ -3139,7 +3147,6 @@ scan_locked() {
   local maintenance_order next_order maintenance_order_tmp maintenance_ran=0 maintenance_deferred=0 direct_deferred=0
   local find_pending_source=0 find_retain=0 find_ordered=1 batch_consumed=0 batch_complete=1 retry_path=
   local find_pending_offset=0 find_tmp_owned=0 pending_skip=0
-  local ordered_tmp=
   local pane_idle_index_dir= pane_idle_index_ready=0
   inactive_state_preflight || return 1
   inactive_merge_txn_recover || return 1
@@ -3379,38 +3386,8 @@ scan_locked() {
           remaining=0
         fi
         if [ "$scan_failed" = 0 ] && [ "$remaining" -le 0 ]; then
-          find_ordered=0
           direct_deferred=1
           find_retain=1
-        elif [ "$scan_failed" = 0 ]; then
-          ordered_tmp=$(mktemp "$STATE/.inactive-outcome-find-ordered.XXXXXX") || {
-            scan_failed=1
-            ordered_tmp=
-          }
-          if [ "$scan_failed" = 0 ] \
-            && inactive_order_find_paths "$scan_deadline" "$find_tmp" "$ordered_tmp";
-          then
-            if [ -f "$ordered_tmp" ] && [ ! -L "$ordered_tmp" ] \
-              && [ ! -L "$find_tmp" ] && mv -f "$ordered_tmp" "$find_tmp"; then
-              ordered_tmp=
-            else
-              rm -f "$ordered_tmp"
-              ordered_tmp=
-              scan_failed=1
-            fi
-          else
-            rc=$?
-            [ "$rc" -ne 0 ] || rc=1
-            if [ "$rc" = 124 ]; then
-              find_ordered=0
-              direct_deferred=1
-              find_retain=1
-            else
-              scan_failed=1
-            fi
-            rm -f "$ordered_tmp"
-            ordered_tmp=
-          fi
         fi
       else
         rc=$?
@@ -3536,10 +3513,17 @@ scan_locked() {
               break
             }
           fi
-          inactive_append_nul_value "$retry_path" "$meta" || {
-            scan_failed=1
+          inactive_append_nul_value "$retry_path" "$meta" "$scan_deadline"
+          append_rc=$?
+          if [ "$append_rc" = 124 ]; then
+            direct_deferred=1
+            batch_complete=0
             break
-          }
+          elif [ "$append_rc" -ne 0 ]; then
+            scan_failed=1
+            batch_complete=0
+            break
+          fi
           continue
           ;;
         *)
@@ -3589,15 +3573,14 @@ scan_locked() {
       scan_failed=1
     }
   fi
-  if [ "$find_tmp_owned" = 0 ] || rm -f "$find_tmp"; then
-    :
-  else
-    rc=$?
-    [ "$rc" -ne 0 ] || rc=1
-    complete=0
-    scan_failed=1
+  if [ "$find_tmp_owned" = 1 ]; then
+    if ! rm -f "$find_tmp"; then
+      rc=$?
+      [ "$rc" -ne 0 ] || rc=1
+      complete=0
+      scan_failed=1
+    fi
   fi
-  [ -z "$ordered_tmp" ] || rm -f "$ordered_tmp"
   if [ "$maintenance_ran" = 0 ]; then
     run_maintenance
   fi
