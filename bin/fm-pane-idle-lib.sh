@@ -27,7 +27,7 @@ fm_pane_idle_now_ms() {
 
 fm_pane_idle_meta_index_collect() {
   local state=$1 output=$2 deadline_ms=${3:-} worker rc
-  local cursor_path records_path complete_path
+  local cursor_path records_path complete_path seen_path
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   [ ! -L "$output" ] || return 1
@@ -35,25 +35,26 @@ fm_pane_idle_meta_index_collect() {
   cursor_path="$state/.pane-idle-meta-index.scan.cursor"
   records_path="$state/.pane-idle-meta-index.scan.records"
   complete_path="$state/.pane-idle-meta-index.scan.complete"
-  for path in "$cursor_path" "$records_path" "$complete_path"; do
+  seen_path="$state/.pane-idle-meta-index.scan.seen"
+  for path in "$cursor_path" "$records_path" "$complete_path" "$seen_path"; do
     if [ -e "$path" ] || [ -L "$path" ]; then
       [ -f "$path" ] && [ ! -L "$path" ] || return 1
     fi
   done
   if [ -e "$complete_path" ]; then
-    rm -f "$cursor_path" "$records_path" || return 1
+    rm -f "$cursor_path" "$records_path" "$seen_path" || return 1
     rm -f "$complete_path" || return 1
   fi
   if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
     return 124
   fi
   command -v perl >/dev/null 2>&1 || return 125
-  perl - "$state" "$cursor_path" "$records_path" "$complete_path" "$deadline_ms" "$output" <<'PERL' &
+  perl - "$state" "$cursor_path" "$records_path" "$complete_path" "$seen_path" "$deadline_ms" "$output" <<'PERL' &
 use strict;
 use warnings;
 use Fcntl qw(:DEFAULT);
 
-my ($state, $cursor_path, $records_path, $complete_path, $deadline, $output) = @ARGV;
+my ($state, $cursor_path, $records_path, $complete_path, $seen_path, $deadline, $output) = @ARGV;
 $deadline = undef unless defined($deadline) && $deadline =~ /^\d+\z/ && $deadline ne '';
 my $nofollow = eval { Fcntl::O_NOFOLLOW() };
 
@@ -108,6 +109,22 @@ sub expired {
   return defined($deadline) && int(time() * 1000) >= $deadline;
 }
 
+sub seen_entry {
+  my ($entry) = @_;
+  return 0 unless -e $seen_path;
+  my $fh = open_read($seen_path) or return -1;
+  while (defined(my $line = <$fh>)) {
+    return -2 if expired();
+    chomp $line;
+    if ($line eq $entry) {
+      close($fh) or return -1;
+      return 1;
+    }
+  }
+  close($fh) or return -1;
+  return 0;
+}
+
 my $cursor = '';
 if (-e $cursor_path) {
   my $cfh = open_read($cursor_path) or exit 1;
@@ -123,15 +140,24 @@ while (1) {
     my $rfh = open_append($records_path) or exit 1;
     close($rfh) or exit 1;
   }
+  if (!-e $seen_path) {
+    my $sfh = open_append($seen_path) or exit 1;
+    close($sfh) or exit 1;
+  }
   opendir(my $dh, $state) or exit 1;
   my $next = '';
   while (defined(my $entry = readdir($dh))) {
     exit 124 if expired();
     next unless $entry =~ /\.meta\z/;
-    next unless $entry gt $cursor;
+    exit 1 if $entry =~ /[\r\n]/;
+    my $seen = seen_entry($entry);
+    exit 124 if $seen == -2;
+    exit 1 if $seen < 0;
+    next if $seen == 1;
     my $path = "$state/$entry";
     next unless -f $path && !-l $path;
-    $next = $entry if $next eq '' || $entry lt $next;
+    $next = $entry;
+    last;
   }
   closedir($dh) or exit 1;
   last if $next eq '';
@@ -154,6 +180,9 @@ while (1) {
       close($rfh) or exit 1;
     }
   }
+  my $sfh = open_append($seen_path) or exit 1;
+  print $sfh $next, "\n" or exit 1;
+  close($sfh) or exit 1;
   write_atomic($cursor_path, "$next\n") or exit 1;
   $cursor = $next;
 }
@@ -201,7 +230,7 @@ PERL
     rm -f "$output"
     return "$rc"
   fi
-  for path in "$output" "$records_path" "$complete_path"; do
+  for path in "$output" "$records_path" "$complete_path" "$seen_path"; do
     [ -f "$path" ] && [ ! -L "$path" ] || {
       rm -f "$output"
       return 1
@@ -429,66 +458,14 @@ fm_pane_idle_meta_index_persist() {
   fm_pane_idle_meta_index_reclaim "$directory" "$deadline_ms"
 }
 
-fm_pane_idle_meta_index_reclaim_next() {
-  local directory=$1 cursor=$2 deadline_ms=${3:-} worker rc tmp next
-  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
-  command -v perl >/dev/null 2>&1 || return 125
-  tmp=$(mktemp "$directory/.pane-idle-reclaim-next.XXXXXX") || return 1
-  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  perl - "$directory" "$cursor" "$deadline_ms" > "$tmp" <<'PERL' &
-use strict;
-use warnings;
-
-my ($directory, $cursor, $deadline) = @ARGV;
-$deadline = undef unless defined($deadline) && $deadline =~ /^\d+\z/ && $deadline ne '';
-sub expired {
-  return defined($deadline) && int(time() * 1000) >= $deadline;
-}
-opendir(my $dh, $directory) or exit 1;
-my $next = '';
-while (defined(my $entry = readdir($dh))) {
-  exit 124 if expired();
-  next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
-  next unless $entry gt $cursor;
-  my $path = "$directory/$entry";
-  next unless -f $path && !-l $path;
-  $next = $entry if $next eq '' || $entry lt $next;
-}
-closedir($dh) or exit 1;
-print $next, "\n";
-PERL
-  worker=$!
-  while kill -0 "$worker" 2>/dev/null; do
-    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
-      kill -TERM "$worker" 2>/dev/null || true
-      kill -KILL "$worker" 2>/dev/null || true
-      wait "$worker" 2>/dev/null || true
-      rm -f "$tmp"
-      return 124
-    fi
-    sleep 0.01
-  done
-  wait "$worker"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    rm -f "$tmp"
-    return "$rc"
-  fi
-  next=$(cat "$tmp" 2>/dev/null || true)
-  rm -f "$tmp" || return 1
-  printf '%s' "$next"
-}
-
 fm_pane_idle_meta_index_reclaim() {
-  local directory=$1 deadline_ms=${2:-} path base key next current i rc cursor_path cursor=
+  local directory=$1 deadline_ms=${2:-} current_tmp cursor_path worker rc path key i
   local -a current_keys=()
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
   cursor_path="$directory/.reclaim.cursor"
   if [ -e "$cursor_path" ] || [ -L "$cursor_path" ]; then
     [ -f "$cursor_path" ] && [ ! -L "$cursor_path" ] || return 1
-    cursor=$(cat "$cursor_path" 2>/dev/null || true)
-    case "$cursor" in ''|*[!0123456789abcdefABCDEF]*) return 1 ;; esac
   fi
   for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
@@ -499,38 +476,82 @@ fm_pane_idle_meta_index_reclaim() {
     case "$key" in *[!0123456789abcdefABCDEF]*) return 1 ;; esac
     current_keys+=("$key")
   done
-  while :; do
+  command -v perl >/dev/null 2>&1 || return 125
+  current_tmp=$(mktemp "$directory/.reclaim-current.XXXXXX") || return 1
+  [ -f "$current_tmp" ] && [ ! -L "$current_tmp" ] || {
+    rm -f "$current_tmp"
+    return 1
+  }
+  for key in "${current_keys[@]}"; do
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      rm -f "$current_tmp"
       return 124
     fi
-    next=$(fm_pane_idle_meta_index_reclaim_next "$directory" "$cursor" "$deadline_ms")
-    rc=$?
-    case "$rc" in
-      0) ;;
-      124) return 124 ;;
-      *) return "$rc" ;;
-    esac
-    [ -n "$next" ] || { rm -f "$cursor_path" || return 1; return 0; }
-    current=0
-    for ((i = 0; i < ${#current_keys[@]}; i++)); do
-      if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
-        return 124
-      fi
-      if [ "${current_keys[$i]}" = "$next" ]; then
-        current=1
-        break
-      fi
-    done
-    path="$directory/$next"
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      [ -f "$path" ] && [ ! -L "$path" ] || return 1
-      if [ "$current" = 0 ]; then
-        rm -f "$path" || return 1
-      fi
-    fi
-    fm_pane_idle_meta_index_cursor_write "$cursor_path" "$next" || return 1
-    cursor=$next
+    printf '%s\n' "$key" >> "$current_tmp" || {
+      rm -f "$current_tmp"
+      return 1
+    }
   done
+  perl - "$directory" "$current_tmp" "$cursor_path" "$deadline_ms" <<'PERL' &
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT);
+
+my ($directory, $current_path, $cursor_path, $deadline) = @ARGV;
+$deadline = undef unless defined($deadline) && $deadline =~ /^\d+\z/ && $deadline ne '';
+my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+sub expired {
+  return defined($deadline) && int(time() * 1000) >= $deadline;
+}
+sub write_progress {
+  my ($path, $value) = @_;
+  return 0 if -l $path || !defined($nofollow);
+  my $fh;
+  sysopen($fh, $path, O_WRONLY | O_CREAT | O_TRUNC | $nofollow, 0600) or return 0;
+  binmode($fh);
+  return 0 unless print($fh $value, "\n") && close($fh);
+  return 1;
+}
+open(my $cfh, '<', $current_path) or exit 1;
+my %current;
+while (defined(my $key = <$cfh>)) {
+  exit 124 if expired();
+  chomp $key;
+  $current{$key} = 1 if $key =~ /^[0-9A-Fa-f]{64}\z/;
+}
+close($cfh) or exit 1;
+opendir(my $dh, $directory) or exit 1;
+while (defined(my $entry = readdir($dh))) {
+  exit 124 if expired();
+  next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
+  my $path = "$directory/$entry";
+  exit 1 if -l $path;
+  next unless -e $path;
+  exit 1 unless -f $path;
+  next if exists $current{$entry};
+  unlink($path) or exit 1;
+  write_progress($cursor_path, $entry) or exit 1;
+}
+closedir($dh) or exit 1;
+PERL
+  worker=$!
+  while kill -0 "$worker" 2>/dev/null; do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      kill -TERM "$worker" 2>/dev/null || true
+      kill -KILL "$worker" 2>/dev/null || true
+      wait "$worker" 2>/dev/null || true
+      rm -f "$current_tmp"
+      return 124
+    fi
+    sleep 0.01
+  done
+  wait "$worker"
+  rc=$?
+  rm -f "$current_tmp" || return 1
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  rm -f "$cursor_path" || return 1
 }
 
 fm_pane_idle_meta_for_window_indexed() {

@@ -3003,7 +3003,14 @@ SH
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
     FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
     fm-sm-never-bound "never bound request" 2>&1) && fail "never-bound marked send unexpectedly succeeded"
-  rec=$(find "$state/pending-replies" -maxdepth 1 -type f -name '????????????????' -print -quit)
+  rec=
+  for candidate in "$state/pending-replies"/*; do
+    base=$(basename "$candidate")
+    [ -f "$candidate" ] || continue
+    [ "${#base}" = 16 ] || continue
+    rec=$candidate
+    break
+  done
   [ -f "$rec" ] || fail "never-bound cleanup did not retain the failed record for retry"
   [ -f "$rec.cleanup-meta" ] || fail "never-bound cleanup did not persist repair metadata"
   [ ! -e "$child_state/.fm-jt-parent-route" ] \

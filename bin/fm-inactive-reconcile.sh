@@ -624,6 +624,92 @@ run_bounded_child() {  # <seconds> <command> [args...]
   fi
 }
 
+inactive_order_find_paths() {
+  local deadline_ms=$1 input=$2 output=$3 lines_tmp sorted_tmp remaining rc
+  command -v sort >/dev/null 2>&1 || return 125
+  lines_tmp=$(mktemp "$STATE/.inactive-outcome-find-lines.XXXXXX") || return 1
+  sorted_tmp=$(mktemp "$STATE/.inactive-outcome-find-sorted.XXXXXX") || {
+    rm -f "$lines_tmp"
+    return 1
+  }
+  [ -f "$lines_tmp" ] && [ ! -L "$lines_tmp" ] || {
+    rm -f "$lines_tmp" "$sorted_tmp"
+    return 1
+  }
+  [ -f "$sorted_tmp" ] && [ ! -L "$sorted_tmp" ] || {
+    rm -f "$lines_tmp" "$sorted_tmp"
+    return 1
+  }
+  remaining=$(budget_remaining_secs "$deadline_ms")
+  if [ "$remaining" -le 0 ]; then
+    rm -f "$lines_tmp" "$sorted_tmp"
+    return 124
+  fi
+  if run_bounded_child "$remaining" perl - "$input" > "$lines_tmp" <<'PERL'
+use strict;
+use warnings;
+
+my $input = shift @ARGV;
+open(my $fh, '<', $input) or exit 1;
+binmode($fh);
+local $/ = "\0";
+while (defined(my $path = <$fh>)) {
+  $path =~ s/\0\z// or exit 1;
+  exit 1 if $path =~ /[\r\n]/;
+  print $path, "\n" or exit 1;
+}
+close($fh) or exit 1;
+PERL
+  then
+    :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=124
+    rm -f "$lines_tmp" "$sorted_tmp"
+    return "$rc"
+  fi
+  remaining=$(budget_remaining_secs "$deadline_ms")
+  if [ "$remaining" -le 0 ]; then
+    rm -f "$lines_tmp" "$sorted_tmp"
+    return 124
+  fi
+  if run_bounded_child "$remaining" env LC_ALL=C sort "$lines_tmp" > "$sorted_tmp"; then
+    :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=124
+    rm -f "$lines_tmp" "$sorted_tmp"
+    return "$rc"
+  fi
+  remaining=$(budget_remaining_secs "$deadline_ms")
+  if [ "$remaining" -le 0 ]; then
+    rm -f "$lines_tmp" "$sorted_tmp" "$output"
+    return 124
+  fi
+  if run_bounded_child "$remaining" perl - "$sorted_tmp" > "$output" <<'PERL'
+use strict;
+use warnings;
+
+my $input = shift @ARGV;
+open(my $fh, '<', $input) or exit 1;
+while (defined(my $path = <$fh>)) {
+  chomp $path;
+  print $path, "\0" or exit 1;
+}
+close($fh) or exit 1;
+PERL
+  then
+    :
+  else
+    rc=$?
+    [ "$rc" -ne 0 ] || rc=124
+    rm -f "$lines_tmp" "$sorted_tmp" "$output"
+    return "$rc"
+  fi
+  rm -f "$lines_tmp" "$sorted_tmp" || return 1
+  [ -f "$output" ] && [ ! -L "$output" ] || return 1
+}
+
 receipt_path() {  # <fingerprint> <suffix>
   printf '%s/%s.%s' "$OUTCOME_DIR" "$1" "$2"
 }
@@ -3278,31 +3364,31 @@ scan_locked() {
     else
       if run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
         \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
-        remaining=$(budget_remaining_secs "$scan_deadline")
-        if [ "$remaining" -le 0 ]; then
+        if inactive_persist_nul_suffix "$find_tmp" "$DIRECT_FIND_PENDING" 0 "" "$scan_deadline"; then
+          find_tmp="$DIRECT_FIND_PENDING"
+          find_tmp_owned=0
+          find_pending_source=1
+          find_pending_offset=0
+          pending_skip=0
+          find_retain=1
+          remaining=$(budget_remaining_secs "$scan_deadline")
+        else
+          rc=$?
+          [ "$rc" -ne 0 ] || rc=1
+          scan_failed=1
+          remaining=0
+        fi
+        if [ "$scan_failed" = 0 ] && [ "$remaining" -le 0 ]; then
           find_ordered=0
           direct_deferred=1
           find_retain=1
-        else
+        elif [ "$scan_failed" = 0 ]; then
           ordered_tmp=$(mktemp "$STATE/.inactive-outcome-find-ordered.XXXXXX") || {
             scan_failed=1
             ordered_tmp=
           }
-          if [ "$scan_failed" = 0 ] && run_bounded_child "$remaining" perl - "$find_tmp" > "$ordered_tmp" <<'PERL'
-use strict;
-use warnings;
-
-my $input = shift @ARGV;
-open(my $fh, '<', $input) or exit 1;
-binmode($fh);
-local $/ = "\0";
-my @paths;
-while (defined(my $path = <$fh>)) {
-  push @paths, $path;
-}
-close($fh) or exit 1;
-print sort @paths or exit 1;
-PERL
+          if [ "$scan_failed" = 0 ] \
+            && inactive_order_find_paths "$scan_deadline" "$find_tmp" "$ordered_tmp";
           then
             if [ -f "$ordered_tmp" ] && [ ! -L "$ordered_tmp" ] \
               && [ ! -L "$find_tmp" ] && mv -f "$ordered_tmp" "$find_tmp"; then
