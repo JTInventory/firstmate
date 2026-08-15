@@ -178,6 +178,30 @@ inactive_append_nul_records() {
   done < "$source"
 }
 
+inactive_append_nul_records_atomic() {
+  local source=$1 target=$2 deadline_ms=${3:-} tmp rc
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  [ -f "$target" ] && [ ! -L "$target" ] || return 1
+  [ "$source" != "$target" ] || return 1
+  [ ! -L "$target" ] || return 1
+  tmp=$(mktemp "$target.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  inactive_append_nul_records "$target" "$tmp" "$deadline_ms"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  inactive_append_nul_records "$source" "$tmp" "$deadline_ms"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  [ ! -L "$target" ] || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
+}
+
 inactive_append_nul_value() {
   local target=$1 value=$2
   [ -f "$target" ] && [ ! -L "$target" ] || return 1
@@ -263,7 +287,7 @@ inactive_pending_merge_retry() {
   for path in "$retry" "${retry}.incoming."*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
-    inactive_append_nul_records "$path" "$pending" "$deadline_ms"
+    inactive_append_nul_records_atomic "$path" "$pending" "$deadline_ms"
     rc=$?
     [ "$rc" = 0 ] || return "$rc"
     rm -f "$path" || return 1
@@ -282,7 +306,7 @@ inactive_persist_nul_suffix() {
     mv -f "$source" "$target" || return 1
   fi
   if [ -n "$retry_source" ]; then
-    inactive_append_nul_records "$retry_source" "$target" "$deadline_ms"
+    inactive_append_nul_records_atomic "$retry_source" "$target" "$deadline_ms"
     local retry_rc=$?
     if [ "$retry_rc" -ne 0 ]; then
       if [ "$retry_rc" = 124 ] && inactive_pending_retry_defer "$retry_source" "${target}.retry" "$deadline_ms"; then

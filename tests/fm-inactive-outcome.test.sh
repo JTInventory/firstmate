@@ -1974,6 +1974,27 @@ SH
   pass "inactive receipt publication rechecks pane idleness under lock"
 }
 
+test_pane_idle_index_reclaims_retired_windows() {
+  local dir root home fakebin state window key index_dir
+  new_case pane-idle-index-retirement
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" retired-index-x1 retired-index-inc
+  window=tmux:fm-retired-index-x1
+  if command -v shasum >/dev/null 2>&1; then
+    key=$(printf '%s' "$window" | shasum -a 256 | awk '{print $1}')
+  else
+    key=$(printf '%s' "$window" | sha256sum | awk '{print $1}')
+  fi
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "initial pane-idle index scan failed"
+  index_dir="$state/.inactive-outcome-pane-idle-index"
+  [ -f "$index_dir/$key" ] || fail "initial pane-idle index entry was not published"
+  rm -f "$state/retired-index-x1.meta" "$state/retired-index-x1.status" "$state/retired-index-x1.turn-ended"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "retired pane-idle index scan failed"
+  [ ! -e "$index_dir/$key" ] || fail "retired pane-idle index entry was not reclaimed"
+  pass "pane-idle index reclaims retired windows after publication"
+}
+
 test_secondmate_route_accepts_effective_state_overrides() {
   local dir root home fakebin child_home child_state effective_state pending_dir corr marker
   new_case secondmate-effective-state
@@ -3124,6 +3145,7 @@ test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_pane_idle_proof_is_required_and_bound
 test_pane_idle_publication_rechecks_under_lock
+test_pane_idle_index_reclaims_retired_windows
 test_secondmate_route_accepts_effective_state_overrides
 test_valid_secondmate_route_reports_parent_once
 test_deferred_recorded_secondmate_finishes_without_output

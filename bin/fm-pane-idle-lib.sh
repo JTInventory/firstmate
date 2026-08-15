@@ -25,9 +25,63 @@ fm_pane_idle_now_ms() {
   fi
 }
 
+fm_pane_idle_meta_index_collect() {
+  local state=$1 output=$2 deadline_ms=${3:-} worker rc
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  [ ! -L "$output" ] || return 1
+  : > "$output" || return 1
+  if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+    return 124
+  fi
+  command -v perl >/dev/null 2>&1 || return 125
+  perl - "$state" > "$output" <<'PERL' &
+use strict;
+use warnings;
+
+my ($state) = @ARGV;
+opendir(my $dh, $state) or exit 1;
+my (%first_meta, %window_counts);
+while (defined(my $entry = readdir($dh))) {
+  next unless $entry =~ /\.meta\z/;
+  my $path = "$state/$entry";
+  next unless -f $path && !-l $path;
+  open(my $fh, '<', $path) or next;
+  my ($window, $window_count) = ('', 0);
+  while (defined(my $line = <$fh>)) {
+    chomp $line;
+    next unless $line =~ /^window=(.*)\z/;
+    $window = $1;
+    $window_count++;
+  }
+  close($fh) or next;
+  next unless $window_count == 1;
+  $first_meta{$window} = $path unless exists $window_counts{$window};
+  $window_counts{$window}++;
+}
+closedir($dh) or exit 1;
+for my $window (keys %window_counts) {
+  print $first_meta{$window}, "\0", $window, "\0", $window_counts{$window}, "\0" or exit 1;
+}
+PERL
+  worker=$!
+  while kill -0 "$worker" 2>/dev/null; do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      kill -TERM "$worker" 2>/dev/null || true
+      kill -KILL "$worker" 2>/dev/null || true
+      wait "$worker" 2>/dev/null || true
+      rm -f "$output"
+      return 124
+    fi
+    sleep 0.01
+  done
+  wait "$worker"
+  rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+}
+
 fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
-  local state=$1 deadline_ms=${2:-} force=${3:-} meta window count rc now worker tmp
-  local -a metas=()
+  local state=$1 deadline_ms=${2:-} force=${3:-} meta window count rc tmp
   local -a new_windows=() new_metas=() new_counts=()
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   if [ "$FM_PANE_IDLE_META_INDEX_STATE" = "$state" ] \
@@ -35,69 +89,27 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
     && [ "${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}" -gt 0 ]; then
     return 0
   fi
-  for meta in "$state"/*.meta; do
+  tmp=$(mktemp "$state/.pane-idle-meta-index.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  fm_pane_idle_meta_index_collect "$state" "$tmp" "$deadline_ms"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  while IFS= read -r -d '' meta \
+    && IFS= read -r -d '' window \
+    && IFS= read -r -d '' count; do
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      rm -f "$tmp"
       return 124
     fi
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    metas+=("$meta")
-  done
-  if [ "${#metas[@]}" -gt 0 ]; then
-    tmp=$(mktemp "$state/.pane-idle-meta-index.XXXXXX") || return 1
-    (
-      awk -F= '
-        function finish_file() {
-          if (seen && window_count == 1) {
-            if (!(window_value in window_counts)) first_meta[window_value]=current_file
-            window_counts[window_value]++
-          }
-        }
-        FNR == 1 {
-          finish_file()
-          current_file=FILENAME
-          window_count=0
-          window_value=""
-          seen=1
-        }
-        $1 == "window" {
-          window_count++
-          window_value=substr($0, index($0, "=") + 1)
-        }
-        END {
-          finish_file()
-          for (window in window_counts) {
-            printf "%s%c%s%c%s%c", first_meta[window], 0, window, 0, window_counts[window], 0
-          }
-        }
-      ' "${metas[@]}" > "$tmp" 2>/dev/null
-    ) &
-    worker=$!
-    while kill -0 "$worker" 2>/dev/null; do
-      if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
-        kill "$worker" 2>/dev/null || true
-        wait "$worker" 2>/dev/null || true
-        rm -f "$tmp"
-        return 124
-      fi
-      sleep 0.01
-    done
-    wait "$worker"
-    rc=$?
-    [ "$rc" = 0 ] || { rm -f "$tmp"; return "$rc"; }
-    while IFS= read -r -d '' meta \
-      && IFS= read -r -d '' window \
-      && IFS= read -r -d '' count; do
-      if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
-        rm -f "$tmp"
-        return 124
-      fi
-      [ -n "$window" ] || continue
-      new_metas+=("$meta")
-      new_windows+=("$window")
-      new_counts+=("$count")
-    done < "$tmp"
-    rm -f "$tmp"
-  fi
+    [ -n "$window" ] || continue
+    new_metas+=("$meta")
+    new_windows+=("$window")
+    new_counts+=("$count")
+  done < "$tmp"
+  rm -f "$tmp"
   FM_PANE_IDLE_META_INDEX_WINDOWS=("${new_windows[@]}")
   FM_PANE_IDLE_META_INDEX_METAS=("${new_metas[@]}")
   FM_PANE_IDLE_META_INDEX_COUNTS=("${new_counts[@]}")
@@ -121,37 +133,31 @@ fm_pane_idle_meta_for_window() {  # <state> <window>
 }
 
 fm_pane_idle_meta_for_window_direct() {  # <state> <window>
-  local state=$1 window=$2 meta
-  local -a metas=()
-  for meta in "$state"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    metas+=("$meta")
-  done
-  [ "${#metas[@]}" -gt 0 ] || return 1
-  awk -F= -v wanted="$window" '
-    FNR == 1 {
-      if (seen && count == 1 && value == wanted) {
-        matches++
-        candidate=current_file
-      }
-      current_file=FILENAME
-      count=0
-      value=""
-      seen=1
-    }
-    $1 == "window" {
-      count++
-      value=substr($0, index($0, "=") + 1)
-    }
-    END {
-      if (seen && count == 1 && value == wanted) {
-        matches++
-        candidate=current_file
-      }
-      if (matches == 1) print candidate
-      exit !(matches == 1)
-    }
-  ' "${metas[@]}" 2>/dev/null
+  local state=$1 window=$2 deadline_ms=${3:-${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-}}
+  local meta current_window count candidate= matches=0 rc tmp
+  tmp=$(mktemp "$state/.pane-idle-meta-direct.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  fm_pane_idle_meta_index_collect "$state" "$tmp" "$deadline_ms"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  while IFS= read -r -d '' meta \
+    && IFS= read -r -d '' current_window \
+    && IFS= read -r -d '' count; do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      rm -f "$tmp"
+      return 124
+    fi
+    [ "$current_window" = "$window" ] || continue
+    matches=$((matches + 1))
+    candidate=$meta
+    [ "$count" = 1 ] || matches=2
+  done < "$tmp"
+  rm -f "$tmp"
+  [ "$matches" = 1 ] || return 1
+  printf '%s' "$candidate"
 }
 
 fm_pane_idle_meta_index_persist() {
@@ -205,6 +211,56 @@ fm_pane_idle_meta_index_persist() {
   done
   rm -f "$cursor_path" || return 1
   : > "$ready_path" || return 1
+  fm_pane_idle_meta_index_reclaim "$directory" "$deadline_ms"
+}
+
+fm_pane_idle_meta_index_reclaim() {
+  local directory=$1 deadline_ms=${2:-} path base current key worker rc tmp i
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  tmp=$(mktemp "$directory/.pane-idle-reclaim.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  find "$directory" -maxdepth 1 -type f -print0 > "$tmp" 2>/dev/null &
+  worker=$!
+  while kill -0 "$worker" 2>/dev/null; do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      kill -TERM "$worker" 2>/dev/null || true
+      kill -KILL "$worker" 2>/dev/null || true
+      wait "$worker" 2>/dev/null || true
+      rm -f "$tmp"
+      return 124
+    fi
+    sleep 0.01
+  done
+  wait "$worker"
+  rc=$?
+  [ "$rc" = 0 ] || { rm -f "$tmp"; return "$rc"; }
+  while IFS= read -r -d '' path; do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      rm -f "$tmp"
+      return 124
+    fi
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    base=${path##*/}
+    case "$base" in
+      .cursor|.ready|.*|'') continue ;;
+    esac
+    [ "${#base}" = 64 ] || continue
+    case "$base" in *[!0123456789abcdefABCDEF]*) continue ;; esac
+    current=0
+    for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
+      key=$(fm_pane_idle_sha256 "${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}") || {
+        rm -f "$tmp"
+        return 1
+      }
+      if [ "$key" = "$base" ]; then
+        current=1
+        break
+      fi
+    done
+    [ "$current" = 1 ] || rm -f "$path" || { rm -f "$tmp"; return 1; }
+  done < "$tmp"
+  rm -f "$tmp"
 }
 
 fm_pane_idle_meta_for_window_indexed() {
