@@ -132,6 +132,22 @@ fm_pending_reply_source_identity() {  # <state-dir>
   (cd "$1" 2>/dev/null && pwd -P)
 }
 
+fm_pending_reply_expected_parent_home() {  # <state-dir>
+  local state=$1 state_identity override_identity
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_identity=$(fm_pending_reply_source_identity "$state") || return 1
+  if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    override_identity=$(fm_pending_reply_source_identity "$FM_STATE_OVERRIDE") || override_identity=
+    if [ "$override_identity" = "$state_identity" ]; then
+      [ -n "${FM_HOME:-}" ] || return 1
+      fm_pending_reply_source_identity "$FM_HOME"
+      return
+    fi
+  fi
+  [ "$(basename "$state_identity")" = state ] || return 1
+  dirname "$state_identity"
+}
+
 fm_pending_reply_source_key() {  # <source-state>
   printf '%s' "$1" | cksum 2>/dev/null | awk '{printf "%s-%s", $1, $2}'
 }
@@ -176,24 +192,18 @@ fm_pending_reply_txn_owner_write() {  # <owner-path> <pid> <identity> <token> <c
 }
 
 fm_pending_reply_protocol_scope() {  # <state-dir> <corr_id> <home-var> <watch-var>
-  local state=$1 corr=$2 home_var=$3 watch_var=$4 rec home state_identity home_state_identity
+  local state=$1 corr=$2 home_var=$3 watch_var=$4 rec home expected_home
   local lock_home lock_watch
   rec=$(fm_pending_reply_path "$state" "$corr")
   home=
   [ -f "$rec" ] && home=$(fm_pending_reply_get "$rec" parent_home)
-  state_identity=$(fm_pending_reply_source_identity "$state") || return 1
+  expected_home=$(fm_pending_reply_expected_parent_home "$state") || return 1
   if [ -n "$home" ]; then
     home=$(cd "$home" 2>/dev/null && pwd -P) || home=
+    [ "$home" = "$expected_home" ] || return 1
   fi
-  if [ -z "$home" ] && [ -n "${FM_HOME:-}" ]; then
-    home_state_identity=$(fm_pending_reply_source_identity "$FM_HOME/state") || home_state_identity=
-    [ "$home_state_identity" = "$state_identity" ] && home=$FM_HOME
-  fi
-  if [ -z "$home" ] && [ "$(basename "$state_identity")" = state ]; then
-    home=$(dirname "$state_identity")
-  fi
+  [ -n "$home" ] || home=$expected_home
   [ -n "$home" ] || return 1
-  home=$(cd "$home" 2>/dev/null && pwd -P) || return 1
   lock_home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
   lock_watch=$(cat "$state/.watch.lock/watcher-path" 2>/dev/null || true)
   if [ "$lock_home" != "$home" ] || [ -z "$lock_watch" ]; then
@@ -501,7 +511,7 @@ fm_pending_reply_get() {  # <record-path> <key>
 
 fm_pending_reply_record_validate() {  # <record-path> <state-dir> <corr-id> <task-id>
   local rec=$1 state=$2 wanted_corr=$3 wanted_task=$4
-  local record_corr record_task parent_home parent_status parent_abs state_abs pending_dir expected_status delivered phase
+  local record_corr record_task parent_home parent_status parent_abs expected_home state_abs pending_dir expected_status delivered phase
   [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
   awk -F= '
     BEGIN {
@@ -550,6 +560,8 @@ fm_pending_reply_record_validate() {  # <record-path> <state-dir> <corr-id> <tas
   case "$parent_home:$parent_status" in /*:/*) ;; *) return 1 ;; esac
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
+  expected_home=$(fm_pending_reply_expected_parent_home "$state_abs") || return 1
+  [ "$parent_abs" = "$expected_home" ] || return 1
   pending_dir=$(fm_pending_reply_dir "$state_abs")
   [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] || return 1
   expected_status="$state_abs/$wanted_task.status"
@@ -604,7 +616,7 @@ fm_pending_reply_secondmate_route_shape() {  # <marker-path>
 
 fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <parent-state> <secondmate-id> <corr-id>
   local secondmate_home=$1 parent_home=$2 parent_state=$3 secondmate_id=$4 corr=$5
-  local marker home_marker route_lock tmp parent_abs state_abs status_path marker_id route_status=0
+  local marker home_marker route_lock tmp parent_abs state_abs expected_home status_path marker_id route_status=0
   local existing_schema existing_id existing_home existing_status existing_corr existing_rec existing_delivered route_mode
   local history_marker
   FM_PENDING_REPLY_ROUTE_COMMITTED=0
@@ -620,6 +632,8 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
   [ -d "$parent_state" ] && [ ! -L "$parent_state" ] || return 1
   state_abs=$(cd "$parent_state" 2>/dev/null && pwd -P) || return 1
+  expected_home=$(fm_pending_reply_expected_parent_home "$state_abs") || return 1
+  [ "$parent_abs" = "$expected_home" ] || return 1
   status_path="$state_abs/$secondmate_id.status"
   [ ! -L "$status_path" ] || return 1
   if [ -e "$status_path" ]; then
@@ -841,7 +855,7 @@ fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <co
 
 fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] [<allow-undelivered>]
   local secondmate_home=$1 wanted_corr=${2:-} allow_undelivered=${3:-0} marker line key value schema marker_id secondmate_id current_corr history_marker
-  local parent_home parent_status corr parent_abs state_abs parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
+  local parent_home parent_status corr parent_abs state_abs expected_home parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
   local phase delivered record_home record_home_abs record_status record_task record_corr home_marker
   local seen_schema=0 seen_secondmate_id=0 seen_parent_home=0 seen_parent_status=0 seen_corr=0
   FM_PENDING_ROUTE_PARENT_STATUS=
@@ -911,6 +925,8 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   parent_status_dir=${parent_status%/*}
   [ -n "$parent_status_dir" ] && [ -d "$parent_status_dir" ] && [ ! -L "$parent_status_dir" ] || return 1
   state_abs=$(cd "$parent_status_dir" 2>/dev/null && pwd -P) || return 1
+  expected_home=$(fm_pending_reply_expected_parent_home "$state_abs") || return 1
+  [ "$parent_abs" = "$expected_home" ] || return 1
   pending_dir=$(fm_pending_reply_dir "$state_abs")
   [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] || return 1
   history_dir=$(fm_pending_reply_history_dir "$state_abs")
@@ -995,7 +1011,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
 
 fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmate-id> <parent-home> <parent-status> <corr>
   local secondmate_home=$1 secondmate_id=$2 parent_home=$3 parent_status=$4 corr=$5
-  local home_marker marker_id parent_abs state_abs parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
+  local home_marker marker_id parent_abs state_abs expected_home parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
   local delivered phase
   FM_PENDING_ROUTE_STATE=
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
@@ -1013,6 +1029,8 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   parent_status_dir=${parent_status%/*}
   [ -n "$parent_status_dir" ] && [ -d "$parent_status_dir" ] && [ ! -L "$parent_status_dir" ] || return 1
   state_abs=$(cd "$parent_status_dir" 2>/dev/null && pwd -P) || return 1
+  expected_home=$(fm_pending_reply_expected_parent_home "$state_abs") || return 1
+  [ "$parent_abs" = "$expected_home" ] || return 1
   pending_dir=$(fm_pending_reply_dir "$state_abs")
   [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] || return 1
   history_dir=$(fm_pending_reply_history_dir "$state_abs")

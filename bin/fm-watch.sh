@@ -1317,9 +1317,10 @@ EOF
   fm_pane_idle_meta_index_build "$STATE" "$pane_idle_index_deadline" force || pane_idle_index_status=$?
   case "$pane_idle_index_status" in
     0) ;;
-    124) continue ;;
+    124) ;;
     *) exit "$pane_idle_index_status" ;;
   esac
+  if [ "$pane_idle_index_status" = 0 ]; then
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, except while a declared pause
@@ -1465,6 +1466,7 @@ EOF
       rm -f "$ssf"
     fi
   done < <(recorded_windows)
+  fi
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

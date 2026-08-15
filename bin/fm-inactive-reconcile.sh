@@ -3051,8 +3051,9 @@ scan_locked() {
   local scan_started scan_deadline maintenance_deadline remaining rc complete=1 scan_failed=0 find_tmp maintenance_status=0
   local maintenance_started maintenance_phase maintenance_next_phase maintenance_phase_tmp
   local maintenance_order next_order maintenance_order_tmp maintenance_ran=0 maintenance_deferred=0 direct_deferred=0
-  local find_pending_source=0 find_retain=0 batch_consumed=0 batch_complete=1 retry_path=
+  local find_pending_source=0 find_retain=0 find_ordered=1 batch_consumed=0 batch_complete=1 retry_path=
   local find_pending_offset=0 find_tmp_owned=0 pending_skip=0
+  local ordered_tmp=
   local pane_idle_index_dir= pane_idle_index_ready=0
   inactive_state_preflight || return 1
   inactive_merge_txn_recover || return 1
@@ -3277,7 +3278,54 @@ scan_locked() {
     else
       if run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
         \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
-        :
+        remaining=$(budget_remaining_secs "$scan_deadline")
+        if [ "$remaining" -le 0 ]; then
+          find_ordered=0
+          direct_deferred=1
+          find_retain=1
+        else
+          ordered_tmp=$(mktemp "$STATE/.inactive-outcome-find-ordered.XXXXXX") || {
+            scan_failed=1
+            ordered_tmp=
+          }
+          if [ "$scan_failed" = 0 ] && run_bounded_child "$remaining" perl - "$find_tmp" > "$ordered_tmp" <<'PERL'
+use strict;
+use warnings;
+
+my $input = shift @ARGV;
+open(my $fh, '<', $input) or exit 1;
+binmode($fh);
+local $/ = "\0";
+my @paths;
+while (defined(my $path = <$fh>)) {
+  push @paths, $path;
+}
+close($fh) or exit 1;
+print sort @paths or exit 1;
+PERL
+          then
+            if [ -f "$ordered_tmp" ] && [ ! -L "$ordered_tmp" ] \
+              && [ ! -L "$find_tmp" ] && mv -f "$ordered_tmp" "$find_tmp"; then
+              ordered_tmp=
+            else
+              rm -f "$ordered_tmp"
+              ordered_tmp=
+              scan_failed=1
+            fi
+          else
+            rc=$?
+            [ "$rc" -ne 0 ] || rc=1
+            if [ "$rc" = 124 ]; then
+              find_ordered=0
+              direct_deferred=1
+              find_retain=1
+            else
+              scan_failed=1
+            fi
+            rm -f "$ordered_tmp"
+            ordered_tmp=
+          fi
+        fi
       else
         rc=$?
         [ "$rc" -ne 0 ] || rc=1
@@ -3320,7 +3368,7 @@ scan_locked() {
     direct_deferred=1
     find_retain=1
   fi
-  while [ "$scan_failed" = 0 ] && IFS= read -r -d '' meta; do
+  while [ "$scan_failed" = 0 ] && [ "$find_ordered" = 1 ] && IFS= read -r -d '' meta; do
     if [ "$pending_skip" -gt 0 ]; then
       remaining=$(budget_remaining_secs "$scan_deadline")
       if [ "$remaining" -le 0 ]; then
@@ -3463,6 +3511,7 @@ scan_locked() {
     complete=0
     scan_failed=1
   fi
+  [ -z "$ordered_tmp" ] || rm -f "$ordered_tmp"
   if [ "$maintenance_ran" = 0 ]; then
     run_maintenance
   fi

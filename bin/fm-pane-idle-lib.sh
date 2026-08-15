@@ -40,42 +40,77 @@ fm_pane_idle_meta_index_collect() {
       [ -f "$path" ] && [ ! -L "$path" ] || return 1
     fi
   done
-  : > "$output" || return 1
   if [ -e "$complete_path" ]; then
     rm -f "$cursor_path" "$records_path" || return 1
     rm -f "$complete_path" || return 1
-  fi
-  if [ ! -e "$records_path" ]; then
-    : > "$records_path" || return 1
   fi
   if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
     return 124
   fi
   command -v perl >/dev/null 2>&1 || return 125
-  perl - "$state" "$cursor_path" "$records_path" "$complete_path" "$deadline_ms" > "$output" <<'PERL' &
+  perl - "$state" "$cursor_path" "$records_path" "$complete_path" "$deadline_ms" "$output" <<'PERL' &
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 
-my ($state, $cursor_path, $records_path, $complete_path, $deadline) = @ARGV;
+my ($state, $cursor_path, $records_path, $complete_path, $deadline, $output) = @ARGV;
 $deadline = undef unless defined($deadline) && $deadline =~ /^\d+\z/ && $deadline ne '';
+my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+
+sub open_read {
+  my ($path) = @_;
+  return undef if -l $path || !defined($nofollow);
+  my $fh;
+  sysopen($fh, $path, O_RDONLY | $nofollow) or return undef;
+  return $fh;
+}
+
+sub open_append {
+  my ($path) = @_;
+  return undef if -l $path;
+  my $flags = O_WRONLY | O_APPEND;
+  if (-e $path) {
+    return undef unless -f $path && defined($nofollow);
+    $flags |= $nofollow;
+  } else {
+    $flags |= O_CREAT | O_EXCL;
+  }
+  my $fh;
+  sysopen($fh, $path, $flags, 0600) or return undef;
+  return $fh;
+}
+
+sub write_atomic {
+  my ($path, $value) = @_;
+  return 0 if -l $path;
+  my $tmp = "$path.tmp.$$";
+  my $fh;
+  sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or return 0;
+  binmode($fh);
+  if (!print($fh $value) || !close($fh)) {
+    close($fh);
+    return 0;
+  }
+  return 0 if -l $path;
+  rename($tmp, $path) or return 0;
+  return 1;
+}
+
+sub open_output {
+  my ($path) = @_;
+  return undef if -l $path || !-f $path || !defined($nofollow);
+  my $fh;
+  sysopen($fh, $path, O_WRONLY | O_TRUNC | $nofollow) or return undef;
+  return $fh;
+}
 
 sub expired {
   return defined($deadline) && int(time() * 1000) >= $deadline;
 }
 
-sub write_cursor {
-  my ($value) = @_;
-  my $tmp = "$cursor_path.tmp.$$";
-  open(my $fh, '>', $tmp) or return 0;
-  print $fh $value, "\n" or return 0;
-  close($fh) or return 0;
-  rename($tmp, $cursor_path) or return 0;
-  return 1;
-}
-
 my $cursor = '';
 if (-e $cursor_path) {
-  open(my $cfh, '<', $cursor_path) or exit 1;
+  my $cfh = open_read($cursor_path) or exit 1;
   $cursor = <$cfh> // '';
   chomp $cursor;
   close($cfh) or exit 1;
@@ -83,6 +118,11 @@ if (-e $cursor_path) {
 
 while (1) {
   exit 124 if expired();
+  exit 1 unless -d $state && !-l $state;
+  if (!-e $records_path) {
+    my $rfh = open_append($records_path) or exit 1;
+    close($rfh) or exit 1;
+  }
   opendir(my $dh, $state) or exit 1;
   my $next = '';
   while (defined(my $entry = readdir($dh))) {
@@ -97,7 +137,7 @@ while (1) {
   last if $next eq '';
   my $path = "$state/$next";
   if (-f $path && !-l $path) {
-    open(my $fh, '<', $path) or exit 1;
+    my $fh = open_read($path) or exit 1;
     my ($window, $window_count) = ('', 0);
     while (defined(my $line = <$fh>)) {
       exit 124 if expired();
@@ -108,17 +148,17 @@ while (1) {
     }
     close($fh) or exit 1;
     if ($window_count == 1 && $window ne '') {
-      open(my $rfh, '>>', $records_path) or exit 1;
+      my $rfh = open_append($records_path) or exit 1;
       binmode($rfh);
       print $rfh $path, "\0", $window, "\0", "1", "\0" or exit 1;
       close($rfh) or exit 1;
     }
   }
-  write_cursor($next) or exit 1;
+  write_atomic($cursor_path, "$next\n") or exit 1;
   $cursor = $next;
 }
 
-open(my $rfh, '<', $records_path) or exit 1;
+my $rfh = open_read($records_path) or exit 1;
 binmode($rfh);
 local $/ = "\0";
 my (%seen, %first_meta, %window_counts);
@@ -135,14 +175,13 @@ while (defined(my $path = <$rfh>)) {
   $window_counts{$window} += $count;
 }
 close($rfh) or exit 1;
+my $ofh = open_output($output) or exit 1;
+binmode($ofh);
 for my $window (sort keys %window_counts) {
-  print $first_meta{$window}, "\0", $window, "\0", $window_counts{$window}, "\0" or exit 1;
+  print $ofh $first_meta{$window}, "\0", $window, "\0", $window_counts{$window}, "\0" or exit 1;
 }
-my $complete_tmp = "$complete_path.tmp.$$";
-open(my $complete_fh, '>', $complete_tmp) or exit 1;
-print $complete_fh "complete\n" or exit 1;
-close($complete_fh) or exit 1;
-rename($complete_tmp, $complete_path) or exit 1;
+close($ofh) or exit 1;
+write_atomic($complete_path, "complete\n") or exit 1;
 PERL
   worker=$!
   while kill -0 "$worker" 2>/dev/null; do
@@ -157,9 +196,22 @@ PERL
   done
   wait "$worker"
   rc=$?
+  rm -f "$cursor_path.tmp.$worker" "$complete_path.tmp.$worker"
   if [ "$rc" -ne 0 ]; then
     rm -f "$output"
     return "$rc"
+  fi
+  for path in "$output" "$records_path" "$complete_path"; do
+    [ -f "$path" ] && [ ! -L "$path" ] || {
+      rm -f "$output"
+      return 1
+    }
+  done
+  if [ -e "$cursor_path" ] || [ -L "$cursor_path" ]; then
+    [ -f "$cursor_path" ] && [ ! -L "$cursor_path" ] || {
+      rm -f "$output"
+      return 1
+    }
   fi
 }
 
