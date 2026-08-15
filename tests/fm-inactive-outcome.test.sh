@@ -2088,6 +2088,41 @@ test_pane_idle_index_refreshes_changed_metadata() {
   pass "pane-idle index refreshes after metadata creation"
 }
 
+test_pane_idle_index_retries_metadata_stamp_race() {
+  local dir root home fakebin state flag
+  new_case pane-idle-index-race
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  flag="$dir/race.flag"
+  printf 'window=tmux:fm-race-a\n' > "$state/race-a.meta"
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = - ] && [ "${2:-}" = "${FM_TEST_RACE_STATE:-}" ] \
+  && [ ! -e "${FM_TEST_RACE_FLAG:-}" ]; then
+  tmp=$(mktemp "${FM_TEST_RACE_DIR:?}/perl-output.XXXXXX")
+  /usr/bin/perl "$@" > "$tmp"
+  rc=$?
+  printf 'window=tmux:fm-race-b\n' > "$FM_TEST_RACE_STATE/race-b.meta"
+  cat "$tmp"
+  rm -f "$tmp"
+  : > "$FM_TEST_RACE_FLAG"
+  exit "$rc"
+fi
+exec /usr/bin/perl "$@"
+SH
+  chmod +x "$fakebin/perl"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_RACE_STATE="$state" FM_TEST_RACE_FLAG="$flag" FM_TEST_RACE_DIR="$dir" \
+    PATH="$fakebin:$PATH" bash -c '
+      . "$1/bin/fm-pane-idle-lib.sh"
+      fm_pane_idle_meta_index_build "$2" || exit 1
+      [ "$(fm_pane_idle_meta_for_window "$2" tmux:fm-race-b)" = "$2/race-b.meta" ]
+    ' _ "$ROOT" "$state" \
+    || fail "metadata stamp race published an incomplete pane-idle index"
+  pass "pane-idle index retries metadata stamp races"
+}
+
 test_pane_idle_lookup_propagates_deadline() {
   local dir root home fakebin state deadline status proof
   new_case pane-idle-lookup-deadline
@@ -3372,6 +3407,7 @@ test_pane_idle_proof_is_required_and_bound
 test_pane_idle_publication_rechecks_under_lock
 test_pane_idle_index_reclaims_retired_windows
 test_pane_idle_index_refreshes_changed_metadata
+test_pane_idle_index_retries_metadata_stamp_race
 test_pane_idle_lookup_propagates_deadline
 test_pane_idle_index_resumes_and_rejects_path_cursor
 test_pane_idle_index_retries_partial_publication_idempotently

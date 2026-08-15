@@ -57,7 +57,7 @@ fm_pane_idle_path_stamp() {
 }
 
 fm_pane_idle_meta_index_collect() {
-  local state=$1 output=$2 deadline_ms=${3:-} worker rc remaining sorted_tmp entries_tmp entries_sorted_tmp state_stamp entries_stamp
+  local state=$1 output=$2 deadline_ms=${3:-} worker rc remaining sorted_tmp entries_tmp entries_sorted_tmp state_stamp entries_stamp post_state_stamp
   local progress_dir cursor_path records_path complete_path seen_path aggregate_path aggregate_cursor_path
   local aggregate_complete_path sorted_path sorted_complete_path entries_path entries_complete_path entries_stamp_path
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
@@ -95,31 +95,32 @@ fm_pane_idle_meta_index_collect() {
       "$aggregate_cursor_path" "$aggregate_complete_path" "$sorted_path" \
       "$sorted_complete_path" "$complete_path" || return 1
   fi
-  if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
-    return 124
-  fi
-  state_stamp=$(fm_pane_idle_path_stamp "$state") || return 1
-  entries_stamp=
-  if [ -f "$entries_path" ] && [ ! -L "$entries_path" ] \
-    && [ -f "$entries_complete_path" ] && [ ! -L "$entries_complete_path" ] \
-    && [ -f "$entries_stamp_path" ] && [ ! -L "$entries_stamp_path" ]; then
-    entries_stamp=$(cat "$entries_stamp_path" 2>/dev/null || true)
-  fi
-  if [ "$entries_stamp" != "$state_stamp" ]; then
-    rm -f "$entries_path" "$entries_complete_path" "$entries_stamp_path" \
-      "$cursor_path" "$records_path" "$seen_path" "$aggregate_path" \
-      "$aggregate_cursor_path" "$aggregate_complete_path" "$sorted_path" \
-      "$sorted_complete_path" || return 1
-    entries_tmp=$(mktemp "$entries_path.XXXXXX") || return 1
-    [ -f "$entries_tmp" ] && [ ! -L "$entries_tmp" ] || {
-      rm -f "$entries_tmp"
-      return 1
-    }
-    remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
-      rm -f "$entries_tmp"
+  while :; do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
       return 124
-    }
-    fm_pane_idle_run_bounded_child "$remaining" perl - "$state" > "$entries_tmp" <<'PERL'
+    fi
+    state_stamp=$(fm_pane_idle_path_stamp "$state") || return 1
+    entries_stamp=
+    if [ -f "$entries_path" ] && [ ! -L "$entries_path" ] \
+      && [ -f "$entries_complete_path" ] && [ ! -L "$entries_complete_path" ] \
+      && [ -f "$entries_stamp_path" ] && [ ! -L "$entries_stamp_path" ]; then
+      entries_stamp=$(cat "$entries_stamp_path" 2>/dev/null || true)
+    fi
+    if [ "$entries_stamp" != "$state_stamp" ]; then
+      rm -f "$entries_path" "$entries_complete_path" "$entries_stamp_path" \
+        "$cursor_path" "$records_path" "$seen_path" "$aggregate_path" \
+        "$aggregate_cursor_path" "$aggregate_complete_path" "$sorted_path" \
+        "$sorted_complete_path" || return 1
+      entries_tmp=$(mktemp "$entries_path.XXXXXX") || return 1
+      [ -f "$entries_tmp" ] && [ ! -L "$entries_tmp" ] || {
+        rm -f "$entries_tmp"
+        return 1
+      }
+      remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
+        rm -f "$entries_tmp"
+        return 124
+      }
+      fm_pane_idle_run_bounded_child "$remaining" perl - "$state" > "$entries_tmp" <<'PERL'
 use strict;
 use warnings;
 my $state = shift @ARGV;
@@ -132,43 +133,53 @@ while (defined(my $entry = readdir($dh))) {
 }
 closedir($dh) or exit 1;
 PERL
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
-      [ "$rc" -ne 0 ] || rc=124
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        [ "$rc" -ne 0 ] || rc=124
+        rm -f "$entries_tmp"
+        return "$rc"
+      fi
+      remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
+        rm -f "$entries_tmp"
+        return 124
+      }
+      entries_sorted_tmp=$(mktemp "$entries_path.XXXXXX") || {
+        rm -f "$entries_tmp"
+        return 1
+      }
+      [ -f "$entries_sorted_tmp" ] && [ ! -L "$entries_sorted_tmp" ] || {
+        rm -f "$entries_tmp" "$entries_sorted_tmp"
+        return 1
+      }
+      fm_pane_idle_run_bounded_child "$remaining" env LC_ALL=C sort -u \
+        "$entries_tmp" > "$entries_sorted_tmp"
+      rc=$?
       rm -f "$entries_tmp"
-      return "$rc"
+      if [ "$rc" -ne 0 ]; then
+        [ "$rc" -ne 0 ] || rc=124
+        rm -f "$entries_sorted_tmp"
+        return "$rc"
+      fi
+      post_state_stamp=$(fm_pane_idle_path_stamp "$state") || {
+        rm -f "$entries_sorted_tmp"
+        return 1
+      }
+      if [ "$post_state_stamp" != "$state_stamp" ]; then
+        rm -f "$entries_sorted_tmp" "$entries_path" "$entries_complete_path" \
+          "$entries_stamp_path" "$cursor_path" "$records_path" "$seen_path" \
+          "$aggregate_path" "$aggregate_cursor_path" "$aggregate_complete_path" \
+          "$sorted_path" "$sorted_complete_path" || return 1
+        continue
+      fi
+      [ ! -L "$entries_path" ] && mv -f "$entries_sorted_tmp" "$entries_path" || {
+        rm -f "$entries_sorted_tmp"
+        return 1
+      }
+      fm_pane_idle_meta_index_cursor_write "$entries_complete_path" complete || return 1
+      fm_pane_idle_meta_index_cursor_write "$entries_stamp_path" "$post_state_stamp" || return 1
     fi
-    remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
-      rm -f "$entries_tmp"
-      return 124
-    }
-    entries_sorted_tmp=$(mktemp "$entries_path.XXXXXX") || {
-      rm -f "$entries_tmp"
-      return 1
-    }
-    [ -f "$entries_sorted_tmp" ] && [ ! -L "$entries_sorted_tmp" ] || {
-      rm -f "$entries_tmp" "$entries_sorted_tmp"
-      return 1
-    }
-    fm_pane_idle_run_bounded_child "$remaining" env LC_ALL=C sort -u \
-      "$entries_tmp" > "$entries_sorted_tmp"
-    rc=$?
-    rm -f "$entries_tmp"
-    if [ "$rc" -ne 0 ]; then
-      [ "$rc" -ne 0 ] || rc=124
-      rm -f "$entries_sorted_tmp"
-      return "$rc"
-    fi
-    [ ! -L "$entries_path" ] && mv -f "$entries_sorted_tmp" "$entries_path" || {
-      rm -f "$entries_sorted_tmp"
-      return 1
-    }
-    fm_pane_idle_meta_index_cursor_write "$entries_complete_path" complete || return 1
-    state_stamp=$(fm_pane_idle_path_stamp "$state") || return 1
-    fm_pane_idle_meta_index_cursor_write "$entries_stamp_path" "$state_stamp" || return 1
-    state_stamp=$(fm_pane_idle_path_stamp "$state") || return 1
-    fm_pane_idle_meta_index_cursor_write "$entries_stamp_path" "$state_stamp" || return 1
-  fi
+    break
+  done
   command -v perl >/dev/null 2>&1 || return 125
   perl - "$state" "$entries_path" "$cursor_path" "$records_path" "$complete_path" "$seen_path" "$deadline_ms" <<'PERL' &
 use strict;
@@ -526,6 +537,17 @@ PERL
     rm -f "$output"
     return "$rc"
   fi
+  post_state_stamp=$(fm_pane_idle_path_stamp "$state") || {
+    rm -f "$output"
+    return 1
+  }
+  if [ "$post_state_stamp" != "$state_stamp" ]; then
+    rm -f "$output" "$entries_path" "$entries_complete_path" "$entries_stamp_path" \
+      "$cursor_path" "$records_path" "$seen_path" "$aggregate_path" \
+      "$aggregate_cursor_path" "$aggregate_complete_path" "$sorted_path" \
+      "$sorted_complete_path" "$complete_path"
+    return 124
+  fi
   fm_pane_idle_meta_index_cursor_write "$complete_path" complete || {
     rm -f "$output"
     return 1
@@ -547,7 +569,7 @@ PERL
 }
 
 fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
-  local state=$1 deadline_ms=${2:-} force=${3:-} rc tmp stamp snapshot progress_dir
+  local state=$1 deadline_ms=${2:-} force=${3:-} rc tmp stamp post_stamp snapshot progress_dir
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   progress_dir="$state/.pane-idle-meta-index"
@@ -576,12 +598,16 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
     rm -f "$tmp"
     return "$rc"
   fi
+  post_stamp=$(fm_pane_idle_path_stamp "$state") || {
+    rm -f "$tmp"
+    return 1
+  }
   [ ! -L "$snapshot" ] && mv -f "$tmp" "$snapshot" || {
     rm -f "$tmp"
     return 1
   }
   FM_PANE_IDLE_META_INDEX_STATE=$state
-  FM_PANE_IDLE_META_INDEX_STATE_STAMP=$(fm_pane_idle_path_stamp "$state") || return 1
+  FM_PANE_IDLE_META_INDEX_STATE_STAMP=$post_stamp
   FM_PANE_IDLE_META_INDEX_SNAPSHOT=$snapshot
   FM_PANE_IDLE_META_INDEX_BUILT=1
 }
