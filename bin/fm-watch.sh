@@ -1297,7 +1297,6 @@ EOF
     124) ;;
     *) exit "$pane_idle_index_status" ;;
   esac
-  if [ "$pane_idle_index_status" = 0 ]; then
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, except while a declared pause
@@ -1327,7 +1326,8 @@ EOF
       # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         if [ "$(window_kind "$w")" != secondmate ]; then
-          idle_meta=$(fm_pane_idle_meta_for_window "$STATE" "$w" 2>/dev/null || true)
+          idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
+            "$pane_idle_index_deadline" 2>/dev/null || true)
           if [ -n "$idle_meta" ]; then
             idle_task=${idle_meta##*/}
             idle_task=${idle_task%.meta}
@@ -1335,7 +1335,8 @@ EOF
             if ! fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n"; then
               fm_pane_idle_clear "$STATE" "$idle_task" || true
               fm_pane_idle_meta_index_build "$STATE" "$pane_idle_index_deadline" force || true
-              refreshed_idle_meta=$(fm_pane_idle_meta_for_window "$STATE" "$w" 2>/dev/null || true)
+              refreshed_idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
+                "$pane_idle_index_deadline" 2>/dev/null || true)
               if [ -n "$refreshed_idle_meta" ] && [ -f "$refreshed_idle_meta" ] \
                 && [ ! -L "$refreshed_idle_meta" ]; then
                 refreshed_idle_task=${refreshed_idle_meta##*/}
@@ -1347,7 +1348,7 @@ EOF
               fi
             fi
           else
-            fm_pane_idle_clear_for_window "$STATE" "$w" || true
+            fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_index_deadline" || true
           fi
         fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
@@ -1421,7 +1422,7 @@ EOF
           fi
         fi
       else
-        fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
+        fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_index_deadline" || exit 1
         # Pane busy is proven activity once two samples agree; a first baseline
         # sample must preserve a declared pause marker across watcher restarts.
         if [ "$n" -ge 2 ]; then
@@ -1432,7 +1433,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
+      fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_index_deadline" || exit 1
       # Pane content changed: the crew is active again, so reset pause and
       # escalation timers before a later pause starts a fresh cadence. During
       # the first baseline after a watcher restart, preserve an existing pause
@@ -1443,7 +1444,6 @@ EOF
       rm -f "$ssf"
     fi
   done < <(recorded_windows)
-  fi
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

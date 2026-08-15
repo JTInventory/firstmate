@@ -2088,6 +2088,31 @@ test_pane_idle_index_refreshes_changed_metadata() {
   pass "pane-idle index refreshes after metadata creation"
 }
 
+test_pane_idle_lookup_propagates_deadline() {
+  local dir root home fakebin state deadline status proof
+  new_case pane-idle-lookup-deadline
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" deadline-x1 deadline-inc
+  proof="$state/.pane-idle/deadline-x1"
+  deadline=$(env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_now_ms' _ "$ROOT" "$state") \
+    || fail "could not create a pane-idle lookup deadline"
+  set +e
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_for_window "$2" tmux:fm-deadline-x1 "$3"' \
+    _ "$ROOT" "$state" "$deadline" >/dev/null 2>&1
+  status=$?
+  set -u
+  [ "$status" = 124 ] || fail "pane-idle lookup ignored its deadline"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_clear_for_window "$2" tmux:fm-deadline-x1 "$3"' \
+    _ "$ROOT" "$state" "$deadline" \
+    || fail "deadline-limited pane-idle clear failed"
+  [ -f "$proof" ] || fail "deadline-limited clear removed the idle proof"
+  pass "pane-idle lookup and clear honor scan deadlines"
+}
+
 test_pane_idle_index_resumes_and_rejects_path_cursor() {
   local dir root home fakebin state progress output stamp
   new_case pane-idle-index-cursor
@@ -3347,6 +3372,7 @@ test_pane_idle_proof_is_required_and_bound
 test_pane_idle_publication_rechecks_under_lock
 test_pane_idle_index_reclaims_retired_windows
 test_pane_idle_index_refreshes_changed_metadata
+test_pane_idle_lookup_propagates_deadline
 test_pane_idle_index_resumes_and_rejects_path_cursor
 test_pane_idle_index_retries_partial_publication_idempotently
 test_secondmate_route_accepts_effective_state_overrides

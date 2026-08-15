@@ -586,10 +586,12 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
   FM_PANE_IDLE_META_INDEX_BUILT=1
 }
 
-fm_pane_idle_meta_for_window() {  # <state> <window>
-  local state=$1 window=$2 candidate current_window count match_meta= matches=0
+fm_pane_idle_meta_for_window() {  # <state> <window> [deadline-ms]
+  local state=$1 window=$2 deadline_ms=${3:-} candidate current_window count match_meta= matches=0 rc
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  fm_pane_idle_meta_index_build "$state" || return 1
+  fm_pane_idle_meta_index_build "$state" "$deadline_ms"
+  rc=$?
+  [ "$rc" = 0 ] || return "$rc"
   while IFS= read -r -d '' candidate \
     && IFS= read -r -d '' current_window \
     && IFS= read -r -d '' count; do
@@ -602,6 +604,18 @@ fm_pane_idle_meta_for_window() {  # <state> <window>
   done < "$FM_PANE_IDLE_META_INDEX_SNAPSHOT"
   [ "$matches" = 1 ] || return 1
   printf '%s' "$match_meta"
+}
+
+fm_pane_idle_meta_for_window_bounded() {  # <state> <window> <deadline-ms>
+  local state=$1 window=$2 deadline_ms=$3 meta rc
+  meta=$(fm_pane_idle_meta_for_window "$state" "$window" "$deadline_ms")
+  rc=$?
+  if [ "$rc" = 0 ]; then
+    printf '%s' "$meta"
+    return 0
+  fi
+  [ "$rc" = 124 ] || return "$rc"
+  fm_pane_idle_meta_for_window_direct "$state" "$window" "$deadline_ms"
 }
 
 fm_pane_idle_meta_for_window_direct() {  # <state> <window>
@@ -1092,9 +1106,9 @@ fm_pane_idle_clear() {  # <state> <task>
   rm -f "$path"
 }
 
-fm_pane_idle_clear_for_window() {  # <state> <window>
-  local state=$1 window=$2 meta task
-  meta=$(fm_pane_idle_meta_for_window "$state" "$window" 2>/dev/null || true)
+fm_pane_idle_clear_for_window() {  # <state> <window> [deadline-ms]
+  local state=$1 window=$2 deadline_ms=${3:-} meta task
+  meta=$(fm_pane_idle_meta_for_window "$state" "$window" "$deadline_ms" 2>/dev/null || true)
   [ -n "$meta" ] || return 0
   task=${meta##*/}
   task=${task%.meta}
