@@ -215,9 +215,19 @@ fm_pane_idle_meta_index_persist() {
 }
 
 fm_pane_idle_meta_index_reclaim() {
-  local directory=$1 deadline_ms=${2:-} path base current key worker rc tmp i
+  local directory=$1 deadline_ms=${2:-} path base key worker rc tmp i
+  local -A current_key_set=()
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      return 124
+    fi
+    key=$(fm_pane_idle_sha256 "${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}") || return 1
+    [ "${#key}" = 64 ] || return 1
+    case "$key" in *[!0123456789abcdefABCDEF]*) return 1 ;; esac
+    current_key_set["$key"]=1
+  done
   tmp=$(mktemp "$directory/.pane-idle-reclaim.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
   find "$directory" -maxdepth 1 -type f -print0 > "$tmp" 2>/dev/null &
@@ -247,18 +257,9 @@ fm_pane_idle_meta_index_reclaim() {
     esac
     [ "${#base}" = 64 ] || continue
     case "$base" in *[!0123456789abcdefABCDEF]*) continue ;; esac
-    current=0
-    for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
-      key=$(fm_pane_idle_sha256 "${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}") || {
-        rm -f "$tmp"
-        return 1
-      }
-      if [ "$key" = "$base" ]; then
-        current=1
-        break
-      fi
-    done
-    [ "$current" = 1 ] || rm -f "$path" || { rm -f "$tmp"; return 1; }
+    if [ "${current_key_set[$base]+present}" != present ]; then
+      rm -f "$path" || { rm -f "$tmp"; return 1; }
+    fi
   done < "$tmp"
   rm -f "$tmp"
 }
