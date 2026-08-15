@@ -2068,6 +2068,26 @@ test_pane_idle_index_reclaims_retired_windows() {
   pass "pane-idle index reclaims retired windows after publication"
 }
 
+test_pane_idle_index_refreshes_changed_metadata() {
+  local dir root home fakebin state
+  new_case pane-idle-index-refresh
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" cached-index-x1 cached-index-inc
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '
+      . "$1/bin/fm-pane-idle-lib.sh"
+      fm_pane_idle_meta_index_build "$2" || exit 1
+      [ "$(fm_pane_idle_meta_for_window "$2" tmux:fm-cached-index-x1)" = "$2/cached-index-x1.meta" ] || exit 1
+      sleep 1
+      printf "task=cached-index-x2\nwindow=tmux:fm-cached-index-x2\n" > "$2/cached-index-x2.meta"
+      fm_pane_idle_meta_index_build "$2" || exit 1
+      [ "$(fm_pane_idle_meta_for_window "$2" tmux:fm-cached-index-x2)" = "$2/cached-index-x2.meta" ]
+    ' _ "$ROOT" "$state" \
+    || fail "long-lived pane index did not refresh after metadata creation"
+  pass "pane-idle index refreshes after metadata creation"
+}
+
 test_secondmate_route_accepts_effective_state_overrides() {
   local dir root home fakebin child_home child_state effective_state pending_dir corr marker
   new_case secondmate-effective-state
@@ -3239,6 +3259,7 @@ test_status_log_terminal_is_not_replayed
 test_pane_idle_proof_is_required_and_bound
 test_pane_idle_publication_rechecks_under_lock
 test_pane_idle_index_reclaims_retired_windows
+test_pane_idle_index_refreshes_changed_metadata
 test_secondmate_route_accepts_effective_state_overrides
 test_valid_secondmate_route_reports_parent_once
 test_deferred_recorded_secondmate_finishes_without_output

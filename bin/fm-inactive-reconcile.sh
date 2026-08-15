@@ -3393,9 +3393,17 @@ scan_locked() {
         rc=$?
         [ "$rc" -ne 0 ] || rc=1
         complete=0
+        find_retain=1
+        if inactive_persist_nul_suffix "$find_tmp" "$DIRECT_FIND_PENDING" 0 "" "$scan_deadline"; then
+          find_tmp="$DIRECT_FIND_PENDING"
+          find_tmp_owned=0
+          find_pending_source=1
+        elif [ -f "$find_tmp" ] && [ ! -L "$find_tmp" ]; then
+          inactive_pending_retry_defer "$find_tmp" "${DIRECT_FIND_PENDING}.retry" "" 1 || true
+          [ -e "$find_tmp" ] || find_tmp_owned=0
+        fi
         if [ "$rc" = 124 ]; then
           direct_deferred=1
-          find_retain=1
         else
           scan_failed=1
         fi
