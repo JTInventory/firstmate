@@ -2074,7 +2074,8 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
   local parent_state token route_lock route_marker route_history line phase rc=0 route_lock_held=0 marker_present=0 report_recorded=0
   fm_pending_reply_secondmate_receipt_validate \
     "$secondmate_home" "$parent_task_id" "$parent_home" "$parent_status" "$corr" || return 2
-  parent_state="$parent_home/state"
+  parent_state=${FM_PENDING_ROUTE_STATE:-}
+  [ -n "$parent_state" ] || return 2
   fm_pending_reply_txn_lock_acquire "$parent_state" "$corr" token || return 2
   if ! fm_pending_reply_secondmate_receipt_validate \
     "$secondmate_home" "$parent_task_id" "$parent_home" "$parent_status" "$corr"; then
@@ -2260,6 +2261,7 @@ scan_locked() {
     remaining=$(budget_remaining_secs "$scan_deadline")
     if [ "$remaining" -le 0 ]; then
       complete=0
+      direct_deferred=1
       break
     fi
     if [ ! -f "$meta" ] || [ -L "$meta" ]; then
@@ -2305,10 +2307,10 @@ scan_locked() {
     [ "$rc" -ne 0 ] || rc=1
     return "$rc"
   fi
-  [ "$complete" = 1 ] || return 1
   if [ "$maintenance_deferred" = 1 ] || [ "$direct_deferred" = 1 ]; then
     return 0
   fi
+  [ "$complete" = 1 ] || return 1
   if [ "$cursor_seen" = 0 ]; then
     return 1
   fi

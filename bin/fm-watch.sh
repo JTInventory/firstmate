@@ -1080,29 +1080,6 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
-  # The helper owns its bounded cadence and receipt idempotence. A non-empty
-  # result means it appended an inactive-outcome wake, so surface that wake in
-  # this watcher turn without probing panes or scraping secondmate chat here.
-  if ! inactive_out=$("$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>&1); then
-    printf '%s\n' "$inactive_out" >&2
-    exit 1
-  fi
-  if [ -n "$inactive_out" ]; then
-    inactive_drain_output=
-    inactive_drain_status=0
-    inactive_drain_output=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
-      FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" "$SCRIPT_DIR/fm-wake-drain.sh") \
-      || inactive_drain_status=$?
-    case "$inactive_drain_status" in
-      0)
-        [ -n "$inactive_drain_output" ] || exit 1
-        wake "$inactive_drain_output"
-        ;;
-      3) exit 3 ;;
-      *) exit "$inactive_drain_status" ;;
-    esac
-  fi
-
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -1171,6 +1148,29 @@ while :; do
     touch "$STATE/.last-check"
   fi
 
+  # The helper owns its bounded cadence and receipt idempotence. A non-empty
+  # result means it appended an inactive-outcome wake, so surface that wake in
+  # this watcher turn without probing panes or scraping secondmate chat here.
+  if ! inactive_out=$("$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>&1); then
+    printf '%s\n' "$inactive_out" >&2
+    exit 1
+  fi
+  if [ -n "$inactive_out" ]; then
+    inactive_drain_output=
+    inactive_drain_status=0
+    inactive_drain_output=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
+      FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" "$SCRIPT_DIR/fm-wake-drain.sh") \
+      || inactive_drain_status=$?
+    case "$inactive_drain_status" in
+      0)
+        [ -n "$inactive_drain_output" ] || exit 1
+        wake "$inactive_drain_output"
+        ;;
+      3) exit 3 ;;
+      *) exit "$inactive_drain_status" ;;
+    esac
+  fi
+
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
@@ -1220,6 +1220,7 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
+  fm_pane_idle_meta_index_build "$STATE" || exit 1
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, except while a declared pause

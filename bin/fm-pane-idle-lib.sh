@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
 FM_PANE_IDLE_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+declare -gA FM_PANE_IDLE_META_INDEX=()
+declare -gA FM_PANE_IDLE_META_INDEX_COUNT=()
+FM_PANE_IDLE_META_INDEX_STATE=
 
 fm_pane_idle_meta_value_unique() {  # <meta> <key>
   awk -F= -v wanted="$2" '
@@ -13,17 +16,52 @@ fm_pane_idle_meta_value_unique() {  # <meta> <key>
   ' "$1" 2>/dev/null
 }
 
-fm_pane_idle_meta_for_window() {  # <state> <window>
-  local state=$1 window=$2 meta candidate count=0 found=
+fm_pane_idle_meta_index_build() {  # <state>
+  local state=$1 meta window count
+  local -a metas=()
+  FM_PANE_IDLE_META_INDEX=()
+  FM_PANE_IDLE_META_INDEX_COUNT=()
+  FM_PANE_IDLE_META_INDEX_STATE=$state
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    candidate=$(fm_pane_idle_meta_value_unique "$meta" window 2>/dev/null) || continue
-    [ "$candidate" = "$window" ] || continue
-    count=$((count + 1))
-    found=$meta
+    metas+=("$meta")
   done
-  [ "$count" = 1 ] || return 1
-  printf '%s' "$found"
+  [ "${#metas[@]}" -gt 0 ] || return 0
+  while IFS= read -r -d '' meta && IFS= read -r -d '' window; do
+    [ -n "$window" ] || continue
+    count=${FM_PANE_IDLE_META_INDEX_COUNT[$window]-0}
+    count=$((count + 1))
+    FM_PANE_IDLE_META_INDEX_COUNT[$window]=$count
+    [ "$count" = 1 ] && FM_PANE_IDLE_META_INDEX[$window]=$meta
+  done < <(
+    awk -F= '
+      FNR == 1 {
+        if (seen && window_count == 1) printf "%s%c%s%c", current_file, 0, window_value, 0
+        current_file=FILENAME
+        window_count=0
+        window_value=""
+        seen=1
+      }
+      $1 == "window" {
+        window_count++
+        window_value=substr($0, index($0, "=") + 1)
+      }
+      END {
+        if (seen && window_count == 1) printf "%s%c%s%c", current_file, 0, window_value, 0
+      }
+    ' "${metas[@]}" 2>/dev/null
+  )
+}
+
+fm_pane_idle_meta_for_window() {  # <state> <window>
+  local state=$1 window=$2 candidate
+  if [ "$FM_PANE_IDLE_META_INDEX_STATE" != "$state" ]; then
+    fm_pane_idle_meta_index_build "$state" || return 1
+  fi
+  [ "${FM_PANE_IDLE_META_INDEX_COUNT[$window]-0}" = 1 ] || return 1
+  candidate=${FM_PANE_IDLE_META_INDEX[$window]-}
+  [ -n "$candidate" ] || return 1
+  printf '%s' "$candidate"
 }
 
 fm_pane_idle_sha256() {

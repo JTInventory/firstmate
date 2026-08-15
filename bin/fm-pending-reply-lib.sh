@@ -209,7 +209,11 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
   local existing_pid existing_identity existing_token actual attempt=0 generation
   local incomplete_signature='' incomplete_seen=0 current_signature
   local winner winner_ticket winner_token live_owner live_choosing max_ticket
-  local legacy_present protocol_home protocol_watch
+  local legacy_present protocol_home protocol_watch max_attempts
+  max_attempts=${FM_PENDING_REPLY_TXN_ATTEMPTS:-200}
+  case "$max_attempts" in ''|*[!0-9]*) max_attempts=200 ;; esac
+  [ "$max_attempts" -ge 1 ] || max_attempts=1
+  [ "$max_attempts" -le 200 ] || max_attempts=200
   fm_pending_reply_protocol_scope "$state" "$corr" protocol_home protocol_watch || return 1
   fm_watcher_protocol_gate "$state" "$protocol_home" "$protocol_watch" || return 1
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
@@ -218,7 +222,7 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
   identity=$(fm_pending_reply_pid_identity "$pid") || return 1
   lock_token="$pid-$RANDOM-$(fm_pending_reply_now)"
   owner="$lock/owner-$lock_token"
-  while [ "$attempt" -lt 200 ]; do
+  while [ "$attempt" -lt "$max_attempts" ]; do
     if [ -f "$lock" ] && [ ! -d "$lock" ]; then
       existing_pid=$(fm_pending_reply_txn_lock_value "$lock" pid)
       existing_identity=$(fm_pending_reply_txn_lock_value "$lock" identity)
@@ -813,6 +817,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   FM_PENDING_ROUTE_PARENT_HOME=
   FM_PENDING_ROUTE_CORR=
   FM_PENDING_ROUTE_SECOND_MATE_ID=
+  FM_PENDING_ROUTE_STATE=
   FM_PENDING_ROUTE_PHASE=
   FM_PENDING_ROUTE_MARKER=
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
@@ -947,6 +952,8 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   FM_PENDING_ROUTE_CORR=$corr
   # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
   FM_PENDING_ROUTE_SECOND_MATE_ID=$secondmate_id
+  # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
+  FM_PENDING_ROUTE_STATE=$state_abs
   FM_PENDING_ROUTE_PHASE=${phase:-}
   FM_PENDING_ROUTE_MARKER=$marker
   return 0
@@ -956,6 +963,7 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   local secondmate_home=$1 secondmate_id=$2 parent_home=$3 parent_status=$4 corr=$5
   local home_marker marker_id parent_abs state_abs parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
   local delivered phase
+  FM_PENDING_ROUTE_STATE=
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   home_marker="$secondmate_home/.fm-secondmate-home"
@@ -1003,6 +1011,8 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
     awaiting_report|recovery_sending|recovery_sent|recovery_failed|recovery_unknown|escalated|resolved|retired) ;;
     *) return 1 ;;
   esac
+  # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
+  FM_PENDING_ROUTE_STATE=$state_abs
   FM_PENDING_ROUTE_PHASE=$phase
   return 0
 }
@@ -1349,6 +1359,89 @@ fm_pending_reply_retry_undelivered_cleanup() {  # <state-dir> <meta-path>
     rm -f "$meta" || rc=1
   fi
   return "$rc"
+}
+
+fm_pending_reply_cleanup_retry_limit() {
+  local limit=${FM_PENDING_REPLY_CLEANUP_LIMIT:-8}
+  case "$limit" in ''|*[!0-9]*) limit=8 ;; esac
+  [ "$limit" -ge 1 ] || limit=1
+  [ "$limit" -le 64 ] || limit=64
+  printf '%s' "$limit"
+}
+
+fm_pending_reply_cleanup_retry_budget_secs() {
+  local budget=${FM_PENDING_REPLY_CLEANUP_BUDGET_SECS:-2}
+  case "$budget" in ''|*[!0-9]*) budget=2 ;; esac
+  [ "$budget" -ge 1 ] || budget=1
+  [ "$budget" -le 30 ] || budget=30
+  printf '%s' "$budget"
+}
+
+fm_pending_reply_cleanup_retry_now_ms() {
+  local stamp seconds
+  stamp=$(date +%s%N 2>/dev/null || true)
+  case "$stamp" in
+    ''|*[!0-9]*)
+      seconds=$(date +%s 2>/dev/null || printf '0')
+      printf '%s000' "$seconds"
+      ;;
+    *) printf '%s' "${stamp:0:13}" ;;
+  esac
+}
+
+fm_pending_reply_cleanup_retry_batch() {  # <state-dir> <pending-reply-dir>
+  local state=$1 dir=$2 cursor_path cursor cleanup_meta base pass started=0
+  local processed=0 last= limit budget start deadline now lock_attempts tmp
+  cursor_path="$state/.cleanup-retry.cursor"
+  limit=$(fm_pending_reply_cleanup_retry_limit)
+  budget=$(fm_pending_reply_cleanup_retry_budget_secs)
+  lock_attempts=${FM_PENDING_REPLY_CLEANUP_LOCK_ATTEMPTS:-20}
+  case "$lock_attempts" in ''|*[!0-9]*) lock_attempts=20 ;; esac
+  [ "$lock_attempts" -ge 1 ] || lock_attempts=1
+  [ "$lock_attempts" -le 200 ] || lock_attempts=200
+  cursor=$(cat "$cursor_path" 2>/dev/null || true)
+  case "$cursor" in
+    ''|*/*|*[!A-Za-z0-9._-]*) cursor= ;;
+    *.cleanup-meta) ;;
+    *) cursor= ;;
+  esac
+  if [ -n "$cursor" ] && [ ! -e "$dir/$cursor" ] && [ ! -L "$dir/$cursor" ]; then
+    cursor=
+  fi
+  start=$(fm_pending_reply_cleanup_retry_now_ms)
+  deadline=$((start + budget * 1000))
+  for pass in 1 2; do
+    if [ "$pass" = 2 ] && [ -z "$cursor" ]; then
+      break
+    fi
+    for cleanup_meta in "$dir"/*.cleanup-meta; do
+      [ -e "$cleanup_meta" ] || [ -L "$cleanup_meta" ] || continue
+      base=${cleanup_meta##*/}
+      if [ "$pass" = 1 ] && [ -n "$cursor" ] && [ "$started" = 0 ]; then
+        if [ "$base" = "$cursor" ]; then
+          started=1
+        fi
+        continue
+      fi
+      if [ "$pass" = 2 ] && [ "$base" = "$cursor" ]; then
+        break
+      fi
+      now=$(fm_pending_reply_cleanup_retry_now_ms)
+      [ "$now" -lt "$deadline" ] || break 2
+      FM_PENDING_REPLY_TXN_ATTEMPTS="$lock_attempts" \
+        fm_pending_reply_retry_undelivered_cleanup "$state" "$cleanup_meta" || true
+      last=$base
+      processed=$((processed + 1))
+      [ "$processed" -lt "$limit" ] || break 2
+    done
+  done
+  if [ "$processed" -gt 0 ]; then
+    tmp=$(mktemp "$state/.cleanup-retry.cursor.XXXXXX") || return 1
+    [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+    printf '%s\n' "$last" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$cursor_path" || { rm -f "$tmp"; return 1; }
+  fi
+  return 0
 }
 
 # Drop an undelivered expectation after a failed send so transport failure does
@@ -2126,15 +2219,12 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta cleanup_meta backend target label busy sm_home
+  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
-  for cleanup_meta in "$dir"/*.cleanup-meta; do
-    [ -e "$cleanup_meta" ] || [ -L "$cleanup_meta" ] || continue
-    fm_pending_reply_retry_undelivered_cleanup "$state" "$cleanup_meta" || true
-  done
+  fm_pending_reply_cleanup_retry_batch "$state" "$dir" || true
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
