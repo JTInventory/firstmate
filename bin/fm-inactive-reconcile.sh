@@ -1247,10 +1247,24 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
 
 replay_pane_idle_publication_valid() {
   local meta=$1 id=$2 window=$3 backend=$4 incarnation=$5
-  (
+  local deadline_ms=${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-} now_ms remaining_ms capture_secs
+  if [ "${FM_INACTIVE_OUTCOME_CHILD_BOUND:-0}" = 1 ]; then
     unset FM_PANE_IDLE_META_INDEX_DIR
     fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$incarnation" "$RECONCILE_SECS"
-  )
+    return $?
+  fi
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  if [ -n "$deadline_ms" ]; then
+    now_ms=$(clock_millis)
+    remaining_ms=$((deadline_ms - now_ms))
+    [ "$remaining_ms" -gt 0 ] || return 1
+    capture_secs=$(((remaining_ms + 999) / 1000))
+  else
+    capture_secs=${FM_INACTIVE_OUTCOME_SCAN_REMAINING_SECS:-${FM_LOCK_WAIT_SECS:-1}}
+  fi
+  capture_secs=$(bounded_secs "$capture_secs" 1 1 300)
+  run_bounded_child "$capture_secs" "$SCRIPT_DIR/fm-inactive-reconcile.sh" _pane-idle \
+    "$STATE" "$meta" "$id" "$window" "$backend" "$incarnation" "$RECONCILE_SECS"
 }
 
 publish_receipt_and_wake() {
@@ -1686,21 +1700,47 @@ repair_reported_secondmate_routes() {
         break 2
       fi
       batch_consumed=$((batch_consumed + 1))
+      if [ ! -e "$reported" ] && [ ! -L "$reported" ]; then
+        last=$base
+        processed=$((processed + 1))
+        if [ "$processed" -ge "$REPORTED_ROUTE_REPAIR_LIMIT" ]; then
+          batch_complete=0
+          break 2
+        fi
+        continue
+      fi
       [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
       kind=$(receipt_field "$reported" kind 2>/dev/null || true)
+      if [ ! -e "$reported" ] && [ ! -L "$reported" ]; then
+        last=$base
+        processed=$((processed + 1))
+        if [ "$processed" -ge "$REPORTED_ROUTE_REPAIR_LIMIT" ]; then
+          batch_complete=0
+          break 2
+        fi
+        continue
+      fi
       item_status=0
       case "$kind" in
         ship|scout) : ;;
         secondmate)
           if ! reported_secondmate_receipt_valid "$reported"; then
-            item_status=1
+            if [ ! -e "$reported" ] && [ ! -L "$reported" ]; then
+              item_status=0
+            else
+              item_status=1
+            fi
           else
             corr=$(receipt_field "$reported" parent_corr)
             parent_task_id=$(receipt_field "$reported" parent_task_id)
             parent_home=$(receipt_field "$reported" parent_home)
             parent_status=$(receipt_field "$reported" parent_status)
-            FM_LOCK_WAIT_SECS="$remaining" fm_pending_reply_secondmate_route_clear_reported \
-              "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || item_status=$?
+            if [ ! -e "$reported" ] && [ ! -L "$reported" ]; then
+              item_status=0
+            else
+              FM_LOCK_WAIT_SECS="$remaining" fm_pending_reply_secondmate_route_clear_reported \
+                "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || item_status=$?
+            fi
           fi
           ;;
         *) item_status=1 ;;
@@ -1762,7 +1802,13 @@ repair_reported_secondmate_routes() {
 
 republish_pending_receipt() {
   local pending=$1 task_lock meta window backend current_incarnation status=0 rc
-  prepare_pending_receipt "$pending" || return 1
+  local deadline_ms=${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-} now_ms remaining_ms wait_secs
+  FM_WAKE_APPEND_CREATED=0
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  if ! prepare_pending_receipt "$pending"; then
+    [ ! -e "$pending" ] && [ ! -L "$pending" ] && return 0
+    return 1
+  fi
   case "$KIND" in
     ship|scout)
       meta="$STATE/$ID.meta"
@@ -1787,7 +1833,18 @@ republish_pending_receipt() {
           fi
         fi
         if [ "$status" = 0 ]; then
-          republish_existing_receipt_wake "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
+          if [ -n "$deadline_ms" ]; then
+            now_ms=$(clock_millis)
+            remaining_ms=$((deadline_ms - now_ms))
+            [ "$remaining_ms" -gt 0 ] || status=75
+            wait_secs=$((remaining_ms / 1000))
+          else
+            wait_secs=${FM_LOCK_WAIT_SECS:-30}
+          fi
+          if [ "$status" = 0 ]; then
+            FM_LOCK_WAIT_SECS="$wait_secs" republish_existing_receipt_wake \
+              "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
+          fi
         fi
       else
         status=75
@@ -1912,7 +1969,8 @@ republish_pending_receipts() {
         break 2
       fi
       batch_consumed=$((batch_consumed + 1))
-      if FM_LOCK_WAIT_SECS="$remaining" republish_pending_receipt "$pending"; then
+      if FM_LOCK_WAIT_SECS="$remaining" FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS="$scan_deadline" \
+        republish_pending_receipt "$pending"; then
         if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
           printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$ID" "$OUTCOME" "$FP"
         fi
@@ -2818,6 +2876,8 @@ scan_locked() {
     (
       export FM_LOCK_WAIT_SECS="$remaining"
       export FM_INACTIVE_OUTCOME_SCAN_REMAINING_SECS="$remaining"
+      export FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS="$scan_deadline"
+      export FM_INACTIVE_OUTCOME_CHILD_BOUND=1
       export FM_PANE_IDLE_META_INDEX_DIR="${pane_idle_index_dir:-}"
       run_bounded_child "$remaining" "$SCRIPT_DIR/fm-inactive-reconcile.sh" _child "$id"
     ) || rc=$?
@@ -3002,6 +3062,11 @@ case "${1:-}" in
   _child)
     [ -n "${2:-}" ] || exit 2
     reconcile_child "$2"
+    ;;
+  _pane-idle)
+    [ -n "${8:-}" ] || exit 2
+    unset FM_PANE_IDLE_META_INDEX_DIR
+    fm_pane_idle_proof_valid "$2" "$3" "$4" "$5" "$6" "$7" "$8"
     ;;
   *)
     echo "usage: fm-inactive-reconcile.sh scan [--startup] | ack <inactive-outcome:key> <wake-row>" >&2

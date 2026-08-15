@@ -203,16 +203,17 @@ fm_pending_reply_protocol_scope() {  # <state-dir> <corr_id> <home-var> <watch-v
   printf -v "$watch_var" '%s' "$lock_watch"
 }
 
-fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
+fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var> [deadline-ms]
   local state=$1 corr=$2 result_var=$3 lock owner pid identity lock_token phase ticket
   local existing_pid existing_identity existing_token actual attempt=0 generation
   local incomplete_signature='' incomplete_seen=0 current_signature
   local winner winner_ticket winner_token live_owner live_choosing max_ticket
-  local legacy_present protocol_home protocol_watch max_attempts
+  local legacy_present protocol_home protocol_watch max_attempts deadline_ms=${4:-}
   max_attempts=${FM_PENDING_REPLY_TXN_ATTEMPTS:-200}
   case "$max_attempts" in ''|*[!0-9]*) max_attempts=200 ;; esac
   [ "$max_attempts" -ge 1 ] || max_attempts=1
   [ "$max_attempts" -le 200 ] || max_attempts=200
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   fm_pending_reply_protocol_scope "$state" "$corr" protocol_home protocol_watch || return 1
   fm_watcher_protocol_gate "$state" "$protocol_home" "$protocol_watch" || return 1
   lock=$(fm_pending_reply_txn_lock_path "$state" "$corr")
@@ -222,6 +223,10 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
   lock_token="$pid-$RANDOM-$(fm_pending_reply_now)"
   owner="$lock/owner-$lock_token"
   while [ "$attempt" -lt "$max_attempts" ]; do
+    if ! fm_pending_reply_cleanup_deadline_check "$deadline_ms"; then
+      rm -f "$owner" 2>/dev/null || true
+      return 75
+    fi
     if [ -f "$lock" ] && [ ! -d "$lock" ]; then
       existing_pid=$(fm_pending_reply_txn_lock_value "$lock" pid)
       existing_identity=$(fm_pending_reply_txn_lock_value "$lock" identity)
@@ -233,7 +238,10 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
         rm -f "$lock" 2>/dev/null || true
         continue
       fi
-      sleep 0.05
+      fm_pending_reply_cleanup_deadline_sleep "$deadline_ms" || {
+        rm -f "$owner" 2>/dev/null || true
+        return 75
+      }
       attempt=$((attempt + 1))
       continue
     fi
@@ -266,7 +274,10 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
           continue
         fi
       fi
-      sleep 0.05
+      fm_pending_reply_cleanup_deadline_sleep "$deadline_ms" || {
+        rm -f "$owner" 2>/dev/null || true
+        return 75
+      }
       attempt=$((attempt + 1))
       continue
     fi
@@ -408,7 +419,10 @@ fm_pending_reply_txn_lock_acquire() {  # <state-dir> <corr_id> <result-var>
       printf -v "$result_var" '%s' "$lock_token"
       return 0
     fi
-    sleep 0.05
+    fm_pending_reply_cleanup_deadline_sleep "$deadline_ms" || {
+      rm -f "$owner" 2>/dev/null || true
+      return 75
+    }
     attempt=$((attempt + 1))
   done
   rm -f "$owner" 2>/dev/null || true
@@ -768,13 +782,26 @@ fm_pending_reply_secondmate_route_clear_reported() {  # <secondmate-home> <corr-
   return "$status"
 }
 
-fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <corr-id>
-  local secondmate_home=$1 corr=$2 marker route_lock current_corr status=0 marker_removed=0
+fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <corr-id> [deadline-ms]
+  local secondmate_home=$1 corr=$2 deadline_ms=${3:-} marker route_lock current_corr status=0 marker_removed=0
+  local wait_secs remaining_ms now_ms
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
-  fm_lock_acquire_wait "$route_lock" || return 1
+  if [ -n "$deadline_ms" ]; then
+    case "$deadline_ms" in ''|*[!0-9]*) return 1 ;; esac
+    now_ms=$(fm_pending_reply_cleanup_retry_now_ms)
+    remaining_ms=$((deadline_ms - now_ms))
+    [ "$remaining_ms" -gt 0 ] || return 75
+    wait_secs=$((remaining_ms / 1000))
+  else
+    wait_secs=${FM_LOCK_WAIT_SECS:-30}
+  fi
+  if ! FM_LOCK_WAIT_SECS="$wait_secs" fm_lock_acquire_wait "$route_lock"; then
+    [ -n "$deadline_ms" ] && return 75
+    return 1
+  fi
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     if [ ! -f "$marker" ] || [ -L "$marker" ] \
@@ -1341,16 +1368,20 @@ fm_pending_reply_schedule_undelivered_cleanup() {  # <state-dir> <corr-id> <seco
   fm_pending_reply_undelivered_cleanup_meta_valid "$meta" "$corr" "$secondmate_home"
 }
 
-fm_pending_reply_retry_undelivered_cleanup() {  # <state-dir> <meta-path>
-  local state=$1 meta=$2 corr secondmate_home token rc=0
+fm_pending_reply_retry_undelivered_cleanup() {  # <state-dir> <meta-path> [deadline-ms]
+  local state=$1 meta=$2 deadline_ms=${3:-} corr secondmate_home token rc=0 lock_rc
   corr=$(fm_pending_reply_get "$meta" corr_id)
   secondmate_home=$(fm_pending_reply_get "$meta" secondmate_home)
   fm_pending_reply_undelivered_cleanup_meta_valid "$meta" "$corr" "$secondmate_home" || return 1
-  fm_pending_reply_txn_lock_acquire "$state" "$corr" token || return 1
+  fm_pending_reply_txn_lock_acquire "$state" "$corr" token "$deadline_ms" || {
+    lock_rc=$?
+    [ "$lock_rc" = 75 ] && return 75
+    return "$lock_rc"
+  }
   if ! fm_pending_reply_discard_undelivered "$state" "$corr" 1; then
     fm_pending_reply_restore_undelivered "$state" "$corr" || true
     rc=1
-  elif ! fm_pending_reply_secondmate_route_clear_undelivered "$secondmate_home" "$corr"; then
+  elif ! fm_pending_reply_secondmate_route_clear_undelivered "$secondmate_home" "$corr" "$deadline_ms"; then
     fm_pending_reply_restore_undelivered "$state" "$corr" || true
     rc=1
   elif ! fm_pending_reply_finish_undelivered "$state" "$corr"; then
@@ -1389,6 +1420,25 @@ fm_pending_reply_cleanup_retry_now_ms() {
       ;;
     *) printf '%s' "${stamp:0:13}" ;;
   esac
+}
+
+fm_pending_reply_cleanup_deadline_check() {
+  local deadline_ms=$1 now_ms
+  [ -n "$deadline_ms" ] || return 0
+  now_ms=$(fm_pending_reply_cleanup_retry_now_ms)
+  [ "$now_ms" -lt "$deadline_ms" ]
+}
+
+fm_pending_reply_cleanup_deadline_sleep() {
+  local deadline_ms=$1 now_ms remaining_ms
+  if [ -z "$deadline_ms" ]; then
+    sleep 0.05
+    return $?
+  fi
+  now_ms=$(fm_pending_reply_cleanup_retry_now_ms)
+  remaining_ms=$((deadline_ms - now_ms))
+  [ "$remaining_ms" -ge 50 ] || return 75
+  sleep 0.05
 }
 
 fm_pending_reply_cleanup_retry_batch() {  # <state-dir> <pending-reply-dir>
@@ -1432,7 +1482,7 @@ fm_pending_reply_cleanup_retry_batch() {  # <state-dir> <pending-reply-dir>
       [ "$now" -lt "$deadline" ] || break 2
       cleanup_rc=0
       FM_PENDING_REPLY_TXN_ATTEMPTS="$lock_attempts" \
-        fm_pending_reply_retry_undelivered_cleanup "$state" "$cleanup_meta" || cleanup_rc=$?
+        fm_pending_reply_retry_undelivered_cleanup "$state" "$cleanup_meta" "$deadline" || cleanup_rc=$?
       [ "$cleanup_rc" = 0 ] || break 2
       last=$base
       processed=$((processed + 1))
