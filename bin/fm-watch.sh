@@ -1255,9 +1255,22 @@ EOF
             idle_task=${idle_meta##*/}
             idle_task=${idle_task%.meta}
             idle_backend=$(fm_backend_of_meta "$idle_meta")
-            fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n" || exit 1
+            if ! fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n"; then
+              fm_pane_idle_clear "$STATE" "$idle_task" || true
+              fm_pane_idle_meta_index_build "$STATE" || true
+              refreshed_idle_meta=$(fm_pane_idle_meta_for_window "$STATE" "$w" 2>/dev/null || true)
+              if [ -n "$refreshed_idle_meta" ] && [ -f "$refreshed_idle_meta" ] \
+                && [ ! -L "$refreshed_idle_meta" ]; then
+                refreshed_idle_task=${refreshed_idle_meta##*/}
+                refreshed_idle_task=${refreshed_idle_task%.meta}
+                refreshed_idle_backend=$(fm_backend_of_meta "$refreshed_idle_meta")
+                fm_pane_idle_write "$STATE" "$refreshed_idle_meta" "$refreshed_idle_task" \
+                  "$w" "$refreshed_idle_backend" "$h" "$n" \
+                  || fm_pane_idle_clear "$STATE" "$refreshed_idle_task" || true
+              fi
+            fi
           else
-            fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
+            fm_pane_idle_clear_for_window "$STATE" "$w" || true
           fi
         fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes

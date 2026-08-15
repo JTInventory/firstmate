@@ -183,8 +183,7 @@ fm_pending_reply_protocol_scope() {  # <state-dir> <corr_id> <home-var> <watch-v
   [ -f "$rec" ] && home=$(fm_pending_reply_get "$rec" parent_home)
   state_identity=$(fm_pending_reply_source_identity "$state") || return 1
   if [ -n "$home" ]; then
-    home_state_identity=$(fm_pending_reply_source_identity "$home/state") || home_state_identity=
-    [ "$home_state_identity" = "$state_identity" ] || home=
+    home=$(cd "$home" 2>/dev/null && pwd -P) || home=
   fi
   if [ -z "$home" ] && [ -n "${FM_HOME:-}" ]; then
     home_state_identity=$(fm_pending_reply_source_identity "$FM_HOME/state") || home_state_identity=
@@ -537,7 +536,6 @@ fm_pending_reply_record_validate() {  # <record-path> <state-dir> <corr-id> <tas
   case "$parent_home:$parent_status" in /*:/*) ;; *) return 1 ;; esac
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
-  [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
   pending_dir=$(fm_pending_reply_dir "$state_abs")
   [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] || return 1
   expected_status="$state_abs/$wanted_task.status"
@@ -605,7 +603,6 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   marker_id=$(cat "$home_marker" 2>/dev/null || true)
   [ "$marker_id" = "$secondmate_id" ] || return 1
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
-  [ -d "$parent_home/state" ] && [ ! -L "$parent_home/state" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
   [ -d "$parent_state" ] && [ ! -L "$parent_state" ] || return 1
   state_abs=$(cd "$parent_state" 2>/dev/null && pwd -P) || return 1
@@ -877,7 +874,6 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
-  [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
   parent_status_dir=${parent_status%/*}
   [ -n "$parent_status_dir" ] && [ -d "$parent_status_dir" ] && [ ! -L "$parent_status_dir" ] || return 1
   state_abs=$(cd "$parent_status_dir" 2>/dev/null && pwd -P) || return 1
@@ -976,7 +972,6 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
-  [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
   parent_status_dir=${parent_status%/*}
   [ -n "$parent_status_dir" ] && [ -d "$parent_status_dir" ] && [ ! -L "$parent_status_dir" ] || return 1
   state_abs=$(cd "$parent_status_dir" 2>/dev/null && pwd -P) || return 1
@@ -1391,7 +1386,7 @@ fm_pending_reply_cleanup_retry_now_ms() {
 
 fm_pending_reply_cleanup_retry_batch() {  # <state-dir> <pending-reply-dir>
   local state=$1 dir=$2 cursor_path cursor cleanup_meta base pass started=0
-  local processed=0 last= limit budget start deadline now lock_attempts tmp
+  local processed=0 last= limit budget start deadline now lock_attempts tmp cleanup_rc
   cursor_path="$state/.cleanup-retry.cursor"
   limit=$(fm_pending_reply_cleanup_retry_limit)
   budget=$(fm_pending_reply_cleanup_retry_budget_secs)
@@ -1428,8 +1423,10 @@ fm_pending_reply_cleanup_retry_batch() {  # <state-dir> <pending-reply-dir>
       fi
       now=$(fm_pending_reply_cleanup_retry_now_ms)
       [ "$now" -lt "$deadline" ] || break 2
+      cleanup_rc=0
       FM_PENDING_REPLY_TXN_ATTEMPTS="$lock_attempts" \
-        fm_pending_reply_retry_undelivered_cleanup "$state" "$cleanup_meta" || true
+        fm_pending_reply_retry_undelivered_cleanup "$state" "$cleanup_meta" || cleanup_rc=$?
+      [ "$cleanup_rc" = 0 ] || break 2
       last=$base
       processed=$((processed + 1))
       [ "$processed" -lt "$limit" ] || break 2

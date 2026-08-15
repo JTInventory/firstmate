@@ -82,6 +82,40 @@ fm_pane_idle_meta_for_window() {  # <state> <window>
   return 1
 }
 
+fm_pane_idle_meta_for_window_direct() {  # <state> <window>
+  local state=$1 window=$2 meta
+  local -a metas=()
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    metas+=("$meta")
+  done
+  [ "${#metas[@]}" -gt 0 ] || return 1
+  awk -F= -v wanted="$window" '
+    FNR == 1 {
+      if (seen && count == 1 && value == wanted) {
+        matches++
+        candidate=current_file
+      }
+      current_file=FILENAME
+      count=0
+      value=""
+      seen=1
+    }
+    $1 == "window" {
+      count++
+      value=substr($0, index($0, "=") + 1)
+    }
+    END {
+      if (seen && count == 1 && value == wanted) {
+        matches++
+        candidate=current_file
+      }
+      if (matches == 1) print candidate
+      exit !(matches == 1)
+    }
+  ' "${metas[@]}" 2>/dev/null
+}
+
 fm_pane_idle_sha256() {
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
@@ -267,7 +301,7 @@ fm_pane_idle_proof_valid() {  # <state> <meta> <task> <window> <backend> <incarn
   local key hash_file count_file current_hash current_count unique_meta
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   fm_pane_idle_task_is_ordinary "$meta" || return 1
-  unique_meta=$(fm_pane_idle_meta_for_window "$state" "$window" 2>/dev/null || true)
+  unique_meta=$(fm_pane_idle_meta_for_window_direct "$state" "$window" 2>/dev/null || true)
   [ "$unique_meta" = "$meta" ] || return 1
   path=$(fm_pane_idle_path "$state" "$task")
   [ -f "$path" ] && [ ! -L "$path" ] || return 1

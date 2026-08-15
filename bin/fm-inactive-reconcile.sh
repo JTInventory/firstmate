@@ -21,6 +21,9 @@ REPORTED_ROUTE_CURSOR="$STATE/.reported-secondmate-route-repair.cursor"
 PENDING_RECEIPT_CURSOR="$STATE/.pending-receipt-republish.cursor"
 MAINTENANCE_PHASE_CURSOR="$STATE/.inactive-outcome-maintenance.cursor"
 MAINTENANCE_ORDER_CURSOR="$STATE/.inactive-outcome-maintenance-order.cursor"
+DIRECT_FIND_PENDING="$STATE/.inactive-outcome-find.pending"
+REPORTED_ROUTE_PENDING="$STATE/.reported-secondmate-route-repair.pending"
+PENDING_RECEIPT_PENDING="$STATE/.pending-receipt-republish.pending"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 PANE_IDLE_DIR="$STATE/.pane-idle"
 
@@ -51,6 +54,9 @@ inactive_state_preflight() {
   inactive_state_path_is_safe "$PENDING_RECEIPT_CURSOR" file || return 1
   inactive_state_path_is_safe "$MAINTENANCE_PHASE_CURSOR" file || return 1
   inactive_state_path_is_safe "$MAINTENANCE_ORDER_CURSOR" file || return 1
+  inactive_state_path_is_safe "$DIRECT_FIND_PENDING" file || return 1
+  inactive_state_path_is_safe "$REPORTED_ROUTE_PENDING" file || return 1
+  inactive_state_path_is_safe "$PENDING_RECEIPT_PENDING" file || return 1
   inactive_state_path_is_safe "$PANE_IDLE_DIR" dir || return 1
   inactive_state_path_is_safe "$FM_WAKE_QUEUE" file || return 1
 }
@@ -129,6 +135,29 @@ budget_remaining_secs() {
   else
     printf '%s' "$(((remaining_ms + 999) / 1000))"
   fi
+}
+
+inactive_copy_nul_prefix() {
+  local source=$1 target=$2 value
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  [ ! -L "$target" ] || return 1
+  : > "$target" || return 1
+  while IFS= read -r -d '' value; do
+    printf '%s\0' "$value" >> "$target" || return 1
+  done < "$source"
+}
+
+inactive_persist_nul_prefix() {
+  local source=$1 target=$2 tmp
+  [ ! -L "$target" ] || return 1
+  tmp=$(mktemp "$target.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  if ! inactive_copy_nul_prefix "$source" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  [ ! -L "$target" ] || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
 }
 
 RECONCILE_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_SECS:-900}" 900 60 1800)
@@ -1293,7 +1322,7 @@ publish_secondmate_receipt_and_wake() {
     wake_queue_lock_acquire || return 75
     release_lock=1
   fi
-  if [ -L "$FM_HOME" ] || [ ! -d "$FM_HOME" ] || [ -L "$FM_HOME/state" ] || [ ! -d "$FM_HOME/state" ]; then
+  if [ -L "$FM_HOME" ] || [ ! -d "$FM_HOME" ] || [ -L "$STATE" ] || [ ! -d "$STATE" ]; then
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
     return 75
   fi
@@ -1496,6 +1525,7 @@ PERL
 repair_reported_secondmate_routes() {
   local scan_deadline=$1 reported kind corr parent_task_id parent_home parent_status remaining status=0
   local cursor='' cursor_found=0 started=1 pass base last processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
+  local candidate_pending=0 candidate_retain=0 item_status
   MAINTENANCE_ENUM_DEFERRED=0
   MAINTENANCE_ENUM_FAILED=0
   MAINTENANCE_ITEMS_PROCESSED=0
@@ -1512,6 +1542,28 @@ repair_reported_secondmate_routes() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
     return 1
   }
+  if [ -e "$REPORTED_ROUTE_PENDING" ] || [ -L "$REPORTED_ROUTE_PENDING" ]; then
+    [ -f "$REPORTED_ROUTE_PENDING" ] && [ ! -L "$REPORTED_ROUTE_PENDING" ] || {
+      rm -f "$candidate_tmp"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+      return 1
+    }
+    if [ -s "$REPORTED_ROUTE_PENDING" ]; then
+      inactive_copy_nul_prefix "$REPORTED_ROUTE_PENDING" "$candidate_tmp" || {
+        rm -f "$candidate_tmp"
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+        return 1
+      }
+      candidate_pending=1
+      candidate_retain=1
+    else
+      rm -f "$REPORTED_ROUTE_PENDING" || {
+        rm -f "$candidate_tmp"
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+        return 1
+      }
+    fi
+  fi
   cursor=$(cat "$REPORTED_ROUTE_CURSOR" 2>/dev/null || true)
   case "$cursor" in
     '') ;;
@@ -1521,8 +1573,15 @@ repair_reported_secondmate_routes() {
   if [ -n "$cursor" ] && { [ ! -f "$OUTCOME_DIR/$cursor" ] || [ -L "$OUTCOME_DIR/$cursor" ]; }; then
     cursor=
   fi
-  [ -n "$cursor" ] && started=0
+  if [ "$candidate_pending" = 1 ]; then
+    cursor=
+    cursor_found=1
+    started=1
+  else
+    [ -n "$cursor" ] && started=0
+  fi
   for pass in 1 2; do
+    [ "$candidate_pending" = 0 ] || [ "$pass" = 1 ] || break
     if [ "$pass" = 2 ]; then
       [ -n "$cursor" ] || break
       started=1
@@ -1530,7 +1589,11 @@ repair_reported_secondmate_routes() {
     remaining=$(budget_remaining_secs "$scan_deadline")
     [ "$remaining" -gt 0 ] || { status=1; break; }
     enum_rc=0
-    receipt_candidates reported "$remaining" > "$candidate_tmp" || enum_rc=$?
+    if [ "$candidate_pending" = 1 ]; then
+      :
+    else
+      receipt_candidates reported "$remaining" > "$candidate_tmp" || enum_rc=$?
+    fi
     if [ "$enum_rc" -ne 0 ]; then
       status=1
       if [ "$enum_rc" = 124 ]; then
@@ -1558,28 +1621,40 @@ repair_reported_secondmate_routes() {
       [ "$remaining" -gt 0 ] || { status=1; break 2; }
       [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
       kind=$(receipt_field "$reported" kind 2>/dev/null || true)
+      item_status=0
       case "$kind" in
         ship|scout) : ;;
         secondmate)
           if ! reported_secondmate_receipt_valid "$reported"; then
-            status=1
+            item_status=1
           else
             corr=$(receipt_field "$reported" parent_corr)
             parent_task_id=$(receipt_field "$reported" parent_task_id)
             parent_home=$(receipt_field "$reported" parent_home)
             parent_status=$(receipt_field "$reported" parent_status)
             FM_LOCK_WAIT_SECS="$remaining" fm_pending_reply_secondmate_route_clear_reported \
-              "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || status=1
+              "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || item_status=1
           fi
           ;;
-        *) status=1 ;;
+        *) item_status=1 ;;
       esac
+      if [ "$item_status" != 0 ]; then
+        status=1
+        candidate_retain=1
+        break 2
+      fi
       last=$base
       processed=$((processed + 1))
       [ "$processed" -lt "$REPORTED_ROUTE_REPAIR_LIMIT" ] || break 2
     done < "$candidate_tmp"
+    [ "$candidate_pending" = 0 ] || candidate_retain=0
     [ "$enum_deferred" = 0 ] || break
   done
+  if [ "$enum_deferred" = 1 ] || [ "$candidate_retain" = 1 ]; then
+    inactive_persist_nul_prefix "$candidate_tmp" "$REPORTED_ROUTE_PENDING" || status=1
+  elif [ "$candidate_pending" = 1 ]; then
+    rm -f "$REPORTED_ROUTE_PENDING" || status=1
+  fi
   rm -f "$candidate_tmp" || status=1
   if [ "$processed" -gt 0 ]; then
     if cursor_tmp=$(mktemp "$STATE/.reported-route-repair.cursor.XXXXXX"); then
@@ -1615,6 +1690,7 @@ republish_pending_receipts() {
   local scan_deadline=$1 pending remaining status=0
   local cursor='' cursor_found=0 pass started=1
   local base last='' processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
+  local candidate_pending=0 candidate_retain=0
   local LC_ALL=C
   MAINTENANCE_ENUM_DEFERRED=0
   MAINTENANCE_ENUM_FAILED=0
@@ -1626,6 +1702,25 @@ republish_pending_receipts() {
     rm -f "$candidate_tmp"
     return 1
   }
+  if [ -e "$PENDING_RECEIPT_PENDING" ] || [ -L "$PENDING_RECEIPT_PENDING" ]; then
+    [ -f "$PENDING_RECEIPT_PENDING" ] && [ ! -L "$PENDING_RECEIPT_PENDING" ] || {
+      rm -f "$candidate_tmp"
+      return 1
+    }
+    if [ -s "$PENDING_RECEIPT_PENDING" ]; then
+      inactive_copy_nul_prefix "$PENDING_RECEIPT_PENDING" "$candidate_tmp" || {
+        rm -f "$candidate_tmp"
+        return 1
+      }
+      candidate_pending=1
+      candidate_retain=1
+    else
+      rm -f "$PENDING_RECEIPT_PENDING" || {
+        rm -f "$candidate_tmp"
+        return 1
+      }
+    fi
+  fi
   cursor=$(cat "$PENDING_RECEIPT_CURSOR" 2>/dev/null || true)
   case "$cursor" in
     '') ;;
@@ -1635,8 +1730,15 @@ republish_pending_receipts() {
       ;;
     *) cursor=;;
   esac
-  [ -n "$cursor" ] && started=0
+  if [ "$candidate_pending" = 1 ]; then
+    cursor=
+    cursor_found=1
+    started=1
+  else
+    [ -n "$cursor" ] && started=0
+  fi
   for pass in 1 2; do
+    [ "$candidate_pending" = 0 ] || [ "$pass" = 1 ] || break
     if [ "$pass" = 2 ]; then
       [ -n "$cursor" ] || break
       started=1
@@ -1644,7 +1746,11 @@ republish_pending_receipts() {
     remaining=$(budget_remaining_secs "$scan_deadline")
     [ "$remaining" -gt 0 ] || { status=1; break; }
     enum_rc=0
-    receipt_candidates pending "$remaining" > "$candidate_tmp" || enum_rc=$?
+    if [ "$candidate_pending" = 1 ]; then
+      :
+    else
+      receipt_candidates pending "$remaining" > "$candidate_tmp" || enum_rc=$?
+    fi
     if [ "$enum_rc" -ne 0 ]; then
       status=1
       if [ "$enum_rc" = 124 ]; then
@@ -1685,8 +1791,14 @@ republish_pending_receipts() {
       processed=$((processed + 1))
       [ "$processed" -lt "$PENDING_RECEIPT_REPUBLISH_LIMIT" ] || break 2
     done < "$candidate_tmp"
+    [ "$candidate_pending" = 0 ] || candidate_retain=0
     [ "$enum_deferred" = 0 ] || break
   done
+  if [ "$enum_deferred" = 1 ] || [ "$candidate_retain" = 1 ]; then
+    inactive_persist_nul_prefix "$candidate_tmp" "$PENDING_RECEIPT_PENDING" || status=1
+  elif [ "$candidate_pending" = 1 ]; then
+    rm -f "$PENDING_RECEIPT_PENDING" || status=1
+  fi
   rm -f "$candidate_tmp" || status=1
   if [ "$processed" -gt 0 ]; then
     if cursor_tmp=$(mktemp "$STATE/.pending-receipt-republish.cursor.XXXXXX"); then
@@ -2000,6 +2112,9 @@ reconcile_child() {
   [ "$activity" -gt 0 ] || return 0
   age=$((now - activity))
   [ "$age" -ge "$RECONCILE_SECS" ] || return 0
+  if ! wake_queue_lock_acquire; then
+    return 75
+  fi
   state_tmp=$(mktemp "$STATE/.$id.inactive-state.XXXXXX") || return 1
   [ -f "$state_tmp" ] && [ ! -L "$state_tmp" ] || { rm -f "$state_tmp"; return 1; }
   state_rc=0
@@ -2048,9 +2163,6 @@ reconcile_child() {
   esac
   [ "$route_rc" = 0 ] && KIND=secondmate
   FP=$(hash_text "$id|$INC|$outcome|$snapshot|$KIND") || return 1
-  if ! wake_queue_lock_acquire; then
-    return 75
-  fi
   surface_status=0
   terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" || surface_status=$?
   case "$surface_status" in
@@ -2275,6 +2387,7 @@ scan_locked() {
   local scan_started scan_deadline maintenance_deadline remaining rc complete=1 scan_failed=0 find_tmp maintenance_status=0
   local maintenance_started maintenance_phase maintenance_next_phase maintenance_phase_tmp
   local maintenance_order next_order maintenance_order_tmp maintenance_ran=0 maintenance_deferred=0 direct_deferred=0
+  local find_pending_source=0 find_retain=0
   inactive_state_preflight || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
   now=$(date +%s)
@@ -2409,29 +2522,61 @@ scan_locked() {
     [ "$maintenance_ran" = 1 ] || run_maintenance
     return 1
   }
-  remaining=$(budget_remaining_secs "$scan_deadline")
-  if [ "$remaining" -le 0 ]; then
-    direct_deferred=1
-  else
-    if run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
-      \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
-      :
+  if [ -e "$DIRECT_FIND_PENDING" ] || [ -L "$DIRECT_FIND_PENDING" ]; then
+    [ -f "$DIRECT_FIND_PENDING" ] && [ ! -L "$DIRECT_FIND_PENDING" ] || {
+      rm -f "$find_tmp"
+      [ "$maintenance_ran" = 1 ] || run_maintenance
+      return 1
+    }
+    if [ -s "$DIRECT_FIND_PENDING" ]; then
+      inactive_copy_nul_prefix "$DIRECT_FIND_PENDING" "$find_tmp" || {
+        rm -f "$find_tmp"
+        [ "$maintenance_ran" = 1 ] || run_maintenance
+        return 1
+      }
+      find_pending_source=1
+      find_retain=1
     else
-      rc=$?
-      [ "$rc" -ne 0 ] || rc=1
-      complete=0
-      if [ "$rc" = 124 ]; then
-        direct_deferred=1
+      rm -f "$DIRECT_FIND_PENDING" || {
+        rm -f "$find_tmp"
+        [ "$maintenance_ran" = 1 ] || run_maintenance
+        return 1
+      }
+    fi
+  fi
+  if [ "$find_pending_source" = 0 ]; then
+    remaining=$(budget_remaining_secs "$scan_deadline")
+    if [ "$remaining" -le 0 ]; then
+      direct_deferred=1
+      find_retain=1
+    else
+      if run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
+        \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
+        :
       else
-        scan_failed=1
+        rc=$?
+        [ "$rc" -ne 0 ] || rc=1
+        complete=0
+        if [ "$rc" = 124 ]; then
+          direct_deferred=1
+          find_retain=1
+        else
+          scan_failed=1
+        fi
       fi
     fi
+  fi
+  if [ "$find_pending_source" = 1 ]; then
+    cursor=
+    started=1
+    cursor_seen=1
   fi
   while [ "$scan_failed" = 0 ] && IFS= read -r -d '' meta; do
     remaining=$(budget_remaining_secs "$scan_deadline")
     if [ "$remaining" -le 0 ]; then
       complete=0
       direct_deferred=1
+      find_retain=1
       break
     fi
     if [ ! -f "$meta" ] || [ -L "$meta" ]; then
@@ -2440,10 +2585,19 @@ scan_locked() {
     id=$(basename "$meta" .meta)
     valid_task_id "$id" || continue
     if [ "$started" = 0 ]; then
-      [ "$id" = "$cursor" ] || continue
-      started=1
-      cursor_seen=1
-      continue
+      if [ ! -f "$STATE/$cursor.meta" ] || [ -L "$STATE/$cursor.meta" ]; then
+        cursor=
+        started=1
+        cursor_seen=1
+        complete=0
+        direct_deferred=1
+        find_retain=1
+      else
+        [ "$id" = "$cursor" ] || continue
+        started=1
+        cursor_seen=1
+        continue
+      fi
     fi
     rc=0
     FM_LOCK_WAIT_SECS="$remaining" run_bounded_child "$remaining" \
@@ -2451,7 +2605,7 @@ scan_locked() {
     if [ "$rc" -ne 0 ]; then
       complete=0
       case "$rc" in
-        75|124) direct_deferred=1 ;;
+        75|124) direct_deferred=1; find_retain=1 ;;
         *) scan_failed=1 ;;
       esac
       break
@@ -2465,6 +2619,28 @@ scan_locked() {
       break
     fi
   done < "$find_tmp"
+  if [ "$find_pending_source" = 1 ] && [ "$direct_deferred" = 0 ] \
+    && [ "$scan_failed" = 0 ] && [ "$complete" = 1 ]; then
+    find_retain=0
+  fi
+  if [ "$direct_deferred" = 1 ] && [ "$scan_failed" = 0 ]; then
+    find_retain=1
+  fi
+  if [ "$find_retain" = 1 ]; then
+    inactive_persist_nul_prefix "$find_tmp" "$DIRECT_FIND_PENDING" || {
+      rc=$?
+      [ "$rc" -ne 0 ] || rc=1
+      complete=0
+      scan_failed=1
+    }
+  elif [ "$find_pending_source" = 1 ]; then
+    rm -f "$DIRECT_FIND_PENDING" || {
+      rc=$?
+      [ "$rc" -ne 0 ] || rc=1
+      complete=0
+      scan_failed=1
+    }
+  fi
   if rm -f "$find_tmp"; then
     :
   else
@@ -2486,6 +2662,9 @@ scan_locked() {
   fi
   [ "$complete" = 1 ] || return 1
   if [ "$cursor_seen" = 0 ]; then
+    if [ -n "$cursor" ] && { [ ! -f "$STATE/$cursor.meta" ] || [ -L "$STATE/$cursor.meta" ]; }; then
+      return 0
+    fi
     return 1
   fi
   if [ "$complete" = 1 ]; then
