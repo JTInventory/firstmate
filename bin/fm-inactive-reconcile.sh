@@ -211,9 +211,15 @@ inactive_pending_clear() {
 }
 
 inactive_pending_retry_defer() {
-  local retry_source=$1 retry_target=$2 deadline_ms=${3:-}
+  local retry_source=$1 retry_target=$2 deadline_ms=${3:-} incoming
   [ -f "$retry_source" ] && [ ! -L "$retry_source" ] || return 1
-  [ ! -e "$retry_target" ] && [ ! -L "$retry_target" ] || return 1
+  if [ -e "$retry_target" ] || [ -L "$retry_target" ]; then
+    [ -f "$retry_target" ] && [ ! -L "$retry_target" ] || return 1
+    incoming="${retry_target}.incoming.$$.$RANDOM"
+    [ ! -e "$incoming" ] && [ ! -L "$incoming" ] || return 1
+    mv -f "$retry_source" "$incoming" || return 1
+    return 124
+  fi
   if [ -n "$deadline_ms" ] && [ "$(clock_millis)" -ge "$deadline_ms" ]; then
     mv -f "$retry_source" "$retry_target" || return 1
     return 124
@@ -221,15 +227,47 @@ inactive_pending_retry_defer() {
   return 1
 }
 
+inactive_pending_retry_exists() {
+  local retry=$1 path
+  if [ -e "$retry" ] || [ -L "$retry" ]; then
+    return 0
+  fi
+  for path in "${retry}.incoming."*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    return 0
+  done
+  return 1
+}
+
+inactive_pending_retry_restore() {
+  local retry=$1 pending=$2 path source=
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] || return 1
+  if [ -e "$retry" ] || [ -L "$retry" ]; then
+    source=$retry
+  else
+    for path in "${retry}.incoming."*; do
+      [ -e "$path" ] || [ -L "$path" ] || continue
+      source=$path
+      break
+    done
+  fi
+  [ -n "$source" ] || return 1
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  mv -f "$source" "$pending"
+}
+
 inactive_pending_merge_retry() {
-  local pending=$1 retry=$2 deadline_ms=${3:-} rc
-  [ -e "$retry" ] || return 0
-  [ -f "$retry" ] && [ ! -L "$retry" ] || return 1
+  local pending=$1 retry=$2 deadline_ms=${3:-} rc path
+  inactive_pending_retry_exists "$retry" || return 0
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
-  inactive_append_nul_records "$retry" "$pending" "$deadline_ms"
-  rc=$?
-  [ "$rc" = 0 ] || return "$rc"
-  rm -f "$retry"
+  for path in "$retry" "${retry}.incoming."*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    inactive_append_nul_records "$path" "$pending" "$deadline_ms"
+    rc=$?
+    [ "$rc" = 0 ] || return "$rc"
+    rm -f "$path" || return 1
+  done
 }
 
 inactive_persist_nul_suffix() {
@@ -1674,9 +1712,8 @@ repair_reported_secondmate_routes() {
     return 1
   fi
   if [ ! -e "$REPORTED_ROUTE_PENDING" ] && [ ! -L "$REPORTED_ROUTE_PENDING" ] \
-    && [ -e "$REPORTED_ROUTE_RETRY" ]; then
-    [ -f "$REPORTED_ROUTE_RETRY" ] && [ ! -L "$REPORTED_ROUTE_RETRY" ] || return 1
-    mv -f "$REPORTED_ROUTE_RETRY" "$REPORTED_ROUTE_PENDING" || return 1
+    && inactive_pending_retry_exists "$REPORTED_ROUTE_RETRY"; then
+    inactive_pending_retry_restore "$REPORTED_ROUTE_RETRY" "$REPORTED_ROUTE_PENDING" || return 1
     inactive_pending_offset_write "$REPORTED_ROUTE_OFFSET" 0 || return 1
   fi
   if [ -e "$REPORTED_ROUTE_PENDING" ] || [ -L "$REPORTED_ROUTE_PENDING" ]; then
@@ -1990,9 +2027,8 @@ republish_pending_receipts() {
   MAINTENANCE_ITEMS_PROCESSED=0
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
   if [ ! -e "$PENDING_RECEIPT_PENDING" ] && [ ! -L "$PENDING_RECEIPT_PENDING" ] \
-    && [ -e "$PENDING_RECEIPT_RETRY" ]; then
-    [ -f "$PENDING_RECEIPT_RETRY" ] && [ ! -L "$PENDING_RECEIPT_RETRY" ] || return 1
-    mv -f "$PENDING_RECEIPT_RETRY" "$PENDING_RECEIPT_PENDING" || return 1
+    && inactive_pending_retry_exists "$PENDING_RECEIPT_RETRY"; then
+    inactive_pending_retry_restore "$PENDING_RECEIPT_RETRY" "$PENDING_RECEIPT_PENDING" || return 1
     inactive_pending_offset_write "$PENDING_RECEIPT_OFFSET" 0 || return 1
   fi
   if [ -e "$PENDING_RECEIPT_PENDING" ] || [ -L "$PENDING_RECEIPT_PENDING" ]; then
@@ -2939,12 +2975,8 @@ scan_locked() {
   if [ -n "$cursor" ]; then started=0; fi
   [ -n "$cursor" ] && cursor_seen=0
   if [ ! -e "$DIRECT_FIND_PENDING" ] && [ ! -L "$DIRECT_FIND_PENDING" ] \
-    && [ -e "$DIRECT_FIND_RETRY" ]; then
-    [ -f "$DIRECT_FIND_RETRY" ] && [ ! -L "$DIRECT_FIND_RETRY" ] || {
-      [ "$maintenance_ran" = 1 ] || run_maintenance
-      return 1
-    }
-    mv -f "$DIRECT_FIND_RETRY" "$DIRECT_FIND_PENDING" || {
+    && inactive_pending_retry_exists "$DIRECT_FIND_RETRY"; then
+    inactive_pending_retry_restore "$DIRECT_FIND_RETRY" "$DIRECT_FIND_PENDING" || {
       [ "$maintenance_ran" = 1 ] || run_maintenance
       return 1
     }

@@ -94,6 +94,8 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+PANE_IDLE_INDEX_BUDGET_SECS=$(positive_seconds_or_default \
+  "${FM_PANE_IDLE_INDEX_BUDGET_SECS:-1}" 1)
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -636,6 +638,53 @@ surface_retry_mark_published() {
   mv -f "$tmp" "$retry" || { rm -f "$tmp"; return 1; }
 }
 
+surface_retry_complete_consumed() {
+  local retry=$1 task=$2 last=$3 spawn_incarnation=$4 tasktmp=$5 window=$6 worktree=$7
+  local marker tmp
+  mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
+    "$tasktmp" "$window" "$worktree" || return 2
+  marker=$(_hb_surfaced_path "$task")
+  tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 2
+  if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 2
+  fi
+  surface_retry_matches_current "$retry" "$task" "$last" || return 2
+  rm -f "$retry" || return 2
+  return 0
+}
+
+surface_retry_receipt_consumed() {
+  local retry=$1 task=$2 last=$3 wake_key=$4 fp rec suffix outcome expected_incarnation
+  local spawn_incarnation tasktmp window worktree
+  case "$wake_key" in
+    inactive-outcome:*) fp=${wake_key#inactive-outcome:} ;;
+    *) return 1 ;;
+  esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  surface_retry_matches_current "$retry" "$task" "$last" || return 1
+  spawn_incarnation=$(surface_meta_value_unique "$retry" spawn_incarnation 2>/dev/null) || return 2
+  tasktmp=$(surface_meta_value_unique "$retry" tasktmp 2>/dev/null) || return 2
+  window=$(surface_meta_value_unique "$retry" window 2>/dev/null) || return 2
+  worktree=$(surface_meta_value_unique "$retry" worktree 2>/dev/null) || return 2
+  outcome=${last%%:*}
+  expected_incarnation=$(surface_replay_incarnation "$task") || return 2
+  for suffix in presented reported; do
+    rec="$STATE/terminal-outcomes/$fp.$suffix"
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    [ "$(surface_meta_value_unique "$rec" schema 2>/dev/null)" = fm-jt-terminal-outcome.v1 ] || return 2
+    [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$fp" ] || return 2
+    [ "$(surface_meta_value_unique "$rec" task_id 2>/dev/null)" = "$task" ] || return 2
+    [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
+    [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
+    [ "$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null)" = "$last" ] || continue
+    surface_retry_complete_consumed "$retry" "$task" "$last" "$spawn_incarnation" \
+      "$tasktmp" "$window" "$worktree"
+    return $?
+  done
+  return 1
+}
+
 surface_retry_published_current() {
   local retry=$1 task=$2 last=$3 wake_key=$4 published
   if [ -L "$retry" ] || [ -e "$retry" ]; then
@@ -649,9 +698,12 @@ surface_retry_published_current() {
   case "$published" in
     1) return 0 ;;
     2)
-      [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
-      awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
-        "$FM_WAKE_QUEUE" 2>/dev/null || return 1
+      if [ ! -f "$FM_WAKE_QUEUE" ] || [ ! -L "$FM_WAKE_QUEUE" ] \
+        || ! awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
+          "$FM_WAKE_QUEUE" 2>/dev/null; then
+        surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"
+        return $?
+      fi
       surface_retry_mark_published "$task" "$last" "$wake_key" || return 2
       return 0
       ;;
@@ -718,7 +770,12 @@ surface_retry_repair() {
         wake_key=$(surface_meta_value_unique "$retry" wake_key 2>/dev/null) || { status=1; continue; }
         if ! [ -f "$FM_WAKE_QUEUE" ] || [ ! -e "$FM_WAKE_QUEUE" ] \
           || ! awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-          continue
+          surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"
+          case "$?" in
+            0) continue ;;
+            1) continue ;;
+            *) status=1; continue ;;
+          esac
         fi
         surface_retry_mark_published "$task" "$last" "$wake_key" || { status=1; continue; }
         ;;
@@ -886,7 +943,7 @@ inactive_replay_queued_for_task() {
 }
 
 terminal_signal_suppressed() {
-  local f=$1 task last retry retry_status marker_status replay_status
+  local f=$1 task last retry retry_status marker_status replay_status retry_wake_key
   last=$(last_status_line "$f")
   case "$last" in
     done:*|failed:*) ;;
@@ -906,7 +963,8 @@ terminal_signal_suppressed() {
     *) return 2 ;;
   esac
   retry=$(_hb_surface_retry_path "$task")
-  surface_retry_published_current "$retry" "$task" "$last" "$task" || retry_status=$?
+  retry_wake_key=$(surface_meta_value_unique "$retry" wake_key 2>/dev/null || true)
+  surface_retry_published_current "$retry" "$task" "$last" "${retry_wake_key:-$task}" || retry_status=$?
   case "${retry_status:-0}" in
     0) return 0 ;;
     1) return 1 ;;
@@ -1220,7 +1278,14 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
-  fm_pane_idle_meta_index_build "$STATE" || exit 1
+  pane_idle_index_deadline=$(( $(fm_pane_idle_now_ms) + PANE_IDLE_INDEX_BUDGET_SECS * 1000 ))
+  pane_idle_index_status=0
+  fm_pane_idle_meta_index_build "$STATE" "$pane_idle_index_deadline" force || pane_idle_index_status=$?
+  case "$pane_idle_index_status" in
+    0) ;;
+    124) continue ;;
+    *) exit "$pane_idle_index_status" ;;
+  esac
   while IFS= read -r w; do
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, except while a declared pause
@@ -1257,7 +1322,7 @@ EOF
             idle_backend=$(fm_backend_of_meta "$idle_meta")
             if ! fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n"; then
               fm_pane_idle_clear "$STATE" "$idle_task" || true
-              fm_pane_idle_meta_index_build "$STATE" || true
+              fm_pane_idle_meta_index_build "$STATE" "$pane_idle_index_deadline" force || true
               refreshed_idle_meta=$(fm_pane_idle_meta_for_window "$STATE" "$w" 2>/dev/null || true)
               if [ -n "$refreshed_idle_meta" ] && [ -f "$refreshed_idle_meta" ] \
                 && [ ! -L "$refreshed_idle_meta" ]; then
