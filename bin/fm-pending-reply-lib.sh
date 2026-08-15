@@ -484,7 +484,7 @@ fm_pending_reply_get() {  # <record-path> <key>
 
 fm_pending_reply_record_validate() {  # <record-path> <state-dir> <corr-id> <task-id>
   local rec=$1 state=$2 wanted_corr=$3 wanted_task=$4
-  local record_corr record_task parent_home parent_status parent_abs state_abs expected_status delivered phase
+  local record_corr record_task parent_home parent_status parent_abs state_abs pending_dir expected_status delivered phase
   [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
   awk -F= '
     BEGIN {
@@ -534,8 +534,8 @@ fm_pending_reply_record_validate() {  # <record-path> <state-dir> <corr-id> <tas
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
   [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
-  [ "$parent_abs/state" = "$state_abs" ] || return 1
-  [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
+  pending_dir=$(fm_pending_reply_dir "$state_abs")
+  [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] || return 1
   expected_status="$state_abs/$wanted_task.status"
   [ "$parent_status" = "$expected_status" ] || return 1
   [ ! -L "$expected_status" ] || return 1
@@ -605,7 +605,6 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
   [ -d "$parent_state" ] && [ ! -L "$parent_state" ] || return 1
   state_abs=$(cd "$parent_state" 2>/dev/null && pwd -P) || return 1
-  [ "$state_abs" = "$parent_abs/state" ] || return 1
   status_path="$state_abs/$secondmate_id.status"
   [ ! -L "$status_path" ] || return 1
   if [ -e "$status_path" ]; then
@@ -807,7 +806,7 @@ fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <co
 
 fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] [<allow-undelivered>]
   local secondmate_home=$1 wanted_corr=${2:-} allow_undelivered=${3:-0} marker line key value schema marker_id secondmate_id current_corr history_marker
-  local parent_home parent_status corr parent_abs state_abs expected_status rec active_rec history_rec history_dir
+  local parent_home parent_status corr parent_abs state_abs parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
   local phase delivered record_home record_status record_task record_corr home_marker
   local seen_schema=0 seen_secondmate_id=0 seen_parent_home=0 seen_parent_status=0 seen_corr=0
   FM_PENDING_ROUTE_PARENT_STATUS=
@@ -874,8 +873,11 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
   [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
-  state_abs=$(cd "$parent_abs/state" 2>/dev/null && pwd -P) || return 1
-  [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
+  parent_status_dir=${parent_status%/*}
+  [ -n "$parent_status_dir" ] && [ -d "$parent_status_dir" ] && [ ! -L "$parent_status_dir" ] || return 1
+  state_abs=$(cd "$parent_status_dir" 2>/dev/null && pwd -P) || return 1
+  pending_dir=$(fm_pending_reply_dir "$state_abs")
+  [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] || return 1
   history_dir=$(fm_pending_reply_history_dir "$state_abs")
   if [ -e "$history_dir" ] || [ -L "$history_dir" ]; then
     [ -d "$history_dir" ] && [ ! -L "$history_dir" ] || return 1
@@ -886,7 +888,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
   if [ -e "$expected_status" ]; then
     [ -f "$expected_status" ] || return 1
   fi
-  active_rec="$state_abs/pending-replies/$corr"
+  active_rec=$(fm_pending_reply_active_path "$state_abs" "$corr")
   history_rec="$history_dir/$corr"
   rec=
   if [ -e "$active_rec" ] || [ -L "$active_rec" ]; then
@@ -952,7 +954,7 @@ fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] 
 
 fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmate-id> <parent-home> <parent-status> <corr>
   local secondmate_home=$1 secondmate_id=$2 parent_home=$3 parent_status=$4 corr=$5
-  local home_marker marker_id parent_abs state_abs expected_status rec active_rec history_rec history_dir
+  local home_marker marker_id parent_abs state_abs parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
   local delivered phase
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
@@ -967,8 +969,11 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   [ -d "$parent_home" ] && [ ! -L "$parent_home" ] || return 1
   parent_abs=$(cd "$parent_home" 2>/dev/null && pwd -P) || return 1
   [ -d "$parent_abs/state" ] && [ ! -L "$parent_abs/state" ] || return 1
-  state_abs=$(cd "$parent_abs/state" 2>/dev/null && pwd -P) || return 1
-  [ -d "$state_abs/pending-replies" ] && [ ! -L "$state_abs/pending-replies" ] || return 1
+  parent_status_dir=${parent_status%/*}
+  [ -n "$parent_status_dir" ] && [ -d "$parent_status_dir" ] && [ ! -L "$parent_status_dir" ] || return 1
+  state_abs=$(cd "$parent_status_dir" 2>/dev/null && pwd -P) || return 1
+  pending_dir=$(fm_pending_reply_dir "$state_abs")
+  [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] || return 1
   history_dir=$(fm_pending_reply_history_dir "$state_abs")
   if [ -e "$history_dir" ] || [ -L "$history_dir" ]; then
     [ -d "$history_dir" ] && [ ! -L "$history_dir" ] || return 1
@@ -979,7 +984,7 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   if [ -e "$parent_status" ]; then
     [ -f "$parent_status" ] || return 1
   fi
-  active_rec="$state_abs/pending-replies/$corr"
+  active_rec=$(fm_pending_reply_active_path "$state_abs" "$corr")
   history_rec="$history_dir/$corr"
   if [ -e "$active_rec" ] || [ -L "$active_rec" ]; then
     [ -f "$active_rec" ] && [ ! -L "$active_rec" ] || return 1

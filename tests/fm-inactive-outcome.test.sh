@@ -1918,6 +1918,77 @@ SH
   pass "inactive replay requires a fresh identity-bound pane-idle proof"
 }
 
+test_pane_idle_publication_rechecks_under_lock() {
+  local dir root home fakebin state count_file
+  new_case pane-idle-publication-race
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  count_file="$dir/tmux-capture-count"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *capture-pane*)
+    count=$(cat "${FM_FAKE_TMUX_COUNT_FILE:?}" 2>/dev/null || printf '0')
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_TMUX_COUNT_FILE"
+    if [ "$count" = 1 ]; then
+      printf 'idle prompt\n'
+    else
+      printf 'Working...\n'
+    fi
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  write_meta "$state" pane-race-x1 pane-race-inc
+  export FM_FAKE_CREW_STATE_PANE_RACE_X1='state: done · source: pane · publication race'
+  export FM_FAKE_TMUX_COUNT_FILE="$count_file"
+  : > "$count_file"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || :
+  [ "$(cat "$count_file")" -ge 2 ] || fail "publication-boundary pane was not revalidated"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "busy publication-boundary pane created a receipt"
+  [ "$(queue_count "$state")" = 0 ] || fail "busy publication-boundary pane created a wake"
+  unset FM_FAKE_TMUX_COUNT_FILE FM_FAKE_CREW_STATE_PANE_RACE_X1
+  pass "inactive receipt publication rechecks pane idleness under lock"
+}
+
+test_secondmate_route_accepts_effective_state_overrides() {
+  local dir root home fakebin child_home child_state effective_state pending_dir corr marker
+  new_case secondmate-effective-state
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  effective_state="$dir/effective-state"
+  pending_dir="$dir/effective-pending"
+  marker="$child_state/.fm-jt-parent-route"
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$effective_state"
+  printf 'sm-effective\n' > "$child_home/.fm-secondmate-home"
+  : > "$effective_state/sm-effective.status"
+  corr=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$effective_state" FM_PENDING_REPLY_DIR_OVERRIDE="$pending_dir" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_create "$2" "$3" sm-effective "effective state request"' \
+    _ "$ROOT" "$home" "$effective_state") \
+    || fail "effective-state pending record was not created"
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$effective_state" FM_PENDING_REPLY_DIR_OVERRIDE="$pending_dir" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+    _ "$ROOT" "$child_home" "$home" "$effective_state" sm-effective "$corr" \
+    || fail "effective-state secondmate route was rejected"
+  [ -f "$marker" ] || fail "effective-state route marker was not written"
+  [ "$(receipt_value "$marker" parent_status)" = "$effective_state/sm-effective.status" ] \
+    || fail "effective-state route serialized the wrong parent status"
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$effective_state" FM_PENDING_REPLY_DIR_OVERRIDE="$pending_dir" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_validate "$2" "$3" 2' \
+    _ "$ROOT" "$child_home" "$corr" \
+    || fail "effective-state secondmate route did not validate"
+  unset FM_STATE_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE
+  pass "secondmate routes validate effective state and pending-reply overrides"
+}
+
 test_valid_secondmate_route_reports_parent_once() {
   local dir root home fakebin state child_home child_state parent_status corr rec outside send_out route_backup
   local outside_parent outside_parent_link fail_move_once
@@ -3023,6 +3094,8 @@ test_herdr_identity_and_default_captain_refusal
 test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_pane_idle_proof_is_required_and_bound
+test_pane_idle_publication_rechecks_under_lock
+test_secondmate_route_accepts_effective_state_overrides
 test_valid_secondmate_route_reports_parent_once
 test_deferred_recorded_secondmate_finishes_without_output
 test_reported_secondmate_route_repair_after_crash

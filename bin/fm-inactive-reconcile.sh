@@ -1098,15 +1098,27 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
   return 0
 }
 
+replay_pane_idle_publication_valid() {
+  local meta=$1 id=$2 window=$3 backend=$4 incarnation=$5
+  fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$incarnation" "$RECONCILE_SECS"
+}
+
 publish_receipt_and_wake() {
   local status=0 release_lock=0
+  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-}
   FM_WAKE_APPEND_CREATED=0
   if [ "$WAKE_QUEUE_LOCK_HELD" != 1 ]; then
     if ! wake_queue_lock_acquire; then
+      [ -z "$pane_meta" ] || return 1
       receipt_write || return 1
       return 1
     fi
     release_lock=1
+  fi
+  if [ -n "$pane_meta" ] \
+    && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation"; then
+    [ "$release_lock" = 1 ] && wake_queue_lock_release || true
+    return 1
   fi
   if receipt_write; then
     if [ -f "$(receipt_path "$FP" pending)" ]; then
@@ -1201,6 +1213,7 @@ republish_existing_receipt_wake() {
 publish_secondmate_receipt_and_wake() {
   local route_lock status=0 existing_rc pending pending_corr pending_parent_id pending_parent_home pending_parent_status
   local release_lock=0
+  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-}
   FM_WAKE_APPEND_CREATED=0
   if [ "$WAKE_QUEUE_LOCK_HELD" != 1 ]; then
     wake_queue_lock_acquire || return 1
@@ -1246,6 +1259,12 @@ publish_secondmate_receipt_and_wake() {
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
     return 1
   }
+  if [ -n "$pane_meta" ] \
+    && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation"; then
+    fm_lock_release "$route_lock" || true
+    [ "$release_lock" = 1 ] && wake_queue_lock_release || true
+    return 1
+  fi
   if receipt_existing_core; then
     if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
       fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
@@ -1907,7 +1926,7 @@ reconcile_child() {
   if [ "$route_rc" = 0 ]; then
     key="inactive-outcome:$FP"
     replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
-    publish_secondmate_receipt_and_wake || return 1
+    publish_secondmate_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" || return 1
     if replay_receipt_exists; then
       replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
     fi
@@ -1933,7 +1952,7 @@ reconcile_child() {
   fi
   key="inactive-outcome:$FP"
   replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
-  publish_receipt_and_wake || return 1
+  publish_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" || return 1
   replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
   if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
     printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
