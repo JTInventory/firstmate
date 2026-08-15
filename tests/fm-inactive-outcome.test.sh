@@ -2139,6 +2139,42 @@ test_pane_idle_index_resumes_and_rejects_path_cursor() {
   pass "pane-idle scan resumes valid path cursors and rejects unsafe cursors"
 }
 
+test_pane_idle_index_retries_partial_publication_idempotently() {
+  local dir root home fakebin state progress output stamp
+  local record_fields aggregate_lines
+  new_case pane-idle-index-idempotency
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  progress="$state/.pane-idle-meta-index"
+  output="$state/idempotent-output"
+  write_meta "$state" idempotent-x1 idempotent-inc
+  mkdir -p "$progress"
+  : > "$output"
+  printf '%s\n' "$state/idempotent-x1.meta" > "$progress/.scan.entries"
+  printf 'complete\n' > "$progress/.scan.entries.complete"
+  stamp=$(env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_path_stamp "$2"' \
+    _ "$ROOT" "$state") || fail "could not stamp the idempotency state"
+  printf '%s\n' "$stamp" > "$progress/.scan.entries.stamp"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_collect "$2" "$3"' \
+    _ "$ROOT" "$state" "$output" || fail "initial pane-idle index build failed"
+  rm -f "$progress/.scan.complete" "$progress/.scan.aggregate.complete" \
+    "$progress/.scan.sorted" "$progress/.scan.sorted.complete"
+  printf '%s\n' "$state/0.meta" > "$progress/.scan.cursor"
+  printf '0\n' > "$progress/.scan.aggregate.cursor"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_collect "$2" "$3"' \
+    _ "$ROOT" "$state" "$output" || fail "partial pane-idle index retry failed"
+  record_fields=$(tr -cd '\0' < "$progress/.scan.records" | wc -c | tr -d ' ')
+  [ "$record_fields" = 3 ] || fail "partial retry duplicated the metadata record"
+  [ "$(grep -Fxc "$state/idempotent-x1.meta" "$progress/.scan.seen")" = 1 ] \
+    || fail "partial retry duplicated the seen marker"
+  aggregate_lines=$(wc -l < "$progress/.scan.aggregate" | tr -d ' ')
+  [ "$aggregate_lines" = 1 ] || fail "partial retry duplicated the aggregate mapping"
+  pass "pane-idle partial publication retries without duplicate records"
+}
+
 test_secondmate_route_accepts_effective_state_overrides() {
   local dir root home fakebin child_home child_state effective_state pending_dir corr marker
   new_case secondmate-effective-state
@@ -3312,6 +3348,7 @@ test_pane_idle_publication_rechecks_under_lock
 test_pane_idle_index_reclaims_retired_windows
 test_pane_idle_index_refreshes_changed_metadata
 test_pane_idle_index_resumes_and_rejects_path_cursor
+test_pane_idle_index_retries_partial_publication_idempotently
 test_secondmate_route_accepts_effective_state_overrides
 test_valid_secondmate_route_reports_parent_once
 test_deferred_recorded_secondmate_finishes_without_output

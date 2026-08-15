@@ -247,6 +247,9 @@ if ($cursor ne '' && $cursor ne 'EOF') {
   }
 }
 
+my %record_keys;
+my %seen_paths;
+my $state_loaded = 0;
 while (1) {
   exit 124 if expired();
   exit 1 unless -d $state && !-l $state;
@@ -259,6 +262,32 @@ while (1) {
     close($sfh) or exit 1;
   }
   exit 0 if $cursor eq 'EOF';
+  if (!$state_loaded) {
+    my $rfh = open_read($records_path) or exit 1;
+    binmode($rfh);
+    {
+      local $/ = "\0";
+      while (defined(my $record_path = <$rfh>)) {
+        exit 124 if expired();
+        my $record_window = <$rfh>;
+        my $record_count = <$rfh>;
+        defined($record_window) && defined($record_count) or exit 1;
+        $record_path =~ s/\0\z// or exit 1;
+        $record_window =~ s/\0\z// or exit 1;
+        $record_count =~ s/\0\z// or exit 1;
+        $record_keys{$record_path . "\0" . $record_window . "\0" . $record_count} = 1;
+      }
+    }
+    close($rfh) or exit 1;
+    my $sfh = open_read($seen_path) or exit 1;
+    while (defined(my $seen_path_value = <$sfh>)) {
+      exit 124 if expired();
+      chomp $seen_path_value;
+      $seen_paths{$seen_path_value} = 1;
+    }
+    close($sfh) or exit 1;
+    $state_loaded = 1;
+  }
   my $efh = open_read($entries_path) or exit 1;
   binmode($efh);
   while (defined(my $path = <$efh>)) {
@@ -279,15 +308,22 @@ while (1) {
       }
       close($fh) or exit 1;
       if ($window_count == 1 && $window ne '') {
-        my $rfh = open_append($records_path) or exit 1;
-        binmode($rfh);
-        print $rfh $path, "\0", $window, "\0", "1", "\0" or exit 1;
-        close($rfh) or exit 1;
+        my $record_key = $path . "\0" . $window . "\0" . "1";
+        if (!$record_keys{$record_key}) {
+          my $rfh = open_append($records_path) or exit 1;
+          binmode($rfh);
+          print $rfh $path, "\0", $window, "\0", "1", "\0" or exit 1;
+          close($rfh) or exit 1;
+          $record_keys{$record_key} = 1;
+        }
       }
     }
-    my $sfh = open_append($seen_path) or exit 1;
-    print $sfh $path, "\n" or exit 1;
-    close($sfh) or exit 1;
+    if (!$seen_paths{$path}) {
+      my $sfh = open_append($seen_path) or exit 1;
+      print $sfh $path, "\n" or exit 1;
+      close($sfh) or exit 1;
+      $seen_paths{$path} = 1;
+    }
     write_atomic($cursor_path, "$path\n") or exit 1;
     $cursor = $path;
   }
@@ -372,6 +408,15 @@ if (-e $cursor_path) {
 }
 my $rfh = open_read($records_path) or exit 1;
 seek($rfh, $offset, 0) or exit 1;
+my %aggregate_lines;
+if (-e $aggregate_path) {
+  my $existing_afh = open_read($aggregate_path) or exit 1;
+  while (defined(my $line = <$existing_afh>)) {
+    chomp $line;
+    $aggregate_lines{$line} = 1;
+  }
+  close($existing_afh) or exit 1;
+}
 my $afh = open_append($aggregate_path) or exit 1;
 binmode($rfh);
 binmode($afh);
@@ -385,7 +430,11 @@ while (defined(my $meta = <$rfh>)) {
   $count =~ s/\0\z// or exit 1;
   $window =~ /^\S+\z/ or exit 1;
   $count =~ /^\d+\z/ or exit 1;
-  print $afh unpack('H*', $window), "\t", unpack('H*', $meta), "\n" or exit 1;
+  my $line = unpack('H*', $window) . "\t" . unpack('H*', $meta);
+  if (!$aggregate_lines{$line}) {
+    print $afh $line, "\n" or exit 1;
+    $aggregate_lines{$line} = 1;
+  }
   my $position = tell($rfh);
   defined($position) or exit 1;
   write_atomic($cursor_path, "$position\n") or exit 1;
