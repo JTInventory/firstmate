@@ -116,17 +116,52 @@ fm_pane_idle_meta_for_window_direct() {  # <state> <window>
 }
 
 fm_pane_idle_meta_index_persist() {
-  local state=$1 directory=$2 window meta count i key path
+  local state=$1 directory=$2 deadline_ms=${3:-} window meta count i key path
+  local cursor_path ready_path cursor=0 tmp now
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ "$FM_PANE_IDLE_META_INDEX_STATE" = "$state" ] || fm_pane_idle_meta_index_build "$state" || return 1
+  cursor_path="$directory/.cursor"
+  ready_path="$directory/.ready"
+  if [ -f "$ready_path" ] && [ ! -L "$ready_path" ]; then
+    rm -f "$ready_path" || return 1
+  elif [ -e "$ready_path" ] || [ -L "$ready_path" ]; then
+    return 1
+  fi
+  if [ -e "$cursor_path" ]; then
+    [ -f "$cursor_path" ] && [ ! -L "$cursor_path" ] || return 1
+    cursor=$(cat "$cursor_path" 2>/dev/null || true)
+    case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+  fi
   for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
+    [ "$i" -ge "$cursor" ] || continue
+    if [ -n "$deadline_ms" ] && command -v clock_millis >/dev/null 2>&1; then
+      now=$(clock_millis)
+      if [ "$now" -ge "$deadline_ms" ]; then
+        tmp=$(mktemp "$cursor_path.XXXXXX") || return 1
+        [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+        if ! printf '%s\n' "$i" > "$tmp" || [ -L "$cursor_path" ] || ! mv -f "$tmp" "$cursor_path"; then
+          rm -f "$tmp"
+          return 1
+        fi
+        return 124
+      fi
+    fi
     window=${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}
     count=${FM_PANE_IDLE_META_INDEX_COUNTS[$i]}
     key=$(fm_pane_idle_sha256 "$window") || return 1
     path="$directory/$key"
-    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
-    printf '%s\n%s\n' "$count" "${FM_PANE_IDLE_META_INDEX_METAS[$i]}" > "$path" || return 1
+    [ ! -L "$path" ] || return 1
+    tmp=$(mktemp "$path.XXXXXX") || return 1
+    [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+    if ! printf '%s\n%s\n' "$count" "${FM_PANE_IDLE_META_INDEX_METAS[$i]}" > "$tmp" \
+      || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+      rm -f "$tmp"
+      return 1
+    fi
   done
+  rm -f "$cursor_path" || return 1
+  : > "$ready_path" || return 1
 }
 
 fm_pane_idle_meta_for_window_indexed() {
