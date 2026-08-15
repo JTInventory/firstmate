@@ -1818,13 +1818,20 @@ republish_pending_receipt() {
   if [ ! -f "$meta" ] || [ -L "$meta" ] \
     || ! herdr_identity_allowed "$meta"; then
     status=75
-  elif current_kind=$(meta_value_unique "$meta" kind 2>/dev/null); then
-    case "$KIND:$current_kind" in
-      ship:ship|scout:scout|secondmate:ship|secondmate:scout) : ;;
-      *) status=75 ;;
-    esac
   else
-    status=75
+    if current_kind=$(meta_value_unique "$meta" kind 2>/dev/null); then
+      :
+    else
+      rc=$?
+      [ "$rc" = 1 ] || status=75
+      current_kind=ship
+    fi
+    if [ "$status" = 0 ]; then
+      case "$KIND:$current_kind" in
+        ship:ship|scout:scout|secondmate:ship|secondmate:scout) : ;;
+        *) status=75 ;;
+      esac
+    fi
   fi
   if [ "$status" = 0 ] && current_incarnation=$(read_incarnation "$meta" "$ID" 2>/dev/null); then
     [ "$current_incarnation" = "$INC" ] || status=75
