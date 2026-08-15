@@ -116,6 +116,37 @@ fm_pane_idle_meta_for_window_direct() {  # <state> <window>
   ' "${metas[@]}" 2>/dev/null
 }
 
+fm_pane_idle_meta_index_persist() {
+  local state=$1 directory=$2 window meta count i key path
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  [ "$FM_PANE_IDLE_META_INDEX_STATE" = "$state" ] || fm_pane_idle_meta_index_build "$state" || return 1
+  for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
+    window=${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}
+    count=${FM_PANE_IDLE_META_INDEX_COUNTS[$i]}
+    key=$(fm_pane_idle_sha256 "$window") || return 1
+    path="$directory/$key"
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+    printf '%s\n%s\n' "$count" "${FM_PANE_IDLE_META_INDEX_METAS[$i]}" > "$path" || return 1
+  done
+}
+
+fm_pane_idle_meta_for_window_indexed() {
+  local directory=$1 window=$2 key path count meta current
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  key=$(fm_pane_idle_sha256 "$window") || return 1
+  path="$directory/$key"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  {
+    IFS= read -r count
+    IFS= read -r meta
+  } < "$path" || return 1
+  [ "$count" = 1 ] || return 1
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  current=$(fm_pane_idle_meta_value_unique "$meta" window) || return 1
+  [ "$current" = "$window" ] || return 1
+  printf '%s' "$meta"
+}
+
 fm_pane_idle_sha256() {
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
@@ -301,7 +332,11 @@ fm_pane_idle_proof_valid() {  # <state> <meta> <task> <window> <backend> <incarn
   local key hash_file count_file current_hash current_count unique_meta
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   fm_pane_idle_task_is_ordinary "$meta" || return 1
-  unique_meta=$(fm_pane_idle_meta_for_window_direct "$state" "$window" 2>/dev/null || true)
+  if [ -n "${FM_PANE_IDLE_META_INDEX_DIR:-}" ]; then
+    unique_meta=$(fm_pane_idle_meta_for_window_indexed "$FM_PANE_IDLE_META_INDEX_DIR" "$window" 2>/dev/null || true)
+  else
+    unique_meta=$(fm_pane_idle_meta_for_window_direct "$state" "$window" 2>/dev/null || true)
+  fi
   [ "$unique_meta" = "$meta" ] || return 1
   path=$(fm_pane_idle_path "$state" "$task")
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
