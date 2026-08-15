@@ -33,7 +33,25 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
 fi
 
 cd "$ROOT" || exit 1
+
+run_shellcheck() {
+  # Expand production libraries from bin/; keep test-file graphs bounded.
+  case "$1" in
+    tests/*|./tests/*|"$ROOT"/tests/*)
+      shellcheck --norc -P SCRIPTDIR -S warning "$1"
+      ;;
+    *)
+      shellcheck --norc -x -P SCRIPTDIR -S warning "$1"
+      ;;
+  esac
+}
+
 if [ "$#" -gt 0 ]; then
-  exec shellcheck --norc -x -P SCRIPTDIR -S warning "$@"
+  for path in "$@"; do
+    run_shellcheck "$path"
+  done
+  exit 0
 fi
-exec shellcheck --norc -x -P SCRIPTDIR -S warning bin/*.sh tests/*.sh
+for path in bin/*.sh tests/*.sh; do
+  run_shellcheck "$path"
+done

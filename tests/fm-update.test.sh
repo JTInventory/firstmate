@@ -30,6 +30,34 @@ UPDATE="$ROOT/bin/fm-update.sh"
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-update-tests)
+# The updater is a primary-only operation. Give every fixture a deterministic
+# primary harness identity so its lock and attestation prove the same session.
+FM_FAKE_HARNESS_PID=$$
+FM_UPDATE_THREAD_ID="fm-update-test-$FM_FAKE_HARNESS_PID"
+FM_UPDATE_FAKEBIN="$TMP_ROOT/fakebin"
+FM_UPDATE_REAL_PS=$(command -v ps 2>/dev/null) \
+  || fail "fm-update tests require a host ps executable"
+[ -n "$FM_UPDATE_REAL_PS" ] || fail "fm-update tests require a host ps executable"
+export FM_FAKE_HARNESS_PID CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+  FM_UPDATE_REAL_PS
+mkdir -p "$FM_UPDATE_FAKEBIN"
+cat > "$FM_UPDATE_FAKEBIN/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *comm=*|*args=*)
+    pid="${@: -1}"
+    if [ "$pid" = "${FM_FAKE_HARNESS_PID:?}" ]; then
+      printf 'codex\n'
+    else
+      printf 'bash\n'
+    fi
+    ;;
+  *ppid=*) exec "${FM_UPDATE_REAL_PS:?}" "$@" ;;
+  *lstart=*) exec "${FM_UPDATE_REAL_PS:?}" "$@" ;;
+  *) exec "${FM_UPDATE_REAL_PS:?}" "$@" ;;
+esac
+SH
+chmod +x "$FM_UPDATE_FAKEBIN/ps"
 UPDATE_TEST_PIDS=""
 
 cleanup_update_tests() {
@@ -67,6 +95,7 @@ new_world() {
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  write_primary_proof "$w"
 
   printf '%s\n' "$w"
 }
@@ -100,7 +129,24 @@ new_protocol_migration_world() {
   git -C "$w/seed" add bin
   git -C "$w/seed" commit -qm protocol-v3
   git -C "$w/seed" push -q origin main
+  write_primary_proof "$w"
   printf '%s\n' "$w"
+}
+
+write_primary_proof() {
+  local w=$1
+  ( cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$ROOT/bin/fm-lock.sh" bootstrap >/dev/null ) \
+    || fail "could not establish primary session lock for $w"
+}
+
+primary_attestation_token() {
+  local w=$1
+  awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$w/home/state/.primary-attestation"
 }
 
 # Add a secondmate home as a DETACHED worktree of the firstmate repo (matching
@@ -133,23 +179,35 @@ bump_origin() {
 }
 
 run_update() {
-  local w=$1
-  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" ) 2>/dev/null
+  local w=$1 token
+  token=$(primary_attestation_token "$w")
+  ( cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" ) 2>/dev/null
 }
 
 ack_firstmate_reread() {
-  local w=$1 generation
+  local w=$1 generation token
   generation=$(fm_update_obligation_generation \
     "$w/home/state/.watch-protocol-reread-required" "$w/main")
+  token=$(primary_attestation_token "$w")
   ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
     "$UPDATE" --ack-reread-firstmate "$generation" >/dev/null )
 }
 
 ack_secondmate_nudge() {
-  local w=$1 target=$2 generation
+  local w=$1 target=$2 generation token
   generation=$(fm_update_obligation_generation \
     "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1")
+  token=$(primary_attestation_token "$w")
   ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
     "$UPDATE" --ack-secondmate-nudge "$target" "$generation" >/dev/null )
 }
 
@@ -392,14 +450,18 @@ test_replays_interrupted_reread_and_nudge_obligations() {
 }
 
 test_first_protocol_upgrade_requires_installed_updater_pass() {
-  local w fakebin watcher arm out rc
+  local w fakebin watcher arm out rc token
   w=$(new_protocol_migration_world t13)
+  token=$(primary_attestation_token "$w")
   fakebin="$w/fakebin"
   mkdir -p "$fakebin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
 
-  ( cd "$w/main" && exec env PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  ( cd "$w/main" && exec env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$fakebin:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
     FM_HEARTBEAT=999999 "$w/main/bin/fm-watch.sh" >/dev/null 2>&1 ) &
   watcher=$!
@@ -413,7 +475,10 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
   [ "$(cat "$w/home/state/.watch.lock/pending-reply-protocol" 2>/dev/null || true)" = pending-reply-ticket-v2 ] \
     || fail "migration fixture did not start the predecessor watcher"
 
-  ( cd "$w/main" && exec env PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  ( cd "$w/main" && exec env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$fakebin:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" FM_POLL=5 FM_CHECK_INTERVAL=999999 \
     FM_HEARTBEAT=999999 "$w/main/bin/fm-watch-arm.sh" >"$w/arm.out" ) &
   arm=$!
@@ -427,14 +492,19 @@ test_first_protocol_upgrade_requires_installed_updater_pass() {
 
   rc=0
   # A v2 updater completed the install before the v3 updater learned to re-exec.
-  out=$(cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_UPDATE_REEXECED=1 \
+  out=$(cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$fakebin:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_UPDATE_REEXECED=1 \
     FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "predecessor updater did not install the new updater"
   assert_contains "$out" "firstmate: updated " "predecessor updater installed v3"
 
   rc=0
-  ( cd "$w/main" && PATH="$fakebin:$PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+  ( cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$fakebin:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_STATE_OVERRIDE="$w/home/state" "$w/main/bin/fm-update.sh" >"$w/second-pass.out" 2>&1 ) || rc=$?
   out=$(cat "$w/second-pass.out")
   [ "$rc" -ne 0 ] || fail "installed updater accepted the predecessor watcher"
@@ -460,20 +530,27 @@ test_acknowledgements_are_generation_bound() {
     || fail "new update generation was not reported"
 
   rc=0
-  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+  token=$(primary_attestation_token "$w")
+  ( cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-reread-firstmate "$old_generation" >/dev/null 2>&1 ) || rc=$?
   [ "$rc" -ne 0 ] || fail "stale acknowledgement cleared a newer obligation"
   [ "$(fm_update_obligation_generation \
     "$w/home/state/.watch-protocol-reread-required" "$w/main")" = "$new_generation" ] \
     || fail "newer reread generation was not preserved"
 
-  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+  ( cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-reread-firstmate "$new_generation" >/dev/null )
   pass "T14 stale acknowledgements cannot clear newer generations"
 }
 
 test_herdr_target_acknowledges_exact_live_meta() {
-  local w out generation
+  local w out generation token
   w=$(new_world t15)
   add_sm "$w" sm1
   sed -i 's/^window=.*/window=default:w1:p2/' "$w/home/state/sm1.meta"
@@ -483,7 +560,11 @@ test_herdr_target_acknowledges_exact_live_meta() {
   assert_contains "$out" "nudge-secondmates: default:w1:p2" "Herdr target is surfaced unchanged"
   generation=$(sed -n 's/^nudge-secondmate-generation: default:w1:p2|//p' <<< "$out")
   [ -n "$generation" ] || fail "Herdr target generation was not reported"
-  ( cd "$w/main" && FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+  token=$(primary_attestation_token "$w")
+  ( cd "$w/main" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FM_UPDATE_FAKEBIN:$PATH" CODEX_THREAD_ID="$FM_UPDATE_THREAD_ID" \
+    FM_FAKE_HARNESS_PID="$FM_FAKE_HARNESS_PID" FM_PRIMARY_ATTESTATION="$token" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
     "$UPDATE" --ack-secondmate-nudge default:w1:p2 "$generation" >/dev/null )
   ! fm_update_obligation_pending "$w/sm1/state/.watch-protocol-reread-required" "$w/sm1" \
     || fail "Herdr target acknowledgement did not clear its obligation"

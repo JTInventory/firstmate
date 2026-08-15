@@ -14,6 +14,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
+# shellcheck disable=SC2034 # Consumed by the sourced wake-helpers.sh fixture.
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 trap fm_test_watch_cleanup_exit EXIT
 

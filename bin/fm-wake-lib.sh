@@ -246,6 +246,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
     "$lockdir/owner-path" \
+    "$lockdir/incarnation" \
     2>/dev/null || true
 }
 
@@ -278,6 +279,11 @@ fm_lock_prepare_owner() {
   fi
   if [ -n "$owner_path" ]; then
     printf '%s\n' "$owner_path" > "$ownerdir/owner-path" || return 1
+  fi
+  if [ -n "${FM_LOCK_OWNER_INCARNATION:-}" ]; then
+    printf '%s\n' "$FM_LOCK_OWNER_INCARNATION" > "$ownerdir/incarnation" || return 1
+    back=$(cat "$ownerdir/incarnation" 2>/dev/null || true)
+    [ "$back" = "$FM_LOCK_OWNER_INCARNATION" ] || return 1
   fi
 }
 

@@ -24,6 +24,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
+# shellcheck disable=SC2034 # Consumed by the sourced wake-helpers.sh fixture.
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a

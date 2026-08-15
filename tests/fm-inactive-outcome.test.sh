@@ -7,7 +7,7 @@ set -u
 # throwaway firstmate homes exercise the primary-only path.
 if [ "${FM_INACTIVE_TEST_CLEAN:-0}" != 1 ]; then
   exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
-    -u FM_PRIMARY_ATTESTATION FM_INACTIVE_TEST_CLEAN=1 bash "$0" "$@"
+    -u FM_PRIMARY_ATTESTATION FM_INACTIVE_TEST_CLEAN=1 /bin/bash "$0" "$@"
 fi
 
 # shellcheck source=tests/lib.sh
@@ -52,6 +52,21 @@ var="FM_FAKE_CREW_STATE_$key"
 printf '%s\n' "${!var:-${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}}"
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-idle prompt}" ;;
+      *) : ;;
+    esac
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -187,7 +202,8 @@ scan() {
 }
 
 drain() {
-  local root=$1 home=$2 fakebin=$3 status
+  local root=$1 home=$2 fakebin=$3 status generation=${FM_WAKE_DRAIN_GENERATION:-$$}
+  [ "${4:-}" = no-generation ] && generation=
   if [ -d "$home/state" ] && [ ! -L "$home/state" ]; then
     prepare_primary_proof "$root" "$home" "$fakebin"
   fi
@@ -196,7 +212,7 @@ drain() {
       FM_STATE_OVERRIDE="$home/state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
       CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
       FM_WAKE_DRAIN_DEFER_ACK="${FM_WAKE_DRAIN_DEFER_ACK:-0}" \
-      FM_WAKE_DRAIN_GENERATION="${FM_WAKE_DRAIN_GENERATION:-}" "$DRAIN" )
+      FM_WAKE_DRAIN_GENERATION="$generation" "$DRAIN" )
   status=$?
   [ "$status" = 0 ] || [ "$status" = 3 ] || return "$status"
 }
@@ -226,6 +242,7 @@ write_meta() {
   printf 'working: fixture\n' > "$state/$id.status"
   : > "$state/$id.turn-ended"
   set_old_mtime "$file" "$state/$id.status" "$state/$id.turn-ended"
+  case "$kind" in ship|scout) write_idle_proof "$state" "$id" "$backend" "$window" ;; esac
 }
 
 write_legacy_meta() {
@@ -238,6 +255,24 @@ write_legacy_meta() {
   printf 'working: fixture\n' > "$state/$id.status"
   : > "$state/$id.turn-ended"
   set_old_mtime "$state/$id.meta" "$state/$id.status" "$state/$id.turn-ended"
+  write_idle_proof "$state" "$id" "$backend" "$window"
+}
+
+write_idle_proof() {
+  local state=$1 id=$2 backend=$3 window=$4 hash
+  if command -v md5 >/dev/null 2>&1; then
+    hash=$(printf '%s' 'idle prompt' | md5 -q)
+  else
+    hash=$(printf '%s' 'idle prompt' | md5sum | awk '{print $1}')
+  fi
+  mkdir -p "$state/.pane-idle"
+  printf '%s\n' "$hash" > "$state/.hash-$(printf '%s' "$window" | tr ':/.' '___')"
+  printf '2\n' > "$state/.count-$(printf '%s' "$window" | tr ':/.' '___')"
+  ( cd "$ROOT" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_HOME" FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_write "$2" "$3" "$4" "$5" "$6" "$7" "$8"' _ \
+      "$ROOT" "$state" "$state/$id.meta" "$id" "$window" "$backend" "$hash" 2 ) \
+    || fail "idle proof fixture could not be written"
 }
 
 receipt_value() {
@@ -391,9 +426,8 @@ printf 'state: done · source: pane · should time out\n'
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
   export FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT=1 FM_INACTIVE_OUTCOME_BUDGET_SECS=1
-  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
-    fail "portable timeout fallback allowed an expired child"
-  fi
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "portable timeout fallback killed the watcher"
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "portable timeout expiry advanced the cadence marker"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "portable timeout expiry created a receipt"
   unset FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT FM_INACTIVE_OUTCOME_BUDGET_SECS
@@ -466,9 +500,8 @@ exit 0
 SH
   chmod +x "$fakebin/find"
   export FM_INACTIVE_OUTCOME_BUDGET_SECS=1
-  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
-    fail "slow find enumeration exceeded the scan budget without failing"
-  fi
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "slow find enumeration terminated supervision instead of deferring"
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "budget-exhausted enumeration advanced the cadence marker"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "budget-exhausted enumeration created a receipt"
   unset FM_INACTIVE_OUTCOME_BUDGET_SECS
@@ -709,7 +742,7 @@ exec /usr/bin/mv "$@"
 SH
   chmod +x "$fakebin/mv"
   export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
-  export FM_WAKE_DRAIN_DIRECT=1
+  export FM_WAKE_DRAIN_DIRECT=1 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
   if drain "$root" "$home" "$fakebin" >"$dir/output-failure.out"; then
     fail "output completion failure was hidden"
   fi
@@ -735,7 +768,7 @@ SH
     || fail "output completion retry left the receipt pending"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
     || fail "output completion retry left a stale claim"
-  unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DIRECT
+  unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DIRECT FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
   pass "post-output failures retry without duplicate presentation"
 }
 
@@ -749,7 +782,7 @@ test_direct_drain_finalizes_after_successful_output() {
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "direct receipt setup failed"
   fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
   row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
-  export FM_WAKE_DRAIN_DIRECT=1
+  export FM_WAKE_DRAIN_DIRECT=1 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
   drain "$root" "$home" "$fakebin" >"$dir/direct.out" \
     || fail "direct drain did not finalize a successful presentation"
   grep -F "$row" "$dir/direct.out" >/dev/null || fail "direct drain did not emit the wake row"
@@ -761,8 +794,29 @@ test_direct_drain_finalizes_after_successful_output() {
   drain "$root" "$home" "$fakebin" >"$dir/direct-replay.out" \
     || fail "direct replay drain failed"
   [ ! -s "$dir/direct-replay.out" ] || fail "direct drain replayed a finalized receipt"
-  unset FM_FAKE_CREW_STATE_DIRECT_X1 FM_WAKE_DRAIN_DIRECT
+  unset FM_FAKE_CREW_STATE_DIRECT_X1 FM_WAKE_DRAIN_DIRECT FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
   pass "direct inactive drains finalize successful output once"
+}
+
+test_standalone_drain_refuses_inactive_ack() {
+  local dir root home fakebin state fingerprint row
+  new_case standalone-no-generation
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" standalone-x1 standalone-inc
+  export FM_FAKE_CREW_STATE_STANDALONE_X1='state: done · source: pane · standalone presentation'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "standalone receipt setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  unset FM_WAKE_DRAIN_DIRECT FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
+  if drain "$root" "$home" "$fakebin" no-generation >"$dir/standalone.out"; then
+    fail "standalone drain acknowledged an inactive outcome without generation"
+  fi
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "standalone drain removed the pending receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "standalone drain removed the wake row"
+  grep -F "$row" "$state/.wake-queue" >/dev/null || fail "standalone drain did not restore the wake row"
+  unset FM_FAKE_CREW_STATE_STANDALONE_X1
+  pass "standalone drain refuses inactive acknowledgement"
 }
 
 test_finalized_receipt_rows_are_suppressed() {
@@ -1097,17 +1151,16 @@ SH
   export FM_WAKE_QUEUE="$wake_dir/queue" FM_WAKE_QUEUE_LOCK="$wake_dir/lock"
   export FM_WAKE_QUEUE_DIR="$wake_dir" FM_WAKE_QUEUE_REMOVED="$wake_removed" \
     FM_BREAK_QUEUE_MARKER="$dir/scan-first" FM_BREAK_QUEUE=1
-  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
-    fail "child scan failure was reported as success"
-  fi
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "retryable wake publication contention stopped the scan"
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "failed scan advanced the cadence marker"
-  [ "$(receipt_count "$state" pending)" = 2 ] || fail "durable receipts were not retained across wake publication failure"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "receipt was created without publication-lock ownership"
   [ ! -e "$state"/.first-x1.inactive-state.* ] || fail "failed crew-state scan leaked its temporary output"
   [ ! -e "$state"/.second-x1.inactive-state.* ] || fail "failed crew-state scan leaked its temporary output"
-  grep -l '^task_id=first-x1$' "$state"/terminal-outcomes/*.pending >/dev/null \
-    || fail "first child receipt was not retained"
-  grep -l '^task_id=second-x1$' "$state"/terminal-outcomes/*.pending >/dev/null \
-    || fail "second child receipt was not retained"
+  if ! grep -l '^task_id=first-x1$' "$state"/terminal-outcomes/*.pending >/dev/null 2>&1 \
+    && ! grep -l '^task_id=second-x1$' "$state"/terminal-outcomes/*.pending >/dev/null 2>&1; then
+    fail "a successfully published child receipt was not retained"
+  fi
   case "$(cat "$state/.inactive-outcome-reconcile.cursor")" in
     first-x1|second-x1) ;;
     *) fail "cursor did not preserve the last successful child" ;;
@@ -1155,6 +1208,7 @@ test_reused_task_id_gets_new_fingerprint() {
   export FM_FAKE_CREW_STATE_REUSED_X1='state: done · source: pane · first run quiet'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   replace_field "$state/reused-x1.meta" spawn_incarnation incarnation-new
+  write_idle_proof "$state" reused-x1 tmux tmux:fm-reused-x1
   set_old_mtime "$state/reused-x1.meta"
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 2 ] || fail "reused task id did not create a new incarnation receipt"
@@ -1336,7 +1390,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1359,7 +1413,6 @@ SH
     || fail "watcher left the existing wake queued"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher scanned inactive outcomes before draining the queued wake"
 
-  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
   second_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
@@ -1373,6 +1426,7 @@ SH
   [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the inactive outcome wake"
   printf '%s\n' "$second_out" | grep -F 'inactive-outcome:' >/dev/null \
     || fail "watcher did not surface the exact inactive outcome wake in the scan turn"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
   ! printf '%s\n' "$second_out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
     || fail "watcher emitted a second generic inactive wake"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher cadence did not acknowledge the inactive receipt"
@@ -1451,7 +1505,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1474,6 +1528,7 @@ SH
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "already surfaced terminal outcome was replayed"
   [ "$(queue_count "$state")" = 0 ] || fail "already surfaced terminal outcome queued a wake"
   replace_field "$state/surfaced-x1.meta" spawn_incarnation resurfaced-inc
+  write_idle_proof "$state" surfaced-x1 tmux tmux:fm-surfaced-x1
   set_old_mtime "$state/surfaced-x1.meta" "$state/surfaced-x1.status" "$state/surfaced-x1.turn-ended"
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "new incarnation was incorrectly suppressed by an old surface marker"
@@ -1500,7 +1555,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1576,7 +1631,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1713,6 +1768,7 @@ test_relaunch_and_teardown_races_recheck_under_spawn_lock() {
   scanner=$!
   sleep 1
   replace_field "$state/relaunch-x1.meta" spawn_incarnation new-inc
+  write_idle_proof "$state" relaunch-x1 tmux tmux:fm-relaunch-x1
   : > "$release"
   wait "$holder" || fail "spawn-lock relaunch fixture failed"
   wait "$scanner" || fail "relaunch reconciliation fixture failed"
@@ -1765,7 +1821,19 @@ test_herdr_identity_and_default_captain_refusal() {
   new_case herdr-identity
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
-  write_meta "$state" herdr-good good-inc ship herdr firstmate:pane
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'status --json'*) printf '{"server":{"running":true}}\n' ;;
+  *'pane read'*) printf 'idle prompt\n' ;;
+  *'agent get'*) printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+  write_meta "$state" herdr-good good-inc ship herdr firstmate:pane-good
   printf 'herdr_session=firstmate\nherdr_workspace_id=ws\nherdr_tab_id=tab\nherdr_pane_id=pane\n' >> "$state/herdr-good.meta"
   printf 'herdr_session=default\n' >> "$state/herdr-good.meta"
   write_meta "$state" herdr-unique unique-inc ship herdr firstmate:pane
@@ -1822,9 +1890,127 @@ test_status_log_terminal_is_not_replayed() {
   pass "status-log terminal output remains fail-closed"
 }
 
+test_pane_idle_proof_is_required_and_bound() {
+  local dir root home fakebin state proof key
+  new_case pane-idle-proof
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *capture-pane*) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-idle prompt}" ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  write_meta "$state" pane-proof-x1 pane-proof-inc
+  export FM_FAKE_CREW_STATE_PANE_PROOF_X1='state: done · source: pane · proof required'
+  proof="$state/.pane-idle/pane-proof-x1"
+  key=$(printf '%s' tmux:fm-pane-proof-x1 | tr ':/.' '___')
+  rm -f "$proof"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "missing pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "missing pane-idle proof was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  replace_field "$proof" observed_epoch 1
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "stale pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "stale pane-idle proof was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  printf '%s\n' 00000000000000000000000000000000 > "$state/.hash-$key"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "changed pane-idle hash scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "changed pane-idle hash was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  replace_field "$state/pane-proof-x1.meta" spawn_incarnation pane-proof-inc-2
+  set_old_mtime "$state/pane-proof-x1.meta"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "mismatched incarnation scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "mismatched pane-idle incarnation was accepted"
+  write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  export FM_FAKE_TMUX_CAPTURE='Working...'
+  export FM_BUSY_REGEX='Working\.\.\.'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "busy pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "busy pane-idle proof was accepted"
+  export FM_FAKE_TMUX_CAPTURE='idle prompt'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "valid pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "valid pane-idle proof was not accepted"
+  unset FM_BUSY_REGEX FM_FAKE_TMUX_CAPTURE FM_FAKE_CREW_STATE_PANE_PROOF_X1
+  pass "inactive replay requires a fresh identity-bound pane-idle proof"
+}
+
+test_pane_idle_publication_rechecks_under_lock() {
+  local dir root home fakebin state count_file
+  new_case pane-idle-publication-race
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  count_file="$dir/tmux-capture-count"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *capture-pane*)
+    count=$(cat "${FM_FAKE_TMUX_COUNT_FILE:?}" 2>/dev/null || printf '0')
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_TMUX_COUNT_FILE"
+    if [ "$count" = 1 ]; then
+      printf 'idle prompt\n'
+    else
+      printf 'Working...\n'
+    fi
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  write_meta "$state" pane-race-x1 pane-race-inc
+  export FM_FAKE_CREW_STATE_PANE_RACE_X1='state: done · source: pane · publication race'
+  export FM_FAKE_TMUX_COUNT_FILE="$count_file"
+  : > "$count_file"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || :
+  [ "$(cat "$count_file")" -ge 2 ] || fail "publication-boundary pane was not revalidated"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "busy publication-boundary pane created a receipt"
+  [ "$(queue_count "$state")" = 0 ] || fail "busy publication-boundary pane created a wake"
+  unset FM_FAKE_TMUX_COUNT_FILE FM_FAKE_CREW_STATE_PANE_RACE_X1
+  pass "inactive receipt publication rechecks pane idleness under lock"
+}
+
+test_secondmate_route_accepts_effective_state_overrides() {
+  local dir root home fakebin child_home child_state effective_state pending_dir corr marker
+  new_case secondmate-effective-state
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  effective_state="$dir/effective-state"
+  pending_dir="$dir/effective-pending"
+  marker="$child_state/.fm-jt-parent-route"
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$effective_state"
+  printf 'sm-effective\n' > "$child_home/.fm-secondmate-home"
+  : > "$effective_state/sm-effective.status"
+  corr=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$effective_state" FM_PENDING_REPLY_DIR_OVERRIDE="$pending_dir" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_create "$2" "$3" sm-effective "effective state request"' \
+    _ "$ROOT" "$home" "$effective_state") \
+    || fail "effective-state pending record was not created"
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$effective_state" FM_PENDING_REPLY_DIR_OVERRIDE="$pending_dir" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
+    _ "$ROOT" "$child_home" "$home" "$effective_state" sm-effective "$corr" \
+    || fail "effective-state secondmate route was rejected"
+  [ -f "$marker" ] || fail "effective-state route marker was not written"
+  [ "$(receipt_value "$marker" parent_status)" = "$effective_state/sm-effective.status" ] \
+    || fail "effective-state route serialized the wrong parent status"
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$effective_state" FM_PENDING_REPLY_DIR_OVERRIDE="$pending_dir" \
+    bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_validate "$2" "$3" 2' \
+    _ "$ROOT" "$child_home" "$corr" \
+    || fail "effective-state secondmate route did not validate"
+  unset FM_STATE_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE
+  pass "secondmate routes validate effective state and pending-reply overrides"
+}
+
 test_valid_secondmate_route_reports_parent_once() {
   local dir root home fakebin state child_home child_state parent_status corr rec outside send_out route_backup
-  local outside_parent outside_parent_link fail_move_once
+  local outside_parent outside_parent_link other_parent fail_move_once
   local history_corr history_record history_status active_record active_backup
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
@@ -1844,7 +2030,12 @@ test_valid_secondmate_route_reports_parent_once() {
 set -u
 case "$*" in
   *"#{cursor_y}"*) printf '1\n' ;;
-  *capture-pane*) : ;;
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf 'idle prompt\n' ;;
+      *) : ;;
+    esac
+    ;;
   *) : ;;
 esac
 exit 0
@@ -1868,6 +2059,14 @@ SH
   [ "$(receipt_value "$rec" parent_corr)" = "$corr" ] || fail "secondmate receipt did not persist its parent correlation"
   [ "$(receipt_value "$rec" parent_home)" = "$home" ] || fail "secondmate receipt did not persist its parent home"
   [ "$(receipt_value "$rec" parent_status)" = "$parent_status" ] || fail "secondmate receipt did not persist its parent status path"
+  other_parent="$dir/other-parent"
+  mkdir -p "$other_parent"
+  replace_field "$state/pending-replies/$corr" parent_home "$other_parent"
+  if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
+    fail "secondmate acknowledgement accepted a mismatched real parent home"
+  fi
+  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "mismatched real parent home consumed the pending receipt"
+  replace_field "$state/pending-replies/$corr" parent_home "$home"
   route_backup="$dir/route-backup"
   mv "$child_state/.fm-jt-parent-route" "$route_backup"
   if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
@@ -2019,7 +2218,12 @@ test_deferred_recorded_secondmate_finishes_without_output() {
 set -u
 case "$*" in
   *"#{cursor_y}"*) printf '1\n' ;;
-  *capture-pane*) : ;;
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf 'idle prompt\n' ;;
+      *) : ;;
+    esac
+    ;;
   *) : ;;
 esac
 exit 0
@@ -2154,6 +2358,7 @@ test_pending_receipt_republish_is_bounded() {
   state="$home/state"
   mkdir -p "$state/terminal-outcomes"
   for index in 1 2 3; do
+    write_meta "$state" "pending-limit-x${index}" "pending-limit-inc-${index}"
     fingerprint=$(receipt_fingerprint "pending-limit-x${index}|pending-limit-inc-${index}|done|pending limit ${index}")
     fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
       schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id="pending-limit-x${index}" \
@@ -2197,7 +2402,12 @@ test_secondmate_route_replacement_preserves_old_receipt() {
 set -u
 case "$*" in
   *"#{cursor_y}"*) printf '1\n' ;;
-  *capture-pane*) : ;;
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf 'idle prompt\n' ;;
+      *) : ;;
+    esac
+    ;;
   *) : ;;
 esac
 exit 0
@@ -2885,6 +3095,7 @@ test_uncertain_output_claim_fails_closed
 test_pre_output_claim_retries_after_crash
 test_output_completion_failure_does_not_reprint
 test_direct_drain_finalizes_after_successful_output
+test_standalone_drain_refuses_inactive_ack
 test_finalized_receipt_rows_are_suppressed
 test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
@@ -2911,6 +3122,9 @@ test_parent_home_secondmate_records_are_skipped
 test_herdr_identity_and_default_captain_refusal
 test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
+test_pane_idle_proof_is_required_and_bound
+test_pane_idle_publication_rechecks_under_lock
+test_secondmate_route_accepts_effective_state_overrides
 test_valid_secondmate_route_reports_parent_once
 test_deferred_recorded_secondmate_finishes_without_output
 test_reported_secondmate_route_repair_after_crash
