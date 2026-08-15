@@ -706,12 +706,16 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
 fm_pending_reply_secondmate_route_clear_with_mode() {  # <secondmate-home> <corr-id> <allow-undelivered> [<secondmate-id> <parent-home> <parent-status>]
   local secondmate_home=$1 corr=$2 allow_undelivered=${3:-0} expected_id=${4:-} expected_home=${5:-} expected_status=${6:-}
   local marker route_lock current_corr history_marker status=0
+  FM_PENDING_REPLY_ROUTE_LOCK_CONTENDED=0
   [ -d "$secondmate_home" ] && [ ! -L "$secondmate_home" ] || return 1
   [ -d "$secondmate_home/state" ] && [ ! -L "$secondmate_home/state" ] || return 1
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   marker=$(fm_pending_reply_secondmate_route_path "$secondmate_home")
   route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
-  fm_lock_acquire_wait "$route_lock" || return 1
+  if ! fm_lock_acquire_wait "$route_lock"; then
+    FM_PENDING_REPLY_ROUTE_LOCK_CONTENDED=1
+    return 1
+  fi
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     if [ ! -f "$marker" ] || [ -L "$marker" ] \
       || [ "$(awk 'END { print NR + 0 }' "$marker" 2>/dev/null || true)" != 5 ] \
@@ -759,6 +763,9 @@ fm_pending_reply_secondmate_route_clear() {  # <secondmate-home> <corr-id>
 
 fm_pending_reply_secondmate_route_clear_reported() {  # <secondmate-home> <corr-id> [<secondmate-id> <parent-home> <parent-status>]
   fm_pending_reply_secondmate_route_clear_with_mode "$1" "$2" 4 "${3:-}" "${4:-}" "${5:-}"
+  local status=$?
+  [ "$status" = 1 ] && [ "${FM_PENDING_REPLY_ROUTE_LOCK_CONTENDED:-0}" = 1 ] && return 75
+  return "$status"
 }
 
 fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <corr-id>

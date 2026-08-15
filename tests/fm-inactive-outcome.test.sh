@@ -7,7 +7,7 @@ set -u
 # throwaway firstmate homes exercise the primary-only path.
 if [ "${FM_INACTIVE_TEST_CLEAN:-0}" != 1 ]; then
   exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
-    -u FM_PRIMARY_ATTESTATION FM_INACTIVE_TEST_CLEAN=1 bash "$0" "$@"
+    -u FM_PRIMARY_ATTESTATION FM_INACTIVE_TEST_CLEAN=1 /bin/bash "$0" "$@"
 fi
 
 # shellcheck source=tests/lib.sh
@@ -1151,17 +1151,16 @@ SH
   export FM_WAKE_QUEUE="$wake_dir/queue" FM_WAKE_QUEUE_LOCK="$wake_dir/lock"
   export FM_WAKE_QUEUE_DIR="$wake_dir" FM_WAKE_QUEUE_REMOVED="$wake_removed" \
     FM_BREAK_QUEUE_MARKER="$dir/scan-first" FM_BREAK_QUEUE=1
-  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
-    fail "child scan failure was reported as success"
-  fi
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "retryable wake publication contention stopped the scan"
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "failed scan advanced the cadence marker"
-  [ "$(receipt_count "$state" pending)" = 2 ] || fail "durable receipts were not retained across wake publication failure"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "receipt was created without publication-lock ownership"
   [ ! -e "$state"/.first-x1.inactive-state.* ] || fail "failed crew-state scan leaked its temporary output"
   [ ! -e "$state"/.second-x1.inactive-state.* ] || fail "failed crew-state scan leaked its temporary output"
-  grep -l '^task_id=first-x1$' "$state"/terminal-outcomes/*.pending >/dev/null \
-    || fail "first child receipt was not retained"
-  grep -l '^task_id=second-x1$' "$state"/terminal-outcomes/*.pending >/dev/null \
-    || fail "second child receipt was not retained"
+  if ! grep -l '^task_id=first-x1$' "$state"/terminal-outcomes/*.pending >/dev/null 2>&1 \
+    && ! grep -l '^task_id=second-x1$' "$state"/terminal-outcomes/*.pending >/dev/null 2>&1; then
+    fail "a successfully published child receipt was not retained"
+  fi
   case "$(cat "$state/.inactive-outcome-reconcile.cursor")" in
     first-x1|second-x1) ;;
     *) fail "cursor did not preserve the last successful child" ;;
@@ -1414,7 +1413,6 @@ SH
     || fail "watcher left the existing wake queued"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher scanned inactive outcomes before draining the queued wake"
 
-  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
   second_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
@@ -1428,6 +1426,7 @@ SH
   [ "$status" = 0 ] || fail "watcher cadence failed while surfacing the inactive outcome wake"
   printf '%s\n' "$second_out" | grep -F 'inactive-outcome:' >/dev/null \
     || fail "watcher did not surface the exact inactive outcome wake in the scan turn"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
   ! printf '%s\n' "$second_out" | grep -F 'check: inactive terminal outcome replay queued' >/dev/null \
     || fail "watcher emitted a second generic inactive wake"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "watcher cadence did not acknowledge the inactive receipt"
@@ -2351,6 +2350,7 @@ test_pending_receipt_republish_is_bounded() {
   state="$home/state"
   mkdir -p "$state/terminal-outcomes"
   for index in 1 2 3; do
+    write_meta "$state" "pending-limit-x${index}" "pending-limit-inc-${index}"
     fingerprint=$(receipt_fingerprint "pending-limit-x${index}|pending-limit-inc-${index}|done|pending limit ${index}")
     fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
       schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id="pending-limit-x${index}" \

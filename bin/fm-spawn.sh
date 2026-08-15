@@ -495,6 +495,16 @@ spawn_release_task_lock() {
   return 1
 }
 
+spawn_task_lock_incarnation_valid() {
+  local owner recorded
+  [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ] || return 1
+  owner=$(fm_lock_link_owner "$SPAWN_TASK_LOCK" 2>/dev/null) || return 1
+  [ -n "$owner" ] && [ -d "$owner" ] && [ ! -L "$owner" ] || return 1
+  fm_lock_points_to_owner "$SPAWN_TASK_LOCK" "$owner" || return 1
+  recorded=$(cat "$owner/incarnation" 2>/dev/null || true)
+  [ "$recorded" = "${SPAWN_INCARNATION:-}" ] && [ -n "$recorded" ]
+}
+
 spawn_require_new_artifact() {
   local path=$1
   [ ! -e "$path" ] && [ ! -L "$path" ] || {
@@ -1044,12 +1054,20 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+SPAWN_INCARNATION="s$(date +%s)-${BASHPID:-$$}-$RANDOM"
+FM_LOCK_OWNER_INCARNATION=$SPAWN_INCARNATION
+export FM_LOCK_OWNER_INCARNATION
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+  unset FM_LOCK_OWNER_INCARNATION
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
 fi
+unset FM_LOCK_OWNER_INCARNATION
 SPAWN_TASK_LOCK_HELD=1
-SPAWN_INCARNATION="s$(date +%s)-${BASHPID:-$$}-$RANDOM"
+spawn_task_lock_incarnation_valid || {
+  echo "error: task lock incarnation could not be verified for $ID" >&2
+  exit 1
+}
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/$ID.herdr-cleanup-uncertain"
 if [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; then
   echo "error: unresolved Herdr cleanup uncertainty for $ID at $HERDR_FLAT_ABORT_UNCERTAINTY_FILE; refusing another spawn" >&2
@@ -2118,6 +2136,7 @@ elif [ "$KIND" != secondmate ]; then
 fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
+spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 {
   echo "window=$T"
   echo "worktree=$WT"
@@ -2157,6 +2176,7 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
+spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 SPAWN_META_PUBLISHED=1
 if [ "$BACKEND" = herdr ]; then

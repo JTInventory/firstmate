@@ -1258,11 +1258,7 @@ publish_receipt_and_wake() {
   local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-}
   FM_WAKE_APPEND_CREATED=0
   if [ "$WAKE_QUEUE_LOCK_HELD" != 1 ]; then
-    if ! wake_queue_lock_acquire; then
-      [ -z "$pane_meta" ] || return 1
-      receipt_write || return 1
-      return 1
-    fi
+    wake_queue_lock_acquire || return 75
     release_lock=1
   fi
   if [ -n "$pane_meta" ] \
@@ -1581,30 +1577,30 @@ repair_reported_secondmate_routes() {
   local candidate_pending=0 candidate_retain=0 item_status batch_consumed=0 batch_complete=1 retry_tmp=
   MAINTENANCE_ENUM_DEFERRED=0
   MAINTENANCE_ENUM_FAILED=0
+  MAINTENANCE_DEADLINE_EXPIRED=0
+  MAINTENANCE_RETRYABLE=0
   MAINTENANCE_ITEMS_PROCESSED=0
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
   remaining=$(budget_remaining_secs "$scan_deadline")
-  [ "$remaining" -gt 0 ] || return 1
-  FM_LOCK_WAIT_SECS="$remaining" fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ "$remaining" -le 0 ]; then
+    MAINTENANCE_DEADLINE_EXPIRED=1
+    return 1
+  fi
   candidate_tmp=$(mktemp "$STATE/.inactive-outcome-candidates.XXXXXX") || {
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
     return 1
   }
   [ -f "$candidate_tmp" ] && [ ! -L "$candidate_tmp" ] || {
     rm -f "$candidate_tmp"
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
     return 1
   }
   if [ -e "$REPORTED_ROUTE_PENDING" ] || [ -L "$REPORTED_ROUTE_PENDING" ]; then
     [ -f "$REPORTED_ROUTE_PENDING" ] && [ ! -L "$REPORTED_ROUTE_PENDING" ] || {
       rm -f "$candidate_tmp"
-      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
       return 1
     }
     if [ -s "$REPORTED_ROUTE_PENDING" ]; then
       inactive_copy_nul_prefix "$REPORTED_ROUTE_PENDING" "$candidate_tmp" || {
         rm -f "$candidate_tmp"
-        fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
         return 1
       }
       candidate_pending=1
@@ -1612,7 +1608,6 @@ repair_reported_secondmate_routes() {
     else
       rm -f "$REPORTED_ROUTE_PENDING" || {
         rm -f "$candidate_tmp"
-        fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
         return 1
       }
     fi
@@ -1640,7 +1635,11 @@ repair_reported_secondmate_routes() {
       started=1
     fi
     remaining=$(budget_remaining_secs "$scan_deadline")
-    [ "$remaining" -gt 0 ] || { status=1; break; }
+    if [ "$remaining" -le 0 ]; then
+      MAINTENANCE_DEADLINE_EXPIRED=1
+      status=1
+      break
+    fi
     batch_consumed=0
     batch_complete=1
     enum_rc=0
@@ -1660,10 +1659,15 @@ repair_reported_secondmate_routes() {
       fi
     fi
     while [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && IFS= read -r -d '' reported; do
-      batch_consumed=$((batch_consumed + 1))
-      case "$reported" in "$OUTCOME_DIR"/*/*) continue ;; esac
+      case "$reported" in
+        "$OUTCOME_DIR"/*/*)
+          batch_consumed=$((batch_consumed + 1))
+          continue
+          ;;
+      esac
       base=${reported##*/}
       if [ "$pass" = 1 ] && [ -n "$cursor" ] && [ "$started" = 0 ]; then
+        batch_consumed=$((batch_consumed + 1))
         if [ "$base" = "$cursor" ]; then
           started=1
           cursor_found=1
@@ -1676,10 +1680,12 @@ repair_reported_secondmate_routes() {
       fi
       remaining=$(budget_remaining_secs "$scan_deadline")
       if [ "$remaining" -le 0 ]; then
+        MAINTENANCE_DEADLINE_EXPIRED=1
         status=1
         batch_complete=0
         break 2
       fi
+      batch_consumed=$((batch_consumed + 1))
       [ -f "$reported" ] && [ ! -L "$reported" ] || { status=1; continue; }
       kind=$(receipt_field "$reported" kind 2>/dev/null || true)
       item_status=0
@@ -1694,13 +1700,14 @@ repair_reported_secondmate_routes() {
             parent_home=$(receipt_field "$reported" parent_home)
             parent_status=$(receipt_field "$reported" parent_status)
             FM_LOCK_WAIT_SECS="$remaining" fm_pending_reply_secondmate_route_clear_reported \
-              "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || item_status=1
+              "$FM_HOME" "$corr" "$parent_task_id" "$parent_home" "$parent_status" || item_status=$?
           fi
           ;;
         *) item_status=1 ;;
       esac
       if [ "$item_status" != 0 ]; then
         status=1
+        [ "$item_status" = 75 ] && MAINTENANCE_RETRYABLE=1
         candidate_retain=1
         if [ -z "$retry_tmp" ]; then
           retry_tmp=$(mktemp "$STATE/.inactive-outcome-retry.XXXXXX") || {
@@ -1750,16 +1757,43 @@ repair_reported_secondmate_routes() {
     fi
   fi
   MAINTENANCE_ITEMS_PROCESSED=$processed
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   return "$status"
 }
 
 republish_pending_receipt() {
-  local pending=$1
+  local pending=$1 task_lock meta window backend current_incarnation status=0 rc
   prepare_pending_receipt "$pending" || return 1
   case "$KIND" in
     ship|scout)
-      republish_existing_receipt_wake
+      meta="$STATE/$ID.meta"
+      [ -f "$meta" ] && [ ! -L "$meta" ] || return 75
+      herdr_identity_allowed "$meta" || return 75
+      task_lock="$STATE/.spawn-$ID.lock"
+      FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-30}" fm_lock_acquire_wait "$task_lock" || return 75
+      if [ ! -f "$meta" ] || [ -L "$meta" ] \
+        || [ "$(meta_value "$meta" kind)" != "$KIND" ] \
+        || ! herdr_identity_allowed "$meta"; then
+        status=75
+      elif current_incarnation=$(read_incarnation "$meta" "$ID" 2>/dev/null); then
+        [ "$current_incarnation" = "$INC" ] || status=75
+        if [ "$status" = 0 ]; then
+          window=$(meta_value_unique "$meta" window 2>/dev/null) || status=75
+          if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
+            :
+          else
+            rc=$?
+            [ "$rc" = 1 ] || status=75
+            backend=tmux
+          fi
+        fi
+        if [ "$status" = 0 ]; then
+          republish_existing_receipt_wake "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
+        fi
+      else
+        status=75
+      fi
+      fm_lock_release "$task_lock" || status=1
+      return "$status"
       ;;
     secondmate)
       publish_secondmate_receipt_and_wake
@@ -1776,6 +1810,7 @@ republish_pending_receipts() {
   MAINTENANCE_ENUM_DEFERRED=0
   MAINTENANCE_ENUM_FAILED=0
   MAINTENANCE_RETRYABLE=0
+  MAINTENANCE_DEADLINE_EXPIRED=0
   MAINTENANCE_ITEMS_PROCESSED=0
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
   candidate_tmp=$(mktemp "$STATE/.inactive-outcome-candidates.XXXXXX") || return 1
@@ -1825,7 +1860,11 @@ republish_pending_receipts() {
       started=1
     fi
     remaining=$(budget_remaining_secs "$scan_deadline")
-    [ "$remaining" -gt 0 ] || { status=1; break; }
+    if [ "$remaining" -le 0 ]; then
+      MAINTENANCE_DEADLINE_EXPIRED=1
+      status=1
+      break
+    fi
     batch_consumed=0
     batch_complete=1
     enum_rc=0
@@ -1845,10 +1884,15 @@ republish_pending_receipts() {
       fi
     fi
     while [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && IFS= read -r -d '' pending; do
-      batch_consumed=$((batch_consumed + 1))
-      case "$pending" in "$OUTCOME_DIR"/*/*) continue ;; esac
+      case "$pending" in
+        "$OUTCOME_DIR"/*/*)
+          batch_consumed=$((batch_consumed + 1))
+          continue
+          ;;
+      esac
       base=${pending##*/}
       if [ "$pass" = 1 ] && [ -n "$cursor" ] && [ "$started" = 0 ]; then
+        batch_consumed=$((batch_consumed + 1))
         if [ "$base" = "$cursor" ]; then
           started=1
           cursor_found=1
@@ -1862,10 +1906,12 @@ republish_pending_receipts() {
       fi
       remaining=$(budget_remaining_secs "$scan_deadline")
       if [ "$remaining" -le 0 ]; then
+        MAINTENANCE_DEADLINE_EXPIRED=1
         status=1
         batch_complete=0
         break 2
       fi
+      batch_consumed=$((batch_consumed + 1))
       if FM_LOCK_WAIT_SECS="$remaining" republish_pending_receipt "$pending"; then
         if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
           printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$ID" "$OUTCOME" "$FP"
@@ -2226,9 +2272,6 @@ reconcile_child() {
   [ "$activity" -gt 0 ] || return 0
   age=$((now - activity))
   [ "$age" -ge "$RECONCILE_SECS" ] || return 0
-  if ! wake_queue_lock_acquire; then
-    return 75
-  fi
   state_tmp=$(mktemp "$STATE/.$id.inactive-state.XXXXXX") || return 1
   [ -f "$state_tmp" ] && [ ! -L "$state_tmp" ] || { rm -f "$state_tmp"; return 1; }
   state_timeout=$(bounded_secs "${FM_INACTIVE_OUTCOME_STATE_TIMEOUT_SECS:-10}" 10 1 300)
@@ -2543,6 +2586,8 @@ scan_locked() {
           maintenance_deferred=1
         elif [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
           maintenance_deferred=1
+        elif [ "$MAINTENANCE_DEADLINE_EXPIRED" = 1 ]; then
+          maintenance_deferred=1
         elif [ "$MAINTENANCE_ENUM_FAILED" = 1 ]; then
           maintenance_status=1
         elif [ "$(clock_millis)" -ge "$scan_deadline" ]; then
@@ -2555,6 +2600,10 @@ scan_locked() {
         && [ "$MAINTENANCE_ITEMS_PROCESSED" = 0 ]; then
         if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
           if [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
+            maintenance_deferred=1
+          elif [ "$MAINTENANCE_RETRYABLE" = 1 ]; then
+            maintenance_deferred=1
+          elif [ "$MAINTENANCE_DEADLINE_EXPIRED" = 1 ]; then
             maintenance_deferred=1
           elif [ "$MAINTENANCE_ENUM_FAILED" = 1 ]; then
             maintenance_status=1
@@ -2574,6 +2623,10 @@ scan_locked() {
       if ! repair_reported_secondmate_routes "$maintenance_deadline"; then
         if [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
           maintenance_deferred=1
+        elif [ "$MAINTENANCE_RETRYABLE" = 1 ]; then
+          maintenance_deferred=1
+        elif [ "$MAINTENANCE_DEADLINE_EXPIRED" = 1 ]; then
+          maintenance_deferred=1
         elif [ "$MAINTENANCE_ENUM_FAILED" = 1 ]; then
           maintenance_status=1
         elif [ "$(clock_millis)" -ge "$scan_deadline" ]; then
@@ -2588,6 +2641,8 @@ scan_locked() {
           if [ "$MAINTENANCE_RETRYABLE" = 1 ]; then
             maintenance_deferred=1
           elif [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
+            maintenance_deferred=1
+          elif [ "$MAINTENANCE_DEADLINE_EXPIRED" = 1 ]; then
             maintenance_deferred=1
           elif [ "$MAINTENANCE_ENUM_FAILED" = 1 ]; then
             maintenance_status=1
@@ -2722,7 +2777,6 @@ scan_locked() {
     find_retain=1
   fi
   while [ "$scan_failed" = 0 ] && IFS= read -r -d '' meta; do
-    batch_consumed=$((batch_consumed + 1))
     remaining=$(budget_remaining_secs "$scan_deadline")
     if [ "$remaining" -le 0 ]; then
       complete=0
@@ -2731,7 +2785,16 @@ scan_locked() {
       batch_complete=0
       break
     fi
+    batch_consumed=$((batch_consumed + 1))
     if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+      if [ "$started" = 0 ] && [ "$meta" = "$STATE/$cursor.meta" ]; then
+        cursor=
+        started=1
+        cursor_seen=1
+        complete=0
+        direct_deferred=1
+        find_retain=1
+      fi
       continue
     fi
     id=$(basename "$meta" .meta)

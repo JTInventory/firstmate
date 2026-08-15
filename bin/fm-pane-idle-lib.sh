@@ -18,7 +18,7 @@ fm_pane_idle_meta_value_unique() {  # <meta> <key>
 }
 
 fm_pane_idle_meta_index_build() {  # <state>
-  local state=$1 meta window count i found
+  local state=$1 meta window count
   local -a metas=()
   FM_PANE_IDLE_META_INDEX_WINDOWS=()
   FM_PANE_IDLE_META_INDEX_METAS=()
@@ -29,27 +29,23 @@ fm_pane_idle_meta_index_build() {  # <state>
     metas+=("$meta")
   done
   [ "${#metas[@]}" -gt 0 ] || return 0
-  while IFS= read -r -d '' meta && IFS= read -r -d '' window; do
+  while IFS= read -r -d '' meta \
+    && IFS= read -r -d '' window \
+    && IFS= read -r -d '' count; do
     [ -n "$window" ] || continue
-    found=-1
-    for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
-      if [ "${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}" = "$window" ]; then
-        found=$i
-        break
-      fi
-    done
-    if [ "$found" -lt 0 ]; then
-      FM_PANE_IDLE_META_INDEX_WINDOWS+=("$window")
-      FM_PANE_IDLE_META_INDEX_METAS+=("$meta")
-      FM_PANE_IDLE_META_INDEX_COUNTS+=(1)
-    else
-      count=${FM_PANE_IDLE_META_INDEX_COUNTS[$found]}
-      FM_PANE_IDLE_META_INDEX_COUNTS[$found]=$((count + 1))
-    fi
+    FM_PANE_IDLE_META_INDEX_WINDOWS+=("$window")
+    FM_PANE_IDLE_META_INDEX_METAS+=("$meta")
+    FM_PANE_IDLE_META_INDEX_COUNTS+=("$count")
   done < <(
     awk -F= '
+      function finish_file() {
+        if (seen && window_count == 1) {
+          if (!(window_value in window_counts)) first_meta[window_value]=current_file
+          window_counts[window_value]++
+        }
+      }
       FNR == 1 {
-        if (seen && window_count == 1) printf "%s%c%s%c", current_file, 0, window_value, 0
+        finish_file()
         current_file=FILENAME
         window_count=0
         window_value=""
@@ -60,7 +56,10 @@ fm_pane_idle_meta_index_build() {  # <state>
         window_value=substr($0, index($0, "=") + 1)
       }
       END {
-        if (seen && window_count == 1) printf "%s%c%s%c", current_file, 0, window_value, 0
+        finish_file()
+        for (window in window_counts) {
+          printf "%s%c%s%c%s%c", first_meta[window], 0, window, 0, window_counts[window], 0
+        }
       }
     ' "${metas[@]}" 2>/dev/null
   )
