@@ -27,42 +27,122 @@ fm_pane_idle_now_ms() {
 
 fm_pane_idle_meta_index_collect() {
   local state=$1 output=$2 deadline_ms=${3:-} worker rc
+  local cursor_path records_path complete_path
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   [ ! -L "$output" ] || return 1
+  case "$output" in "$state"/*) ;; *) return 1 ;; esac
+  cursor_path="$state/.pane-idle-meta-index.scan.cursor"
+  records_path="$state/.pane-idle-meta-index.scan.records"
+  complete_path="$state/.pane-idle-meta-index.scan.complete"
+  for path in "$cursor_path" "$records_path" "$complete_path"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    fi
+  done
   : > "$output" || return 1
+  if [ -e "$complete_path" ]; then
+    rm -f "$cursor_path" "$records_path" || return 1
+    rm -f "$complete_path" || return 1
+  fi
+  if [ ! -e "$records_path" ]; then
+    : > "$records_path" || return 1
+  fi
   if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
     return 124
   fi
   command -v perl >/dev/null 2>&1 || return 125
-  perl - "$state" > "$output" <<'PERL' &
+  perl - "$state" "$cursor_path" "$records_path" "$complete_path" "$deadline_ms" > "$output" <<'PERL' &
 use strict;
 use warnings;
 
-my ($state) = @ARGV;
-opendir(my $dh, $state) or exit 1;
-my (%first_meta, %window_counts);
-while (defined(my $entry = readdir($dh))) {
-  next unless $entry =~ /\.meta\z/;
-  my $path = "$state/$entry";
-  next unless -f $path && !-l $path;
-  open(my $fh, '<', $path) or next;
-  my ($window, $window_count) = ('', 0);
-  while (defined(my $line = <$fh>)) {
-    chomp $line;
-    next unless $line =~ /^window=(.*)\z/;
-    $window = $1;
-    $window_count++;
-  }
-  close($fh) or next;
-  next unless $window_count == 1;
-  $first_meta{$window} = $path unless exists $window_counts{$window};
-  $window_counts{$window}++;
+my ($state, $cursor_path, $records_path, $complete_path, $deadline) = @ARGV;
+$deadline = undef unless defined($deadline) && $deadline =~ /^\d+\z/ && $deadline ne '';
+
+sub expired {
+  return defined($deadline) && int(time() * 1000) >= $deadline;
 }
-closedir($dh) or exit 1;
-for my $window (keys %window_counts) {
+
+sub write_cursor {
+  my ($value) = @_;
+  my $tmp = "$cursor_path.tmp.$$";
+  open(my $fh, '>', $tmp) or return 0;
+  print $fh $value, "\n" or return 0;
+  close($fh) or return 0;
+  rename($tmp, $cursor_path) or return 0;
+  return 1;
+}
+
+my $cursor = '';
+if (-e $cursor_path) {
+  open(my $cfh, '<', $cursor_path) or exit 1;
+  $cursor = <$cfh> // '';
+  chomp $cursor;
+  close($cfh) or exit 1;
+}
+
+while (1) {
+  exit 124 if expired();
+  opendir(my $dh, $state) or exit 1;
+  my $next = '';
+  while (defined(my $entry = readdir($dh))) {
+    exit 124 if expired();
+    next unless $entry =~ /\.meta\z/;
+    next unless $entry gt $cursor;
+    my $path = "$state/$entry";
+    next unless -f $path && !-l $path;
+    $next = $entry if $next eq '' || $entry lt $next;
+  }
+  closedir($dh) or exit 1;
+  last if $next eq '';
+  my $path = "$state/$next";
+  if (-f $path && !-l $path) {
+    open(my $fh, '<', $path) or exit 1;
+    my ($window, $window_count) = ('', 0);
+    while (defined(my $line = <$fh>)) {
+      exit 124 if expired();
+      chomp $line;
+      next unless $line =~ /^window=(.*)\z/;
+      $window = $1;
+      $window_count++;
+    }
+    close($fh) or exit 1;
+    if ($window_count == 1 && $window ne '') {
+      open(my $rfh, '>>', $records_path) or exit 1;
+      binmode($rfh);
+      print $rfh $path, "\0", $window, "\0", "1", "\0" or exit 1;
+      close($rfh) or exit 1;
+    }
+  }
+  write_cursor($next) or exit 1;
+  $cursor = $next;
+}
+
+open(my $rfh, '<', $records_path) or exit 1;
+binmode($rfh);
+local $/ = "\0";
+my (%seen, %first_meta, %window_counts);
+while (defined(my $path = <$rfh>)) {
+  chomp $path;
+  my $window = <$rfh>;
+  my $count = <$rfh>;
+  last unless defined($window) && defined($count);
+  chomp $window;
+  chomp $count;
+  next if $seen{$path}++;
+  next unless $window ne '' && $count =~ /^\d+\z/;
+  $first_meta{$window} = $path unless exists $window_counts{$window};
+  $window_counts{$window} += $count;
+}
+close($rfh) or exit 1;
+for my $window (sort keys %window_counts) {
   print $first_meta{$window}, "\0", $window, "\0", $window_counts{$window}, "\0" or exit 1;
 }
+my $complete_tmp = "$complete_path.tmp.$$";
+open(my $complete_fh, '>', $complete_tmp) or exit 1;
+print $complete_fh "complete\n" or exit 1;
+close($complete_fh) or exit 1;
+rename($complete_tmp, $complete_path) or exit 1;
 PERL
   worker=$!
   while kill -0 "$worker" 2>/dev/null; do
@@ -77,13 +157,17 @@ PERL
   done
   wait "$worker"
   rc=$?
-  [ "$rc" = 0 ] || return "$rc"
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$output"
+    return "$rc"
+  fi
 }
 
 fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
   local state=$1 deadline_ms=${2:-} force=${3:-} meta window count rc tmp
   local -a new_windows=() new_metas=() new_counts=()
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
   if [ "$FM_PANE_IDLE_META_INDEX_STATE" = "$state" ] \
     && [ "$force" != force ] \
     && [ "${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}" -gt 0 ]; then
@@ -105,6 +189,11 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
       return 124
     fi
     [ -n "$window" ] || continue
+    case "$meta" in
+      "$state"/*) ;;
+      *) rm -f "$tmp"; return 1 ;;
+    esac
+    [ -f "$meta" ] && [ ! -L "$meta" ] || { rm -f "$tmp"; return 1; }
     new_metas+=("$meta")
     new_windows+=("$window")
     new_counts+=("$count")
@@ -118,6 +207,7 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
 
 fm_pane_idle_meta_for_window() {  # <state> <window>
   local state=$1 window=$2 candidate i
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
   if [ "$FM_PANE_IDLE_META_INDEX_STATE" != "$state" ]; then
     fm_pane_idle_meta_index_build "$state" || return 1
   fi
@@ -135,6 +225,7 @@ fm_pane_idle_meta_for_window() {  # <state> <window>
 fm_pane_idle_meta_for_window_direct() {  # <state> <window>
   local state=$1 window=$2 deadline_ms=${3:-${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-}}
   local meta current_window count candidate= matches=0 rc tmp
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
   tmp=$(mktemp "$state/.pane-idle-meta-direct.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
   fm_pane_idle_meta_index_collect "$state" "$tmp" "$deadline_ms"
@@ -160,77 +251,160 @@ fm_pane_idle_meta_for_window_direct() {  # <state> <window>
   printf '%s' "$candidate"
 }
 
+fm_pane_idle_meta_index_cursor_write() {
+  local path=$1 value=$2 tmp
+  [ -n "$value" ] || return 1
+  case "$value" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  [ ! -L "$path" ] || return 1
+  tmp=$(mktemp "$path.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  if ! printf '%s\n' "$value" > "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 fm_pane_idle_meta_index_persist() {
   local state=$1 directory=$2 deadline_ms=${3:-} window meta count i key path
-  local cursor_path ready_path cursor=0 tmp now
+  local cursor_path ready_path snapshot_path reclaim_cursor_path cursor= cursor_found=0 started=1
+  local snapshot_tmp snapshot_changed=1 tmp now rc
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   if [ "$FM_PANE_IDLE_META_INDEX_STATE" != "$state" ]; then
     fm_pane_idle_meta_index_build "$state" "$deadline_ms"
-    i=$?
-    [ "$i" = 0 ] || return "$i"
+    rc=$?
+    [ "$rc" = 0 ] || return "$rc"
   fi
   cursor_path="$directory/.cursor"
   ready_path="$directory/.ready"
-  if [ -f "$ready_path" ] && [ ! -L "$ready_path" ]; then
+  snapshot_path="$directory/.snapshot"
+  reclaim_cursor_path="$directory/.reclaim.cursor"
+  for path in "$cursor_path" "$ready_path" "$snapshot_path" "$reclaim_cursor_path"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    fi
+  done
+  if [ -e "$ready_path" ]; then
     rm -f "$ready_path" || return 1
-  elif [ -e "$ready_path" ] || [ -L "$ready_path" ]; then
-    return 1
+  fi
+  snapshot_tmp=$(mktemp "$snapshot_path.XXXXXX") || return 1
+  [ -f "$snapshot_tmp" ] && [ ! -L "$snapshot_tmp" ] || { rm -f "$snapshot_tmp"; return 1; }
+  for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      rm -f "$snapshot_tmp"
+      return 124
+    fi
+    meta=${FM_PANE_IDLE_META_INDEX_METAS[$i]}
+    window=${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}
+    count=${FM_PANE_IDLE_META_INDEX_COUNTS[$i]}
+    case "$meta" in "$state"/*) ;; *) rm -f "$snapshot_tmp"; return 1 ;; esac
+    [ -f "$meta" ] && [ ! -L "$meta" ] || { rm -f "$snapshot_tmp"; return 1; }
+    printf '%s\0%s\0%s\0' "$meta" "$window" "$count" >> "$snapshot_tmp" || {
+      rm -f "$snapshot_tmp"
+      return 1
+    }
+  done
+  if [ -f "$snapshot_path" ] && [ ! -L "$snapshot_path" ] \
+    && cmp -s "$snapshot_tmp" "$snapshot_path"; then
+    snapshot_changed=0
+  fi
+  if [ "$snapshot_changed" = 1 ]; then
+    rm -f "$cursor_path" "$reclaim_cursor_path" || {
+      rm -f "$snapshot_tmp"
+      return 1
+    }
   fi
   if [ -e "$cursor_path" ]; then
-    [ -f "$cursor_path" ] && [ ! -L "$cursor_path" ] || return 1
     cursor=$(cat "$cursor_path" 2>/dev/null || true)
-    case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+    for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_METAS[@]}; i++)); do
+      [ "${FM_PANE_IDLE_META_INDEX_METAS[$i]}" = "$cursor" ] || continue
+      cursor_found=1
+      break
+    done
+    if [ "$cursor_found" = 0 ]; then
+      cursor=
+      rm -f "$cursor_path" || { rm -f "$snapshot_tmp"; return 1; }
+    fi
   fi
+  [ -n "$cursor" ] || started=1
+  [ -n "$cursor" ] && [ "$cursor_found" = 1 ] && started=0
   for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
-    [ "$i" -ge "$cursor" ] || continue
-    if [ -n "$deadline_ms" ] && command -v clock_millis >/dev/null 2>&1; then
-      now=$(clock_millis)
-      if [ "$now" -ge "$deadline_ms" ]; then
-        tmp=$(mktemp "$cursor_path.XXXXXX") || return 1
-        [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-        if ! printf '%s\n' "$i" > "$tmp" || [ -L "$cursor_path" ] || ! mv -f "$tmp" "$cursor_path"; then
-          rm -f "$tmp"
-          return 1
-        fi
-        return 124
+    meta=${FM_PANE_IDLE_META_INDEX_METAS[$i]}
+    if [ "$started" = 0 ]; then
+      if [ "$meta" = "$cursor" ]; then
+        started=1
       fi
+      continue
+    fi
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      rm -f "$snapshot_tmp"
+      return 124
     fi
     window=${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}
     count=${FM_PANE_IDLE_META_INDEX_COUNTS[$i]}
-    key=$(fm_pane_idle_sha256 "$window") || return 1
+    key=$(fm_pane_idle_sha256 "$window") || { rm -f "$snapshot_tmp"; return 1; }
     path="$directory/$key"
-    [ ! -L "$path" ] || return 1
-    tmp=$(mktemp "$path.XXXXXX") || return 1
-    [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-    if ! printf '%s\n%s\n' "$count" "${FM_PANE_IDLE_META_INDEX_METAS[$i]}" > "$tmp" \
+    [ ! -L "$path" ] || { rm -f "$snapshot_tmp"; return 1; }
+    if [ -e "$path" ]; then
+      [ -f "$path" ] || { rm -f "$snapshot_tmp"; return 1; }
+    fi
+    tmp=$(mktemp "$path.XXXXXX") || { rm -f "$snapshot_tmp"; return 1; }
+    [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp" "$snapshot_tmp"; return 1; }
+    if ! printf '%s\n%s\n' "$count" "$meta" > "$tmp" \
       || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
-      rm -f "$tmp"
+      rm -f "$tmp" "$snapshot_tmp"
       return 1
     fi
+    fm_pane_idle_meta_index_cursor_write "$cursor_path" "$meta" || {
+      rm -f "$snapshot_tmp"
+      return 1
+    }
+    cursor=$meta
   done
-  rm -f "$cursor_path" || return 1
+  rm -f "$cursor_path" || { rm -f "$snapshot_tmp"; return 1; }
+  if [ "$snapshot_changed" = 1 ]; then
+    [ ! -L "$snapshot_path" ] || { rm -f "$snapshot_tmp"; return 1; }
+    mv -f "$snapshot_tmp" "$snapshot_path" || { rm -f "$snapshot_tmp"; return 1; }
+  else
+    rm -f "$snapshot_tmp" || return 1
+  fi
+  if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+    return 124
+  fi
+  [ ! -L "$ready_path" ] || return 1
   : > "$ready_path" || return 1
   fm_pane_idle_meta_index_reclaim "$directory" "$deadline_ms"
 }
 
-fm_pane_idle_meta_index_reclaim() {
-  local directory=$1 deadline_ms=${2:-} path base key worker rc tmp i
-  local -A current_key_set=()
-  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+fm_pane_idle_meta_index_reclaim_next() {
+  local directory=$1 cursor=$2 deadline_ms=${3:-} worker rc tmp next
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
-  for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
-    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
-      return 124
-    fi
-    key=$(fm_pane_idle_sha256 "${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}") || return 1
-    [ "${#key}" = 64 ] || return 1
-    case "$key" in *[!0123456789abcdefABCDEF]*) return 1 ;; esac
-    current_key_set["$key"]=1
-  done
-  tmp=$(mktemp "$directory/.pane-idle-reclaim.XXXXXX") || return 1
+  command -v perl >/dev/null 2>&1 || return 125
+  tmp=$(mktemp "$directory/.pane-idle-reclaim-next.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  find "$directory" -maxdepth 1 -type f -print0 > "$tmp" 2>/dev/null &
+  perl - "$directory" "$cursor" "$deadline_ms" > "$tmp" <<'PERL' &
+use strict;
+use warnings;
+
+my ($directory, $cursor, $deadline) = @ARGV;
+$deadline = undef unless defined($deadline) && $deadline =~ /^\d+\z/ && $deadline ne '';
+sub expired {
+  return defined($deadline) && int(time() * 1000) >= $deadline;
+}
+opendir(my $dh, $directory) or exit 1;
+my $next = '';
+while (defined(my $entry = readdir($dh))) {
+  exit 124 if expired();
+  next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
+  next unless $entry gt $cursor;
+  my $path = "$directory/$entry";
+  next unless -f $path && !-l $path;
+  $next = $entry if $next eq '' || $entry lt $next;
+}
+closedir($dh) or exit 1;
+print $next, "\n";
+PERL
   worker=$!
   while kill -0 "$worker" 2>/dev/null; do
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
@@ -244,24 +418,67 @@ fm_pane_idle_meta_index_reclaim() {
   done
   wait "$worker"
   rc=$?
-  [ "$rc" = 0 ] || { rm -f "$tmp"; return "$rc"; }
-  while IFS= read -r -d '' path; do
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  next=$(cat "$tmp" 2>/dev/null || true)
+  rm -f "$tmp" || return 1
+  printf '%s' "$next"
+}
+
+fm_pane_idle_meta_index_reclaim() {
+  local directory=$1 deadline_ms=${2:-} path base key next current i rc cursor_path cursor=
+  local -a current_keys=()
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  cursor_path="$directory/.reclaim.cursor"
+  if [ -e "$cursor_path" ] || [ -L "$cursor_path" ]; then
+    [ -f "$cursor_path" ] && [ ! -L "$cursor_path" ] || return 1
+    cursor=$(cat "$cursor_path" 2>/dev/null || true)
+    case "$cursor" in ''|*[!0123456789abcdefABCDEF]*) return 1 ;; esac
+  fi
+  for ((i = 0; i < ${#FM_PANE_IDLE_META_INDEX_WINDOWS[@]}; i++)); do
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
-      rm -f "$tmp"
       return 124
     fi
-    [ -f "$path" ] && [ ! -L "$path" ] || continue
-    base=${path##*/}
-    case "$base" in
-      .cursor|.ready|.*|'') continue ;;
-    esac
-    [ "${#base}" = 64 ] || continue
-    case "$base" in *[!0123456789abcdefABCDEF]*) continue ;; esac
-    if [ "${current_key_set[$base]+present}" != present ]; then
-      rm -f "$path" || { rm -f "$tmp"; return 1; }
+    key=$(fm_pane_idle_sha256 "${FM_PANE_IDLE_META_INDEX_WINDOWS[$i]}") || return 1
+    [ "${#key}" = 64 ] || return 1
+    case "$key" in *[!0123456789abcdefABCDEF]*) return 1 ;; esac
+    current_keys+=("$key")
+  done
+  while :; do
+    if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+      return 124
     fi
-  done < "$tmp"
-  rm -f "$tmp"
+    next=$(fm_pane_idle_meta_index_reclaim_next "$directory" "$cursor" "$deadline_ms")
+    rc=$?
+    case "$rc" in
+      0) ;;
+      124) return 124 ;;
+      *) return "$rc" ;;
+    esac
+    [ -n "$next" ] || { rm -f "$cursor_path" || return 1; return 0; }
+    current=0
+    for ((i = 0; i < ${#current_keys[@]}; i++)); do
+      if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
+        return 124
+      fi
+      if [ "${current_keys[$i]}" = "$next" ]; then
+        current=1
+        break
+      fi
+    done
+    path="$directory/$next"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      [ -f "$path" ] && [ ! -L "$path" ] || return 1
+      if [ "$current" = 0 ]; then
+        rm -f "$path" || return 1
+      fi
+    fi
+    fm_pane_idle_meta_index_cursor_write "$cursor_path" "$next" || return 1
+    cursor=$next
+  done
 }
 
 fm_pane_idle_meta_for_window_indexed() {
