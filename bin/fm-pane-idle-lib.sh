@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+FM_PANE_IDLE_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+
 fm_pane_idle_meta_value_unique() {  # <meta> <key>
   awk -F= -v wanted="$2" '
     $1 == wanted { count++; value=substr($0, index($0, "=") + 1) }
@@ -42,6 +44,35 @@ fm_pane_idle_hash() {
   else
     return 1
   fi
+}
+
+fm_pane_idle_current_hash() {  # <backend> <target> <lines>
+  local backend=$1 target=$2 lines=${3:-40} tail native=unknown
+  command -v fm_backend_capture >/dev/null 2>&1 || return 1
+  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(FM_BACKEND_HERDR_NO_SERVER_START=1 fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
+    case "$native" in
+      busy) return 1 ;;
+      idle|unknown) ;;
+      *) return 1 ;;
+    esac
+  fi
+  if [ "$backend" = herdr ]; then
+    tail=$(FM_BACKEND_HERDR_NO_SERVER_START=1 fm_backend_capture "$backend" "$target" "$lines" 2>/dev/null) || return 1
+  else
+    tail=$(fm_backend_capture "$backend" "$target" "$lines" 2>/dev/null) || return 1
+  fi
+  if printf '%s' "$tail" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_PANE_IDLE_BUSY_REGEX_DEFAULT}"; then
+    return 1
+  fi
+  printf '%s' "$tail" | fm_pane_idle_hash
+}
+
+fm_pane_idle_current_matches() {  # <backend> <target> <expected-hash>
+  local current
+  current=$(fm_pane_idle_current_hash "$1" "$2" 40) || return 1
+  [ "$current" = "$3" ]
 }
 
 fm_pane_idle_read_incarnation() {  # <meta> <id>
@@ -234,4 +265,5 @@ fm_pane_idle_proof_valid() {  # <state> <meta> <task> <window> <backend> <incarn
   [ "$current_hash" = "$pane_hash" ] || return 1
   case "$current_count" in ''|*[!0-9]*) return 1 ;; esac
   [ "$current_count" -ge "$samples" ] || return 1
+  fm_pane_idle_current_matches "$backend" "$window" "$pane_hash"
 }

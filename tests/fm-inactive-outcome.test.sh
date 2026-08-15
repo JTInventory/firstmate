@@ -52,6 +52,21 @@ var="FM_FAKE_CREW_STATE_$key"
 printf '%s\n' "${!var:-${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}}"
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-idle prompt}" ;;
+      *) : ;;
+    esac
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -1356,7 +1371,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1471,7 +1486,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1521,7 +1536,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1597,7 +1612,7 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
   *"#{window_name}"*) printf '%s\n' firstmate ;;
-  capture-pane) : ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
 esac
 exit 0
 SH
@@ -1787,6 +1802,18 @@ test_herdr_identity_and_default_captain_refusal() {
   new_case herdr-identity
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'status --json'*) printf '{"server":{"running":true}}\n' ;;
+  *'pane read'*) printf 'idle prompt\n' ;;
+  *'agent get'*) printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
   write_meta "$state" herdr-good good-inc ship herdr firstmate:pane-good
   printf 'herdr_session=firstmate\nherdr_workspace_id=ws\nherdr_tab_id=tab\nherdr_pane_id=pane\n' >> "$state/herdr-good.meta"
   printf 'herdr_session=default\n' >> "$state/herdr-good.meta"
@@ -1849,6 +1876,16 @@ test_pane_idle_proof_is_required_and_bound() {
   new_case pane-idle-proof
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *capture-pane*) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-idle prompt}" ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   write_meta "$state" pane-proof-x1 pane-proof-inc
   export FM_FAKE_CREW_STATE_PANE_PROOF_X1='state: done · source: pane · proof required'
   proof="$state/.pane-idle/pane-proof-x1"
@@ -1870,9 +1907,14 @@ test_pane_idle_proof_is_required_and_bound() {
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "mismatched incarnation scan failed"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "mismatched pane-idle incarnation was accepted"
   write_idle_proof "$state" pane-proof-x1 tmux tmux:fm-pane-proof-x1
+  export FM_FAKE_TMUX_CAPTURE='Working...'
+  export FM_BUSY_REGEX='Working\.\.\.'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "busy pane-idle proof scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "busy pane-idle proof was accepted"
+  export FM_FAKE_TMUX_CAPTURE='idle prompt'
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "valid pane-idle proof scan failed"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "valid pane-idle proof was not accepted"
-  unset FM_FAKE_CREW_STATE_PANE_PROOF_X1
+  unset FM_BUSY_REGEX FM_FAKE_TMUX_CAPTURE FM_FAKE_CREW_STATE_PANE_PROOF_X1
   pass "inactive replay requires a fresh identity-bound pane-idle proof"
 }
 
@@ -1898,7 +1940,12 @@ test_valid_secondmate_route_reports_parent_once() {
 set -u
 case "$*" in
   *"#{cursor_y}"*) printf '1\n' ;;
-  *capture-pane*) : ;;
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf 'idle prompt\n' ;;
+      *) : ;;
+    esac
+    ;;
   *) : ;;
 esac
 exit 0
@@ -2073,7 +2120,12 @@ test_deferred_recorded_secondmate_finishes_without_output() {
 set -u
 case "$*" in
   *"#{cursor_y}"*) printf '1\n' ;;
-  *capture-pane*) : ;;
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf 'idle prompt\n' ;;
+      *) : ;;
+    esac
+    ;;
   *) : ;;
 esac
 exit 0
@@ -2251,7 +2303,12 @@ test_secondmate_route_replacement_preserves_old_receipt() {
 set -u
 case "$*" in
   *"#{cursor_y}"*) printf '1\n' ;;
-  *capture-pane*) : ;;
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf 'idle prompt\n' ;;
+      *) : ;;
+    esac
+    ;;
   *) : ;;
 esac
 exit 0
