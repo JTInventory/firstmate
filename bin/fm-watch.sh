@@ -1063,17 +1063,6 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
-  drain_output=
-  drain_status=0
-  drain_output=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
-    FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" "$SCRIPT_DIR/fm-wake-drain.sh") \
-    || drain_status=$?
-  case "$drain_status" in
-    0) [ -n "$drain_output" ] && wake "$drain_output" ;;
-    3) exit 3 ;;
-    *) exit "$drain_status" ;;
-  esac
-
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
@@ -1147,6 +1136,17 @@ while :; do
     fi
     touch "$STATE/.last-check"
   fi
+
+  drain_output=
+  drain_status=0
+  drain_output=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
+    FM_WAKE_DRAIN_GENERATION="$WATCHER_PID" "$SCRIPT_DIR/fm-wake-drain.sh") \
+    || drain_status=$?
+  case "$drain_status" in
+    0) [ -n "$drain_output" ] && wake "$drain_output" ;;
+    3) exit 3 ;;
+    *) exit "$drain_status" ;;
+  esac
 
   # The helper owns its bounded cadence and receipt idempotence. A non-empty
   # result means it appended an inactive-outcome wake, so surface that wake in

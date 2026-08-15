@@ -202,7 +202,8 @@ scan() {
 }
 
 drain() {
-  local root=$1 home=$2 fakebin=$3 status
+  local root=$1 home=$2 fakebin=$3 status generation=${FM_WAKE_DRAIN_GENERATION:-$$}
+  [ "${4:-}" = no-generation ] && generation=
   if [ -d "$home/state" ] && [ ! -L "$home/state" ]; then
     prepare_primary_proof "$root" "$home" "$fakebin"
   fi
@@ -211,7 +212,7 @@ drain() {
       FM_STATE_OVERRIDE="$home/state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
       CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
       FM_WAKE_DRAIN_DEFER_ACK="${FM_WAKE_DRAIN_DEFER_ACK:-0}" \
-      FM_WAKE_DRAIN_GENERATION="${FM_WAKE_DRAIN_GENERATION:-}" "$DRAIN" )
+      FM_WAKE_DRAIN_GENERATION="$generation" "$DRAIN" )
   status=$?
   [ "$status" = 0 ] || [ "$status" = 3 ] || return "$status"
 }
@@ -500,9 +501,8 @@ exit 0
 SH
   chmod +x "$fakebin/find"
   export FM_INACTIVE_OUTCOME_BUDGET_SECS=1
-  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
-    fail "slow find enumeration exceeded the scan budget without failing"
-  fi
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "slow find enumeration terminated supervision instead of deferring"
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "budget-exhausted enumeration advanced the cadence marker"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "budget-exhausted enumeration created a receipt"
   unset FM_INACTIVE_OUTCOME_BUDGET_SECS
@@ -743,7 +743,7 @@ exec /usr/bin/mv "$@"
 SH
   chmod +x "$fakebin/mv"
   export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
-  export FM_WAKE_DRAIN_DIRECT=1
+  export FM_WAKE_DRAIN_DIRECT=1 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
   if drain "$root" "$home" "$fakebin" >"$dir/output-failure.out"; then
     fail "output completion failure was hidden"
   fi
@@ -769,7 +769,7 @@ SH
     || fail "output completion retry left the receipt pending"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
     || fail "output completion retry left a stale claim"
-  unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DIRECT
+  unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DIRECT FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
   pass "post-output failures retry without duplicate presentation"
 }
 
@@ -783,7 +783,7 @@ test_direct_drain_finalizes_after_successful_output() {
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "direct receipt setup failed"
   fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
   row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
-  export FM_WAKE_DRAIN_DIRECT=1
+  export FM_WAKE_DRAIN_DIRECT=1 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
   drain "$root" "$home" "$fakebin" >"$dir/direct.out" \
     || fail "direct drain did not finalize a successful presentation"
   grep -F "$row" "$dir/direct.out" >/dev/null || fail "direct drain did not emit the wake row"
@@ -795,8 +795,29 @@ test_direct_drain_finalizes_after_successful_output() {
   drain "$root" "$home" "$fakebin" >"$dir/direct-replay.out" \
     || fail "direct replay drain failed"
   [ ! -s "$dir/direct-replay.out" ] || fail "direct drain replayed a finalized receipt"
-  unset FM_FAKE_CREW_STATE_DIRECT_X1 FM_WAKE_DRAIN_DIRECT
+  unset FM_FAKE_CREW_STATE_DIRECT_X1 FM_WAKE_DRAIN_DIRECT FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
   pass "direct inactive drains finalize successful output once"
+}
+
+test_standalone_drain_refuses_inactive_ack() {
+  local dir root home fakebin state fingerprint row
+  new_case standalone-no-generation
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" standalone-x1 standalone-inc
+  export FM_FAKE_CREW_STATE_STANDALONE_X1='state: done · source: pane · standalone presentation'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "standalone receipt setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  unset FM_WAKE_DRAIN_DIRECT FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
+  if drain "$root" "$home" "$fakebin" no-generation >"$dir/standalone.out"; then
+    fail "standalone drain acknowledged an inactive outcome without generation"
+  fi
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "standalone drain removed the pending receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "standalone drain removed the wake row"
+  grep -F "$row" "$state/.wake-queue" >/dev/null || fail "standalone drain did not restore the wake row"
+  unset FM_FAKE_CREW_STATE_STANDALONE_X1
+  pass "standalone drain refuses inactive acknowledgement"
 }
 
 test_finalized_receipt_rows_are_suppressed() {
@@ -3067,6 +3088,7 @@ test_uncertain_output_claim_fails_closed
 test_pre_output_claim_retries_after_crash
 test_output_completion_failure_does_not_reprint
 test_direct_drain_finalizes_after_successful_output
+test_standalone_drain_refuses_inactive_ack
 test_finalized_receipt_rows_are_suppressed
 test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain

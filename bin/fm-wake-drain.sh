@@ -17,24 +17,53 @@ DRAIN_LOCK_HELD=false
 DRAIN_ACTIONABLE=0
 DRAIN_CURRENT_RETAINED=0
 
+inactive_generation_valid() {
+  local generation=${FM_WAKE_DRAIN_GENERATION:-}
+  case "${FM_WAKE_DRAIN_DEFER_ACK:-0}" in 0|1) ;; *) return 1 ;; esac
+  case "$generation" in ''|*[!0-9]*|0) return 1 ;; esac
+  kill -0 "$generation" 2>/dev/null || return 1
+  fm_pid_start "$generation" >/dev/null 2>&1
+}
+
 present_inactive_row() {
-  local key=$1 row=$2 status=0 go emitted worker worker_status=0
+  local key=$1 row=$2 status=0 go emitted worker worker_status=0 generation
   local _epoch _seq _kind _queued_key payload
+  generation=${FM_WAKE_DRAIN_GENERATION:-}
   if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ]; then
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-      output-started "$key" "$row" >/dev/null 2>&1 || return 1
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-      output-emitted "$key" "$row" >/dev/null 2>&1 || return 1
-    printf '%s\n' "$row" || return 1
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+    emitted=0
+    if FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+      output-emitted-state "$key" "$row" >/dev/null 2>&1; then
+      emitted=1
+    else
+      worker_status=$?
+      [ "$worker_status" = 1 ] || return 1
+    fi
+    if [ "$emitted" = 0 ]; then
+      FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        output-started "$key" "$row" >/dev/null 2>&1 || return 1
+      FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        output-emitted "$key" "$row" >/dev/null 2>&1 || return 1
+      printf '%s\n' "$row" || return 1
+    fi
+    FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-confirmed "$key" "$row" >/dev/null 2>&1 || return 1
-    if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+    if FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-complete "$key" "$row"; then
-      if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-        presented "$key" "$row" >/dev/null 2>&1; then
-        return 0
-      fi
-      return 3
+      FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        caller-output-complete-locked "$key" "$row" "$generation" >/dev/null 2>&1 || return 3
+      FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        presented "$key" "$row" >/dev/null 2>&1 || return 3
+      FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$generation" \
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        ack "$key" "$row" 0 "$generation" >/dev/null 2>&1 || return 3
+      return 0
     fi
     return 3
   fi
@@ -93,6 +122,12 @@ present_inactive_row() {
       fi
     else
       :
+    fi
+  fi
+  if [ "$status" = 0 ] && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
+    if [ -n "$generation" ]; then
+      FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+        caller-output-complete-locked "$key" "$row" "$generation" >/dev/null 2>&1 || status=3
     fi
   fi
   if [ "$status" = 0 ] && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
@@ -190,12 +225,18 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
   IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
   case "$_key" in
     inactive-outcome:*)
+      if ! inactive_generation_valid; then
+        restore_unprocessed_rows "$drain_line" || exit 1
+        exit 2
+      fi
       claim_status=0
       FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" claim "$_key" "$drain_row" || claim_status=$?
       case "$claim_status" in
         0)
           DRAIN_ACTIONABLE=1
-          if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presenting "$_key" "$drain_row"; then
+          if ! FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK="${FM_WAKE_DRAIN_DEFER_ACK:-0}" \
+            FM_WAKE_DRAIN_GENERATION="${FM_WAKE_DRAIN_GENERATION:-}" \
+            FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presenting "$_key" "$drain_row"; then
             restore_unprocessed_rows "$drain_line" || exit 1
             exit 1
           fi
@@ -229,7 +270,8 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       esac
       if [ "$claim_status" != 3 ] && [ "$claim_status" != 4 ] \
         && { [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ] || [ "$claim_status" = 5 ]; }; then
-        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" ack "$_key" "$drain_row" || {
+        FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
+          ack "$_key" "$drain_row" 0 "${FM_WAKE_DRAIN_GENERATION:-}" || {
           ack_status=$?
           # 1 means the receipt was already acknowledged or is not ours. Any
           # other failure keeps the drained row durable for a later turn.
