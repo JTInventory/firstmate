@@ -233,11 +233,19 @@ sub expired {
 my $cursor = '';
 if (-e $cursor_path) {
   my $cfh = open_read($cursor_path) or exit 1;
-  $cursor = <$cfh> // '';
-  chomp $cursor;
+  local $/;
+  my $raw_cursor = <$cfh> // '';
+  $raw_cursor =~ /\A(.*)\n\z/s or exit 1;
+  $cursor = $1;
   close($cfh) or exit 1;
+  $cursor ne '' or exit 1;
 }
-$cursor = '' if $cursor ne '' && $cursor ne 'EOF' && $cursor !~ /^\d+\z/;
+if ($cursor ne '' && $cursor ne 'EOF') {
+  $cursor =~ /\A\Q$state\E\/[^\/\r\n\x00]+\.meta\z/ or exit 1;
+  if (-e $cursor || -l $cursor) {
+    (-f $cursor && !-l $cursor) or exit 1;
+  }
+}
 
 while (1) {
   exit 124 if expired();

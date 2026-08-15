@@ -2088,6 +2088,57 @@ test_pane_idle_index_refreshes_changed_metadata() {
   pass "pane-idle index refreshes after metadata creation"
 }
 
+test_pane_idle_index_resumes_and_rejects_path_cursor() {
+  local dir root home fakebin state progress output stamp
+  new_case pane-idle-index-cursor
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  progress="$state/.pane-idle-meta-index"
+  output="$state/cursor-output"
+  write_meta "$state" cursor-a cursor-a-inc
+  write_meta "$state" cursor-b cursor-b-inc
+  mkdir -p "$progress"
+  : > "$output"
+  printf '%s\n%s\n' "$state/cursor-a.meta" "$state/cursor-b.meta" > "$progress/.scan.entries"
+  printf 'complete\n' > "$progress/.scan.entries.complete"
+  stamp=$(env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_path_stamp "$2"' \
+    _ "$ROOT" "$state") || fail "could not stamp the pane-idle metadata state"
+  printf '%s\n' "$stamp" > "$progress/.scan.entries.stamp"
+  printf '%s\n' "$state/cursor-a.meta" > "$progress/.scan.cursor"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_collect "$2" "$3"' \
+    _ "$ROOT" "$state" "$output" || fail "valid path cursor did not resume the pane-idle scan"
+  [ ! -e "$progress/.scan.seen" ] || \
+    ! grep -Fqx "$state/cursor-a.meta" "$progress/.scan.seen" \
+    || fail "valid path cursor rescanned its completed metadata"
+  grep -Fqx "$state/cursor-b.meta" "$progress/.scan.seen" \
+    || fail "valid path cursor skipped the remaining metadata"
+
+  new_case pane-idle-index-invalid-cursor
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  progress="$state/.pane-idle-meta-index"
+  output="$state/cursor-output"
+  write_meta "$state" invalid-a invalid-a-inc
+  mkdir -p "$progress"
+  : > "$output"
+  printf '%s\n' "$state/invalid-a.meta" > "$progress/.scan.entries"
+  printf 'complete\n' > "$progress/.scan.entries.complete"
+  stamp=$(env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_path_stamp "$2"' \
+    _ "$ROOT" "$state") || fail "could not stamp the invalid cursor state"
+  printf '%s\n' "$stamp" > "$progress/.scan.entries.stamp"
+  printf '/tmp/unsafe-pane-idle.meta\n' > "$progress/.scan.cursor"
+  if env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_collect "$2" "$3"' \
+    _ "$ROOT" "$state" "$output"; then
+    fail "unsafe path cursor was accepted"
+  fi
+  [ ! -s "$progress/.scan.seen" ] || fail "unsafe path cursor processed metadata"
+  pass "pane-idle scan resumes valid path cursors and rejects unsafe cursors"
+}
+
 test_secondmate_route_accepts_effective_state_overrides() {
   local dir root home fakebin child_home child_state effective_state pending_dir corr marker
   new_case secondmate-effective-state
@@ -3260,6 +3311,7 @@ test_pane_idle_proof_is_required_and_bound
 test_pane_idle_publication_rechecks_under_lock
 test_pane_idle_index_reclaims_retired_windows
 test_pane_idle_index_refreshes_changed_metadata
+test_pane_idle_index_resumes_and_rejects_path_cursor
 test_secondmate_route_accepts_effective_state_overrides
 test_valid_secondmate_route_reports_parent_once
 test_deferred_recorded_secondmate_finishes_without_output
