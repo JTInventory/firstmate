@@ -1489,13 +1489,13 @@ while (defined(my $entry = readdir($dh))) {
 closedir($dh) or exit 1;
 PERL
   else
-    return 0
+    return 124
   fi
 }
 
 repair_reported_secondmate_routes() {
   local scan_deadline=$1 reported kind corr parent_task_id parent_home parent_status remaining status=0
-  local cursor='' cursor_found=0 started=1 pass base last processed=0 cursor_tmp candidate_tmp enum_rc
+  local cursor='' cursor_found=0 started=1 pass base last processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
   MAINTENANCE_ENUM_DEFERRED=0
   MAINTENANCE_ENUM_FAILED=0
   MAINTENANCE_ITEMS_PROCESSED=0
@@ -1535,12 +1535,12 @@ repair_reported_secondmate_routes() {
       status=1
       if [ "$enum_rc" = 124 ]; then
         MAINTENANCE_ENUM_DEFERRED=1
+        enum_deferred=1
       else
         MAINTENANCE_ENUM_FAILED=1
       fi
-      break
     fi
-    while IFS= read -r -d '' reported; do
+    while [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && IFS= read -r -d '' reported; do
       case "$reported" in "$OUTCOME_DIR"/*/*) continue ;; esac
       base=${reported##*/}
       if [ "$pass" = 1 ] && [ -n "$cursor" ] && [ "$started" = 0 ]; then
@@ -1578,6 +1578,7 @@ repair_reported_secondmate_routes() {
       processed=$((processed + 1))
       [ "$processed" -lt "$REPORTED_ROUTE_REPAIR_LIMIT" ] || break 2
     done < "$candidate_tmp"
+    [ "$enum_deferred" = 0 ] || break
   done
   rm -f "$candidate_tmp" || status=1
   if [ "$processed" -gt 0 ]; then
@@ -1613,7 +1614,7 @@ republish_pending_receipt() {
 republish_pending_receipts() {
   local scan_deadline=$1 pending remaining status=0
   local cursor='' cursor_found=0 pass started=1
-  local base last='' processed=0 cursor_tmp candidate_tmp enum_rc
+  local base last='' processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
   local LC_ALL=C
   MAINTENANCE_ENUM_DEFERRED=0
   MAINTENANCE_ENUM_FAILED=0
@@ -1648,12 +1649,12 @@ republish_pending_receipts() {
       status=1
       if [ "$enum_rc" = 124 ]; then
         MAINTENANCE_ENUM_DEFERRED=1
+        enum_deferred=1
       else
         MAINTENANCE_ENUM_FAILED=1
       fi
-      break
     fi
-    while IFS= read -r -d '' pending; do
+    while [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && IFS= read -r -d '' pending; do
       case "$pending" in "$OUTCOME_DIR"/*/*) continue ;; esac
       base=${pending##*/}
       if [ "$pass" = 1 ] && [ -n "$cursor" ] && [ "$started" = 0 ]; then
@@ -1684,6 +1685,7 @@ republish_pending_receipts() {
       processed=$((processed + 1))
       [ "$processed" -lt "$PENDING_RECEIPT_REPUBLISH_LIMIT" ] || break 2
     done < "$candidate_tmp"
+    [ "$enum_deferred" = 0 ] || break
   done
   rm -f "$candidate_tmp" || status=1
   if [ "$processed" -gt 0 ]; then
@@ -2047,9 +2049,6 @@ reconcile_child() {
   [ "$route_rc" = 0 ] && KIND=secondmate
   FP=$(hash_text "$id|$INC|$outcome|$snapshot|$KIND") || return 1
   if ! wake_queue_lock_acquire; then
-    if [ "$route_rc" = 1 ]; then
-      receipt_write || return 75
-    fi
     return 75
   fi
   surface_status=0
@@ -2428,7 +2427,7 @@ scan_locked() {
       fi
     fi
   fi
-  while [ "$direct_deferred" = 0 ] && [ "$scan_failed" = 0 ] && IFS= read -r -d '' meta; do
+  while [ "$scan_failed" = 0 ] && IFS= read -r -d '' meta; do
     remaining=$(budget_remaining_secs "$scan_deadline")
     if [ "$remaining" -le 0 ]; then
       complete=0

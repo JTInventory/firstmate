@@ -649,9 +649,9 @@ surface_retry_published_current() {
   case "$published" in
     1) return 0 ;;
     2)
-      [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 0
+      [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
       awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
-        "$FM_WAKE_QUEUE" 2>/dev/null || return 0
+        "$FM_WAKE_QUEUE" 2>/dev/null || return 1
       surface_retry_mark_published "$task" "$last" "$wake_key" || return 2
       return 0
       ;;
@@ -1249,14 +1249,16 @@ EOF
       # where every verified harness renders its busy indicator) so busy-looking
       # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
-        idle_meta=$(fm_pane_idle_meta_for_window "$STATE" "$w" 2>/dev/null || true)
-        if [ -n "$idle_meta" ]; then
-          idle_task=${idle_meta##*/}
-          idle_task=${idle_task%.meta}
-          idle_backend=$(fm_backend_of_meta "$idle_meta")
-          fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n" || exit 1
-        else
-          fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
+        if [ "$(window_kind "$w")" != secondmate ]; then
+          idle_meta=$(fm_pane_idle_meta_for_window "$STATE" "$w" 2>/dev/null || true)
+          if [ -n "$idle_meta" ]; then
+            idle_task=${idle_meta##*/}
+            idle_task=${idle_task%.meta}
+            idle_backend=$(fm_backend_of_meta "$idle_meta")
+            fm_pane_idle_write "$STATE" "$idle_meta" "$idle_task" "$w" "$idle_backend" "$h" "$n" || exit 1
+          else
+            fm_pane_idle_clear_for_window "$STATE" "$w" || exit 1
+          fi
         fi
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
