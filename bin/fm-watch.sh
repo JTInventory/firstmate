@@ -96,6 +96,8 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # turn-end hook) coalesce into one wake
 PANE_IDLE_INDEX_BUDGET_SECS=$(positive_seconds_or_default \
   "${FM_PANE_IDLE_INDEX_BUDGET_SECS:-1}" 1)
+WAKE_QUEUE_STATUS_BUDGET_SECS=$(positive_seconds_or_default \
+  "${FM_WAKE_QUEUE_STATUS_BUDGET_SECS:-1}" 1)
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
@@ -264,7 +266,17 @@ hash_pane() {
 }
 
 window_kind() {
-  local w=$1 meta mw kind
+  local w=$1 deadline_ms=${2:-} meta mw kind
+  if [ -n "$deadline_ms" ]; then
+    if ! meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null); then
+      echo unknown
+      return 0
+    fi
+    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
+    [ -n "$kind" ] || kind=ship
+    echo "$kind"
+    return 0
+  fi
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
@@ -278,13 +290,32 @@ window_kind() {
 }
 
 window_backend() {  # <window>
-  local w=$1 meta
+  local w=$1 deadline_ms=${2:-} meta
+  if [ -n "$deadline_ms" ]; then
+    if ! meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null); then
+      printf 'tmux'
+      return 0
+    fi
+    fm_backend_of_meta "$meta"
+    return 0
+  fi
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
   [ -n "$meta" ] && fm_backend_of_meta "$meta" || printf 'tmux'
 }
 
 recorded_windows() {
-  local meta w seen=
+  local deadline_ms=${1:-} meta w seen=
+  if [ -n "$deadline_ms" ]; then
+    if [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ] \
+      && [ -f "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ] \
+      && [ ! -L "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ]; then
+      fm_pane_idle_meta_index_windows_from_snapshot \
+        "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "$deadline_ms"
+    else
+      fm_pane_idle_meta_index_windows_direct "$STATE" "$deadline_ms"
+    fi
+    return $?
+  fi
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     w=$(grep '^window=' "$meta" | cut -d= -f2- || true)
@@ -916,29 +947,54 @@ terminal_surface_marker_current() {
 }
 
 inactive_replay_queued_for_task() {
-  local task=$1 last outcome key payload fp rec incarnation expected_incarnation
-  [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+  local task=$1 last outcome fp rec expected_incarnation queue_deadline queue_match rc
+  [ -e "$FM_WAKE_QUEUE" ] || return 1
+  [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 2
   last=$(last_status_line "$STATE/$task.status") || return 2
   outcome=${last%%:*}
   case "$outcome" in done|failed) ;; *) return 1 ;; esac
   expected_incarnation=$(surface_replay_incarnation "$task") || return 2
-  while IFS=$(printf '\t') read -r _epoch _seq kind key payload; do
-    [ "$kind" = check ] || continue
-    case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) continue ;; esac
-    case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
-    case "$payload" in *"task=$task "*) ;; *) continue ;; esac
-    for rec in "$STATE/terminal-outcomes/$fp.pending" \
-      "$STATE/terminal-outcomes/$fp.presented" "$STATE/terminal-outcomes/$fp.reported"; do
-      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
-      [ "$(surface_meta_value_unique "$rec" schema 2>/dev/null)" = fm-jt-terminal-outcome.v1 ] || return 2
-      [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$fp" ] || return 2
-      [ "$(surface_meta_value_unique "$rec" task_id 2>/dev/null)" = "$task" ] || return 2
-      [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
-      [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
-      [ "$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null)" = "$last" ] || continue
-      return 0
-    done
-  done < "$FM_WAKE_QUEUE"
+  queue_deadline=$(( $(fm_pane_idle_now_ms) + WAKE_QUEUE_STATUS_BUDGET_SECS * 1000 ))
+  queue_match=$(fm_pane_idle_run_bounded_perl "$queue_deadline" "$FM_WAKE_QUEUE" "$task" <<'PERL'
+use strict;
+use warnings;
+my ($queue, $task) = @ARGV;
+open(my $fh, '<', $queue) or exit 2;
+my $needle = "task=$task ";
+while (defined(my $line = <$fh>)) {
+  chomp $line;
+  my @fields = split(/\t/, $line, 5);
+  @fields == 5 or exit 2;
+  next unless $fields[2] eq 'check';
+  next unless $fields[3] =~ /\Ainactive-outcome:(.*)\z/;
+  my $fp = $1;
+  $fp ne '' && $fp =~ /\A[A-Fa-f0-9]+\z/ or exit 2;
+  next unless index($fields[4], $needle) >= 0;
+  print $fp or exit 2;
+  close($fh) or exit 2;
+  exit 0;
+}
+close($fh) or exit 2;
+exit 1;
+PERL
+  )
+  rc=$?
+  case "$rc" in
+    0) fp=$queue_match ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+  for rec in "$STATE/terminal-outcomes/$fp.pending" \
+    "$STATE/terminal-outcomes/$fp.presented" "$STATE/terminal-outcomes/$fp.reported"; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    [ "$(surface_meta_value_unique "$rec" schema 2>/dev/null)" = fm-jt-terminal-outcome.v1 ] || return 2
+    [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$fp" ] || return 2
+    [ "$(surface_meta_value_unique "$rec" task_id 2>/dev/null)" = "$task" ] || return 2
+    [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
+    [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
+    [ "$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null)" = "$last" ] || continue
+    return 0
+  done
   return 1
 }
 
@@ -1301,11 +1357,11 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, except while a declared pause
     # marker is active so the same bounded re-surface cadence still applies.
-    if [ "$(window_kind "$w")" = secondmate ]; then
+    if [ "$(window_kind "$w" "$pane_idle_index_deadline")" = secondmate ]; then
       key=$(printf '%s' "$w" | tr ':/.' '___')
       [ -e "$STATE/.paused-$key" ] || continue
     fi
-    backend=$(window_backend "$w")
+    backend=$(window_backend "$w" "$pane_idle_index_deadline")
     if ! tail40=$(fm_backend_capture "$backend" "$w" 40 2>/dev/null); then
       reason="check: backend capture failed for $w (backend=$backend); inspect the runtime endpoint and task metadata"
       fm_wake_append check "$w" "$reason" || exit 1
@@ -1325,7 +1381,7 @@ EOF
       # where every verified harness renders its busy indicator) so busy-looking
       # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
-        if [ "$(window_kind "$w")" != secondmate ]; then
+        if [ "$(window_kind "$w" "$pane_idle_index_deadline")" != secondmate ]; then
           idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
             "$pane_idle_index_deadline" 2>/dev/null || true)
           if [ -n "$idle_meta" ]; then
@@ -1443,7 +1499,7 @@ EOF
       fi
       rm -f "$ssf"
     fi
-  done < <(recorded_windows)
+  done < <(recorded_windows "$pane_idle_index_deadline")
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

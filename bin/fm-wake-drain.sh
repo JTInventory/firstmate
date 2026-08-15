@@ -16,6 +16,10 @@ DRAIN_PID=${BASHPID:-$$}
 DRAIN_LOCK_HELD=false
 DRAIN_ACTIONABLE=0
 DRAIN_CURRENT_RETAINED=0
+DRAIN_BATCH_ROWS=${FM_WAKE_DRAIN_BATCH_ROWS:-16}
+case "$DRAIN_BATCH_ROWS" in
+  ''|*[!0-9]*|0) DRAIN_BATCH_ROWS=16 ;;
+esac
 
 inactive_generation_valid() {
   local generation=${FM_WAKE_DRAIN_GENERATION:-}
@@ -172,9 +176,35 @@ restore_unprocessed_rows() {
   DRAIN_RESTORE=$restored
 }
 
+drain_batch_stop() {
+  local start=$1
+  restore_unprocessed_rows "$start" || return 1
+  if [ -s "$DRAIN_RESTORE" ]; then
+    fm_wake_restore_queue "$DRAIN_RESTORE" || return 1
+  fi
+  rm -f "$DRAIN_RESTORE" "$DRAIN_TMP" "$DRAIN_DEDUPED"
+  DRAIN_RESTORE=
+  DRAIN_TMP=
+  DRAIN_DEDUPED=
+  assert_watcher_liveness
+  if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ] && [ "$DRAIN_ACTIONABLE" = 1 ]; then
+    return 3
+  fi
+  return 0
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$? restore_status=0
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] \
+    && [ "$DRAIN_LOCK_HELD" = false ] \
+    && { [ -n "$DRAIN_TMP" ] || [ -n "$DRAIN_RESTORE" ]; }; then
+    if fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+      DRAIN_LOCK_HELD=true
+    else
+      restore_status=1
+    fi
+  fi
   if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] && [ "$DRAIN_LOCK_HELD" = true ]; then
     if [ -n "$DRAIN_RESTORE" ] && [ -e "$DRAIN_RESTORE" ]; then
       fm_wake_restore_queue "$DRAIN_RESTORE" || restore_status=1
@@ -216,7 +246,13 @@ rm -f "$DRAIN_DEDUPED"
 mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
 : > "$FM_WAKE_QUEUE" || exit 1
 
-fm_wake_print_deduped "$DRAIN_TMP" > "$DRAIN_DEDUPED" || exit "$?"
+fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
+DRAIN_LOCK_HELD=false
+if ! fm_wake_print_deduped "$DRAIN_TMP" > "$DRAIN_DEDUPED"; then
+  exit 1
+fi
+fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+DRAIN_LOCK_HELD=true
 # Inactive-outcome rows are acknowledged only after their matching durable
 # receipt is presented. A one-time claim binds the receipt to this locked drain.
 drain_line=0
@@ -290,6 +326,12 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       DRAIN_ACTIONABLE=1
       ;;
   esac
+  if [ "$drain_line" -ge "$DRAIN_BATCH_ROWS" ]; then
+    drain_batch_stop "$((drain_line + 1))"
+    batch_status=$?
+    [ "$batch_status" = 0 ] || exit "$batch_status"
+    exit 0
+  fi
 done < "$DRAIN_DEDUPED"
 rm -f "$DRAIN_TMP"
 DRAIN_TMP=

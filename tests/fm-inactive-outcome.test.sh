@@ -847,6 +847,26 @@ test_finalized_receipt_rows_are_suppressed() {
   pass "finalized receipt rows are suppressed after drain rollback"
 }
 
+test_drain_processes_bounded_batches() {
+  local dir root home fakebin state first second
+  new_case drain-batch
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  first=$'1\t1\tcheck\tbatch-first\tfirst batch wake'
+  second=$'1\t2\tcheck\tbatch-second\tsecond batch wake'
+  printf '%s\n%s\n' "$first" "$second" > "$state/.wake-queue"
+  export FM_WAKE_DRAIN_BATCH_ROWS=1
+  drain "$root" "$home" "$fakebin" > "$dir/drain.out" \
+    || fail "bounded wake drain failed"
+  grep -Fqx "$first" "$dir/drain.out" || fail "bounded wake drain skipped its first row"
+  ! grep -Fqx "$second" "$dir/drain.out" || fail "bounded wake drain processed beyond its batch"
+  [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
+    || fail "bounded wake drain did not restore the remainder"
+  grep -Fqx "$second" "$state/.wake-queue" || fail "bounded wake drain restored the wrong remainder"
+  unset FM_WAKE_DRAIN_BATCH_ROWS
+  pass "wake drain restores unprocessed bounded batches"
+}
+
 test_malformed_finalized_receipt_fails_closed() {
   local dir root home fakebin state fingerprint row
   new_case malformed-finalized-receipt
@@ -2123,6 +2143,68 @@ SH
   pass "pane-idle index retries metadata stamp races"
 }
 
+test_pane_idle_snapshot_reads_honor_deadline() {
+  local dir root home fakebin state deadline status
+  new_case pane-idle-snapshot-deadline
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" snapshot-deadline-x1 snapshot-deadline-inc
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${2:-}" in
+  */.pane-idle-meta-index/snapshot) sleep 2 ;;
+esac
+exec /usr/bin/perl "$@"
+SH
+  chmod +x "$fakebin/perl"
+  set +e
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" bash -c '
+      . "$1/bin/fm-pane-idle-lib.sh"
+      fm_pane_idle_meta_index_build "$2" || exit 1
+      deadline=$(( $(fm_pane_idle_now_ms) + 1000 ))
+      fm_pane_idle_meta_for_window "$2" tmux:fm-snapshot-deadline-x1 "$deadline" >/dev/null
+    ' _ "$ROOT" "$state"
+  status=$?
+  set -u
+  [ "$status" = 124 ] || fail "indexed snapshot lookup ignored its deadline"
+  pass "pane-idle snapshot reads honor deadlines"
+}
+
+test_pane_idle_snapshot_compare_honors_deadline() {
+  local dir root home fakebin state index deadline status
+  new_case pane-idle-snapshot-compare-deadline
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"; index="$state/index"
+  write_meta "$state" snapshot-compare-x1 snapshot-compare-inc
+  mkdir -p "$index"
+  cat > "$fakebin/cmp" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_TEST_SLEEP_CMP:-0}" = 1 ]; then sleep 2; fi
+exec /usr/bin/cmp "$@"
+SH
+  chmod +x "$fakebin/cmp"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" FM_TEST_SLEEP_CMP=0 bash -c '
+      . "$1/bin/fm-pane-idle-lib.sh"
+      fm_pane_idle_meta_index_persist "$2" "$3"
+    ' _ "$ROOT" "$state" "$index" \
+    || fail "could not create the baseline pane-idle snapshot"
+  set +e
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" FM_TEST_SLEEP_CMP=1 bash -c '
+      . "$1/bin/fm-pane-idle-lib.sh"
+      deadline=$(( $(fm_pane_idle_now_ms) + 1000 ))
+      fm_pane_idle_meta_index_persist "$2" "$3" "$deadline"
+    ' _ "$ROOT" "$state" "$index"
+  status=$?
+  set -u
+  [ "$status" = 124 ] || fail "snapshot comparison ignored its deadline"
+  pass "pane-idle snapshot comparisons honor deadlines"
+}
+
 test_pane_idle_lookup_propagates_deadline() {
   local dir root home fakebin state deadline status proof
   new_case pane-idle-lookup-deadline
@@ -3377,6 +3459,7 @@ test_pre_output_claim_retries_after_crash
 test_output_completion_failure_does_not_reprint
 test_direct_drain_finalizes_after_successful_output
 test_standalone_drain_refuses_inactive_ack
+test_drain_processes_bounded_batches
 test_finalized_receipt_rows_are_suppressed
 test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
@@ -3408,6 +3491,8 @@ test_pane_idle_publication_rechecks_under_lock
 test_pane_idle_index_reclaims_retired_windows
 test_pane_idle_index_refreshes_changed_metadata
 test_pane_idle_index_retries_metadata_stamp_race
+test_pane_idle_snapshot_reads_honor_deadline
+test_pane_idle_snapshot_compare_honors_deadline
 test_pane_idle_lookup_propagates_deadline
 test_pane_idle_index_resumes_and_rejects_path_cursor
 test_pane_idle_index_retries_partial_publication_idempotently
