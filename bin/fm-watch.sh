@@ -269,13 +269,13 @@ window_kind() {
   local w=$1 deadline_ms=${2:-} meta mw kind
   if [ -n "$deadline_ms" ]; then
     if ! meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null); then
-      echo unknown
-      return 0
+      return 1
     fi
     kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-    [ -n "$kind" ] || kind=ship
-    echo "$kind"
-    return 0
+    case "$kind" in
+      ship|scout|secondmate) printf '%s\n' "$kind"; return 0 ;;
+      *) return 1 ;;
+    esac
   fi
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -293,11 +293,12 @@ window_backend() {  # <window>
   local w=$1 deadline_ms=${2:-} meta
   if [ -n "$deadline_ms" ]; then
     if ! meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null); then
-      printf 'tmux'
-      return 0
+      return 1
     fi
-    fm_backend_of_meta "$meta"
-    return 0
+    case "$(grep '^backend=' "$meta" | cut -d= -f2- || true)" in
+      tmux|herdr) grep '^backend=' "$meta" | cut -d= -f2-; return 0 ;;
+      *) return 1 ;;
+    esac
   fi
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
   [ -n "$meta" ] && fm_backend_of_meta "$meta" || printf 'tmux'
@@ -685,12 +686,52 @@ surface_retry_complete_consumed() {
   return 0
 }
 
+surface_retry_ordinary_consumed() {
+  local retry=$1 task=$2 last=$3 wake_key=$4 marker spawn_incarnation
+  [ "$wake_key" = "$task" ] || return 1
+  marker=$(fm_wake_surface_consumed_path "$task")
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  awk -F= '
+    BEGIN {
+      allowed["schema"]=1; allowed["task"]=1; allowed["wake_key"]=1
+      allowed["snapshot"]=1; allowed["spawn_incarnation"]=1
+      required["schema"]=1; required["task"]=1; required["wake_key"]=1
+      required["snapshot"]=1; required["spawn_incarnation"]=1
+      valid=1
+    }
+    /^[^=]+=/ {
+      key=$1
+      if (!(key in allowed) || (key in seen)) valid=0
+      seen[key]=1
+      values[key]=substr($0, index($0, "=") + 1)
+      next
+    }
+    { valid=0 }
+    END {
+      for (key in required) if (!(key in seen)) valid=0
+      exit !(valid && values["schema"] == "fm-hb-surface-consumed.v1")
+    }
+  ' "$marker" 2>/dev/null || return 2
+  [ "$(surface_meta_value_unique "$marker" task 2>/dev/null)" = "$task" ] || return 2
+  [ "$(surface_meta_value_unique "$marker" wake_key 2>/dev/null)" = "$wake_key" ] || return 2
+  [ "$(surface_meta_value_unique "$marker" snapshot 2>/dev/null)" = "$last" ] || return 1
+  spawn_incarnation=$(surface_meta_value_unique "$retry" spawn_incarnation 2>/dev/null) || return 2
+  [ "$(surface_meta_value_unique "$marker" spawn_incarnation 2>/dev/null)" = "$spawn_incarnation" ] || return 1
+  surface_retry_complete_consumed "$retry" "$task" "$last" \
+    "$spawn_incarnation" \
+    "$(surface_meta_value_unique "$retry" tasktmp 2>/dev/null)" \
+    "$(surface_meta_value_unique "$retry" window 2>/dev/null)" \
+    "$(surface_meta_value_unique "$retry" worktree 2>/dev/null)" || return $?
+  rm -f "$marker" || return 2
+  return 0
+}
+
 surface_retry_receipt_consumed() {
   local retry=$1 task=$2 last=$3 wake_key=$4 fp rec suffix outcome expected_incarnation
   local spawn_incarnation tasktmp window worktree
   case "$wake_key" in
     inactive-outcome:*) fp=${wake_key#inactive-outcome:} ;;
-    *) return 1 ;;
+    *) surface_retry_ordinary_consumed "$retry" "$task" "$last" "$wake_key"; return $? ;;
   esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   surface_retry_matches_current "$retry" "$task" "$last" || return 1
@@ -1357,11 +1398,13 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, except while a declared pause
     # marker is active so the same bounded re-surface cadence still applies.
-    if [ "$(window_kind "$w" "$pane_idle_index_deadline")" = secondmate ]; then
+    kind=
+    kind=$(window_kind "$w" "$pane_idle_index_deadline") || continue
+    if [ "$kind" = secondmate ]; then
       key=$(printf '%s' "$w" | tr ':/.' '___')
       [ -e "$STATE/.paused-$key" ] || continue
     fi
-    backend=$(window_backend "$w" "$pane_idle_index_deadline")
+    backend=$(window_backend "$w" "$pane_idle_index_deadline") || continue
     if ! tail40=$(fm_backend_capture "$backend" "$w" 40 2>/dev/null); then
       reason="check: backend capture failed for $w (backend=$backend); inspect the runtime endpoint and task metadata"
       fm_wake_append check "$w" "$reason" || exit 1
@@ -1381,7 +1424,7 @@ EOF
       # where every verified harness renders its busy indicator) so busy-looking
       # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
-        if [ "$(window_kind "$w" "$pane_idle_index_deadline")" != secondmate ]; then
+        if [ "$kind" != secondmate ]; then
           idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
             "$pane_idle_index_deadline" 2>/dev/null || true)
           if [ -n "$idle_meta" ]; then

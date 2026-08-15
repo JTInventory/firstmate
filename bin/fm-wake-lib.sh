@@ -733,6 +733,76 @@ fm_wake_restore_queue() {
   return "$status"
 }
 
+fm_wake_queue_signature() {
+  local queue=$1
+  if [ ! -e "$queue" ]; then
+    printf 'missing'
+    return 0
+  fi
+  [ -f "$queue" ] && [ ! -L "$queue" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%d:%i:%z:%m' "$queue" 2>/dev/null
+  else
+    stat -c '%d:%i:%s:%Y:%y' "$queue" 2>/dev/null
+  fi
+}
+
+fm_wake_restore_queue_atomic() {
+  local drained=$1 restore expected current status=0 attempt
+  [ -f "$drained" ] && [ ! -L "$drained" ] || return 1
+  for attempt in 1 2 3 4 5 6 7 8; do
+    expected=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || return 1
+    restore=$(mktemp "$STATE/.wake-queue.restore.XXXXXX") || return 1
+    [ -f "$restore" ] && [ ! -L "$restore" ] || { rm -f "$restore"; return 1; }
+    if [ -e "$FM_WAKE_QUEUE" ]; then
+      [ -f "$FM_WAKE_QUEUE" ] || { rm -f "$restore"; return 1; }
+      cat "$drained" "$FM_WAKE_QUEUE" > "$restore" || status=1
+    else
+      cat "$drained" > "$restore" || status=1
+    fi
+    if [ "$status" -ne 0 ]; then
+      rm -f "$restore"
+      return 1
+    fi
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || { rm -f "$restore"; return 1; }
+    current=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || status=1
+    if [ "$status" -eq 0 ] && [ "$current" = "$expected" ] \
+      && [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE"; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
+      return 0
+    fi
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    rm -f "$restore"
+    status=0
+  done
+  return 1
+}
+
+fm_wake_surface_consumed_path() {
+  printf '%s/.hb-surface-consumed-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
+}
+
+fm_wake_mark_surface_consumed() {
+  local key=$1 retry marker tmp retry_key published snapshot spawn_incarnation
+  retry="$STATE/.hb-surface-retry-$(printf '%s' "$key" | tr ':/.' '___')"
+  [ -e "$retry" ] || return 0
+  [ -f "$retry" ] && [ ! -L "$retry" ] || return 1
+  retry_key=$(awk -F= -v wanted=wake_key '$1 == wanted { print substr($0, index($0, "=") + 1); count++ } END { exit(count == 1 ? 0 : 1) }' "$retry" 2>/dev/null) || return 1
+  [ "$retry_key" = "$key" ] || return 0
+  published=$(awk -F= -v wanted=wake_published '$1 == wanted { print substr($0, index($0, "=") + 1); count++ } END { exit(count == 1 ? 0 : 1) }' "$retry" 2>/dev/null) || return 1
+  [ "$published" = 2 ] || return 0
+  snapshot=$(awk -F= -v wanted=snapshot '$1 == wanted { print substr($0, index($0, "=") + 1); count++ } END { exit(count == 1 ? 0 : 1) }' "$retry" 2>/dev/null) || return 1
+  spawn_incarnation=$(awk -F= -v wanted=spawn_incarnation '$1 == wanted { print substr($0, index($0, "=") + 1); count++ } END { exit(count == 1 ? 0 : 1) }' "$retry" 2>/dev/null) || return 1
+  marker=$(fm_wake_surface_consumed_path "$key")
+  tmp=$(mktemp "$STATE/.hb-surface-consumed.XXXXXX") || return 1
+  if ! printf 'schema=fm-hb-surface-consumed.v1\ntask=%s\nwake_key=%s\nsnapshot=%s\nspawn_incarnation=%s\n' \
+    "$key" "$key" "$snapshot" "$spawn_incarnation" > "$tmp" \
+    || [ -L "$marker" ] || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 fm_wake_print_deduped() {
   local file=$1
   awk -F '\t' '

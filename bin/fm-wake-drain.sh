@@ -178,9 +178,13 @@ restore_unprocessed_rows() {
 
 drain_batch_stop() {
   local start=$1
+  if [ "$DRAIN_LOCK_HELD" = true ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
+    DRAIN_LOCK_HELD=false
+  fi
   restore_unprocessed_rows "$start" || return 1
   if [ -s "$DRAIN_RESTORE" ]; then
-    fm_wake_restore_queue "$DRAIN_RESTORE" || return 1
+    fm_wake_restore_queue_atomic "$DRAIN_RESTORE" || return 1
   fi
   rm -f "$DRAIN_RESTORE" "$DRAIN_TMP" "$DRAIN_DEDUPED"
   DRAIN_RESTORE=
@@ -320,6 +324,10 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       ;;
     *)
       if ! printf '%s\n' "$drain_row"; then
+        restore_unprocessed_rows "$drain_line" || exit 1
+        exit 1
+      fi
+      if [ "$_kind" = signal ] && ! fm_wake_mark_surface_consumed "$_key"; then
         restore_unprocessed_rows "$drain_line" || exit 1
         exit 1
       fi

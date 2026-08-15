@@ -1671,6 +1671,54 @@ SH
   pass "post-publication uncertainty suppresses duplicate wakes"
 }
 
+test_ordinary_terminal_wake_consumption_is_durable() {
+  local dir root home fakebin state retry last out
+  new_case ordinary-terminal-consumed
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" ordinary-consumed-x1 ordinary-consumed-inc
+  last='done: ordinary terminal consumed'
+  printf '%s\n' "$last" > "$state/ordinary-consumed-x1.status"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" \
+    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-watch.sh"; surface_retry_write "$3" "$4" "$3" 2' _ \
+    "$root" "$state" ordinary-consumed-x1 "$last" \
+    || fail "ordinary terminal retry fixture was not written"
+  retry="$state/.hb-surface-retry-ordinary-consumed-x1"
+  [ "$(receipt_value "$retry" wake_published)" = 2 ] || fail "ordinary retry was not uncertain"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" \
+    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-wake-lib.sh"; fm_wake_append signal "$3" terminal' _ \
+    "$root" "$state" ordinary-consumed-x1 \
+    || fail "ordinary terminal wake was not queued"
+  drain "$root" "$home" "$fakebin" >/dev/null || fail "ordinary terminal wake drain failed"
+  [ -f "$state/.hb-surface-consumed-ordinary-consumed-x1" ] \
+    || fail "drain did not persist ordinary wake consumption"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" \
+    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-watch.sh"; terminal_signal_suppressed "$2/ordinary-consumed-x1.status"' _ \
+    "$root" "$state" ordinary-consumed-x1 \
+    || fail "ordinary consumed wake was not recognized by watcher"
+  [ -f "$state/.hb-terminal-surfaced-ordinary-consumed-x1" ] \
+    || fail "ordinary consumed wake did not complete terminal surfacing"
+  [ ! -e "$retry" ] || fail "ordinary consumed retry was not cleared"
+  [ ! -e "$state/.hb-surface-consumed-ordinary-consumed-x1" ] \
+    || fail "ordinary consumed marker was not cleared"
+  pass "ordinary terminal wake consumption survives watcher crashes"
+}
+
 test_surface_marker_failure_is_retryable() {
   local dir root home fakebin state out status
   new_case surface-marker-failure
@@ -2141,6 +2189,79 @@ SH
     ' _ "$ROOT" "$state" \
     || fail "metadata stamp race published an incomplete pane-idle index"
   pass "pane-idle index retries metadata stamp races"
+}
+
+test_pane_idle_index_rejects_publication_stamp_race() {
+  local dir root home fakebin state index key flag status
+  new_case pane-idle-index-publication-race
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"; index="$state/index"; flag="$dir/publication-race.flag"
+  mkdir -p "$index"
+  write_meta "$state" publication-race-x1 publication-race-inc
+  if command -v shasum >/dev/null 2>&1; then
+    key=$(printf '%s' tmux:fm-publication-race-x1 | shasum -a 256 | awk '{print $1}')
+  else
+    key=$(printf '%s' tmux:fm-publication-race-x1 | sha256sum | awk '{print $1}')
+  fi
+  : > "$flag"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+source_file="${@: -2:1}"
+target="${!#}"
+if [ "$target" = "${FM_TEST_PUBLICATION_PATH:?}" ] && [ -e "${FM_TEST_PUBLICATION_FLAG:?}" ]; then
+  rm -f "$FM_TEST_PUBLICATION_FLAG"
+  printf 'window=tmux:fm-publication-race-x2\n' > "$FM_TEST_PUBLICATION_STATE/publication-race-x2.meta"
+fi
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  set +e
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_PUBLICATION_PATH="$index/$key" FM_TEST_PUBLICATION_FLAG="$flag" \
+    FM_TEST_PUBLICATION_STATE="$state" PATH="$fakebin:$PATH" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_persist "$2" "$3"' _ \
+    "$ROOT" "$state" "$index"
+  status=$?
+  set -u
+  [ "$status" = 124 ] || fail "publication stamp race was accepted as current"
+  [ ! -e "$index/.ready" ] || fail "publication stamp race left a ready marker"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_PUBLICATION_PATH="$index/$key" FM_TEST_PUBLICATION_FLAG="$flag" \
+    FM_TEST_PUBLICATION_STATE="$state" PATH="$fakebin:$PATH" bash -c \
+    '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_persist "$2" "$3"' _ \
+    "$ROOT" "$state" "$index" \
+    || fail "pane-idle index did not recover after publication stamp race"
+  [ -f "$index/.ready" ] || fail "recovered pane-idle index was not marked ready"
+  pass "pane-idle publication validates final state stamps"
+}
+
+test_watcher_bounded_metadata_fail_closed() {
+  local dir root home fakebin state status
+  new_case watcher-bounded-metadata
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" bounded-metadata-x1 bounded-metadata-inc
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  set +e
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" \
+    bash -c '
+      cd "$1" || exit 1
+      . "$1/bin/fm-watch.sh"
+      deadline=$(fm_pane_idle_now_ms)
+      if window_kind tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
+      if window_backend tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
+      exit 0
+    ' _ "$root"
+  status=$?
+  set -u
+  [ "$status" = 0 ] || fail "bounded metadata lookup did not fail closed"
+  pass "watcher refuses unresolved bounded metadata"
 }
 
 test_pane_idle_snapshot_reads_honor_deadline() {
@@ -3478,6 +3599,7 @@ test_session_start_generation_bound_replay
 test_watcher_runs_inactive_cadence
 test_surfaced_terminal_is_not_replayed
 test_postpublication_uncertainty_is_not_replayed
+test_ordinary_terminal_wake_consumption_is_durable
 test_surface_marker_failure_is_retryable
 test_legacy_metadata_uses_stable_fallback
 test_empty_spawn_incarnation_is_rejected
@@ -3491,6 +3613,8 @@ test_pane_idle_publication_rechecks_under_lock
 test_pane_idle_index_reclaims_retired_windows
 test_pane_idle_index_refreshes_changed_metadata
 test_pane_idle_index_retries_metadata_stamp_race
+test_pane_idle_index_rejects_publication_stamp_race
+test_watcher_bounded_metadata_fail_closed
 test_pane_idle_snapshot_reads_honor_deadline
 test_pane_idle_snapshot_compare_honors_deadline
 test_pane_idle_lookup_propagates_deadline
