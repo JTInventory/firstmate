@@ -556,7 +556,7 @@ surface_retry_valid() {
     { valid=0 }
     END {
       for (key in required) if (!(key in seen)) valid=0
-      exit !(valid && values["schema"] == "fm-hb-surface-retry.v1" && values["task"] != "" && values["snapshot"] != "" && values["wake_key"] != "" && values["wake_published"] ~ /^[01]$/)
+      exit !(valid && values["schema"] == "fm-hb-surface-retry.v1" && values["task"] != "" && values["snapshot"] != "" && values["wake_key"] != "" && values["wake_published"] ~ /^[012]$/)
     }
   ' "$1" 2>/dev/null
 }
@@ -587,7 +587,7 @@ surface_retry_matches_current() {
 surface_retry_write() {
   local task=$1 last=$2 wake_key=$3 wake_published=${4:-1}
   local meta="$STATE/$1.meta" retry tmp spawn_incarnation tasktmp window worktree rc
-  case "$wake_published" in 0|1) ;; *) return 1 ;; esac
+  case "$wake_published" in 0|1|2) ;; *) return 1 ;; esac
   spawn_incarnation= tasktmp= window= worktree=
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
     if spawn_incarnation=$(surface_meta_value_unique "$meta" spawn_incarnation); then
@@ -602,6 +602,12 @@ surface_retry_write() {
     worktree=$(surface_meta_value "$meta" worktree)
   fi
   retry=$(_hb_surface_retry_path "$task")
+  if [ -e "$retry" ]; then
+    [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || return 1
+    if surface_retry_matches_current "$retry" "$task" "$last"; then
+      [ "$(surface_meta_value_unique "$retry" wake_key 2>/dev/null)" = "$wake_key" ] || return 2
+    fi
+  fi
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nwake_key=%s\nwake_published=%s\n' \
     "$task" "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$wake_key" "$wake_published" > "$tmp" \
@@ -629,10 +635,27 @@ surface_retry_mark_published() {
 }
 
 surface_retry_published_current() {
-  local retry=$1 task=$2 last=$3 wake_key=$4
+  local retry=$1 task=$2 last=$3 wake_key=$4 published
+  if [ -L "$retry" ] || [ -e "$retry" ]; then
+    [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || return 2
+  else
+    return 1
+  fi
   surface_retry_matches_current "$retry" "$task" "$last" || return 1
-  [ "$(surface_meta_value_unique "$retry" wake_key 2>/dev/null)" = "$wake_key" ] || return 1
-  [ "$(surface_meta_value_unique "$retry" wake_published 2>/dev/null)" = 1 ] && return 0
+  [ "$(surface_meta_value_unique "$retry" wake_key 2>/dev/null)" = "$wake_key" ] || return 2
+  published=$(surface_meta_value_unique "$retry" wake_published 2>/dev/null) || return 2
+  case "$published" in
+    1) return 0 ;;
+    2)
+      [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 0
+      awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
+        "$FM_WAKE_QUEUE" 2>/dev/null || return 0
+      surface_retry_mark_published "$task" "$last" "$wake_key" || return 2
+      return 0
+      ;;
+    0) ;;
+    *) return 2 ;;
+  esac
   [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
   awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
     "$FM_WAKE_QUEUE" 2>/dev/null || return 1
@@ -672,11 +695,11 @@ surface_replay_incarnation() {
 }
 
 surface_retry_repair() {
-  local retry task last spawn_incarnation tasktmp window worktree status=0 status_file sig sf marker tmp
+  local retry task last spawn_incarnation tasktmp window worktree wake_key
+  local status=0 status_file sig sf marker tmp
   for retry in "$STATE"/.hb-surface-retry-*; do
     [ -e "$retry" ] || continue
     [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || { status=1; continue; }
-    [ "$(surface_meta_value_unique "$retry" wake_published 2>/dev/null)" = 1 ] || continue
     task=$(surface_meta_value "$retry" task)
     last=$(surface_meta_value "$retry" snapshot)
     spawn_incarnation=$(surface_meta_value "$retry" spawn_incarnation)
@@ -687,6 +710,19 @@ surface_retry_repair() {
       status=1
       continue
     fi
+    case "$(surface_meta_value_unique "$retry" wake_published 2>/dev/null || true)" in
+      1) ;;
+      2)
+        wake_key=$(surface_meta_value_unique "$retry" wake_key 2>/dev/null) || { status=1; continue; }
+        if ! [ -f "$FM_WAKE_QUEUE" ] || [ ! -e "$FM_WAKE_QUEUE" ] \
+          || ! awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+          continue
+        fi
+        surface_retry_mark_published "$task" "$last" "$wake_key" || { status=1; continue; }
+        ;;
+      0) continue ;;
+      *) status=1; continue ;;
+    esac
     if ! mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
       "$tasktmp" "$window" "$worktree"; then
       status=1
@@ -771,7 +807,7 @@ surface_signal_transaction() {
     terminal=0
     case "$last" in done:*|failed:*) terminal=1 ;; esac
     if [ "$terminal" = 1 ]; then
-      surface_retry_write "$task" "$last" "$task" 0 || { status=1; break; }
+      surface_retry_write "$task" "$last" "$task" 2 || { status=1; break; }
     fi
     if ! fm_wake_append_locked signal "$(basename "$f")" "$reason"; then
       status=1
@@ -848,16 +884,25 @@ inactive_replay_queued_for_task() {
 }
 
 terminal_signal_suppressed() {
-  local f=$1 task last retry retry_status
+  local f=$1 task last retry retry_status marker_status replay_status
   last=$(last_status_line "$f")
   case "$last" in
     done:*|failed:*) ;;
     *) return 1 ;;
   esac
   task=$(basename "$f" .status)
-  terminal_surface_marker_current "$task" && return 0
-  inactive_replay_queued_for_task "$task" && return 0
-  [ "$?" = 1 ] || return 2
+  terminal_surface_marker_current "$task" || marker_status=$?
+  case "${marker_status:-0}" in
+    0) return 0 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  inactive_replay_queued_for_task "$task" || replay_status=$?
+  case "${replay_status:-0}" in
+    0) return 0 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
   retry=$(_hb_surface_retry_path "$task")
   surface_retry_published_current "$retry" "$task" "$last" "$task" || retry_status=$?
   case "${retry_status:-0}" in
@@ -868,17 +913,32 @@ terminal_signal_suppressed() {
 }
 
 surface_terminal_stale_transaction() {
-  local w=$1 h=$2 status=0 task last terminal=0
+  local w=$1 h=$2 status=0 task last terminal=0 marker_status=0 replay_status=0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   task=$(window_to_task "$w")
-  if terminal_surface_marker_current "$task" || inactive_replay_queued_for_task "$task"; then
+  marker_status=0
+  terminal_surface_marker_current "$task" || marker_status=$?
+  if [ "$marker_status" = 0 ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
     return 2
   fi
+  replay_status=0
+  inactive_replay_queued_for_task "$task" || replay_status=$?
+  case "$replay_status" in
+    0)
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+      return 2
+      ;;
+    1) ;;
+    *)
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+      return 2
+      ;;
+  esac
   last=$(last_status_line "$STATE/$task.status")
   case "$last" in done:*|failed:*) terminal=1 ;; esac
   if [ "$terminal" = 1 ]; then
-    surface_retry_write "$task" "$last" "$w" 0 || status=1
+    surface_retry_write "$task" "$last" "$w" 2 || status=1
   fi
   [ "$status" = 0 ] && fm_wake_append_locked stale "$w" "stale: $w" || status=1
   if [ "$status" = 0 ] && [ "$terminal" = 1 ]; then

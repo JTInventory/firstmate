@@ -1482,6 +1482,82 @@ SH
   pass "terminal replay suppression is bound to surfaced status and incarnation"
 }
 
+test_postpublication_uncertainty_is_not_replayed() {
+  local dir root home fakebin state out status flag
+  new_case postpublication-uncertainty
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" postpublish-x1 postpublish-inc
+  printf 'done: postpublication uncertainty\n' > "$state/postpublish-x1.status"
+  : > "$state/postpublish-x1.turn-ended"
+  touch "$state/postpublish-x1.meta" "$state/postpublish-x1.status" "$state/postpublish-x1.turn-ended"
+  export FM_FAKE_CREW_STATE_POSTPUBLISH_X1='state: done · source: pane · postpublication uncertainty'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+  *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
+  *"#{window_name}"*) printf '%s\n' firstmate ;;
+  capture-pane) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  flag="$dir/fail-postpublication-mark"
+  : > "$flag"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+source_file="${@: -2:1}"
+target="${!#}"
+if [ -e "${FM_TEST_FAIL_POSTPUBLICATION:-}" ] \
+  && [[ "$target" == *.hb-surface-retry-* ]] \
+  && grep -Fqx 'wake_published=1' "$source_file" 2>/dev/null; then
+  rm -f "$FM_TEST_FAIL_POSTPUBLICATION"
+  exit 91
+fi
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  export FM_TEST_FAIL_POSTPUBLICATION="$flag"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  set +e
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "post-publication persistence failure was treated as success"
+  [ "$(receipt_value "$state/.hb-surface-retry-postpublish-x1" wake_published)" = 2 ] \
+    || fail "post-publication failure did not retain an uncertain retry state"
+  [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
+    || fail "post-publication failure did not retain its wake"
+  rm -f "$fakebin/mv"
+  unset FM_TEST_FAIL_POSTPUBLICATION
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 "$root/bin/fm-watch.sh" 2>&1) \
+    || fail "post-publication retry did not repair its wake"
+  [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
+    || fail "post-publication retry left its wake queued"
+  printf '%s\n' "$out" | grep -F 'signal' >/dev/null \
+    || fail "post-publication retry did not surface its retained wake"
+  unset FM_FAKE_CREW_STATE_POSTPUBLISH_X1
+  pass "post-publication uncertainty suppresses duplicate wakes"
+}
+
 test_surface_marker_failure_is_retryable() {
   local dir root home fakebin state out status
   new_case surface-marker-failure
@@ -1921,6 +1997,68 @@ SH
     || fail "resolved history route appended a duplicate parent status"
   unset FM_FAKE_CREW_STATE_CHILD_X1 FM_FAKE_CREW_STATE_CHILD_HISTORY_X1
   pass "valid secondmate outcomes use the parent status correlation exactly once"
+}
+
+test_deferred_recorded_secondmate_finishes_without_output() {
+  local dir root home fakebin state child_home child_state parent_status corr rec fingerprint line send_out
+  new_case secondmate-recorded-deferred
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  parent_status="$state/sm-recorded.status"
+  mkdir -p "$child_state" "$child_state/terminal-outcomes" "$child_home/data" "$child_home/config" \
+    "$state/pending-replies" "$state/pending-reply-history"
+  printf 'sm-recorded\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-recorded parent-inc secondmate tmux firstmate:fm-sm-recorded
+  printf 'home=%s\n' "$child_home" >> "$state/sm-recorded.meta"
+  write_meta "$child_state" child-recorded-x1 child-recorded-inc
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{cursor_y}"*) printf '1\n' ;;
+  *capture-pane*) : ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-recorded "parent request" 2>&1) || fail "recorded secondmate route setup failed: $send_out"
+  corr=$(basename "$(direct_first_file "$state/pending-replies" '*')")
+  [ -n "$corr" ] || fail "recorded secondmate route did not create a correlation"
+  export FM_FAKE_CREW_STATE_CHILD_RECORDED_X1='state: failed · source: pane · child already reported'
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null \
+    || fail "recorded secondmate scan failed"
+  rec=$(direct_first_file "$child_state/terminal-outcomes" '*.pending')
+  fingerprint=$(basename "$rec" .pending)
+  line="failed [corr=$corr]: inactive terminal outcome replayed: task=child-recorded-x1 fingerprint=$fingerprint"
+  printf '%s\n' "$line" >> "$parent_status"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
+  drain "$root" "$child_home" "$fakebin" >"$dir/recorded-deferred.out" \
+    || fail "recorded secondmate deferred drain failed"
+  [ ! -s "$dir/recorded-deferred.out" ] \
+    || fail "already-recorded secondmate receipt was presented to the caller"
+  [ "$(receipt_count "$child_state" pending)" = 0 ] \
+    || fail "already-recorded secondmate receipt remained pending"
+  [ "$(receipt_count "$child_state" reported)" = 1 ] \
+    || fail "already-recorded secondmate receipt was not finalized"
+  [ "$(queue_count "$child_state")" = 0 ] \
+    || fail "already-recorded secondmate wake remained queued"
+  [ ! -e "$child_state/.fm-jt-parent-route" ] \
+    || fail "already-recorded secondmate route was not cleared"
+  [ "$(grep -Fc "$line" "$parent_status")" = 1 ] \
+    || fail "already-recorded secondmate parent report was duplicated"
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_FAKE_CREW_STATE_CHILD_RECORDED_X1
+  pass "recorded secondmate reports finalize without caller output"
 }
 
 test_reported_secondmate_route_repair_after_crash() {
@@ -2764,6 +2902,7 @@ test_session_start_drains_before_inactive_scan
 test_session_start_generation_bound_replay
 test_watcher_runs_inactive_cadence
 test_surfaced_terminal_is_not_replayed
+test_postpublication_uncertainty_is_not_replayed
 test_surface_marker_failure_is_retryable
 test_legacy_metadata_uses_stable_fallback
 test_empty_spawn_incarnation_is_rejected
@@ -2773,6 +2912,7 @@ test_herdr_identity_and_default_captain_refusal
 test_occupancy_unknown_is_not_terminal
 test_status_log_terminal_is_not_replayed
 test_valid_secondmate_route_reports_parent_once
+test_deferred_recorded_secondmate_finishes_without_output
 test_reported_secondmate_route_repair_after_crash
 test_reported_route_repair_is_bounded
 test_pending_receipt_republish_is_bounded
