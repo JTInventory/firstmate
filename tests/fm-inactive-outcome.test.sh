@@ -426,9 +426,8 @@ printf 'state: done · source: pane · should time out\n'
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
   export FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT=1 FM_INACTIVE_OUTCOME_BUDGET_SECS=1
-  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
-    fail "portable timeout fallback allowed an expired child"
-  fi
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "portable timeout fallback killed the watcher"
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "portable timeout expiry advanced the cadence marker"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "portable timeout expiry created a receipt"
   unset FM_INACTIVE_OUTCOME_FORCE_PORTABLE_TIMEOUT FM_INACTIVE_OUTCOME_BUDGET_SECS

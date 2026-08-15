@@ -714,10 +714,8 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim state tmp line defer_ack=0 defer_generation= defer_generation_start=
   local preserve_output=0 seen_pid=0 seen_output=0 seen_emitted=0 seen_complete=0 seen_caller_confirmed=0
   local seen_defer_ack=0 seen_defer_generation=0 seen_defer_generation_start=0
-  if [ "${FM_WAKE_DRAIN_DIRECT:-0}" != 1 ]; then
-    if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] || [ -n "${FM_WAKE_DRAIN_GENERATION:-}" ]; then
-      defer_ack=1
-    fi
+  if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] || [ -n "${FM_WAKE_DRAIN_GENERATION:-}" ]; then
+    defer_ack=1
   fi
   if [ "$defer_ack" = 1 ]; then
     defer_generation=${FM_WAKE_DRAIN_GENERATION:-}
@@ -1194,7 +1192,7 @@ publish_receipt_and_wake() {
   if [ -n "$pane_meta" ] \
     && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation"; then
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
-    return 1
+    return 75
   fi
   if receipt_write; then
     if [ -f "$(receipt_path "$FP" pending)" ]; then
@@ -1287,59 +1285,55 @@ republish_existing_receipt_wake() {
 }
 
 publish_secondmate_receipt_and_wake() {
-  local route_lock status=0 existing_rc pending pending_corr pending_parent_id pending_parent_home pending_parent_status
+  local route_lock status=0 route_invalid=0 existing_rc pending pending_corr pending_parent_id pending_parent_home pending_parent_status
   local release_lock=0
   local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-}
   FM_WAKE_APPEND_CREATED=0
   if [ "$WAKE_QUEUE_LOCK_HELD" != 1 ]; then
-    wake_queue_lock_acquire || return 1
+    wake_queue_lock_acquire || return 75
     release_lock=1
   fi
   if [ -L "$FM_HOME" ] || [ ! -d "$FM_HOME" ] || [ -L "$FM_HOME/state" ] || [ ! -d "$FM_HOME/state" ]; then
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
-    return 0
+    return 75
   fi
   route_lock=$(fm_pending_reply_secondmate_route_lock_path "$FM_HOME")
   if ! fm_lock_acquire_wait "$route_lock"; then
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
-    return 1
+    return 75
   fi
   KIND=secondmate
   pending=$(receipt_path "$FP" pending)
   if [ -e "$pending" ] || [ -L "$pending" ]; then
-    [ -f "$pending" ] && [ ! -L "$pending" ] || status=1
-    if [ "$status" = 0 ]; then
+    [ -f "$pending" ] && [ ! -L "$pending" ] || route_invalid=1
+    if [ "$route_invalid" = 0 ]; then
       pending_corr=$(receipt_field "$pending" parent_corr)
-      printf '%s' "$pending_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || status=1
+      printf '%s' "$pending_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || route_invalid=1
     fi
-    if [ "$status" = 0 ] && ! fm_pending_reply_secondmate_route_validate "$FM_HOME" "$pending_corr"; then
-      fm_lock_release "$route_lock" || true
-      [ "$release_lock" = 1 ] && wake_queue_lock_release || true
-      return 0
+    if [ "$route_invalid" = 0 ] && ! fm_pending_reply_secondmate_route_validate "$FM_HOME" "$pending_corr"; then
+      route_invalid=1
     fi
-    if [ "$status" = 0 ]; then
+    if [ "$route_invalid" = 0 ]; then
       pending_parent_id=$(receipt_field "$pending" parent_task_id)
       pending_parent_home=$(receipt_field "$pending" parent_home)
       pending_parent_status=$(receipt_field "$pending" parent_status)
-      [ "$pending_parent_id" = "$FM_PENDING_ROUTE_SECOND_MATE_ID" ] || status=1
-      [ "$pending_parent_home" = "$FM_PENDING_ROUTE_PARENT_HOME" ] || status=1
-      [ "$pending_parent_status" = "$FM_PENDING_ROUTE_PARENT_STATUS" ] || status=1
+      [ "$pending_parent_id" = "$FM_PENDING_ROUTE_SECOND_MATE_ID" ] || route_invalid=1
+      [ "$pending_parent_home" = "$FM_PENDING_ROUTE_PARENT_HOME" ] || route_invalid=1
+      [ "$pending_parent_status" = "$FM_PENDING_ROUTE_PARENT_STATUS" ] || route_invalid=1
     fi
   elif ! fm_pending_reply_secondmate_route_validate "$FM_HOME"; then
-    fm_lock_release "$route_lock" || true
-    [ "$release_lock" = 1 ] && wake_queue_lock_release || true
-    return 0
+    route_invalid=1
   fi
-  [ "$status" = 0 ] || {
+  if [ "$route_invalid" = 1 ]; then
     fm_lock_release "$route_lock" || true
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
-    return 1
-  }
+    return 75
+  fi
   if [ -n "$pane_meta" ] \
     && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation"; then
     fm_lock_release "$route_lock" || true
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
-    return 1
+    return 75
   fi
   if receipt_existing_core; then
     if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
@@ -1623,6 +1617,7 @@ republish_pending_receipts() {
   local LC_ALL=C
   MAINTENANCE_ENUM_DEFERRED=0
   MAINTENANCE_ENUM_FAILED=0
+  MAINTENANCE_RETRYABLE=0
   MAINTENANCE_ITEMS_PROCESSED=0
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
   candidate_tmp=$(mktemp "$STATE/.inactive-outcome-candidates.XXXXXX") || return 1
@@ -1675,10 +1670,15 @@ republish_pending_receipts() {
       fi
       remaining=$(budget_remaining_secs "$scan_deadline")
       [ "$remaining" -gt 0 ] || { status=1; break 2; }
-      if ! FM_LOCK_WAIT_SECS="$remaining" republish_pending_receipt "$pending"; then
+      if FM_LOCK_WAIT_SECS="$remaining" republish_pending_receipt "$pending"; then
+        if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
+          printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$ID" "$OUTCOME" "$FP"
+        fi
+      else
+        enum_rc=$?
         status=1
-      elif [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
-        printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$ID" "$OUTCOME" "$FP"
+        [ "$enum_rc" = 75 ] && MAINTENANCE_RETRYABLE=1
+        break 2
       fi
       last=$base
       processed=$((processed + 1))
@@ -1974,7 +1974,7 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend window now activity age line outcome source
-  local snapshot token key route_rc state_tmp state_rc existing_rc surface_status
+  local snapshot token key route_rc state_tmp state_rc existing_rc surface_status publication_status
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
@@ -2062,7 +2062,8 @@ reconcile_child() {
   if [ "$route_rc" = 0 ]; then
     key="inactive-outcome:$FP"
     replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
-    publish_secondmate_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" || return 1
+    publish_secondmate_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" \
+      || { publication_status=$?; return "$publication_status"; }
     if replay_receipt_exists; then
       replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
     fi
@@ -2088,7 +2089,8 @@ reconcile_child() {
   fi
   key="inactive-outcome:$FP"
   replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
-  publish_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" || return 1
+  publish_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" \
+    || { publication_status=$?; return "$publication_status"; }
   replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
   if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
     printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
@@ -2287,6 +2289,7 @@ scan_locked() {
     maintenance_next_phase=$maintenance_phase
     MAINTENANCE_ENUM_DEFERRED=0
     MAINTENANCE_ENUM_FAILED=0
+    MAINTENANCE_RETRYABLE=0
     maintenance_started=$(clock_millis)
     if [ "$maintenance_started" -ge "$scan_deadline" ]; then
       maintenance_deferred=1
@@ -2296,7 +2299,9 @@ scan_locked() {
     [ "$maintenance_deadline" -gt "$scan_deadline" ] && maintenance_deadline=$scan_deadline
     if [ "$maintenance_phase" = pending ]; then
       if ! republish_pending_receipts "$maintenance_deadline"; then
-        if [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
+        if [ "$MAINTENANCE_RETRYABLE" = 1 ]; then
+          maintenance_deferred=1
+        elif [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
           maintenance_deferred=1
         elif [ "$MAINTENANCE_ENUM_FAILED" = 1 ]; then
           maintenance_status=1
@@ -2340,7 +2345,9 @@ scan_locked() {
       if [ "$maintenance_status" = 0 ] && [ "$maintenance_deferred" = 0 ] \
         && [ "$MAINTENANCE_ITEMS_PROCESSED" = 0 ]; then
         if ! republish_pending_receipts "$maintenance_deadline"; then
-          if [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
+          if [ "$MAINTENANCE_RETRYABLE" = 1 ]; then
+            maintenance_deferred=1
+          elif [ "$MAINTENANCE_ENUM_DEFERRED" = 1 ]; then
             maintenance_deferred=1
           elif [ "$MAINTENANCE_ENUM_FAILED" = 1 ]; then
             maintenance_status=1
@@ -2444,7 +2451,10 @@ scan_locked() {
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" _child "$id" || rc=$?
     if [ "$rc" -ne 0 ]; then
       complete=0
-      scan_failed=1
+      case "$rc" in
+        75|124) direct_deferred=1 ;;
+        *) scan_failed=1 ;;
+      esac
       break
     fi
     if printf '%s\n' "$id" > "$SCAN_CURSOR"; then
