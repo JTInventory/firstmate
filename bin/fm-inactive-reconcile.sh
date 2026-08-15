@@ -395,9 +395,43 @@ claim_recover_deferred_handoff() {
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
+claim_mark_recorded_presented() {  # <inactive-outcome:fingerprint> <wake-row>
+  local key=$1 row=$2 fp claim state tmp line field value
+  drain_claim_owner "$row" || return 2
+  case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
+  case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
+  claim=$(claim_path "$fp")
+  [ ! -L "$claim" ] || return 2
+  state=$(claim_validate "$claim" "$fp" "$row") || return 2
+  case "$state" in reserved|presenting) ;; *) return 2 ;; esac
+  claim_binary_fields_valid "$claim" || return 2
+  for field in output_started output_emitted output_complete output_confirmed caller_confirmed; do
+    value=$(claim_binary_field "$claim" "$field" 2>/dev/null || true)
+    case "$value" in ''|0) ;; *) return 2 ;; esac
+  done
+  tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
+  chmod 600 "$tmp" 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      state=*) printf 'state=presented\n' ;;
+      output_started=*) printf 'output_started=1\n' ;;
+      output_emitted=*) printf 'output_emitted=1\n' ;;
+      output_complete=*) printf 'output_complete=1\n' ;;
+      output_confirmed=*) printf 'output_confirmed=1\n' ;;
+      caller_confirmed=*) printf 'caller_confirmed=1\n' ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  for field in output_started output_emitted output_complete output_confirmed caller_confirmed; do
+    grep -Fq "$field=" "$tmp" || printf '%s=1\n' "$field" >> "$tmp"
+  done
+  [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
+  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+}
+
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
   local key=$1 row=$2 fp claim tmp state existing old_row line output_started output_emitted output_complete output_confirmed caller_confirmed defer_ack
-  local defer_generation defer_generation_start receipt_state receipt_rc=0 recorded_report=0 report_rc=1
+  local defer_generation defer_generation_start receipt_state receipt_rc=0 recorded_report=0 report_rc=1 recorded_ready=1 value
   drain_claim_owner "$row" || return 2
   case "$key" in inactive-outcome:*) fp=${key#inactive-outcome:} ;; *) return 2 ;; esac
   case "$fp" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -422,6 +456,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     *) return 2 ;;
   esac
   prepare_pending_receipt "$(receipt_path "$fp" pending)" || return 2
+  report_rc=0
   pending_secondmate_report_recorded "$fp" >/dev/null || report_rc=$?
   case "$report_rc" in
     0) recorded_report=1 ;;
@@ -475,6 +510,17 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       return 5
     fi
     if [ "$state" = presenting ] && [ "$defer_ack" = 1 ]; then
+      if [ "$recorded_report" = 1 ]; then
+        recorded_ready=1
+        for value in "$output_started" "$output_emitted" "$output_complete" "$output_confirmed" "$caller_confirmed"; do
+          case "$value" in ''|0) ;; *) recorded_ready=0 ;; esac
+        done
+        if [ "$recorded_ready" = 1 ]; then
+          claim_mark_presenting "$key" "$row" || return 2
+          claim_mark_recorded_presented "$key" "$row" || return 2
+          return 5
+        fi
+      fi
       if [ "$caller_confirmed" = 0 ] \
         && [ "$output_started" = 1 ] \
         && [ "$output_emitted" = 1 ] \
@@ -509,6 +555,28 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
       esac
       [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] || return 4
       return 0
+    fi
+    if [ "$recorded_report" = 1 ]; then
+      if [ "$state" = presented ]; then
+        return 5
+      fi
+      if [ "$state" = reserved ]; then
+        claim_mark_presenting "$key" "$row" || return 2
+        state=presenting
+        output_started=0
+        output_emitted=0
+        output_complete=0
+        output_confirmed=0
+        caller_confirmed=0
+      fi
+      for value in "$output_started" "$output_emitted" "$output_complete" "$output_confirmed" "$caller_confirmed"; do
+        case "$value" in ''|0) ;; *) recorded_ready=0 ;; esac
+      done
+      if [ "$state" = presenting ] && [ "$recorded_ready" = 1 ]; then
+        claim_mark_presenting "$key" "$row" || return 2
+        claim_mark_recorded_presented "$key" "$row" || return 2
+        return 5
+      fi
     fi
     if [ "$recorded_report" = 1 ]; then
       case "$state" in
@@ -583,9 +651,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     rm -f "$tmp"
     if [ "$recorded_report" = 1 ]; then
       claim_mark_presenting "$key" "$row" || return 2
-      claim_mark_output_complete "$key" "$row" || return 2
-      claim_mark_output_confirmed "$key" "$row" || return 2
-      claim_mark_presented "$key" "$row" || return 2
+      claim_mark_recorded_presented "$key" "$row" || return 2
       return 5
     fi
     return 0
@@ -1276,7 +1342,7 @@ prepare_pending_receipt() {
 }
 
 pending_secondmate_report_recorded() {
-  local fp=$1 pending kind parent_status parent_corr line
+  local fp=$1 pending kind task_id outcome parent_status parent_corr line
   pending=$(receipt_path "$fp" pending)
   kind=$(receipt_field "$pending" kind) || return 2
   case "$kind" in
@@ -1285,11 +1351,16 @@ pending_secondmate_report_recorded() {
     *) return 2 ;;
   esac
   prepare_pending_receipt "$pending" || return 2
+  task_id=$(receipt_field "$pending" task_id) || return 2
+  outcome=$(receipt_field "$pending" outcome) || return 2
   parent_status=$(receipt_field "$pending" parent_status) || return 2
   parent_corr=$(receipt_field "$pending" parent_corr) || return 2
   [ -f "$parent_status" ] && [ ! -L "$parent_status" ] || return 1
-  line="$OUTCOME [corr=$parent_corr]: inactive terminal outcome replayed: task=$ID fingerprint=$fp"
-  grep -Fqx "$line" "$parent_status" 2>/dev/null
+  line="$outcome [corr=$parent_corr]: inactive terminal outcome replayed: task=$task_id fingerprint=$fp"
+  while IFS= read -r existing_line || [ -n "$existing_line" ]; do
+    [ "$existing_line" = "$line" ] && return 0
+  done < "$parent_status"
+  return 1
 }
 
 reported_secondmate_receipt_valid() {
@@ -1544,7 +1615,7 @@ surface_retry_valid() {
     { valid=0 }
     END {
       for (key in required) if (!(key in seen)) valid=0
-      exit !(valid && values["schema"] == "fm-hb-surface-retry.v1" && values["task"] != "" && values["snapshot"] != "" && values["wake_key"] != "" && values["wake_published"] ~ /^[01]$/)
+      exit !(valid && values["schema"] == "fm-hb-surface-retry.v1" && values["task"] != "" && values["snapshot"] != "" && values["wake_key"] != "" && values["wake_published"] ~ /^[012]$/)
     }
   ' "$1" 2>/dev/null
 }
@@ -1591,10 +1662,27 @@ surface_retry_mark_published() {
 }
 
 surface_retry_published_current() {
-  local id=$1 meta=$2 retry=$3 wake_key=$4
+  local id=$1 meta=$2 retry=$3 wake_key=$4 published
+  if [ -L "$retry" ] || [ -e "$retry" ]; then
+    [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || return 2
+  else
+    return 1
+  fi
   surface_retry_matches_current "$retry" "$id" "$meta" || return 1
-  [ "$(meta_value_unique "$retry" wake_key 2>/dev/null)" = "$wake_key" ] || return 1
-  [ "$(meta_value_unique "$retry" wake_published 2>/dev/null)" = 1 ] && return 0
+  [ "$(meta_value_unique "$retry" wake_key 2>/dev/null)" = "$wake_key" ] || return 2
+  published=$(meta_value_unique "$retry" wake_published 2>/dev/null) || return 2
+  case "$published" in
+    1) return 0 ;;
+    2)
+      [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 0
+      awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
+        "$FM_WAKE_QUEUE" 2>/dev/null || return 0
+      surface_retry_mark_published "$retry" || return 2
+      return 0
+      ;;
+    0) ;;
+    *) return 2 ;;
+  esac
   [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
   awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
     "$FM_WAKE_QUEUE" 2>/dev/null || return 1
@@ -1672,7 +1760,7 @@ terminal_outcome_surfaced() {
 replay_surface_retry_write() {
   local id=$1 meta=$2 snapshot=$3 incarnation=$4 key=$5 published=$6
   local retry tmp tasktmp window worktree marker_incarnation explicit_incarnation rc
-  case "$published" in 0|1) ;; *) return 1 ;; esac
+  case "$published" in 0|1|2) ;; *) return 1 ;; esac
   tasktmp=$(meta_value "$meta" tasktmp)
   window=$(meta_value "$meta" window)
   worktree=$(meta_value "$meta" worktree)
@@ -1684,6 +1772,12 @@ replay_surface_retry_write() {
     marker_incarnation=
   fi
   retry="$STATE/.hb-surface-retry-$(printf '%s' "$id" | tr ':/.' '___')"
+  if [ -e "$retry" ]; then
+    [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || return 1
+    if surface_retry_matches_current "$retry" "$id" "$meta"; then
+      [ "$(meta_value_unique "$retry" wake_key 2>/dev/null)" = "$key" ] || return 2
+    fi
+  fi
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nwake_key=%s\nwake_published=%s\n' \
     "$id" "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$key" "$published" > "$tmp" \
@@ -1748,7 +1842,7 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend now activity age line outcome source
-  local snapshot token key route_rc state_tmp state_rc existing_rc
+  local snapshot token key route_rc state_tmp state_rc existing_rc surface_status
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
@@ -1817,10 +1911,16 @@ reconcile_child() {
     fi
     return 75
   fi
-  terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" && return 0
+  surface_status=0
+  terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" || surface_status=$?
+  case "$surface_status" in
+    0) return 0 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
   if [ "$route_rc" = 0 ]; then
     key="inactive-outcome:$FP"
-    replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 0 || return 1
+    replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
     publish_secondmate_receipt_and_wake || return 1
     if replay_receipt_exists; then
       replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
@@ -1832,7 +1932,7 @@ reconcile_child() {
   fi
   if receipt_existing_core; then
     key="inactive-outcome:$FP"
-    replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 0 || return 1
+    replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
     if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
       republish_existing_receipt_wake || return 1
       if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
@@ -1846,7 +1946,7 @@ reconcile_child() {
     [ "$existing_rc" = 1 ] || return 1
   fi
   key="inactive-outcome:$FP"
-  replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 0 || return 1
+  replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
   publish_receipt_and_wake || return 1
   replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
   if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
