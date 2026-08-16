@@ -281,7 +281,10 @@ receipt_value() {
 }
 
 receipt_fingerprint() {
-  local value=$1 kind=${2:-ship}
+  local value=$1 kind=${2:-ship} parent_corr=${3:-}
+  if [ "$kind" = secondmate ] && [ -n "$parent_corr" ]; then
+    value="$value|$parent_corr"
+  fi
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$value|$kind" | shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
@@ -2890,7 +2893,7 @@ test_reported_secondmate_route_repair_after_crash() {
     '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_secondmate_route_write "$2" "$3" "$4" "$5" "$6"' \
     _ "$ROOT" "$child_home" "$home" "$state" sm-reported "$corr" \
     || fail "reported route fixture was not written"
-  fingerprint=$(receipt_fingerprint 'child-reported-x1|child-reported-inc|failed|state: failed · source: pane · reported crash' secondmate)
+  fingerprint=$(receipt_fingerprint 'child-reported-x1|child-reported-inc|failed|state: failed · source: pane · reported crash' secondmate "$corr")
   fm_write_meta "$child_state/terminal-outcomes/$fingerprint.reported" \
     schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=child-reported-x1 \
     incarnation=child-reported-inc outcome=failed terminal_source=pane \
@@ -3094,6 +3097,81 @@ SH
     || fail "old route history was not retired after acknowledgement"
   unset FM_FAKE_CREW_STATE_CHILD_REPLACE_X1
   pass "secondmate route replacement preserves correlation-scoped old receipts"
+}
+
+test_secondmate_route_replacement_replays_unchanged_terminal() {
+  local dir root home fakebin state child_home child_state corr_a corr_b rec send_out corr_count
+  new_case secondmate-route-replay
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  child_home="$dir/secondmate-home"
+  child_state="$child_home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  mkdir -p "$child_state" "$child_home/data" "$child_home/config" "$state/pending-replies"
+  printf 'sm-replay\n' > "$child_home/.fm-secondmate-home"
+  write_meta "$state" sm-replay parent-replay-inc secondmate tmux firstmate:fm-sm-replay
+  printf 'home=%s\n' "$child_home" >> "$state/sm-replay.meta"
+  write_meta "$child_state" child-replay-x1 child-replay-inc
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{cursor_y}"*) printf '1\n' ;;
+  *capture-pane*)
+    case "$*" in
+      *" -S -40"*) printf 'idle prompt\n' ;;
+      *) : ;;
+    esac
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  prepare_watcher_protocol "$root" "$home" "$state"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-replay "first request" 2>&1) || fail "initial replay route setup failed: $send_out"
+  corr_a=$(basename "$(direct_first_file "$state/pending-replies" '*')")
+  [ -n "$corr_a" ] || fail "initial replay route did not create a correlation"
+  export FM_FAKE_CREW_STATE_CHILD_REPLAY_X1='state: done · source: pane · unchanged terminal state'
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null \
+    || fail "initial unchanged terminal scan failed"
+  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "initial replay route did not create a receipt"
+  replace_field "$state/pending-replies/$corr_a" phase resolved
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 "$root/bin/fm-send.sh" \
+    fm-sm-replay "replacement request" 2>&1) || fail "replacement replay route setup failed: $send_out"
+  corr_b=
+  for marker in "$state"/pending-replies/*; do
+    [ -f "$marker" ] || continue
+    [ "$(basename "$marker")" = "$corr_a" ] || corr_b=$(basename "$marker")
+  done
+  [ -n "$corr_b" ] || fail "replacement replay route did not create a new correlation"
+  [ "$(receipt_value "$child_state/.fm-jt-parent-route" corr_id)" = "$corr_b" ] \
+    || fail "replacement replay route did not publish the new correlation"
+  scan "$root" "$child_home" "$fakebin" --startup >/dev/null \
+    || fail "unchanged terminal state was not replayed for the replacement route"
+  [ "$(receipt_count "$child_state" pending)" = 2 ] \
+    || fail "replacement route did not create a second receipt"
+  corr_count=0
+  for rec in "$child_state"/terminal-outcomes/*.pending; do
+    [ -f "$rec" ] || continue
+    [ "$(receipt_value "$rec" parent_corr)" = "$corr_b" ] || continue
+    corr_count=$((corr_count + 1))
+  done
+  [ "$corr_count" = 1 ] || fail "replacement receipt was not bound to the new correlation"
+  [ "$(queue_count "$child_state")" = 2 ] || fail "replacement route did not queue a second wake"
+  unset FM_FAKE_CREW_STATE_CHILD_REPLAY_X1
+  pass "unchanged terminals replay for each secondmate correlation"
 }
 
 test_undelivered_secondmate_route_cleanup_is_idempotent() {
@@ -3864,6 +3942,7 @@ test_reported_secondmate_route_repair_after_crash
 test_reported_route_repair_is_bounded
 test_pending_receipt_republish_is_bounded
 test_secondmate_route_replacement_preserves_old_receipt
+test_secondmate_route_replacement_replays_unchanged_terminal
 test_undelivered_secondmate_route_cleanup_is_idempotent
 test_concurrent_secondmate_routes_are_rejected
 test_route_replacement_rejects_malformed_parent_record

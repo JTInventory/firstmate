@@ -656,6 +656,33 @@ hash_text() {
   fi
 }
 
+replay_parent_corr() {
+  local corr=${FM_PENDING_ROUTE_CORR:-}
+  case "${KIND:-}" in
+    secondmate)
+      printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+      printf '%s' "$corr"
+      ;;
+    ship|scout|'') printf '%s' '' ;;
+    *) return 1 ;;
+  esac
+}
+
+terminal_outcome_fingerprint() {
+  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 kind=$5 parent_corr=${6:-}
+  case "$kind" in
+    secondmate)
+      printf '%s' "$parent_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+      hash_text "$id|$incarnation|$outcome|$snapshot|$kind|$parent_corr"
+      ;;
+    ship|scout)
+      [ -z "$parent_corr" ] || return 1
+      hash_text "$id|$incarnation|$outcome|$snapshot|$kind"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 metadata_fingerprint() {
   local meta=$1 contents
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -1740,9 +1767,10 @@ publish_receipt_and_wake() {
 
 receipt_existing_core() {
   local suffix existing expected_fp existing_kind existing_fingerprint existing_task_id existing_incarnation
-  local existing_outcome existing_snapshot existing_source parent_id parent_home parent_status parent_corr
+  local existing_outcome existing_snapshot existing_source parent_id parent_home parent_status parent_corr current_corr
   RECEIPT_EXISTING_SUFFIX=
-  expected_fp=$(hash_text "$ID|$INC|$OUTCOME|$SNAPSHOT|$KIND") || return 1
+  current_corr=$(replay_parent_corr) || return 1
+  expected_fp=$(terminal_outcome_fingerprint "$ID" "$INC" "$OUTCOME" "$SNAPSHOT" "$KIND" "$current_corr") || return 1
   [ "$expected_fp" = "$FP" ] || return 1
   for suffix in pending presented reported; do
     existing=$(receipt_path "$FP" "$suffix")
@@ -1764,8 +1792,6 @@ receipt_existing_core() {
     [ "$existing_source" = "$SOURCE" ] || return 2
     [ "$existing_snapshot" = "$SNAPSHOT" ] || return 2
     [ "$existing_kind" = "$KIND" ] || return 2
-    expected_fp=$(hash_text "$existing_task_id|$existing_incarnation|$existing_outcome|$existing_snapshot|$existing_kind") || return 2
-    [ "$expected_fp" = "$existing_fingerprint" ] || return 2
     case "$existing_kind" in
       ship|scout)
         parent_id=$(receipt_field "$existing" parent_task_id) || return 2
@@ -1793,6 +1819,9 @@ receipt_existing_core() {
         ;;
       *) return 2 ;;
     esac
+    expected_fp=$(terminal_outcome_fingerprint "$existing_task_id" "$existing_incarnation" \
+      "$existing_outcome" "$existing_snapshot" "$existing_kind" "$parent_corr") || return 2
+    [ "$expected_fp" = "$existing_fingerprint" ] || return 2
     RECEIPT_EXISTING_SUFFIX=$suffix
     return 0
   done
@@ -1909,7 +1938,7 @@ publish_secondmate_receipt_and_wake() {
 }
 
 prepare_pending_receipt() {
-  local pending=$1 expected_fp serialized_fp schema task_id incarnation outcome terminal_source terminal_snapshot kind key
+  local pending=$1 expected_fp legacy_fp= serialized_fp schema task_id incarnation outcome terminal_source terminal_snapshot kind key
   local parent_task_id parent_home parent_status parent_corr
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
   FP=${pending##*/}
@@ -1972,8 +2001,13 @@ prepare_pending_receipt() {
       ;;
     *) return 1 ;;
   esac
-  expected_fp=$(hash_text "$task_id|$incarnation|$outcome|$terminal_snapshot|$kind") || return 1
-  [ "$serialized_fp" = "$FP" ] && [ "$expected_fp" = "$FP" ] || return 1
+  expected_fp=$(terminal_outcome_fingerprint "$task_id" "$incarnation" "$outcome" \
+    "$terminal_snapshot" "$kind" "$parent_corr") || return 1
+  if [ "$kind" = secondmate ]; then
+    legacy_fp=$(hash_text "$task_id|$incarnation|$outcome|$terminal_snapshot|$kind") || return 1
+  fi
+  [ "$serialized_fp" = "$FP" ] || return 1
+  [ "$expected_fp" = "$FP" ] || [ "$legacy_fp" = "$FP" ] || return 1
   ID=$task_id
   INC=$incarnation
   OUTCOME=$outcome
@@ -2933,6 +2967,7 @@ surface_retry_valid() {
       allowed["schema"]=1; allowed["task"]=1; allowed["snapshot"]=1
       allowed["spawn_incarnation"]=1; allowed["tasktmp"]=1
       allowed["window"]=1; allowed["worktree"]=1; allowed["wake_key"]=1
+      allowed["parent_corr"]=1
       allowed["wake_published"]=1
       required["schema"]=1; required["task"]=1; required["snapshot"]=1
       required["spawn_incarnation"]=1; required["tasktmp"]=1
@@ -2957,7 +2992,7 @@ surface_retry_valid() {
 
 surface_retry_matches_current() {
   local retry=$1 id=$2 meta=$3 status_file current_snapshot saved_snapshot saved_spawn
-  local current_spawn current_tasktmp current_window current_worktree rc
+  local current_spawn current_tasktmp current_window current_worktree current_parent_corr saved_parent_corr rc
   [ -f "$retry" ] && [ ! -L "$retry" ] || return 1
   surface_retry_valid "$retry" || return 1
   [ "$(meta_value_unique "$retry" task 2>/dev/null)" = "$id" ] || return 1
@@ -2966,6 +3001,9 @@ surface_retry_matches_current() {
   current_snapshot=$(awk 'NF { line=$0 } END { if (line == "") exit 1; print line }' "$status_file" 2>/dev/null) || return 1
   saved_snapshot=$(meta_value_unique "$retry" snapshot 2>/dev/null) || return 1
   [ "$saved_snapshot" = "$current_snapshot" ] || return 1
+  saved_parent_corr=$(meta_value_unique "$retry" parent_corr 2>/dev/null || true)
+  current_parent_corr=$(replay_parent_corr) || return 1
+  [ "$saved_parent_corr" = "$current_parent_corr" ] || return 1
   saved_spawn=$(meta_value_unique "$retry" spawn_incarnation 2>/dev/null) || return 1
   if current_spawn=$(meta_value_unique "$meta" spawn_incarnation 2>/dev/null); then
     [ "$saved_spawn" = "$current_spawn" ] || return 1
@@ -3071,9 +3109,10 @@ surface_retry_published_current() {
 
 terminal_outcome_surfaced() {
   local id=$1 meta=$2 outcome=$3 wake_key=${4:-}
-  local key raw marker retry marker_snapshot marker_spawn current_snapshot retry_status
+  local key raw marker retry marker_snapshot marker_spawn marker_parent_corr current_parent_corr current_snapshot retry_status
   local current_spawn current_tasktmp current_window current_worktree status_file
   key=$(printf '%s' "$id" | tr ':/.' '___')
+  current_parent_corr=$(replay_parent_corr) || return 2
   raw="$STATE/.hb-surfaced-$key"
   marker="$STATE/.hb-terminal-surfaced-$key"
   retry="$STATE/.hb-surface-retry-$key"
@@ -3102,6 +3141,7 @@ terminal_outcome_surfaced() {
     BEGIN {
       allowed["schema"]=1; allowed["snapshot"]=1; allowed["spawn_incarnation"]=1
       allowed["tasktmp"]=1; allowed["window"]=1; allowed["worktree"]=1
+      allowed["parent_corr"]=1
       required["schema"]=1; required["snapshot"]=1; required["spawn_incarnation"]=1
       required["tasktmp"]=1; required["window"]=1; required["worktree"]=1
       valid=1
@@ -3119,6 +3159,8 @@ terminal_outcome_surfaced() {
       exit !(valid && values["schema"] == "fm-hb-terminal-surfaced.v1")
     }
   ' "$marker" 2>/dev/null || return 1
+  marker_parent_corr=$(meta_value_unique "$marker" parent_corr 2>/dev/null || true)
+  [ "$marker_parent_corr" = "$current_parent_corr" ] || return 1
   marker_snapshot=$(meta_value_unique "$marker" snapshot 2>/dev/null) || return 1
   [ "$marker_snapshot" = "$raw" ] || return 1
   marker_spawn=$(meta_value_unique "$marker" spawn_incarnation 2>/dev/null) || return 1
@@ -3139,8 +3181,9 @@ terminal_outcome_surfaced() {
 
 replay_surface_retry_write() {
   local id=$1 meta=$2 snapshot=$3 incarnation=$4 key=$5 published=$6
-  local retry tmp tasktmp window worktree marker_incarnation explicit_incarnation rc
+  local retry tmp tasktmp window worktree marker_incarnation explicit_incarnation parent_corr rc
   case "$published" in 0|1|2) ;; *) return 1 ;; esac
+  parent_corr=$(replay_parent_corr) || return 1
   tasktmp=$(meta_value "$meta" tasktmp)
   window=$(meta_value "$meta" window)
   worktree=$(meta_value "$meta" worktree)
@@ -3159,8 +3202,8 @@ replay_surface_retry_write() {
     fi
   fi
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
-  if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nwake_key=%s\nwake_published=%s\n' \
-    "$id" "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$key" "$published" > "$tmp" \
+  if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\nwake_key=%s\nwake_published=%s\n' \
+    "$id" "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$key" "$published" > "$tmp" \
     || ! mv -f "$tmp" "$retry"; then
     rm -f "$tmp"
     return 1
@@ -3169,8 +3212,9 @@ replay_surface_retry_write() {
 
 replay_surface_marker() {
   local id=$1 meta=$2 snapshot=$3 incarnation=$4 wake_key=$5 key raw marker retry tmp tasktmp window worktree
-  local marker_incarnation explicit_incarnation rc
+  local marker_incarnation explicit_incarnation parent_corr rc
   key=$(printf '%s' "$id" | tr ':/.' '___')
+  parent_corr=$(replay_parent_corr) || return 1
   raw="$STATE/.hb-surfaced-$key"
   marker="$STATE/.hb-terminal-surfaced-$key"
   retry="$STATE/.hb-surface-retry-$key"
@@ -3186,8 +3230,8 @@ replay_surface_marker() {
   fi
   replay_surface_retry_write "$id" "$meta" "$snapshot" "$incarnation" "$wake_key" 1 || return 1
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
-  if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\n' \
-    "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" > "$tmp" \
+  if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\n' \
+    "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" > "$tmp" \
     || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
@@ -3222,7 +3266,7 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend window now activity age line outcome source
-  local snapshot token key route_rc state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining
+  local snapshot token key route_rc parent_corr state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
@@ -3307,8 +3351,15 @@ reconcile_child() {
     0|1) ;;
     *) return 0 ;;
   esac
-  [ "$route_rc" = 0 ] && KIND=secondmate
-  FP=$(hash_text "$id|$INC|$outcome|$snapshot|$KIND") || return 1
+  if [ "$route_rc" = 0 ]; then
+    KIND=secondmate
+    fm_pending_reply_secondmate_route_validate "$FM_HOME" || return 75
+    parent_corr=$FM_PENDING_ROUTE_CORR
+  else
+    FM_PENDING_ROUTE_CORR=
+    parent_corr=
+  fi
+  FP=$(terminal_outcome_fingerprint "$id" "$INC" "$outcome" "$snapshot" "$KIND" "$parent_corr") || return 1
   surface_status=0
   terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" || surface_status=$?
   case "$surface_status" in
@@ -3358,7 +3409,7 @@ reconcile_child() {
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
   local key=$1 row=${2:-} owner_required=${3:-1} expected_generation=${4:-}
-  local fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
+  local fp rec id kind incarnation outcome snapshot expected_fp legacy_fp= parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
   [ -n "$row" ] || return 2
   case "$owner_required" in 0|1) ;; *) return 2 ;; esac
   [ "$owner_required" = 0 ] || drain_claim_owner "$row" || return 2
@@ -3406,10 +3457,14 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   kind=$(receipt_field "$rec" kind)
   incarnation=$(receipt_field "$rec" incarnation)
   parent_task_id=$(receipt_field "$rec" parent_task_id)
+  corr=$(receipt_field "$rec" parent_corr)
   outcome=$(receipt_field "$rec" outcome)
   snapshot=$(receipt_field "$rec" terminal_snapshot)
-  expected_fp=$(hash_text "$id|$incarnation|$outcome|$snapshot|$kind") || return 2
-  [ "$expected_fp" = "$fp" ] || return 2
+  expected_fp=$(terminal_outcome_fingerprint "$id" "$incarnation" "$outcome" "$snapshot" "$kind" "$corr") || return 2
+  if [ "$kind" = secondmate ]; then
+    legacy_fp=$(hash_text "$id|$incarnation|$outcome|$snapshot|$kind") || return 2
+  fi
+  [ "$expected_fp" = "$fp" ] || [ "$legacy_fp" = "$fp" ] || return 2
   case "$kind" in ship|scout|secondmate) ;; *) return 2 ;; esac
   if [ "$kind" = secondmate ]; then
     parent_home=$(receipt_field "$rec" parent_home)
