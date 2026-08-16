@@ -3354,14 +3354,16 @@ child_cleanup() {
 }
 
 reconcile_child() {
-  local id=$1 meta="$STATE/$1.meta" kind backend window now activity age line outcome source
+  local id=$1 meta="$STATE/$1.meta" kind kind_status backend window now activity age line outcome source
   local snapshot token key route_rc parent_corr state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining child_lock_owner
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   if kind=$(meta_value_unique "$meta" kind 2>/dev/null); then
     :
   else
-    return 0
+    kind_status=$?
+    [ "$kind_status" = 1 ] || return 0
+    kind=ship
   fi
   case "$kind" in ship|scout) ;; *) return 0 ;; esac
   herdr_identity_allowed "$meta" || return 0
@@ -3379,7 +3381,9 @@ reconcile_child() {
   if kind=$(meta_value_unique "$meta" kind 2>/dev/null); then
     :
   else
-    return 0
+    kind_status=$?
+    [ "$kind_status" = 1 ] || return 0
+    kind=ship
   fi
   case "$kind" in ship|scout) ;; *) return 0 ;; esac
   herdr_identity_allowed "$meta" || return 0
