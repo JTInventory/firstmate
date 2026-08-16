@@ -424,11 +424,12 @@ test_run_step_incarnation_evidence_is_persisted_under_task_lock() {
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = axi ] && [ "\${2:-}" = status ]; then
+  run_id="\${FM_RUN_STEP_ID:-run-step-x1}"
   case "\${FM_RUN_STEP_MODE:-active}" in
     active)
       cat <<EOF
 run:
-  id: run-step-x1
+  id: \$run_id
   branch: main
   status: running
   head: $run_head
@@ -438,7 +439,7 @@ EOF
     terminal)
       cat <<EOF
 run:
-  id: run-step-x1
+  id: \$run_id
   branch: main
   status: completed
   head: $run_head
@@ -459,12 +460,36 @@ SH
   [ "$(receipt_value "$evidence" run_id)" = run-step-x1 ] || fail "run-step binding lost its run id"
   [ "$(receipt_value "$evidence" spawn_incarnation)" = run-step-inc ] || fail "run-step binding used the wrong incarnation"
   [ "$(receipt_value "$evidence" state)" = active ] || fail "run-step binding was not active"
-  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-x1'
+  export FM_RUN_STEP_ID=run-step-y1 FM_RUN_STEP_MODE=active
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null \
+    || fail "run-step relaunch could not replace its incarnation binding"
+  [ "$(receipt_value "$evidence" run_id)" = run-step-y1 ] || fail "run-step relaunch retained the stale binding"
+  export FM_RUN_STEP_MODE=terminal
+  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-y1'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "bound run-step state did not create a receipt"
   [ "$(queue_count "$state")" = 1 ] || fail "bound run-step state did not queue a wake"
-  unset FM_FAKE_CREW_STATE_RUN_STEP_X1
-  pass "run-step outcomes require a pre-existing incarnation binding"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+if [ "${FM_FAIL_RUN_STEP_BINDING:-0}" = 1 ] && [[ "$target" == *.run-step-incarnation-run-step-x1 ]]; then
+  exit 91
+fi
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  export FM_RUN_STEP_ID=run-step-z1 FM_RUN_STEP_MODE=active FM_FAIL_RUN_STEP_BINDING=1
+  set +e
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "run-step binding publication failure was swallowed"
+  rm -f "$fakebin/mv"
+  unset FM_FAKE_CREW_STATE_RUN_STEP_X1 FM_RUN_STEP_ID FM_RUN_STEP_MODE FM_FAIL_RUN_STEP_BINDING
+  pass "run-step outcomes require durable current incarnation bindings"
 }
 
 test_portable_timeout_runner_is_used() {

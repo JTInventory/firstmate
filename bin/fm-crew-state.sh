@@ -204,7 +204,7 @@ run_step_incarnation_binding_write() {
       [ "$acquired" = 1 ] && fm_lock_release "$lock"
       return 1
     }
-    if awk -F= -v task="$id" -v run="$run_id" -v inc="$incarnation" '
+    if existing_run=$(awk -F= -v task="$id" -v inc="$incarnation" '
       BEGIN {
         allowed["schema"]=1; allowed["task_id"]=1; allowed["run_id"]=1
         allowed["spawn_incarnation"]=1; allowed["state"]=1
@@ -217,23 +217,28 @@ run_step_incarnation_binding_write() {
         value=substr($0, index($0, "=") + 1)
         if (key == "schema" && value != "fm-jt-run-step-incarnation.v1") valid=0
         if (key == "task_id" && value != task) valid=0
-        if (key == "run_id" && value != run) valid=0
+        if (key == "run_id" && (value == "" || value !~ /^[A-Za-z0-9._:-]+$/)) valid=0
         if (key == "spawn_incarnation" && value != inc) valid=0
         if (key == "state" && value != "active") valid=0
+        if (key == "run_id") stored_run=value
         next
       }
       { valid=0 }
       END {
         if (!("schema" in seen) || !("task_id" in seen) || !("run_id" in seen) \
           || !("spawn_incarnation" in seen) || !("state" in seen)) valid=0
+        if (valid) print stored_run
         exit !valid
       }
-    ' "$evidence" 2>/dev/null; then
+    ' "$evidence" 2>/dev/null); then
+      if [ "$existing_run" = "$run_id" ]; then
+        [ "$acquired" = 1 ] && fm_lock_release "$lock"
+        return 0
+      fi
+    else
       [ "$acquired" = 1 ] && fm_lock_release "$lock"
-      return 0
+      return 1
     fi
-    [ "$acquired" = 1 ] && fm_lock_release "$lock"
-    return 1
   fi
   tmp=$(mktemp "$STATE/.run-step-incarnation.$id.XXXXXX") || {
     [ "$acquired" = 1 ] && fm_lock_release "$lock"
@@ -245,7 +250,11 @@ run_step_incarnation_binding_write() {
     [ "$acquired" = 1 ] && fm_lock_release "$lock"
     return 1
   fi
-  [ "$acquired" = 1 ] && fm_lock_release "$lock"
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$lock"
+    return $?
+  fi
+  return 0
 }
 
 # Bounded no-mistakes call in the worktree; stdout only, never fails the script.
@@ -598,9 +607,12 @@ if [ "$HAVE_RUN" = 1 ]; then
   incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
   case "$RUN_STATE" in
     working|parked|paused)
-      if [ -n "$run_id" ] && [ -n "$incarnation" ]; then
-        run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" || true
-      fi
+      [ -n "$run_id" ] && [ -n "$incarnation" ] \
+        && run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" \
+        || {
+          printf '%s\n' 'state: unknown · source: run-step · incarnation binding unavailable' >&2
+          exit 1
+        }
       ;;
   esac
   case "$RUN_STATE" in

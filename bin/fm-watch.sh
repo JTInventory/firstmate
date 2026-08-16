@@ -70,6 +70,9 @@ mkdir -p "$STATE"
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+WATCH_TASK_LOCK=
+WATCH_TASK_LOCK_OWNER=
+WATCH_TASK_LOCK_HELD=0
 
 # Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
 # Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux
@@ -661,6 +664,40 @@ surface_meta_value_unique() {
   ' "$1" 2>/dev/null
 }
 
+watch_task_lock_acquire() {
+  local task=$1
+  WATCH_TASK_LOCK="$STATE/.spawn-$task.lock"
+  WATCH_TASK_LOCK_OWNER=
+  WATCH_TASK_LOCK_HELD=0
+  fm_lock_acquire_wait "$WATCH_TASK_LOCK" || return 1
+  WATCH_TASK_LOCK_HELD=1
+  WATCH_TASK_LOCK_OWNER=$(fm_lock_link_owner "$WATCH_TASK_LOCK" 2>/dev/null) || {
+    fm_lock_release "$WATCH_TASK_LOCK" || true
+    WATCH_TASK_LOCK=
+    WATCH_TASK_LOCK_OWNER=
+    WATCH_TASK_LOCK_HELD=0
+    return 1
+  }
+  [ -n "$WATCH_TASK_LOCK_OWNER" ] || {
+    fm_lock_release "$WATCH_TASK_LOCK" || true
+    WATCH_TASK_LOCK=
+    WATCH_TASK_LOCK_OWNER=
+    WATCH_TASK_LOCK_HELD=0
+    return 1
+  }
+}
+
+watch_task_lock_release() {
+  local status=0 lock="$WATCH_TASK_LOCK"
+  if [ "$WATCH_TASK_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$lock" || status=1
+  fi
+  WATCH_TASK_LOCK=
+  WATCH_TASK_LOCK_OWNER=
+  WATCH_TASK_LOCK_HELD=0
+  return "$status"
+}
+
 surface_snapshot_matches_current() {
   local task=$1 expected=$2 status_snapshot=$3 current state_timeout state_tmp state_rc=0
   case "$expected" in
@@ -670,8 +707,15 @@ surface_snapshot_matches_current() {
   esac
   state_timeout=$(positive_seconds_or_default "${FM_WATCH_CREW_STATE_TIMEOUT_SECS:-1}" 1)
   state_tmp=$(mktemp "$STATE/.hb-crew-state.XXXXXX") || return 1
-  fm_pane_idle_run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
-    "$FM_CREW_STATE_BIN" "$task" > "$state_tmp" 2>/dev/null || state_rc=$?
+  if [ "$WATCH_TASK_LOCK_HELD" = 1 ] && [ "$WATCH_TASK_LOCK" = "$STATE/.spawn-$task.lock" ]; then
+    fm_pane_idle_run_bounded_child "$state_timeout" env \
+      FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
+      FM_TASK_LOCK_PATH="$WATCH_TASK_LOCK" FM_TASK_LOCK_OWNER="$WATCH_TASK_LOCK_OWNER" \
+      "$FM_CREW_STATE_BIN" "$task" > "$state_tmp" 2>/dev/null || state_rc=$?
+  else
+    fm_pane_idle_run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
+      "$FM_CREW_STATE_BIN" "$task" > "$state_tmp" 2>/dev/null || state_rc=$?
+  fi
   current=
   if [ "$state_rc" -eq 0 ]; then
     current=$(cat "$state_tmp" 2>/dev/null) || state_rc=$?
@@ -1152,47 +1196,67 @@ mark_all_captain_relevant_surfaced() {
 }
 
 surface_signal_transaction() {
-  local pending=$1 reason=$2 sf sig f task last terminal status=0 suppressed
+  local pending=$1 reason=$2 sf sig f task last terminal status=0 suppressed wake_held=0
   FM_SURFACE_PUBLISHED=0
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   while IFS=$(printf '\t') read -r sf sig f; do
     [ -n "$sf" ] || continue
+    task=$(basename "$f"); task=${task%.status}
+    watch_task_lock_acquire "$task" || { status=1; break; }
     suppressed=0
     terminal_signal_suppressed "$f" || suppressed=$?
     case "$suppressed" in
       0)
         printf '%s' "$sig" > "$sf" || status=1
+        watch_task_lock_release || status=1
         [ "$status" = 0 ] || break
         continue
         ;;
       1) ;;
-      *) status=1; break ;;
+      *) watch_task_lock_release || true; status=1; break ;;
     esac
-    task=$(basename "$f"); task=${task%.status}
     last=$(last_status_line "$f")
     terminal=0
     case "$last" in done:*|failed:*) terminal=1 ;; esac
     if [ "$terminal" = 1 ]; then
-      surface_retry_write "$task" "$last" "$task" 2 || { status=1; break; }
+      surface_retry_write "$task" "$last" "$task" 2 || {
+        watch_task_lock_release || true
+        status=1
+        break
+      }
     fi
+    if ! fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+      watch_task_lock_release || true
+      status=1
+      break
+    fi
+    wake_held=1
     if ! fm_wake_append_locked signal "$task" "$reason"; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+      wake_held=0
+      watch_task_lock_release || true
       status=1
       break
     fi
     if [ "$terminal" = 1 ]; then
-      surface_retry_mark_published "$task" "$last" "$task" || { status=1; break; }
+      surface_retry_mark_published "$task" "$last" "$task" || status=1
     fi
-    FM_SURFACE_PUBLISHED=1
-    if ! mark_surfaced "$f" || ! printf '%s' "$sig" > "$sf"; then
-      status=1
-      break
+    if [ "$status" = 0 ]; then
+      FM_SURFACE_PUBLISHED=1
+      if ! mark_surfaced "$f" || ! printf '%s' "$sig" > "$sf"; then
+        status=1
+      fi
     fi
-    if status_is_paused "$(last_status_line "$f")" && [ "$(status_file_kind "$f")" = secondmate ]; then
+    if [ "$status" = 0 ] && status_is_paused "$(last_status_line "$f")" \
+      && [ "$(status_file_kind "$f")" = secondmate ]; then
       pause_marker_record_status "$f" || status=1
     fi
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+    wake_held=0
+    watch_task_lock_release || status=1
     [ "$status" = 0 ] || break
   done <<< "$pending"
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  [ "$wake_held" = 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  [ "$WATCH_TASK_LOCK_HELD" = 0 ] || watch_task_lock_release || status=1
   return "$status"
 }
 
@@ -1240,6 +1304,7 @@ use warnings;
 my ($queue, $task) = @ARGV;
 open(my $fh, '<', $queue) or exit 2;
 my $needle = "task=$task ";
+my $found = 0;
 while (defined(my $line = <$fh>)) {
   chomp $line;
   my @fields = split(/\t/, $line, 5);
@@ -1249,34 +1314,36 @@ while (defined(my $line = <$fh>)) {
   my $fp = $1;
   $fp ne '' && $fp =~ /\A[A-Fa-f0-9]+\z/ or exit 2;
   next unless index($fields[4], $needle) >= 0;
-  print $fp or exit 2;
-  close($fh) or exit 2;
-  exit 0;
+  print "$fp\n" or exit 2;
+  $found = 1;
 }
 close($fh) or exit 2;
-exit 1;
+exit $found ? 0 : 1;
 PERL
   )
   rc=$?
   case "$rc" in
-    0) fp=$queue_match ;;
+    0) ;;
     1) return 1 ;;
     *) return 2 ;;
   esac
-  for rec in "$STATE/terminal-outcomes/$fp.pending" \
-    "$STATE/terminal-outcomes/$fp.presented" "$STATE/terminal-outcomes/$fp.reported"; do
-    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
-    [ "$(surface_meta_value_unique "$rec" schema 2>/dev/null)" = fm-jt-terminal-outcome.v1 ] || return 2
-    [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$fp" ] || return 2
-    [ "$(surface_meta_value_unique "$rec" task_id 2>/dev/null)" = "$task" ] || return 2
-    [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
-    [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
-    receipt_snapshot=$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null) || continue
-    surface_receipt_identity_matches_current "$task" "$fp" "$rec" \
-      "$expected_incarnation" "$outcome" "$receipt_snapshot" || continue
-    surface_snapshot_matches_current "$task" "$receipt_snapshot" "$last" || continue
-    return 0
-  done
+  while IFS= read -r fp; do
+    [ -n "$fp" ] || continue
+    for rec in "$STATE/terminal-outcomes/$fp.pending" \
+      "$STATE/terminal-outcomes/$fp.presented" "$STATE/terminal-outcomes/$fp.reported"; do
+      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+      [ "$(surface_meta_value_unique "$rec" schema 2>/dev/null)" = fm-jt-terminal-outcome.v1 ] || continue
+      [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$fp" ] || continue
+      [ "$(surface_meta_value_unique "$rec" task_id 2>/dev/null)" = "$task" ] || continue
+      [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
+      [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
+      receipt_snapshot=$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null) || continue
+      surface_receipt_identity_matches_current "$task" "$fp" "$rec" \
+        "$expected_incarnation" "$outcome" "$receipt_snapshot" || continue
+      surface_snapshot_matches_current "$task" "$receipt_snapshot" "$last" || continue
+      return 0
+    done
+  done <<< "$queue_match"
   return 1
 }
 
@@ -1312,24 +1379,24 @@ terminal_signal_suppressed() {
 
 surface_terminal_stale_transaction() {
   local w=$1 h=$2 status=0 task last terminal=0 marker_status=0 replay_status=0
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  task=$(window_to_task "$w")
+  task=$(window_to_task "$w") || return 1
+  watch_task_lock_acquire "$task" || return 1
   marker_status=0
   terminal_surface_marker_current "$task" || marker_status=$?
   if [ "$marker_status" = 0 ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+    watch_task_lock_release || true
     return 2
   fi
   replay_status=0
   inactive_replay_queued_for_task "$task" || replay_status=$?
   case "$replay_status" in
     0)
-      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+      watch_task_lock_release || true
       return 2
       ;;
     1) ;;
     *)
-      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+      watch_task_lock_release || true
       return 2
       ;;
   esac
@@ -1338,18 +1405,23 @@ surface_terminal_stale_transaction() {
   if [ "$terminal" = 1 ]; then
     surface_retry_write "$task" "$last" "$w" 2 || status=1
   fi
-  [ "$status" = 0 ] && fm_wake_append_locked stale "$w" "stale: $w" || status=1
+  if [ "$status" = 0 ] && fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
+    fm_wake_append_locked stale "$w" "stale: $w" || status=1
+  else
+    status=1
+  fi
   if [ "$status" = 0 ] && [ "$terminal" = 1 ]; then
     surface_retry_mark_published "$task" "$last" "$w" || status=1
   fi
   if [ "$status" = 0 ]; then
-    mark_surfaced "$STATE/$(window_to_task "$w").status" "$w" || status=1
+    mark_surfaced "$STATE/$task.status" "$w" || status=1
   fi
   if [ "$status" = 0 ]; then
     printf '%s' "$h" > "$STATE/.stale-$(printf '%s' "$w" | tr ':/.' '___')" || status=1
     rm -f "$STATE/.stale-since-$(printf '%s' "$w" | tr ':/.' '___')" || status=1
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+  watch_task_lock_release || status=1
   return "$status"
 }
 
@@ -1357,10 +1429,10 @@ surface_heartbeat_transaction() {
   local status=0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   fm_wake_append_locked heartbeat heartbeat heartbeat || status=1
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   if [ "$status" = 0 ]; then
     mark_all_captain_relevant_surfaced || status=1
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   return "$status"
 }
 
