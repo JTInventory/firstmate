@@ -41,7 +41,7 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
-#   Ship terminal replay requires an externally bound no-mistakes run id.
+#   No-mistakes ship launches bind the actual run id through the child command bridge.
 #   Matching JT Control Room ship spawns for .openclaw or jt-control-room append a
 #   JT PR Intake Governor block to direct-PR/no-mistakes briefs before launch.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
@@ -240,6 +240,8 @@ SPAWN_GROK_AUTH_FILE=
 SPAWN_GROK_AUTH_TMP=
 SPAWN_GROK_HOOK_FILE=
 SPAWN_GROK_CONFIG_FILE=
+SPAWN_RUN_BINDING_HANDOFF=
+SPAWN_RUN_BINDING_HANDOFF_CREATED=0
 SPAWN_CLAUDE_HOOK_INODE=
 SPAWN_CLAUDE_HOOK_DIGEST=
 SPAWN_OPENCODE_HOOK_INODE=
@@ -849,6 +851,14 @@ spawn_abort_artifacts_cleanup() {
       fi
     fi
   done
+  if [ "${SPAWN_RUN_BINDING_HANDOFF_CREATED:-0}" = 1 ] \
+    && [ -n "${SPAWN_RUN_BINDING_HANDOFF:-}" ]; then
+    if [ -f "$SPAWN_RUN_BINDING_HANDOFF" ] && [ ! -L "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+      rm -f "$SPAWN_RUN_BINDING_HANDOFF" || rc=1
+    else
+      rc=1
+    fi
+  fi
   [ -z "${HERDR_LABEL_JOURNAL:-}" ] || rm -f "$HERDR_LABEL_JOURNAL" || rc=1
   if [ -n "${TASK_TMP:-}" ] && [ -d "$TASK_TMP" ]; then
     owner_file="$TASK_TMP/.fm-tasktmp-owner"
@@ -2168,6 +2178,22 @@ if [ -e "$STATE/.run-step-incarnation-$ID" ] || [ -L "$STATE/.run-step-incarnati
   [ -f "$STATE/.run-step-incarnation-$ID" ] && [ ! -L "$STATE/.run-step-incarnation-$ID" ] || exit 1
   rm -f "$STATE/.run-step-incarnation-$ID" || exit 1
 fi
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  SPAWN_RUN_BINDING_HANDOFF="$STATE/.run-step-handoff-$ID"
+  if [ -e "$SPAWN_RUN_BINDING_HANDOFF" ] || [ -L "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+    [ -f "$SPAWN_RUN_BINDING_HANDOFF" ] && [ ! -L "$SPAWN_RUN_BINDING_HANDOFF" ] || exit 1
+    rm -f "$SPAWN_RUN_BINDING_HANDOFF" || exit 1
+  fi
+  HANDOFF_TMP=$(mktemp "$STATE/.$ID.run-step-handoff.XXXXXX") || exit 1
+  chmod 600 "$HANDOFF_TMP" || { rm -f "$HANDOFF_TMP"; exit 1; }
+  if ! printf 'schema=fm-jt-run-step-handoff.v1\ntask_id=%s\nspawn_incarnation=%s\nstate=pending\n' \
+    "$ID" "$SPAWN_INCARNATION" > "$HANDOFF_TMP" \
+    || ! mv "$HANDOFF_TMP" "$SPAWN_RUN_BINDING_HANDOFF"; then
+    rm -f "$HANDOFF_TMP"
+    exit 1
+  fi
+  SPAWN_RUN_BINDING_HANDOFF_CREATED=1
+fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
@@ -2183,6 +2209,10 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ -n "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+    echo "run_binding_state=pending"
+    echo "run_binding_handoff=${SPAWN_RUN_BINDING_HANDOFF##*/}"
+  fi
   # Missing backend= is the compatibility spelling for tmux. Record only
   # non-default backends so existing and new tmux metadata stay unchanged.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
@@ -2243,6 +2273,36 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
   exit 1
 }
 LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
+if [ -n "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+  SPAWN_RUN_BINDING_REAL=$(command -v no-mistakes 2>/dev/null || true)
+  [ -n "$SPAWN_RUN_BINDING_REAL" ] && [ -x "$SPAWN_RUN_BINDING_REAL" ] || {
+    echo "error: no-mistakes is required to publish the real run binding for ship task $ID; refusing to launch" >&2
+    exit 1
+  }
+  [ -x "$FM_ROOT/bin/fm-run-step-bridge.sh" ] || {
+    echo "error: run-step bridge is unavailable for ship task $ID; refusing to launch" >&2
+    exit 1
+  }
+  mkdir -p "$TASK_TMP/bin" || exit 1
+  [ ! -e "$TASK_TMP/bin/no-mistakes" ] && [ ! -L "$TASK_TMP/bin/no-mistakes" ] || exit 1
+  bridge_wrapper="$TASK_TMP/bin/no-mistakes"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'export FM_RUN_BINDING_ROOT=%s\n' "$(shell_quote "$FM_ROOT")"
+    printf 'export FM_RUN_BINDING_HOME=%s\n' "$(shell_quote "$FM_HOME")"
+    printf 'export FM_RUN_BINDING_STATE=%s\n' "$(shell_quote "$STATE")"
+    printf 'export FM_RUN_BINDING_TASK=%s\n' "$(shell_quote "$ID")"
+    printf 'export FM_RUN_BINDING_INCARNATION=%s\n' "$(shell_quote "$SPAWN_INCARNATION")"
+    printf 'export FM_RUN_BINDING_HANDOFF=%s\n' "$(shell_quote "$SPAWN_RUN_BINDING_HANDOFF")"
+    printf 'export FM_RUN_BINDING_TMP=%s\n' "$(shell_quote "$TASK_TMP")"
+    printf 'exec %s wrap %s "$@"\n' \
+      "$(shell_quote "$FM_ROOT/bin/fm-run-step-bridge.sh")" \
+      "$(shell_quote "$SPAWN_RUN_BINDING_REAL")"
+  } > "$bridge_wrapper" || exit 1
+  chmod 700 "$bridge_wrapper" || exit 1
+  sq_run_binding_path=$(shell_quote "$TASK_TMP/bin:$PATH")
+  LAUNCH="PATH=$sq_run_binding_path $LAUNCH"
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

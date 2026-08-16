@@ -50,6 +50,7 @@ inactive_generation_valid() {
 
 present_inactive_row() {
   local key=$1 row=$2 status=0 go emitted worker worker_status=0 generation
+  local defer_pending=0 defer_payload=
   local _epoch _seq _kind _queued_key payload
   generation=${FM_WAKE_DRAIN_GENERATION:-}
   if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ]; then
@@ -93,15 +94,14 @@ present_inactive_row() {
   if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ]; then
     IFS=$(printf '\t') read -r _epoch _seq _kind _queued_key payload <<< "$row"
     [ "$_queued_key" = "$key" ] || return 3
+    defer_pending=1
+    defer_payload=$payload
     if [ "$DRAIN_RESUMING" = true ]; then
       if [ "$DRAIN_RETAINED_ANY" = 0 ]; then
         DRAIN_RETAINED_OFFSET=$DRAIN_CURRENT_OFFSET
         DRAIN_RETAINED_ANY=1
       fi
-    else
-      fm_wake_append_if_absent_locked retained check "$key" "$payload" || return 3
     fi
-    DRAIN_CURRENT_RETAINED=1
   fi
   trap - INT TERM HUP
   go=$(mktemp "$STATE/.wake-presentation.XXXXXX") || return 1
@@ -167,6 +167,17 @@ present_inactive_row() {
         && FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
           presented "$key" "$row" >/dev/null 2>&1; then
         status=0
+      fi
+    fi
+  fi
+  if [ "$status" = 0 ] && [ "$defer_pending" = 1 ]; then
+    if [ "$DRAIN_RESUMING" = true ]; then
+      DRAIN_CURRENT_RETAINED=1
+    else
+      if fm_wake_append_if_absent_locked retained check "$key" "$defer_payload"; then
+        DRAIN_CURRENT_RETAINED=1
+      else
+        status=1
       fi
     fi
   fi

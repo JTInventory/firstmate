@@ -1420,7 +1420,7 @@ test_reused_task_id_gets_new_fingerprint() {
 }
 
 test_spawn_publishes_incarnation_token() {
-  local dir root home fakebin state project worktree tmux_state pane_pid out status meta token evidence run_id
+  local dir root home fakebin state project worktree tmux_state pane_pid out status meta token evidence run_id tasktmp bridge_output
   new_case spawn-contract
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1454,6 +1454,11 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01SPAWNCONTRACT"\n  status: running\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
   : > "$tmux_state"
   ( cd "$worktree" && exec sleep 30 ) >/dev/null 2>&1 &
   pane_pid=$!
@@ -1477,6 +1482,20 @@ SH
   evidence="$state/.run-step-incarnation-spawn-contract"
   [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "spawn fabricated a run-step binding without the actual no-mistakes run id"
   [ "$(grep -c '^run_step_id=' "$meta" 2>/dev/null || true)" = 0 ] || fail "spawn persisted a synthetic run-step id"
+  tasktmp=$(receipt_value "$meta" tasktmp)
+  [ -x "$tasktmp/bin/no-mistakes" ] || fail "spawn did not install the run-id bridge"
+  bridge_output=$(cd "$root" && env PATH="$tasktmp/bin:$fakebin:$PATH" no-mistakes axi run 2>&1) \
+    || fail "run-id bridge rejected the actual no-mistakes run output"
+  printf '%s\n' "$bridge_output" | grep -Fqx '  id: "01SPAWNCONTRACT"' \
+    || fail "run-id bridge did not preserve no-mistakes output"
+  [ "$(receipt_value "$evidence" run_id)" = 01SPAWNCONTRACT ] \
+    || fail "run-id bridge did not persist the actual no-mistakes run id"
+  [ "$(receipt_value "$evidence" spawn_incarnation)" = "$token" ] \
+    || fail "run-id bridge bound the wrong spawn incarnation"
+  [ "$(receipt_value "$meta" run_binding_state)" = bound ] \
+    || fail "run-id bridge did not mark the spawn metadata bound"
+  [ "$(receipt_value "$meta" run_id)" = 01SPAWNCONTRACT ] \
+    || fail "run-id bridge did not persist the actual run id in spawn metadata"
   mkdir -p "$home/data/spawn-mismatch"
   printf 'spawn mismatch brief\n' > "$home/data/spawn-mismatch/brief.md"
   mv "$root/bin/fm-wake-lib.sh" "$root/bin/fm-wake-lib.real.sh"
