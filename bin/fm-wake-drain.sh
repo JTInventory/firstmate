@@ -30,6 +30,7 @@ DRAIN_RESTORE_PENDING=false
 DRAIN_RESTORE_OFFSET=0
 DRAIN_RESTORE_SOURCE=
 DRAIN_DEDUPED_READY=0
+DRAIN_FINALIZED_KEYS=()
 FM_WAKE_DRAIN_RESUMED_SOURCE=0
 export FM_WAKE_DRAIN_RESUMED_SOURCE
 case "$DRAIN_BATCH_ROWS" in
@@ -312,6 +313,22 @@ drain_batch_stop() {
       next_offset=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" 0 \
         "$DRAIN_BATCH_COUNT") || return 1
       fm_wake_install_queue_cursor_atomic "$DRAIN_DEDUPED" "$next_offset" || return 1
+      if [ "${#DRAIN_FINALIZED_KEYS[@]}" -gt 0 ]; then
+        fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+        DRAIN_LOCK_HELD=true
+        finalized_status=0
+        for finalized_key in "${DRAIN_FINALIZED_KEYS[@]}"; do
+          fm_wake_remove_key_locked "$finalized_key" || { finalized_status=1; break; }
+        done
+        if [ "$finalized_status" -ne 0 ]; then
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+          DRAIN_LOCK_HELD=false
+          return 1
+        fi
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
+        DRAIN_LOCK_HELD=false
+        DRAIN_FINALIZED_KEYS=()
+      fi
       rm -f "$DRAIN_RESTORE" "$DRAIN_TMP" "$DRAIN_DEDUPED"
       DRAIN_RESTORE=
       DRAIN_TMP=
@@ -502,7 +519,17 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
           fi
           ;;
         1|5) ;;
-        3) ;;
+        3)
+          if [ "$DRAIN_RESUMING" = true ] && [ "$DRAIN_RESTORE_PENDING" != true ]; then
+            fm_wake_remove_key_locked "$_key" || {
+              drain_restore_remaining "$drain_line" || exit 1
+              exit 1
+            }
+            DRAIN_CURRENT_REMOVED=1
+          else
+            DRAIN_FINALIZED_KEYS+=("$_key")
+          fi
+          ;;
         4)
           if [ "$DRAIN_RESUMING" != true ]; then
             drain_restore_remaining "$drain_line" || exit 1

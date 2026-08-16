@@ -1739,7 +1739,8 @@ publish_receipt_and_wake() {
 }
 
 receipt_existing_core() {
-  local suffix existing expected_fp existing_kind parent_id parent_home parent_status parent_corr
+  local suffix existing expected_fp existing_kind existing_fingerprint existing_task_id existing_incarnation
+  local existing_outcome existing_snapshot existing_source parent_id parent_home parent_status parent_corr
   RECEIPT_EXISTING_SUFFIX=
   expected_fp=$(hash_text "$ID|$INC|$OUTCOME|$SNAPSHOT|$KIND") || return 1
   [ "$expected_fp" = "$FP" ] || return 1
@@ -1749,26 +1750,35 @@ receipt_existing_core() {
     [ -e "$existing" ] || continue
     [ -f "$existing" ] || return 2
     [ "$(receipt_field "$existing" schema)" = fm-jt-terminal-outcome.v1 ] || return 2
-    [ "$(receipt_field "$existing" fingerprint)" = "$FP" ] || return 2
-    [ "$(receipt_field "$existing" task_id)" = "$ID" ] || return 2
-    [ "$(receipt_field "$existing" incarnation)" = "$INC" ] || return 2
-    [ "$(receipt_field "$existing" outcome)" = "$OUTCOME" ] || return 2
-    [ "$(receipt_field "$existing" terminal_source)" = "$SOURCE" ] || return 2
-    [ "$(receipt_field "$existing" terminal_snapshot)" = "$SNAPSHOT" ] || return 2
-    existing_kind=$(receipt_field "$existing" kind)
+    existing_fingerprint=$(receipt_field "$existing" fingerprint) || return 2
+    existing_task_id=$(receipt_field "$existing" task_id) || return 2
+    existing_incarnation=$(receipt_field "$existing" incarnation) || return 2
+    existing_outcome=$(receipt_field "$existing" outcome) || return 2
+    existing_source=$(receipt_field "$existing" terminal_source) || return 2
+    existing_snapshot=$(receipt_field "$existing" terminal_snapshot) || return 2
+    existing_kind=$(receipt_field "$existing" kind) || return 2
+    [ "$existing_fingerprint" = "$FP" ] || return 2
+    [ "$existing_task_id" = "$ID" ] || return 2
+    [ "$existing_incarnation" = "$INC" ] || return 2
+    [ "$existing_outcome" = "$OUTCOME" ] || return 2
+    [ "$existing_source" = "$SOURCE" ] || return 2
+    [ "$existing_snapshot" = "$SNAPSHOT" ] || return 2
+    [ "$existing_kind" = "$KIND" ] || return 2
+    expected_fp=$(hash_text "$existing_task_id|$existing_incarnation|$existing_outcome|$existing_snapshot|$existing_kind") || return 2
+    [ "$expected_fp" = "$existing_fingerprint" ] || return 2
     case "$existing_kind" in
       ship|scout)
-        parent_id=$(receipt_field "$existing" parent_task_id)
-        parent_home=$(receipt_field "$existing" parent_home)
-        parent_status=$(receipt_field "$existing" parent_status)
-        parent_corr=$(receipt_field "$existing" parent_corr)
+        parent_id=$(receipt_field "$existing" parent_task_id) || return 2
+        parent_home=$(receipt_field "$existing" parent_home) || return 2
+        parent_status=$(receipt_field "$existing" parent_status) || return 2
+        parent_corr=$(receipt_field "$existing" parent_corr) || return 2
         [ -z "$parent_id" ] && [ -z "$parent_home" ] && [ -z "$parent_status" ] && [ -z "$parent_corr" ] || return 2
         ;;
       secondmate)
-        parent_id=$(receipt_field "$existing" parent_task_id)
-        parent_home=$(receipt_field "$existing" parent_home)
-        parent_status=$(receipt_field "$existing" parent_status)
-        parent_corr=$(receipt_field "$existing" parent_corr)
+        parent_id=$(receipt_field "$existing" parent_task_id) || return 2
+        parent_home=$(receipt_field "$existing" parent_home) || return 2
+        parent_status=$(receipt_field "$existing" parent_status) || return 2
+        parent_corr=$(receipt_field "$existing" parent_corr) || return 2
         if [ "$suffix" = pending ]; then
           [ "$parent_id" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 2
           [ "$parent_home" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 2
