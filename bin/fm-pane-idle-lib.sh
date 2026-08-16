@@ -867,14 +867,10 @@ use strict;
 use warnings;
 my ($state, $cursor) = @ARGV;
 opendir(my $dh, $state) or exit 2;
-my $started = $cursor eq '' ? 1 : 0;
 my %seen;
 while (defined(my $entry = readdir($dh))) {
   next unless $entry =~ /\.meta\z/;
-  if (!$started) {
-    $started = 1 if $entry eq $cursor;
-    next;
-  }
+  next if $cursor ne '' && $entry ne '0' && $entry le $cursor;
   my $path = "$state/$entry";
   if (!-f $path || -l $path) {
     print $entry, "\0\0" or exit 2;

@@ -382,6 +382,10 @@ watch_window_scan_prepare() {
     fi
   fi
   FM_WATCH_WINDOW_CURSOR=$(cat "$cursor_path" 2>/dev/null || true)
+  if [ "$FM_WATCH_WINDOW_CURSOR" = EOF ]; then
+    rm -f "$cursor_path" || return 1
+    FM_WATCH_WINDOW_CURSOR=
+  fi
   case "$FM_WATCH_WINDOW_CURSOR" in
     *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;;
   esac
@@ -396,10 +400,24 @@ watch_window_scan_advance() {
 
 event_wait_herdr() {
   local timeout=$1 w backend session first_session='' record rc=0 pane_id to agent window meta task reason
+  local event_scan_deadline windows_tmp windows_status=0
   local -a windows=()
+  event_scan_deadline=$(( $(fm_pane_idle_now_ms) + PANE_IDLE_INDEX_BUDGET_SECS * 1000 ))
+  windows_tmp=$(mktemp "$STATE/.herdr-windows.XXXXXX") || return 2
+  [ -f "$windows_tmp" ] && [ ! -L "$windows_tmp" ] || { rm -f "$windows_tmp"; return 2; }
+  recorded_windows "$event_scan_deadline" > "$windows_tmp" || windows_status=$?
+  case "$windows_status" in
+    0) ;;
+    124) rm -f "$windows_tmp"; return 2 ;;
+    *) rm -f "$windows_tmp"; return 1 ;;
+  esac
   while IFS= read -r w; do
+    [ "$(fm_pane_idle_now_ms)" -lt "$event_scan_deadline" ] || {
+      rm -f "$windows_tmp"
+      return 2
+    }
     [ -n "$w" ] || continue
-    backend=$(window_backend "$w")
+    backend=$(window_backend "$w" "$event_scan_deadline") || continue
     [ "$backend" = herdr ] || continue
     session=${w%%:*}
     [ -n "$session" ] && [ "$session" != "$w" ] || continue
@@ -408,7 +426,8 @@ event_wait_herdr() {
     fi
     [ "$session" = "$first_session" ] || continue
     windows+=("$w")
-  done < <(recorded_windows)
+  done < "$windows_tmp"
+  rm -f "$windows_tmp" || return 2
   [ "${#windows[@]}" -gt 0 ] || return 2
   fm_watch_herdr_events_capable "$first_session" || return 2
 
@@ -823,11 +842,24 @@ surface_retry_receipt_consumed() {
 }
 
 surface_retry_wake_state() {
-  local wake_key=$1 status
+  local wake_key=$1 status wake_deadline remaining
   [ -e "$FM_WAKE_QUEUE" ] || return 1
   [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 2
-  if awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
-      "$FM_WAKE_QUEUE" 2>/dev/null; then
+  wake_deadline=$(( $(fm_pane_idle_now_ms) + WAKE_QUEUE_STATUS_BUDGET_SECS * 1000 ))
+  remaining=$(fm_pane_idle_budget_secs "$wake_deadline") || return 2
+  if fm_pane_idle_run_bounded_child "$remaining" perl - "$FM_WAKE_QUEUE" "$wake_key" <<'PERL'
+use strict;
+use warnings;
+my ($path, $wanted) = @ARGV;
+open(my $fh, '<', $path) or exit 2;
+while (defined(my $line = <$fh>)) {
+  my @fields = split(/\t/, $line, -1);
+  exit 0 if defined($fields[3]) && $fields[3] eq $wanted;
+}
+close($fh) or exit 2;
+exit 1;
+PERL
+  then
     return 0
   else
     status=$?
@@ -1485,15 +1517,11 @@ EOF
       "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "${FM_WATCH_WINDOW_CURSOR:-0}" \
       "$pane_idle_scan_deadline" > "$window_scan_stream" || window_scan_status=$?
   else
-    window_scan_stamp=$(fm_pane_idle_path_stamp "$STATE" "$pane_idle_scan_deadline") \
+    window_scan_source=direct
+    watch_window_scan_prepare "$window_scan_source" || exit 1
+    fm_pane_idle_meta_index_windows_direct_resumable "$STATE" \
+      "${FM_WATCH_WINDOW_CURSOR:-}" "$pane_idle_scan_deadline" > "$window_scan_stream" \
       || window_scan_status=$?
-    if [ "$window_scan_status" = 0 ]; then
-      window_scan_source="direct:$window_scan_stamp"
-      watch_window_scan_prepare "$window_scan_source" || exit 1
-      fm_pane_idle_meta_index_windows_direct_resumable "$STATE" \
-        "${FM_WATCH_WINDOW_CURSOR:-}" "$pane_idle_scan_deadline" > "$window_scan_stream" \
-        || window_scan_status=$?
-    fi
   fi
   case "$window_scan_status" in
     0|124) ;;
@@ -1640,6 +1668,9 @@ EOF
     fi
     watch_window_scan_advance "$window_scan_cursor" || exit 1
   done < "$window_scan_stream"
+  if [ "$window_scan_source" = direct ] && [ "$window_scan_status" = 0 ]; then
+    watch_window_scan_advance EOF || exit 1
+  fi
   rm -f "$window_scan_stream" || exit 1
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter

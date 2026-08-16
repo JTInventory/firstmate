@@ -486,39 +486,53 @@ test_oversized_cadence_is_clamped() {
   pass "oversized decimal cadence values clamp before arithmetic"
 }
 
-test_find_failure_propagates_without_advancing_scan() {
-  local dir root home fakebin state
+test_metadata_enumeration_failure_propagates_without_advancing_scan() {
+  local dir root home fakebin state real_perl
   new_case find-failure
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   write_meta "$state" find-x1 find-inc
-  cat > "$fakebin/find" <<'SH'
+  real_perl=$(command -v perl)
+  cat > "$fakebin/perl" <<SH
 #!/usr/bin/env bash
-exit 42
+if [ "\$1" = - ] && [ "\$3" = meta ]; then exit 42; fi
+exec "$real_perl" "\$@"
 SH
-  chmod +x "$fakebin/find"
+  chmod +x "$fakebin/perl"
   if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
     fail "find enumeration failure was reported as success"
   fi
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "find failure advanced the cadence marker"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "find failure created a receipt"
-  pass "find enumeration failures propagate and preserve retry state"
+  pass "metadata enumeration failures propagate and preserve retry state"
 }
 
 test_find_enumeration_respects_scan_budget() {
-  local dir root home fakebin state find_log
+  local dir root home fakebin state find_log real_perl
   new_case find-budget
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   find_log="$dir/find.log"
   write_meta "$state" find-budget-x1 find-budget-inc
-  cat > "$fakebin/find" <<'SH'
+  write_meta "$state" find-budget-x2 find-budget-inc-2
+  real_perl=$(command -v perl)
+  cat > "$fakebin/perl" <<SH
 #!/usr/bin/env bash
-: > "${FM_FIND_LOG:?}"
-sleep 3
-exit 0
+if [ "\$1" = - ] && [ "\$3" = meta ]; then
+  : > "\${FM_FIND_LOG:?}"
+  if [ "\$4" = 0 ] || [ -z "\$4" ]; then
+    printf '%s\\0' "\$2/find-budget-x1.meta"
+    printf '%s\\n' find-budget-x1.meta > "\$5"
+  else
+    printf '%s\\0' "\$2/find-budget-x2.meta"
+    printf '%s\\n' find-budget-x2.meta > "\$5"
+  fi
+  sleep 3
+  exit 0
+fi
+exec "$real_perl" "\$@"
 SH
-  chmod +x "$fakebin/find"
+  chmod +x "$fakebin/perl"
   export FM_INACTIVE_OUTCOME_BUDGET_SECS=2 FM_FIND_LOG="$find_log"
   scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
     || fail "slow find enumeration terminated supervision instead of deferring"
@@ -527,6 +541,14 @@ SH
   [ -e "$find_log" ] || fail "bounded scan did not invoke the find child"
   [ -f "$state/.inactive-outcome-find.incomplete" ] \
     || fail "budget-exhausted enumeration did not persist resumable progress"
+  [ "$(cat "$state/.inactive-outcome-find.enum.cursor")" = find-budget-x1.meta ] \
+    || fail "budget-exhausted enumeration did not persist its source cursor"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "resumable enumeration retry terminated supervision"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
+    || fail "resumable enumeration suffix retry terminated supervision"
+  [ "$(cat "$state/.inactive-outcome-find.enum.cursor")" = find-budget-x2.meta ] \
+    || fail "resumable enumeration restarted from the beginning"
   unset FM_INACTIVE_OUTCOME_BUDGET_SECS FM_FIND_LOG
   pass "inactive enumeration is bounded by the per-scan budget"
 }
@@ -3781,7 +3803,7 @@ test_portable_timeout_preserves_signal_failure
 test_portable_timeout_expires_child
 test_leading_zero_cadence_is_normalized
 test_oversized_cadence_is_clamped
-test_find_failure_propagates_without_advancing_scan
+test_metadata_enumeration_failure_propagates_without_advancing_scan
 test_find_enumeration_respects_scan_budget
 test_minimum_budget_preserves_direct_scan
 test_ack_recomputes_fingerprint_from_receipt_fields
