@@ -186,10 +186,11 @@ strip_quotes() {
 }
 
 run_step_incarnation_binding_write() {
-  local id=$1 run_id=$2 incarnation=$3 evidence lock owner tmp acquired=0
+  local id=$1 run_id=$2 incarnation=$3 create=${4:-1} evidence lock owner tmp acquired=0
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   [ -n "$incarnation" ] || return 1
+  case "$create" in 0|1) ;; *) return 1 ;; esac
   evidence="$STATE/.run-step-incarnation-$id"
   lock=${FM_TASK_LOCK_PATH:-$STATE/.spawn-$id.lock}
   owner=${FM_TASK_LOCK_OWNER:-}
@@ -242,6 +243,10 @@ run_step_incarnation_binding_write() {
       return 1
     fi
   fi
+  [ "$create" = 1 ] || {
+    [ "$acquired" = 1 ] && fm_lock_release "$lock"
+    return 1
+  }
   tmp=$(mktemp "$STATE/.run-step-incarnation.$id.XXXXXX") || {
     [ "$acquired" = 1 ] && fm_lock_release "$lock"
     return 1
@@ -459,6 +464,7 @@ nm_run_head_matches_worktree() {
 }
 
 HAVE_RUN=0
+RUN_SELECTION_SOURCE=none
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -467,6 +473,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
+      RUN_SELECTION_SOURCE=current
     else
       # The active-or-most-recent run is for another branch, or its branch name
       # matches but its code identity does not. Inspect bounded recent runs for
@@ -479,6 +486,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         run_branch=$(strip_quotes "$(nm_field branch)")
         if [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
           HAVE_RUN=1
+          RUN_SELECTION_SOURCE=candidate
           break
         fi
       done <<< "$candidate_ids"
@@ -608,9 +616,15 @@ if [ "$HAVE_RUN" = 1 ]; then
   run_id=$(strip_quotes "$(nm_field id)")
   incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
   case "$RUN_STATE" in
-    working|parked|paused)
+    working|parked|paused|done|failed)
+      binding_create=1
+      if [ "$RUN_SELECTION_SOURCE" != current ] && {
+        [ "$RUN_STATE" = done ] || [ "$RUN_STATE" = failed ];
+      }; then
+        binding_create=0
+      fi
       [ -n "$run_id" ] && [ -n "$incarnation" ] \
-        && run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" \
+        && run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" "$binding_create" \
         || {
           printf '%s\n' 'state: unknown · source: run-step · incarnation binding unavailable' >&2
           exit 1

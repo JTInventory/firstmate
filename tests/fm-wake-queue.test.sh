@@ -336,16 +336,19 @@ test_orphaned_drain_source_is_recovered() {
 }
 
 test_restore_manifest_retires_raw_source_before_clear() {
-  local dir state row
+  local dir state row raw
   dir=$(make_case restore-manifest-source)
   state="$dir/state"
   row=$'1\t1\tsignal\tretired-key\tsignal: retired'
+  raw=.wake-queue.drain.99998
   printf '%s\n' "$row" > "$state/.wake-queue.deduped.99999"
-  printf 'schema=fm-wake-queue-restore.v1\nsource=.wake-queue.deduped.99999\noffset=0\nsource_retired=1\n' \
+  printf '%s\n' "$row" > "$state/$raw"
+  printf 'schema=fm-wake-queue-restore.v1\nsource=.wake-queue.deduped.99999\noffset=0\nsource_retired=1\nraw_source=%s\nraw_source_retired=0\n' "$raw" \
     > "$state/.wake-queue.restore"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
     || fail "drain did not recover a retired restore source"
   [ ! -e "$state/.wake-queue.deduped.99999" ] || fail "retired restore source remained"
+  [ ! -e "$state/$raw" ] || fail "owned raw drain source remained"
   [ ! -e "$state/.wake-queue.restore" ] || fail "restore manifest remained after source retirement"
   ! grep -Fqx "$row" "$dir/drain.out" || fail "retired restore source was replayed"
   pass "restore manifest retires its raw source before clearing"

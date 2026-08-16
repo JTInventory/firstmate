@@ -95,7 +95,12 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  local dir=$1 id=$2 meta="$1/state/$2.meta"
+  if [ -f "$meta" ] && [ -n "${FM_FAKE_AXI_STATUS:-}${FM_FAKE_AXI_LIST:-}" ] \
+    && ! grep -q '^spawn_incarnation=' "$meta"; then
+    printf 'spawn_incarnation=test-incarnation\n' >> "$meta"
+  fi
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" "$CREW_STATE" "$id"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -542,6 +547,56 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+test_terminal_first_observation_persists_binding() {
+  reset_fakes
+  local d out evidence
+  d=$(new_case terminal-first-observation)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-first
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-terminal-first.meta" \
+    "window=fm:fm-feat-terminal-first" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=terminal-first-inc"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-terminal-first)"
+  out=$(run_crew_state "$d" feat-terminal-first)
+  assert_contains "$out" "state: done" "terminal first observation -> done"
+  evidence="$d/state/.run-step-incarnation-feat-terminal-first"
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "terminal first observation did not persist binding"
+  [ "$(awk -F= '$1 == "run_id" { print $2 }' "$evidence")" = 01RUN ] \
+    || fail "terminal first observation persisted the wrong run"
+  [ "$(awk -F= '$1 == "spawn_incarnation" { print $2 }' "$evidence")" = terminal-first-inc ] \
+    || fail "terminal first observation persisted the wrong incarnation"
+  pass "terminal first observation persists its lifecycle binding"
+}
+
+test_terminal_candidate_requires_existing_binding() {
+  reset_fakes
+  local d status out evidence
+  d=$(new_case terminal-candidate)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-candidate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-terminal-candidate.meta" \
+    "window=fm:fm-feat-terminal-candidate" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=terminal-candidate-inc"
+  status=$(run_passed fm/unrelated-branch)
+  FM_FAKE_AXI_STATUS="$status"
+  status=$(run_passed fm/feat-terminal-candidate | sed 's/id: "01RUN"/id: "01HIST"/')
+  export FM_FAKE_AXI_STATUS_RUN_01HIST="$status"
+  FM_FAKE_AXI_LIST=$(cat <<EOF
+runs[1]{id,branch,status,head,pr}:
+  "01HIST",fm/feat-terminal-candidate,completed,$FM_FAKE_RUN_HEAD,""
+EOF
+)
+  set +e
+  out=$(run_crew_state "$d" feat-terminal-candidate 2>&1)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "terminal candidate run created a new binding"
+  evidence="$d/state/.run-step-incarnation-feat-terminal-candidate"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "terminal candidate run persisted historical evidence"
+  unset FM_FAKE_AXI_STATUS_RUN_01HIST
+  pass "terminal candidate run requires a pre-existing binding"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run, so the
@@ -1020,6 +1075,8 @@ test_terminal_passed
 test_terminal_passed_delivery_skipped
 test_terminal_passed_delivery_completed
 test_terminal_failed
+test_terminal_first_observation_persists_binding
+test_terminal_candidate_requires_existing_binding
 test_cross_branch_attribution_via_list
 test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored
