@@ -1420,7 +1420,7 @@ test_reused_task_id_gets_new_fingerprint() {
 }
 
 test_spawn_publishes_incarnation_token() {
-  local dir root home fakebin state project worktree tmux_state pane_pid out status meta token evidence
+  local dir root home fakebin state project worktree tmux_state pane_pid out status meta token evidence run_id
   new_case spawn-contract
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1463,7 +1463,6 @@ SH
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_SPAWN_NO_GUARD=1 \
-    FM_RUN_STEP_ID=run-step-spawn-contract \
     FM_FAKE_PANE_PATH="$worktree" FM_FAKE_PANE_PID="$pane_pid" FM_FAKE_TMUX_STATE="$tmux_state" TMUX=fake,1,0 \
     FM_SPAWN_WT_WAIT_SECS=3 "$root/bin/fm-spawn.sh" spawn-contract "$project" \
     --harness codex 2>&1)
@@ -1475,9 +1474,11 @@ SH
   token=$(receipt_value "$meta" spawn_incarnation)
   case "$token" in ''|legacy-unknown) fail "public fm-spawn path published no incarnation token" ;; esac
   grep -F 'spawn_incarnation=' "$meta" >/dev/null || fail "spawn metadata omitted its incarnation field"
+  run_id=$(receipt_value "$meta" run_step_id)
+  case "$run_id" in spawn-spawn-contract-*) ;; *) fail "spawn metadata omitted its generated run id" ;; esac
   evidence="$state/.run-step-incarnation-spawn-contract"
-  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "spawn did not publish the explicit run-step binding"
-  [ "$(receipt_value "$evidence" run_id)" = run-step-spawn-contract ] || fail "spawn binding used the wrong run id"
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "spawn did not publish the generated run-step binding"
+  [ "$(receipt_value "$evidence" run_id)" = "$run_id" ] || fail "spawn binding did not match metadata run id"
   [ "$(receipt_value "$evidence" spawn_incarnation)" = "$token" ] || fail "spawn binding used the wrong incarnation"
   mkdir -p "$home/data/spawn-mismatch"
   printf 'spawn mismatch brief\n' > "$home/data/spawn-mismatch/brief.md"
@@ -1502,7 +1503,6 @@ SH
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_SPAWN_NO_GUARD=1 \
-    FM_RUN_STEP_ID=run-step-spawn-mismatch \
     FM_FAKE_PANE_PATH="$worktree" FM_FAKE_PANE_PID="$pane_pid" FM_FAKE_TMUX_STATE="$tmux_state" TMUX=fake,1,0 \
     FM_SPAWN_WT_WAIT_SECS=3 "$root/bin/fm-spawn.sh" spawn-mismatch "$project" \
     --harness codex 2>&1)

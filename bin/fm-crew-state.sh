@@ -534,10 +534,20 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
 
   run_id=$(strip_quotes "$(nm_field id)")
+  run_step_id_count=$(grep -c '^run_step_id=' "$META" 2>/dev/null || true)
+  run_step_id=
+  if [ "$run_step_id_count" = 1 ]; then
+    run_step_id=$(grep '^run_step_id=' "$META" 2>/dev/null | cut -d= -f2- || true)
+  fi
   incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
   case "$RUN_STATE" in
     done|failed)
-      [ -n "$run_id" ] && [ -n "$incarnation" ] \
+      case "$run_step_id_count" in
+        0) run_step_id_matches_meta=1 ;;
+        1) [ "$run_step_id" = "$run_id" ] && run_step_id_matches_meta=1 || run_step_id_matches_meta=0 ;;
+        *) run_step_id_matches_meta=0 ;;
+      esac
+      [ "$run_step_id_matches_meta" = 1 ] && [ -n "$run_id" ] && [ -n "$incarnation" ] \
         && fm_run_step_binding_validate "$ID" "$run_id" "$incarnation" \
         || {
           printf '%s\n' 'state: unknown · source: run-step · incarnation binding unavailable' >&2

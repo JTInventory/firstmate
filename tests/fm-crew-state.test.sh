@@ -505,7 +505,7 @@ test_terminal_passed() {
   local d; d=$(new_case passed)
   make_repo_on_branch "$d/wt" fm/feat-d
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
   write_run_step_binding "$d/state" feat-d 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
   local out; out=$(run_crew_state "$d" feat-d)
@@ -536,7 +536,7 @@ test_terminal_passed_delivery_completed() {
   local d; d=$(new_case passed-delivery-completed)
   make_repo_on_branch "$d/wt" fm/feat-dok
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dok.meta" "window=fm:fm-feat-dok" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-dok.meta" "window=fm:fm-feat-dok" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
   write_run_step_binding "$d/state" feat-dok 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed_delivery_completed fm/feat-dok)"
   local out; out=$(run_crew_state "$d" feat-dok)
@@ -550,7 +550,7 @@ test_terminal_failed() {
   local d; d=$(new_case failed)
   make_repo_on_branch "$d/wt" fm/feat-e
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-e.meta" "window=fm:fm-feat-e" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-e.meta" "window=fm:fm-feat-e" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
   write_run_step_binding "$d/state" feat-e 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-e)"
   local out; out=$(run_crew_state "$d" feat-e)
@@ -623,6 +623,27 @@ EOF
   [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "terminal candidate run persisted historical evidence"
   unset FM_FAKE_AXI_STATUS_RUN_01HIST
   pass "terminal candidate run requires a pre-existing binding"
+}
+
+test_terminal_metadata_run_id_must_match_binding() {
+  reset_fakes
+  local d status out evidence
+  d=$(new_case terminal-metadata-mismatch)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-metadata-mismatch
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-terminal-metadata-mismatch.meta" \
+    "window=fm:fm-feat-terminal-metadata-mismatch" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=terminal-metadata-inc" "run_step_id=spawned-run"
+  write_run_step_binding "$d/state" feat-terminal-metadata-mismatch 01RUN terminal-metadata-inc
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-terminal-metadata-mismatch)"
+  set +e
+  out=$(run_crew_state "$d" feat-terminal-metadata-mismatch 2>&1)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "terminal run crossed a mismatched metadata run id"
+  evidence="$d/state/.run-step-incarnation-feat-terminal-metadata-mismatch"
+  [ -f "$evidence" ] || fail "mismatched metadata test lost its binding evidence"
+  pass "terminal state requires the metadata and binding run ids to match"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run, so the
@@ -814,7 +835,7 @@ test_dead_window_still_reports_terminal_run_step() {
   local d; d=$(new_case dead-window-done)
   make_repo_on_branch "$d/wt" fm/feat-dead-done
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
   write_run_step_binding "$d/state" feat-dead-done 01RUN test-incarnation
   printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-dead-done.status"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
@@ -1105,6 +1126,7 @@ test_terminal_failed
 test_active_run_does_not_create_incarnation_binding
 test_terminal_first_observation_requires_binding
 test_terminal_candidate_requires_existing_binding
+test_terminal_metadata_run_id_must_match_binding
 test_cross_branch_attribution_via_list
 test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored

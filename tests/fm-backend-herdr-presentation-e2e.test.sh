@@ -439,7 +439,6 @@ run_real_herdr_spawn() {
     FM_HERDR_FAKE_LEASE_PROOF="$SPAWN_STATE/.real-herdr-e2e.spawn-worktree"
     FM_HERDR_FAKE_WORKTREE="$SPAWN_WORKTREE"
     FM_SPAWN_NO_GUARD=1
-    FM_RUN_STEP_ID=real-herdr-e2e
     FM_SPAWN_WT_WAIT_SECS=2
     PATH="$SPAWN_BIN:$ORIGINAL_PATH"
   )

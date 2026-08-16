@@ -752,7 +752,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
       FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-      FM_SPAWN_NO_GUARD=1 FM_RUN_STEP_ID="$id" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
       FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_PID="$pid" \
       FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
       FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
@@ -1123,7 +1123,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
     FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 FM_RUN_STEP_ID="$id" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$lying" FM_FAKE_PANE_PID="$pid" \
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
@@ -1151,7 +1151,7 @@ test_spawn_does_not_promote_an_unproven_pane_path() {
     FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 FM_RUN_STEP_ID="$id" FM_SPAWN_WT_WAIT_SECS=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_SPAWN_WT_WAIT_SECS=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" \
     FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
