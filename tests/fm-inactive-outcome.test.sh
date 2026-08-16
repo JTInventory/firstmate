@@ -1529,6 +1529,70 @@ SH
   pass "public fm-spawn publishes the incarnation token in task metadata"
 }
 
+test_run_bridge_rejects_relaunched_generation() {
+  local dir root home fakebin state handoff lock held release holder bridge_pid status
+  new_case bridge-generation
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-race"
+  lock="$state/.spawn-bridge-race.lock"
+  held="$dir/lock-held"
+  release="$dir/release-lock"
+  fm_write_meta "$state/bridge-race.meta" \
+    window=tmux:fm-bridge-race worktree="$state/work-bridge-race" \
+    project="$state/work-bridge-race" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-race
+  mkdir -p "$state/work-bridge-race"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-race \
+    spawn_incarnation=inc-a state=pending
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01OLDGENERATION"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_TASK_LOCK_PATH="$lock" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || exit 1; : > "$2"; while [ ! -e "$3" ]; do sleep 0.01; done; fm_lock_release "$FM_TASK_LOCK_PATH"' \
+    _ "$root" "$held" "$release" &
+  holder=$!
+  for _ in $(seq 1 100); do
+    [ -e "$held" ] && break
+    sleep 0.01
+  done
+  [ -e "$held" ] || fail "generation race fixture did not acquire the task lock"
+  FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-race \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1 &
+  bridge_pid=$!
+  sleep 0.1
+  fm_write_meta "$state/bridge-race.meta" \
+    window=tmux:fm-bridge-race worktree="$state/work-bridge-race" \
+    project="$state/work-bridge-race" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-b run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-race
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-race \
+    spawn_incarnation=inc-b state=pending
+  : > "$release"
+  wait "$holder" || fail "generation race lock holder failed"
+  status=0
+  wait "$bridge_pid" || status=$?
+  [ "$status" -ne 0 ] || fail "stale bridge published after a generation change"
+  [ ! -e "$state/.run-step-incarnation-bridge-race" ] || \
+    fail "stale bridge wrote run evidence for the relaunched task"
+  [ "$(receipt_value "$state/bridge-race.meta" spawn_incarnation)" = inc-b ] || \
+    fail "generation race changed the relaunched incarnation"
+  [ "$(receipt_value "$state/bridge-race.meta" run_binding_state)" = pending ] || \
+    fail "generation race marked the relaunched metadata bound"
+  [ "$(grep -c '^run_id=' "$state/bridge-race.meta" 2>/dev/null || true)" = 0 ] || \
+    fail "generation race left a stale run id in relaunched metadata"
+  pass "run binding rejects stale bridge generations"
+}
+
 test_session_start_drains_before_inactive_scan() {
   local dir root home fakebin state out status wake_line inactive_line
   new_case session-start-wiring
@@ -4144,6 +4208,7 @@ test_scan_failure_retries_without_advancing_cadence
 test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
 test_spawn_publishes_incarnation_token
+test_run_bridge_rejects_relaunched_generation
 test_session_start_drains_before_inactive_scan
 test_session_start_generation_bound_replay
 test_watcher_runs_inactive_cadence

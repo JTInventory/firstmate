@@ -50,11 +50,30 @@ handoff_valid() {
   esac
 }
 
+metadata_generation_valid() {
+  local meta=$STATE/$FM_RUN_BINDING_TASK.meta incarnation state handoff
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
+  state=$(awk -F= '$1 == "run_binding_state" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
+  handoff=$(awk -F= '$1 == "run_binding_handoff" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
+  [ "$incarnation" = "$FM_RUN_BINDING_INCARNATION" ] || return 1
+  case "$state" in pending|bound) ;; *) return 1 ;; esac
+  [ "$handoff" = "${FM_RUN_BINDING_HANDOFF##*/}" ]
+}
+
 meta_bind_run_id() {
-  local run_id=$1 meta tmp status=0
+  local run_id=$1 meta tmp status=0 owner acquired=0
   meta="$STATE/$FM_RUN_BINDING_TASK.meta"
-  fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
+  owner=${FM_TASK_LOCK_OWNER:-}
+  if [ -n "$owner" ] && fm_lock_points_to_owner "$FM_TASK_LOCK_PATH" "$owner"; then
+    :
+  else
+    fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
+    acquired=1
+  fi
   if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    status=1
+  elif ! metadata_generation_valid; then
     status=1
   else
     tmp=$(mktemp "$STATE/.${FM_RUN_BINDING_TASK}.meta-run-binding.XXXXXX") || status=1
@@ -70,25 +89,50 @@ meta_bind_run_id() {
       fi
     fi
   fi
-  fm_lock_release "$FM_TASK_LOCK_PATH" || status=1
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$FM_TASK_LOCK_PATH" || status=1
+  fi
   return "$status"
 }
 
 publish_run_id() {
-  local run_id=$1 existing status
+  local run_id=$1 existing status=0 existing_status owner old_owner acquired=0
   case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
-  handoff_valid || return 1
-  if existing=$(fm_run_step_binding_read "$FM_RUN_BINDING_TASK" "$FM_RUN_BINDING_INCARNATION" 2>/dev/null); then
-    [ "$existing" = "$run_id" ] || return 1
-    meta_bind_run_id "$run_id"
-    return $?
-  else
-    status=$?
+  old_owner=${FM_TASK_LOCK_OWNER:-}
+  fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
+  acquired=1
+  owner=$(fm_lock_link_owner "$FM_TASK_LOCK_PATH" 2>/dev/null) || status=1
+  if [ "$status" = 0 ]; then
+    FM_TASK_LOCK_OWNER=$owner
+    export FM_TASK_LOCK_OWNER
+    handoff_valid || status=1
+    metadata_generation_valid || status=1
   fi
-  [ "$status" = 75 ] || return 1
-  fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION" || return 1
-  meta_bind_run_id "$run_id" || return 1
-  handoff_valid || return 1
+  if [ "$status" = 0 ]; then
+    if existing=$(fm_run_step_binding_read "$FM_RUN_BINDING_TASK" "$FM_RUN_BINDING_INCARNATION" 2>/dev/null); then
+      [ "$existing" = "$run_id" ] || status=1
+    else
+      existing_status=$?
+      if [ "$existing_status" = 75 ]; then
+        fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION" || status=1
+      else
+        status=1
+      fi
+    fi
+  fi
+  if [ "$status" = 0 ]; then
+    meta_bind_run_id "$run_id" || status=1
+  fi
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$FM_TASK_LOCK_PATH" || status=1
+  fi
+  if [ -n "$old_owner" ]; then
+    FM_TASK_LOCK_OWNER=$old_owner
+    export FM_TASK_LOCK_OWNER
+  else
+    unset FM_TASK_LOCK_OWNER
+  fi
+  return "$status"
 }
 
 run_axi() {
