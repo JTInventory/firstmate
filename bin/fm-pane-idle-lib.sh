@@ -1007,48 +1007,159 @@ fm_pane_idle_meta_index_windows_direct_resumable() {
   local state=$1 cursor=${2:-} deadline_ms=${3:-}
   local entries_path="$state/.pane-idle-meta-index/.scan.entries"
   local complete_path="$state/.pane-idle-meta-index/.scan.entries.complete"
+  local windows_path="$state/.pane-idle-meta-index/.scan.windows"
+  local windows_complete_path="$state/.pane-idle-meta-index/.scan.windows.complete"
+  local windows_partial_path="$state/.pane-idle-meta-index/.scan.windows.partial"
+  local windows_cursor_path="$state/.pane-idle-meta-index/.scan.windows.cursor"
+  local windows_stamp_path="$state/.pane-idle-meta-index/.scan.windows.stamp"
+  local entries_stamp_path="$state/.pane-idle-meta-index/.scan.entries.stamp"
+  local source_stamp
   [ -f "$entries_path" ] && [ ! -L "$entries_path" ] || return 124
   [ -f "$complete_path" ] && [ ! -L "$complete_path" ] || return 124
+  if [ -e "$entries_stamp_path" ] || [ -L "$entries_stamp_path" ]; then
+    [ -f "$entries_stamp_path" ] && [ ! -L "$entries_stamp_path" ] || return 124
+  fi
+  local sidecar
+  for sidecar in "$windows_path" "$windows_complete_path" "$windows_partial_path" \
+    "$windows_cursor_path" "$windows_stamp_path"; do
+    if [ -e "$sidecar" ] || [ -L "$sidecar" ]; then
+      [ -f "$sidecar" ] && [ ! -L "$sidecar" ] || return 124
+    fi
+  done
   case "$cursor" in ''|0) cursor=0;; *[!0-9]*) return 1 ;; esac
-  fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" "$entries_path" "$cursor" <<'PERL'
+  source_stamp=$(cat "$entries_stamp_path" 2>/dev/null || true)
+  [ -n "$source_stamp" ] || source_stamp=$(fm_pane_idle_path_stamp "$state") || return 1
+  fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" "$entries_path" "$cursor" "$windows_path" \
+    "$windows_complete_path" "$windows_partial_path" "$windows_cursor_path" \
+    "$windows_stamp_path" "$source_stamp" <<'PERL'
 use strict;
 use warnings;
-my ($state, $entries_path, $cursor) = @ARGV;
-open(my $entries_fh, '<', $entries_path) or exit 2;
-my @records;
-my %counts;
-while (defined(my $path = <$entries_fh>)) {
-  my $next = tell($entries_fh);
-  defined($next) or exit 2;
-  chomp $path;
-  my ($window, $valid) = ('', 0);
-  if ($path =~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/ && -f $path && !-l $path) {
-    open(my $fh, '<', $path) or exit 2;
-    my $count = 0;
-    while (defined(my $line = <$fh>)) {
-      if ($line =~ /\Awindow=(.*)\n\z/) {
-        $window = $1;
-        $count++;
+my ($state, $entries_path, $cursor, $windows_path, $windows_complete_path,
+    $windows_partial_path, $windows_cursor_path, $windows_stamp_path, $source_stamp) = @ARGV;
+sub atomic_write {
+  my ($path, $value) = @_;
+  return 0 if -l $path;
+  my $tmp = "$path.tmp.$$";
+  open(my $fh, '>', $tmp) or return 0;
+  binmode($fh);
+  return 0 unless print($fh $value) && close($fh);
+  return 0 if -l $path;
+  rename($tmp, $path) or return 0;
+}
+sub read_text {
+  my ($path) = @_;
+  return '' unless -e $path;
+  return undef if -l $path || !-f $path;
+  open(my $fh, '<', $path) or return undef;
+  local $/;
+  my $value = <$fh> // '';
+  close($fh) or return undef;
+  chomp $value;
+  return $value;
+}
+my $stored_stamp = read_text($windows_stamp_path);
+defined($stored_stamp) or exit 2 if -e $windows_stamp_path;
+if (!defined($stored_stamp) || $stored_stamp ne $source_stamp) {
+  unlink($windows_path, $windows_complete_path, $windows_partial_path, $windows_cursor_path);
+  atomic_write($windows_stamp_path, "$source_stamp\n") or exit 2;
+}
+if (!-e $windows_complete_path) {
+  my $raw_cursor = read_text($windows_cursor_path);
+  defined($raw_cursor) or exit 2 if -e $windows_cursor_path;
+  $raw_cursor = '0' unless defined($raw_cursor) && $raw_cursor =~ /^\d+\z/;
+  my $efh;
+  open($efh, '<', $entries_path) or exit 2;
+  seek($efh, 0 + $raw_cursor, 0) or exit 2;
+  my $pfh;
+  if (-e $windows_partial_path) {
+    -f $windows_partial_path && !-l $windows_partial_path or exit 2;
+    open($pfh, '>>', $windows_partial_path) or exit 2;
+  } else {
+    open($pfh, '>', $windows_partial_path) or exit 2;
+  }
+  while (defined(my $path = <$efh>)) {
+    my $next = tell($efh);
+    defined($next) or exit 2;
+    chomp $path;
+    if ($path =~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/) {
+      -l $path and exit 2;
+      if (-f $path) {
+        open(my $mfh, '<', $path) or exit 2;
+        my ($window, $count) = ('', 0);
+        while (defined(my $line = <$mfh>)) {
+          if ($line =~ /\Awindow=(.*)\n\z/) {
+            $window = $1;
+            $count++;
+          }
+        }
+        close($mfh) or exit 2;
+        if ($count == 1 && $window !~ /[\r\n\t]/) {
+          print($pfh $window, "\n") or exit 2;
+        }
       }
     }
-    close($fh) or exit 2;
-    if ($count == 1 && $window !~ /[\r\n\t]/) {
-      $valid = 1;
-      $counts{$window}++;
+    atomic_write($windows_cursor_path, "$next\n") or exit 2;
+  }
+  close($efh) or exit 2;
+  close($pfh) or exit 2;
+  my %counts;
+  open(my $rfh, '<', $windows_partial_path) or exit 2;
+  while (defined(my $window = <$rfh>)) {
+    chomp $window;
+    $counts{$window}++ if $window ne '';
+  }
+  close($rfh) or exit 2;
+  my $tmp = "$windows_path.tmp.$$";
+  open(my $wfh, '>', $tmp) or exit 2;
+  for my $window (sort keys %counts) {
+    print($wfh $window, "\t", $counts{$window}, "\n") or exit 2;
+  }
+  close($wfh) or exit 2;
+  -l $windows_path and exit 2;
+  rename($tmp, $windows_path) or exit 2;
+  atomic_write($windows_complete_path, "complete\n") or exit 2;
+  unlink($windows_partial_path, $windows_cursor_path) or exit 2;
+}
+my %counts;
+open(my $wfh, '<', $windows_path) or exit 2;
+while (defined(my $line = <$wfh>)) {
+  chomp $line;
+  my ($window, $count) = split(/\t/, $line, 2);
+  defined($count) && $count =~ /^\d+\z/ or exit 2;
+  $counts{$window} = $count;
+}
+close($wfh) or exit 2;
+open(my $efh, '<', $entries_path) or exit 2;
+seek($efh, 0 + $cursor, 0) or exit 2;
+while (defined(my $path = <$efh>)) {
+  my $next = tell($efh);
+  defined($next) or exit 2;
+  chomp $path;
+  if ($path !~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/) {
+    print $next, "\0\0\0" or exit 2;
+    next;
+  }
+  -l $path and exit 2;
+  if (!-f $path) {
+    print $next, "\0\0\0" or exit 2;
+    next;
+  }
+  open(my $mfh, '<', $path) or exit 2;
+  my ($window, $count) = ('', 0);
+  while (defined(my $line = <$mfh>)) {
+    if ($line =~ /\Awindow=(.*)\n\z/) {
+      $window = $1;
+      $count++;
     }
   }
-  push @records, [$next, $path, $window, $valid];
-}
-close($entries_fh) or exit 2;
-for my $record (@records) {
-  my ($next, $path, $window, $valid) = @$record;
-  next if $next <= (0 + ($cursor // 0));
-  if (!$valid || $counts{$window} != 1) {
+  close($mfh) or exit 2;
+  if ($count != 1 || $window =~ /[\r\n\t]/ || ($counts{$window} // 0) != 1) {
     print $next, "\0\0\0" or exit 2;
     next;
   }
   print $next, "\0", $window, "\0", $path, "\0" or exit 2;
 }
+close($efh) or exit 2;
 PERL
 }
 

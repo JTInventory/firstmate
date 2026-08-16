@@ -1502,6 +1502,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_SPAWN_NO_GUARD=1 \
+    FM_RUN_STEP_ID=run-step-spawn-mismatch \
     FM_FAKE_PANE_PATH="$worktree" FM_FAKE_PANE_PID="$pane_pid" FM_FAKE_TMUX_STATE="$tmux_state" TMUX=fake,1,0 \
     FM_SPAWN_WT_WAIT_SECS=3 "$root/bin/fm-spawn.sh" spawn-mismatch "$project" \
     --harness codex 2>&1)
@@ -2499,6 +2500,38 @@ test_watcher_bounded_metadata_fail_closed() {
   set -u
   [ "$status" = 0 ] || fail "bounded metadata lookup did not fail closed"
   pass "watcher refuses unresolved bounded metadata"
+}
+
+test_watcher_skips_deterministic_malformed_metadata() {
+  local dir root home fakebin state out status valid_key
+  new_case watcher-malformed-metadata
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" malformed-kind-x1 malformed-kind-inc
+  replace_field "$state/malformed-kind-x1.meta" kind invalid-kind
+  write_meta "$state" malformed-backend-x1 malformed-backend-inc
+  replace_field "$state/malformed-backend-x1.meta" backend invalid-backend
+  write_meta "$state" valid-scan-x1 valid-scan-inc
+  rm -f "$state"/.hash-* "$state"/.count-* "$state"/*.status "$state"/*.turn-ended
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  set +e
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCHER_HEARTBEAT=999999 bash -c \
+      '. "$1/bin/fm-pane-idle-lib.sh"; shift; fm_pane_idle_run_bounded_child "$@"' \
+      _ "$ROOT" 5 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  set -u
+  [ "$status" = 124 ] || fail "watcher did not remain bounded while scanning malformed metadata: $out"
+  valid_key=$(printf '%s' tmux:fm-valid-scan-x1 | tr ':/.' '___')
+  [ -f "$state/.hash-$valid_key" ] || fail "watcher did not process the valid window after malformed metadata"
+  pass "watcher advances past deterministic malformed metadata"
 }
 
 test_pane_idle_snapshot_reads_honor_deadline() {
@@ -4117,6 +4150,7 @@ test_pane_idle_index_refreshes_changed_metadata
 test_pane_idle_index_retries_metadata_stamp_race
 test_pane_idle_index_rejects_publication_stamp_race
 test_watcher_bounded_metadata_fail_closed
+test_watcher_skips_deterministic_malformed_metadata
 test_pane_idle_snapshot_reads_honor_deadline
 test_pane_idle_snapshot_compare_honors_deadline
 test_pane_idle_lookup_propagates_deadline

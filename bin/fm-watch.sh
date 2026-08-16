@@ -268,6 +268,16 @@ hash_pane() {
   fm_pane_idle_hash
 }
 
+meta_value_count() {
+  local meta=$1 key=$2 count rc
+  count=$(grep -c "^$key=" "$meta" 2>/dev/null) || {
+    rc=$?
+    [ "$rc" = 1 ] || return 1
+    count=0
+  }
+  printf '%s' "$count"
+}
+
 window_kind() {
   local w=$1 deadline_ms=${2:-} meta_hint=${3:-} meta mw kind kind_count
   if [ -n "$meta_hint" ]; then
@@ -284,49 +294,65 @@ window_kind() {
   else
     for meta in "$STATE"/*.meta; do
       [ -e "$meta" ] || continue
-      mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+      [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+      window_count=$(meta_value_count "$meta" window) || return 1
+      case "$window_count" in
+        0) continue ;;
+        1) mw=$(fm_pane_idle_meta_value_unique "$meta" window 2>/dev/null) || return 1 ;;
+        *) return 3 ;;
+      esac
       [ "$mw" = "$w" ] || continue
-      kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-      [ -n "$kind" ] || kind=ship
-      echo "$kind"
-      return 0
+      kind_count=$(meta_value_count "$meta" kind) || return 1
+      case "$kind_count" in
+        0) kind=ship ;;
+        1) kind=$(fm_pane_idle_meta_value_unique "$meta" kind 2>/dev/null) || return 1 ;;
+        *) return 3 ;;
+      esac
+      case "$kind" in
+        ship|scout|secondmate) echo "$kind"; return 0 ;;
+        *) return 3 ;;
+      esac
     done
     echo unknown
     return 0
   fi
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
+  kind_count=$(meta_value_count "$meta" kind) || return 1
   case "$kind_count" in
     0) printf 'ship\n'; return 0 ;;
     1)
-      kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
+      kind=$(fm_pane_idle_meta_value_unique "$meta" kind 2>/dev/null) || return 1
       case "$kind" in
         ship|scout|secondmate) printf '%s\n' "$kind"; return 0 ;;
-        *) return 1 ;;
+        *) return 3 ;;
       esac
       ;;
-    *) return 1 ;;
+    *) return 3 ;;
   esac
 }
 
 window_backend_from_meta() {
-  local meta=$1 backend_count backend session window
+  local meta=$1 backend_count backend session window session_count window_count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  backend_count=$(grep -c '^backend=' "$meta" 2>/dev/null || true)
+  backend_count=$(meta_value_count "$meta" backend) || return 1
   case "$backend_count" in
     0) printf 'tmux'; return 0 ;;
-    1) backend=$(grep '^backend=' "$meta" | cut -d= -f2-) || return 1 ;;
-    *) return 1 ;;
+    1) backend=$(fm_pane_idle_meta_value_unique "$meta" backend 2>/dev/null) || return 1 ;;
+    *) return 3 ;;
   esac
   case "$backend" in
     tmux) printf '%s' "$backend" ;;
     herdr)
+      session_count=$(meta_value_count "$meta" herdr_session) || return 1
+      [ "$session_count" = 1 ] || return 3
       session=$(fm_pane_idle_meta_value_unique "$meta" herdr_session 2>/dev/null) || return 1
-      [ "$session" = firstmate ] || return 1
+      [ "$session" = firstmate ] || return 3
+      window_count=$(meta_value_count "$meta" window) || return 1
+      [ "$window_count" = 1 ] || return 3
       window=$(fm_pane_idle_meta_value_unique "$meta" window 2>/dev/null) || return 1
-      case "$window" in firstmate:*) printf '%s' "$backend" ;; *) return 1 ;; esac
+      case "$window" in firstmate:*) printf '%s' "$backend" ;; *) return 3 ;; esac
       ;;
-    *) return 1 ;;
+    *) return 3 ;;
   esac
 }
 
@@ -461,7 +487,21 @@ event_wait_herdr() {
       }
       continue
     fi
-    backend=$(window_backend "$w" "$event_scan_deadline" "$event_meta") || continue
+    backend_status=0
+    backend=$(window_backend "$w" "$event_scan_deadline" "$event_meta") || backend_status=$?
+    case "$backend_status" in
+      0) ;;
+      3)
+        fm_pane_idle_meta_index_cursor_write "$event_cursor_path" "$event_window_cursor" || {
+          rm -f "$windows_tmp"
+          return 2
+        }
+        continue
+        ;;
+      *)
+        continue
+        ;;
+    esac
     fm_pane_idle_meta_index_cursor_write "$event_cursor_path" "$event_window_cursor" || {
       rm -f "$windows_tmp"
       return 2
@@ -1739,11 +1779,20 @@ EOF
       watch_window_scan_advance "$window_scan_cursor" || exit 1
       continue
     fi
+    kind_status=0
     kind=
-    kind=$(window_kind "$w" "$pane_idle_scan_deadline" "$window_meta") || {
-      window_scan_complete=0
-      break
-    }
+    kind=$(window_kind "$w" "$pane_idle_scan_deadline" "$window_meta") || kind_status=$?
+    case "$kind_status" in
+      0) ;;
+      3)
+        watch_window_scan_advance "$window_scan_cursor" || exit 1
+        continue
+        ;;
+      *)
+        window_scan_complete=0
+        break
+        ;;
+    esac
     if [ "$kind" = secondmate ]; then
       key=$(printf '%s' "$w" | tr ':/.' '___')
       if [ ! -e "$STATE/.paused-$key" ]; then
@@ -1751,10 +1800,19 @@ EOF
         continue
       fi
     fi
-    backend=$(window_backend "$w" "$pane_idle_scan_deadline" "$window_meta") || {
-      window_scan_complete=0
-      break
-    }
+    backend_status=0
+    backend=$(window_backend "$w" "$pane_idle_scan_deadline" "$window_meta") || backend_status=$?
+    case "$backend_status" in
+      0) ;;
+      3)
+        watch_window_scan_advance "$window_scan_cursor" || exit 1
+        continue
+        ;;
+      *)
+        window_scan_complete=0
+        break
+        ;;
+    esac
     if ! tail40=$(fm_backend_capture "$backend" "$w" 40 2>/dev/null); then
       reason="check: backend capture failed for $w (backend=$backend); inspect the runtime endpoint and task metadata"
       fm_wake_append check "$w" "$reason" || exit 1

@@ -41,6 +41,7 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Ship spawns require FM_RUN_STEP_ID to name the lifecycle run that owns the crew.
 #   Matching JT Control Room ship spawns for .openclaw or jt-control-room append a
 #   JT PR Intake Governor block to direct-PR/no-mistakes briefs before launch.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
@@ -2134,6 +2135,17 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+SPAWN_RUN_STEP_ID=
+if [ "$KIND" = ship ]; then
+  SPAWN_RUN_STEP_ID=${FM_RUN_STEP_ID:-}
+  case "$SPAWN_RUN_STEP_ID" in
+    ''|*[!A-Za-z0-9._:-]*)
+      echo "error: ordinary ship spawn requires an explicit lifecycle run id (FM_RUN_STEP_ID)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 mkdir -p "$STATE"
 # Record current ownership in the linked worktree's private git directory.
 # Metadata is historical; teardown uses this stamp as independent evidence.
@@ -2211,10 +2223,10 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 SPAWN_META_PUBLISHED=1
-if [ "$KIND" = ship ] && [ -n "${FM_RUN_STEP_ID:-}" ]; then
+if [ "$KIND" = ship ]; then
   FM_TASK_LOCK_PATH=$SPAWN_TASK_LOCK
   FM_TASK_LOCK_OWNER=$(fm_lock_link_owner "$SPAWN_TASK_LOCK") || exit 1
-  fm_run_step_binding_publish "$ID" "$FM_RUN_STEP_ID" "$SPAWN_INCARNATION" || exit 1
+  fm_run_step_binding_publish "$ID" "$SPAWN_RUN_STEP_ID" "$SPAWN_INCARNATION" || exit 1
 fi
 fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 if [ "$BACKEND" = herdr ]; then
