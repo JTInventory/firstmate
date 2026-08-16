@@ -2180,8 +2180,8 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
-fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 SPAWN_META_PUBLISHED=1
+fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
   if [ "$HERDR_LABEL_LOCK_HELD" = 1 ]; then

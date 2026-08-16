@@ -2823,6 +2823,10 @@ cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
   exit 1
 }
+fm_pane_idle_meta_freshness_bump "$STATE" || {
+  echo "error: could not advance metadata freshness boundary for $ID" >&2
+  exit 1
+}
 if [ "$TOP_SLOT_UNRESOLVED_LEASE" != 1 ] && [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   teardown_meta_identity_matches || {
     echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
@@ -2864,10 +2868,6 @@ elif ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   echo "error: could not remove task records for $ID; ownership evidence was preserved" >&2
   exit 1
 fi
-fm_pane_idle_meta_freshness_bump "$STATE" || {
-  echo "error: could not advance metadata freshness boundary for $ID" >&2
-  exit 1
-}
 if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   # A slot whose directory is gone has no stamp to serialize against; demanding
   # a lock on it would strand the record this teardown already retired.
