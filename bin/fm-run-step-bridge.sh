@@ -61,6 +61,39 @@ metadata_generation_valid() {
   [ "$handoff" = "${FM_RUN_BINDING_HANDOFF##*/}" ]
 }
 
+metadata_staged_run_id() {
+  local meta=$STATE/$FM_RUN_BINDING_TASK.meta result status
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 75
+  result=$(awk -F= -v inc="$FM_RUN_BINDING_INCARNATION" '
+    BEGIN { valid=1 }
+    /^[^=]+=/ {
+      key=$1
+      if (key in seen) valid=0
+      seen[key]=1
+      value=substr($0, index($0, "=") + 1)
+      if (key == "run_binding_state") { state=value; state_n++ }
+      if (key == "run_id") { run_id=value; run_n++ }
+      if (key == "spawn_incarnation") { stored_inc=value; inc_n++ }
+      next
+    }
+    { valid=0 }
+    END {
+      if (!valid || state_n != 1 || run_n != 1 || inc_n != 1 \
+        || state != "staged" || stored_inc != inc || run_id == "") exit 75
+      print run_id
+    }
+  ' "$meta" 2>/dev/null)
+  status=$?
+  case "$status" in
+    0)
+      case "$result" in ''|*[!A-Za-z0-9._:-]*) return 75 ;; esac
+      printf '%s\n' "$result"
+      ;;
+    75) return 75 ;;
+    *) return 1 ;;
+  esac
+}
+
 meta_set_run_binding_state() {
   local desired_state=$1 run_id=$2 meta tmp status=0 owner acquired=0
   case "$desired_state" in staged|bound) ;; *) return 1 ;; esac
@@ -105,7 +138,7 @@ meta_bind_run_id() {
 }
 
 publish_run_id() {
-  local run_id=$1 existing status=0 existing_status owner old_owner acquired=0
+  local run_id=$1 existing staged_existing status=0 existing_status staged_status owner old_owner acquired=0
   case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   old_owner=${FM_TASK_LOCK_OWNER:-}
   fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
@@ -122,7 +155,16 @@ publish_run_id() {
       [ "$existing" = "$run_id" ] || status=1
     else
       existing_status=$?
-      [ "$existing_status" = 75 ] || status=1
+      if [ "$existing_status" = 75 ]; then
+        if staged_existing=$(metadata_staged_run_id 2>/dev/null); then
+          [ "$staged_existing" = "$run_id" ] || status=1
+        else
+          staged_status=$?
+          [ "$staged_status" = 75 ] || status=1
+        fi
+      else
+        status=1
+      fi
     fi
   fi
   if [ "$status" = 0 ]; then

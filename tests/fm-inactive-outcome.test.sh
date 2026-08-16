@@ -1644,6 +1644,83 @@ SH
   pass "run binding metadata staging failure preserves the committed pair"
 }
 
+test_run_bridge_rejects_staged_run_rebinding() {
+  local dir root home fakebin state handoff meta evidence fail_marker status
+  new_case bridge-staged-rebinding
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-staged-rebinding"
+  meta="$state/bridge-staged-rebinding.meta"
+  evidence="$state/.run-step-incarnation-bridge-staged-rebinding"
+  fail_marker="$dir/fail-evidence-mv"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-staged-rebinding worktree="$state/work-bridge-staged-rebinding" \
+    project="$state/work-bridge-staged-rebinding" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-staged-rebinding
+  mkdir -p "$state/work-bridge-staged-rebinding"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-staged-rebinding \
+    spawn_incarnation=inc-a state=pending
+  : > "$fail_marker"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+if [ "$target" = "${FM_TEST_EVIDENCE_TARGET:?}" ] && [ -e "${FM_TEST_EVIDENCE_FAIL:?}" ]; then
+  rm -f "$FM_TEST_EVIDENCE_FAIL"
+  exit 91
+fi
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01STAGEDORIGINAL"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-staged-rebinding \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_TEST_EVIDENCE_TARGET="$evidence" \
+    FM_TEST_EVIDENCE_FAIL="$fail_marker" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/first.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "initial staged publication failure was treated as success"
+  [ "$(receipt_value "$meta" run_binding_state)" = staged ] \
+    || fail "initial publication failure did not leave staged metadata"
+  [ "$(receipt_value "$meta" run_id)" = 01STAGEDORIGINAL ] \
+    || fail "initial publication failure did not retain its run id"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
+    || fail "initial publication failure unexpectedly published evidence"
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01STAGEDREBOUND"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-staged-rebinding \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_TEST_EVIDENCE_TARGET="$evidence" \
+    FM_TEST_EVIDENCE_FAIL="$fail_marker" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/second.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "staged run binding was rebound to a new run id"
+  [ "$(receipt_value "$meta" run_binding_state)" = staged ] \
+    || fail "rejected rebinding changed staged metadata state"
+  [ "$(receipt_value "$meta" run_id)" = 01STAGEDORIGINAL ] \
+    || fail "rejected rebinding changed the staged run id"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
+    || fail "rejected rebinding published replacement evidence"
+  pass "staged run bindings reject rebinding within one incarnation"
+}
+
 test_run_bridge_rolls_back_failed_metadata_binding() {
   local dir root home fakebin state handoff meta evidence meta_count status
   new_case bridge-metadata-rollback
@@ -4403,6 +4480,7 @@ test_reused_task_id_gets_new_fingerprint
 test_spawn_publishes_incarnation_token
 test_run_bridge_rejects_relaunched_generation
 test_run_bridge_metadata_stage_failure_preserves_committed_pair
+test_run_bridge_rejects_staged_run_rebinding
 test_run_bridge_rolls_back_failed_metadata_binding
 test_run_bridge_activation_failure_is_recoverable
 test_pane_idle_reclaim_advances_malformed_cursor
