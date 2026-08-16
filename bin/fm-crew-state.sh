@@ -372,6 +372,23 @@ nm_run_ids_for_branch() {  # <branch> <list-output>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 META_INCARNATION=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
+META_BINDING_STATE=absent
+META_BINDING_STATE_COUNT=0
+while IFS= read -r META_BINDING_LINE; do
+  case "$META_BINDING_LINE" in
+    run_binding_state=*)
+      META_BINDING_STATE_COUNT=$((META_BINDING_STATE_COUNT + 1))
+      META_BINDING_STATE=${META_BINDING_LINE#*=}
+      ;;
+  esac
+done < "$META"
+if [ "$META_BINDING_STATE_COUNT" -ne 0 ]; then
+  [ "$META_BINDING_STATE_COUNT" = 1 ] || META_BINDING_STATE=invalid
+  case "$META_BINDING_STATE" in
+    pending|staged|bound) ;;
+    *) META_BINDING_STATE=invalid ;;
+  esac
+fi
 BOUND_RUN_ID=
 BOUND_RUN_STATUS=75
 BOUND_RUN_REQUIRED=0
@@ -379,6 +396,9 @@ BOUND_RUN_EVIDENCE=$(fm_run_step_binding_path "$ID") || exit 1
 if [ -e "$BOUND_RUN_EVIDENCE" ] || [ -L "$BOUND_RUN_EVIDENCE" ]; then
   BOUND_RUN_REQUIRED=1
 fi
+case "$META_BINDING_STATE" in
+  bound|staged|invalid) BOUND_RUN_REQUIRED=1 ;;
+esac
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && [ -n "$META_INCARNATION" ]; then
   if BOUND_RUN_ID=$(fm_run_step_binding_read "$ID" "$META_INCARNATION"); then
     BOUND_RUN_STATUS=0

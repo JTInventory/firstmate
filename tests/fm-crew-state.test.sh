@@ -520,7 +520,8 @@ test_terminal_passed_delivery_skipped() {
   local d; d=$(new_case passed-delivery-skipped)
   make_repo_on_branch "$d/wt" fm/feat-dsk
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dsk.meta" "window=fm:fm-feat-dsk" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-dsk.meta" "window=fm:fm-feat-dsk" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
+  write_run_step_binding "$d/state" feat-dsk 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed_delivery_skipped fm/feat-dsk)"
   local out; out=$(run_crew_state "$d" feat-dsk)
   assert_not_contains "$out" "merged" "passed with skipped delivery must not claim merged"
@@ -529,6 +530,22 @@ test_terminal_passed_delivery_skipped() {
   assert_contains "$out" "UNLANDED" "skipped delivery detail marks work unlanded"
   assert_contains "$out" "source: run-step" "verdict still comes from the run-step"
   pass "passed run with skipped pr/ci steps never claims merged"
+}
+
+test_bound_run_missing_evidence_fails_closed() {
+  reset_fakes
+  local d; d=$(new_case bound-missing-evidence)
+  make_repo_on_branch "$d/wt" fm/feat-bound-missing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bound-missing.meta" \
+    "window=fm:fm-feat-bound-missing" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=test-incarnation" "run_binding_state=bound" "run_id=01OTHER"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bound-missing)"
+  local out; out=$(run_crew_state "$d" feat-bound-missing)
+  assert_contains "$out" "state: unknown" "bound run without evidence -> unknown"
+  assert_contains "$out" "source: run-step" "bound run without evidence -> run-step source"
+  assert_not_contains "$out" "state: working" "bound run without evidence must not use generic attribution"
+  pass "bound run metadata without evidence fails closed"
 }
 
 test_terminal_passed_delivery_completed() {
@@ -1151,6 +1168,7 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_terminal_passed
 test_terminal_passed_delivery_skipped
+test_bound_run_missing_evidence_fails_closed
 test_terminal_passed_delivery_completed
 test_terminal_failed
 test_active_run_does_not_create_incarnation_binding

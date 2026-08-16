@@ -52,13 +52,15 @@ handoff_valid() {
 
 metadata_generation_valid() {
   local meta=$STATE/$FM_RUN_BINDING_TASK.meta incarnation state handoff
+  FM_RUN_BINDING_METADATA_STATE=
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
   state=$(awk -F= '$1 == "run_binding_state" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
   handoff=$(awk -F= '$1 == "run_binding_handoff" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
   [ "$incarnation" = "$FM_RUN_BINDING_INCARNATION" ] || return 1
   case "$state" in pending|staged|bound) ;; *) return 1 ;; esac
-  [ "$handoff" = "${FM_RUN_BINDING_HANDOFF##*/}" ]
+  [ "$handoff" = "${FM_RUN_BINDING_HANDOFF##*/}" ] || return 1
+  FM_RUN_BINDING_METADATA_STATE=$state
 }
 
 metadata_staged_run_id() {
@@ -174,7 +176,9 @@ publish_run_id() {
             status=1
           fi
         elif [ "$status" = 0 ]; then
-          if staged_existing=$(metadata_staged_run_id 2>/dev/null); then
+          if [ "${FM_RUN_BINDING_METADATA_STATE:-}" = bound ]; then
+            status=1
+          elif staged_existing=$(metadata_staged_run_id 2>/dev/null); then
             [ "$staged_existing" = "$run_id" ] || status=1
           else
             staged_status=$?

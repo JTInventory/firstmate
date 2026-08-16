@@ -1996,6 +1996,7 @@ prepare_pending_receipt() {
   [ "$schema" = fm-jt-terminal-outcome.v1 ] || return 1
   [ -n "$task_id" ] && [ -n "$incarnation" ] && [ -n "$terminal_source" ] \
     && [ -n "$terminal_snapshot" ] || return 1
+  valid_task_id "$task_id" || return 1
   case "$outcome" in done|failed) ;; *) return 1 ;; esac
   case "$kind" in ship|scout)
     [ -z "$parent_task_id" ] && [ -z "$parent_home" ] \
@@ -3357,9 +3358,12 @@ reconcile_child() {
   local snapshot token key route_rc parent_corr state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining child_lock_owner
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  kind=$(meta_value "$meta" kind)
-  [ "$kind" = secondmate ] && return 0
-  case "$kind" in ''|ship|scout) ;; *) return 0 ;; esac
+  if kind=$(meta_value_unique "$meta" kind 2>/dev/null); then
+    :
+  else
+    return 0
+  fi
+  case "$kind" in ship|scout) ;; *) return 0 ;; esac
   herdr_identity_allowed "$meta" || return 0
   CHILD_LOCK="$STATE/.spawn-$id.lock"
   FM_LOCK_WAIT_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_LOCK_WAIT_SECS:-30}" 30 0 300)
@@ -3372,8 +3376,12 @@ reconcile_child() {
   # released. Re-read it after acquiring the lock so the snapshot belongs to the
   # current incarnation.
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  kind=$(meta_value "$meta" kind)
-  [ "$kind" = secondmate ] && return 0
+  if kind=$(meta_value_unique "$meta" kind 2>/dev/null); then
+    :
+  else
+    return 0
+  fi
+  case "$kind" in ship|scout) ;; *) return 0 ;; esac
   herdr_identity_allowed "$meta" || return 0
   now=$(date +%s)
   activity=$(latest_activity "$id")
@@ -4062,16 +4070,17 @@ scan_locked() {
         current_cursor_identity=$(metadata_fingerprint "$STATE/$cursor.meta" 2>/dev/null || true)
         if [ -n "$cursor_identity" ] && [ "$current_cursor_identity" != "$cursor_identity" ]; then
           cursor=
+          cursor_identity=
           started=1
           cursor_seen=1
           complete=0
           direct_deferred=1
           find_retain=1
+        else
+          started=1
+          cursor_seen=1
           continue
         fi
-        started=1
-        cursor_seen=1
-        continue
       fi
     fi
     rc=0

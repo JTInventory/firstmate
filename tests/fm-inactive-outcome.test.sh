@@ -1770,6 +1770,47 @@ SH
   pass "existing run evidence rejects replacement binding"
 }
 
+test_run_bridge_rejects_bound_metadata_without_evidence() {
+  local dir root home fakebin state handoff meta evidence status
+  new_case bridge-bound-missing-evidence
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-bound-missing-evidence"
+  meta="$state/bridge-bound-missing-evidence.meta"
+  evidence="$state/.run-step-incarnation-bridge-bound-missing-evidence"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-bound-missing-evidence worktree="$state/work-bridge-bound-missing-evidence" \
+    project="$state/work-bridge-bound-missing-evidence" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=bound run_id=01ORIGINAL \
+    run_binding_handoff=.run-step-handoff-bridge-bound-missing-evidence
+  mkdir -p "$state/work-bridge-bound-missing-evidence"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-bound-missing-evidence \
+    spawn_incarnation=inc-a state=bound run_id=01ORIGINAL
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01REPLACEMENT"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-bound-missing-evidence \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "bound metadata without evidence was rebound"
+  [ "$(receipt_value "$meta" run_binding_state)" = bound ] \
+    || fail "bound metadata without evidence changed state"
+  [ "$(receipt_value "$meta" run_id)" = 01ORIGINAL ] \
+    || fail "bound metadata without evidence changed run id"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
+    || fail "bound metadata without evidence published replacement evidence"
+  pass "bound metadata without evidence rejects replacement binding"
+}
+
 test_run_bridge_rolls_back_failed_metadata_binding() {
   local dir root home fakebin state handoff meta evidence meta_count status
   new_case bridge-metadata-rollback
@@ -2543,7 +2584,14 @@ test_parent_home_secondmate_records_are_skipped() {
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "parent-home scan failed"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "parent-home secondmate record was replayed"
   [ "$(queue_count "$state")" = 0 ] || fail "parent-home secondmate record queued a wake"
-  unset FM_FAKE_CREW_STATE_PARENT_SM_X1
+  write_meta "$state" duplicate-kind-x1 duplicate-kind-inc ship
+  printf 'kind=secondmate\n' >> "$state/duplicate-kind-x1.meta"
+  export FM_FAKE_CREW_STATE_DUPLICATE_KIND_X1='state: done · source: pane · duplicate kind'
+  set_old_mtime "$state/duplicate-kind-x1.meta"
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "duplicate kind scan failed"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "duplicate kind metadata bypassed secondmate exclusion"
+  [ "$(queue_count "$state")" = 0 ] || fail "duplicate kind metadata queued a wake"
+  unset FM_FAKE_CREW_STATE_PARENT_SM_X1 FM_FAKE_CREW_STATE_DUPLICATE_KIND_X1
   pass "parent-home secondmate records stay outside inactive replay"
 }
 
@@ -3561,6 +3609,27 @@ test_pending_receipt_republish_is_bounded() {
   pass "pending-receipt maintenance rotates bounded receipt batches"
 }
 
+test_pending_receipt_rejects_unsafe_task_path() {
+  local dir root home fakebin state fingerprint rec
+  new_case pending-receipt-unsafe-task
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  mkdir -p "$state/terminal-outcomes"
+  fingerprint=$(receipt_fingerprint '../../outside|unsafe-inc|done|unsafe task path')
+  rec="$state/terminal-outcomes/$fingerprint.pending"
+  fm_write_meta "$rec" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=../../outside \
+    incarnation=unsafe-inc outcome=done terminal_source=pane \
+    terminal_snapshot='unsafe task path' kind=ship
+  if scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1; then
+    fail "unsafe pending receipt was accepted"
+  fi
+  [ -f "$rec" ] || fail "unsafe pending receipt was consumed"
+  [ "$(queue_count "$state")" = 0 ] || fail "unsafe pending receipt queued a wake"
+  [ ! -e "$dir/outside.meta" ] || fail "unsafe pending receipt escaped the state directory"
+  pass "pending receipts reject unsafe task paths"
+}
+
 test_secondmate_route_replacement_preserves_old_receipt() {
   local dir root home fakebin state child_home child_state parent_status corr_a corr_b rec send_out marker history_backup active_route_backup
   new_case secondmate-route-replacement
@@ -4531,6 +4600,7 @@ test_run_bridge_rejects_relaunched_generation
 test_run_bridge_metadata_stage_failure_preserves_committed_pair
 test_run_bridge_rejects_staged_run_rebinding
 test_run_bridge_rejects_existing_evidence_rebinding
+test_run_bridge_rejects_bound_metadata_without_evidence
 test_run_bridge_rolls_back_failed_metadata_binding
 test_run_bridge_activation_failure_is_recoverable
 test_pane_idle_reclaim_advances_malformed_cursor
@@ -4569,6 +4639,7 @@ test_deferred_recorded_secondmate_finishes_without_output
 test_reported_secondmate_route_repair_after_crash
 test_reported_route_repair_is_bounded
 test_pending_receipt_republish_is_bounded
+test_pending_receipt_rejects_unsafe_task_path
 test_secondmate_route_replacement_preserves_old_receipt
 test_secondmate_route_replacement_replays_unchanged_terminal
 test_undelivered_secondmate_route_cleanup_is_idempotent
