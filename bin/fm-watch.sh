@@ -452,10 +452,11 @@ event_wait_herdr() {
     && [ -f "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ] \
     && [ ! -L "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ] || return 2
   event_source="snapshot:${FM_PANE_IDLE_META_INDEX_STATE_STAMP}"
+  [ ! -L "$event_cursor_path" ] && [ ! -L "$event_source_path" ] || return 2
   event_cursor=$(cat "$event_source_path" 2>/dev/null || true)
   if [ "$event_cursor" != "$event_source" ]; then
     rm -f "$event_cursor_path" || return 2
-    printf '%s\n' "$event_source" > "$event_source_path" || return 2
+    fm_pane_idle_meta_index_cursor_write "$event_source_path" "$event_source" || return 2
   fi
   event_window_cursor=$(cat "$event_cursor_path" 2>/dev/null || true)
   if [ "$event_window_cursor" = EOF ]; then
