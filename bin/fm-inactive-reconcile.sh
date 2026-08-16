@@ -1938,7 +1938,7 @@ publish_secondmate_receipt_and_wake() {
 }
 
 prepare_pending_receipt() {
-  local pending=$1 expected_fp legacy_fp= serialized_fp schema task_id incarnation outcome terminal_source terminal_snapshot kind key
+  local pending=$1 expected_fp serialized_fp schema task_id incarnation outcome terminal_source terminal_snapshot kind key
   local parent_task_id parent_home parent_status parent_corr
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
   FP=${pending##*/}
@@ -2003,11 +2003,8 @@ prepare_pending_receipt() {
   esac
   expected_fp=$(terminal_outcome_fingerprint "$task_id" "$incarnation" "$outcome" \
     "$terminal_snapshot" "$kind" "$parent_corr") || return 1
-  if [ "$kind" = secondmate ]; then
-    legacy_fp=$(hash_text "$task_id|$incarnation|$outcome|$terminal_snapshot|$kind") || return 1
-  fi
   [ "$serialized_fp" = "$FP" ] || return 1
-  [ "$expected_fp" = "$FP" ] || [ "$legacy_fp" = "$FP" ] || return 1
+  [ "$expected_fp" = "$FP" ] || return 1
   ID=$task_id
   INC=$incarnation
   OUTCOME=$outcome
@@ -3409,7 +3406,7 @@ reconcile_child() {
 
 ack_receipt() {  # <inactive-outcome:fingerprint>
   local key=$1 row=${2:-} owner_required=${3:-1} expected_generation=${4:-}
-  local fp rec id kind incarnation outcome snapshot expected_fp legacy_fp= parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
+  local fp rec id kind incarnation outcome snapshot expected_fp parent_task_id parent_home parent_status corr line target existing existing_kind existing_corr claim_state
   [ -n "$row" ] || return 2
   case "$owner_required" in 0|1) ;; *) return 2 ;; esac
   [ "$owner_required" = 0 ] || drain_claim_owner "$row" || return 2
@@ -3461,10 +3458,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   outcome=$(receipt_field "$rec" outcome)
   snapshot=$(receipt_field "$rec" terminal_snapshot)
   expected_fp=$(terminal_outcome_fingerprint "$id" "$incarnation" "$outcome" "$snapshot" "$kind" "$corr") || return 2
-  if [ "$kind" = secondmate ]; then
-    legacy_fp=$(hash_text "$id|$incarnation|$outcome|$snapshot|$kind") || return 2
-  fi
-  [ "$expected_fp" = "$fp" ] || [ "$legacy_fp" = "$fp" ] || return 2
+  [ "$expected_fp" = "$fp" ] || return 2
   case "$kind" in ship|scout|secondmate) ;; *) return 2 ;; esac
   if [ "$kind" = secondmate ]; then
     parent_home=$(receipt_field "$rec" parent_home)

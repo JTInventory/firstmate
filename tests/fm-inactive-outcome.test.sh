@@ -960,7 +960,9 @@ test_wake_cursor_survives_processed_row_removal() {
   drain "$root" "$home" "$fakebin" > "$dir/drain.out" \
     || fail "cursor removal setup drain failed"
   unset FM_WAKE_DRAIN_BATCH_ROWS
-  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+  env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u STATE PATH="$fakebin:$PATH" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1/bin/fm-wake-lib.sh"
       fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
@@ -3699,19 +3701,21 @@ SH
 }
 
 test_drain_restores_only_unprocessed_rows() {
-  local dir root home fakebin state first second deduped offset remainder
+  local dir root home fakebin state first second second_corr deduped offset remainder
   new_case drain-rollback
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   first=$(receipt_fingerprint 'first-x1|first-inc|done|done')
-  second=$(receipt_fingerprint 'second-x1|second-inc|failed|failed' secondmate)
+  second_corr=0123456789abcdef
+  second=$(receipt_fingerprint 'second-x1|second-inc|failed|failed' secondmate "$second_corr")
   mkdir -p "$state/terminal-outcomes"
   fm_write_meta "$state/terminal-outcomes/$first.pending" \
     schema=fm-jt-terminal-outcome.v1 fingerprint="$first" task_id=first-x1 \
     incarnation=first-inc outcome=done terminal_source=pane terminal_snapshot=done kind=ship
   fm_write_meta "$state/terminal-outcomes/$second.pending" \
     schema=fm-jt-terminal-outcome.v1 fingerprint="$second" task_id=second-x1 \
-    incarnation=second-inc outcome=failed terminal_source=pane terminal_snapshot=failed kind=secondmate
+    incarnation=second-inc outcome=failed terminal_source=pane terminal_snapshot=failed kind=secondmate \
+    parent_task_id=second-parent parent_home="$home" parent_status="$state/second-parent.status" parent_corr="$second_corr"
   printf 'sm-rollback\n' > "$home/.fm-secondmate-home"
   printf '1\t1\tcheck\tinactive-outcome:%s\tfirst\n2\t2\tcheck\tinactive-outcome:%s\tsecond\n' \
     "$first" "$second" > "$state/.wake-queue"
@@ -3742,6 +3746,41 @@ test_drain_restores_only_unprocessed_rows() {
   [ "$(direct_file_count "$state" '.wake-queue.unprocessed.*')" = 0 ] \
     || fail "drain rollback created an unbounded suffix copy"
   pass "drain rollback persists a bounded unprocessed suffix"
+}
+
+test_legacy_secondmate_receipt_is_rejected_before_claim() {
+  local root home fakebin state owner drain_file row corr fingerprint status
+  new_case legacy-secondmate-receipt
+  root=$CASE_ROOT
+  home=$CASE_HOME
+  fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  corr=0123456789abcdef
+  mkdir -p "$state/terminal-outcomes"
+  fingerprint=$(receipt_fingerprint 'legacy-x1|legacy-inc|failed|failed' secondmate)
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=legacy-x1 \
+    incarnation=legacy-inc outcome=failed terminal_source=pane terminal_snapshot=failed kind=secondmate \
+    parent_task_id=legacy-parent parent_home="$home" parent_status="$state/legacy-parent.status" parent_corr="$corr"
+  row="1\t1\tcheck\tinactive-outcome:$fingerprint\tlegacy"
+  drain_file="$state/.wake-queue.deduped.$$"
+  printf '%s\n' "$row" > "$drain_file"
+  owner="$state/.wake-queue.lock.owner-manual"
+  mkdir "$owner"
+  printf '%s\n' "$$" > "$owner/pid"
+  ln -s "$owner" "$state/.wake-queue.lock"
+  status=0
+  export FM_WAKE_DRAIN_FILE="$drain_file"
+  recon_from_root "$root" "$fakebin" "$home" "$state" \
+    claim "inactive-outcome:$fingerprint" "$row" || status=$?
+  unset FM_WAKE_DRAIN_FILE
+  [ "$status" -eq 2 ] || fail "legacy secondmate receipt was accepted by claim"
+  [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
+    || fail "legacy secondmate receipt was removed during rejected claim"
+  [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
+    || fail "legacy secondmate receipt created a claim before rejection"
+  pass "legacy secondmate receipt is rejected before claim"
 }
 
 test_deferred_claim_retains_row_beyond_resume_cursor() {
@@ -3955,3 +3994,4 @@ test_drain_restores_only_unprocessed_rows
 test_deferred_claim_retains_row_beyond_resume_cursor
 test_resumed_drain_preserves_deferred_row_after_prior_removal
 test_malformed_or_missing_secondmate_route_fails_closed
+test_legacy_secondmate_receipt_is_rejected_before_claim
