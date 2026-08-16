@@ -525,6 +525,8 @@ SH
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "budget-exhausted enumeration advanced the cadence marker"
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "budget-exhausted enumeration created a receipt"
   [ -e "$find_log" ] || fail "bounded scan did not invoke the find child"
+  [ -f "$state/.inactive-outcome-find.incomplete" ] \
+    || fail "budget-exhausted enumeration did not persist resumable progress"
   unset FM_INACTIVE_OUTCOME_BUDGET_SECS FM_FIND_LOG
   pass "inactive enumeration is bounded by the per-scan budget"
 }
@@ -1925,8 +1927,8 @@ test_legacy_metadata_uses_stable_fallback() {
   state="$home/state"
   write_legacy_meta "$state" legacy-x1
   tmp=$(mktemp "$state/.legacy-meta.XXXXXX") || fail "legacy metadata fixture could not be staged"
-  awk -F= '$1 != "backend"' "$state/legacy-x1.meta" > "$tmp" \
-    || fail "legacy metadata backend could not be removed"
+  awk -F= '$1 != "backend" && $1 != "kind"' "$state/legacy-x1.meta" > "$tmp" \
+    || fail "legacy metadata compatibility fields could not be removed"
   mv -f "$tmp" "$state/legacy-x1.meta"
   set_old_mtime "$state/legacy-x1.meta"
   export FM_FAKE_CREW_STATE_LEGACY_X1='state: done · source: pane · legacy quiet'
@@ -2347,6 +2349,12 @@ test_watcher_bounded_metadata_fail_closed() {
   state="$home/state"
   cp -a "$ROOT/bin/." "$root/bin/"
   write_meta "$state" bounded-metadata-x1 bounded-metadata-inc
+  fm_write_meta "$state/herdr-default.meta" \
+    window=default:pane worktree="$state/work-herdr-default" project="$state/work-herdr-default" \
+    kind=ship mode=ship yolo=off backend=herdr herdr_session=default
+  fm_write_meta "$state/herdr-captain.meta" \
+    window=CAPTAIN:pane worktree="$state/work-herdr-captain" project="$state/work-herdr-captain" \
+    kind=ship mode=ship yolo=off backend=herdr herdr_session=CAPTAIN
   prepare_primary_proof "$root" "$home" "$fakebin"
   set +e
   env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
@@ -2361,8 +2369,10 @@ test_watcher_bounded_metadata_fail_closed() {
       if window_kind tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
       if window_backend tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
       fresh_deadline=$(( $(fm_pane_idle_now_ms) + 1000 ))
-      [ "$(recorded_windows "$fresh_deadline")" = tmux:fm-bounded-metadata-x1 ] || exit 1
+      recorded_windows "$fresh_deadline" | grep -Fx tmux:fm-bounded-metadata-x1 >/dev/null || exit 1
       [ "$(window_kind tmux:fm-bounded-metadata-x1 "$fresh_deadline")" = ship ] || exit 1
+      if window_backend default:pane "$fresh_deadline" >/dev/null; then exit 1; fi
+      if window_backend CAPTAIN:pane "$fresh_deadline" >/dev/null; then exit 1; fi
       exit 0
     ' _ "$root"
   status=$?
@@ -2531,6 +2541,7 @@ test_pane_idle_index_retries_partial_publication_idempotently() {
     _ "$ROOT" "$state" "$output" || fail "initial pane-idle index build failed"
   rm -f "$progress/.scan.complete" "$progress/.scan.aggregate.complete" \
     "$progress/.scan.sorted" "$progress/.scan.sorted.complete"
+  printf 'partial-record\0' >> "$progress/.scan.records"
   printf '%s\n' "$state/0.meta" > "$progress/.scan.cursor"
   printf '0\n' > "$progress/.scan.aggregate.cursor"
   env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
@@ -3665,6 +3676,45 @@ test_deferred_claim_retains_row_beyond_resume_cursor() {
   pass "deferred inactive rows remain durable beyond resume cursors"
 }
 
+test_resumed_drain_preserves_deferred_row_after_prior_removal() {
+  local dir root home fakebin state fingerprint first second third offset
+  new_case resumed-drain-prior-removal
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'resume-remove-x1|resume-remove-inc|done|resume remove')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=resume-remove-x1 \
+    incarnation=resume-remove-inc outcome=done terminal_source=pane \
+    terminal_snapshot='resume remove' kind=ship
+  first=$'1\t1\tcheck\tresume-first\tfirst resume row'
+  second=$'1\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tdeferred resume row'
+  third=$'1\t3\tcheck\tresume-third\tthird resume row'
+  printf '%s\n%s\n%s\n' "$first" "$second" "$third" > "$state/.wake-queue"
+  export FM_WAKE_DRAIN_BATCH_ROWS=1
+  drain "$root" "$home" "$fakebin" > "$dir/first.out" \
+    || fail "initial bounded resume drain failed"
+  unset FM_WAKE_DRAIN_BATCH_ROWS
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+      status=0
+      fm_wake_remove_key_locked resume-first || status=$?
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+      exit "$status"
+    ' _ "$ROOT" || fail "prior processed row removal failed"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" FM_WAKE_DRAIN_BATCH_ROWS=2
+  drain "$root" "$home" "$fakebin" > "$dir/resumed.out" \
+    || fail "resumed drain after prior removal failed"
+  offset=$(awk -F= '$1 == "offset" { print $2; exit }' "$state/.wake-queue.cursor")
+  [ "$offset" = 0 ] || fail "resumed drain advanced past an unacknowledged deferred row"
+  [ "$(awk -F '\t' -v wanted="inactive-outcome:$fingerprint" '$4 == wanted { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
+    || fail "deferred row was skipped after a prior row was removed"
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION FM_WAKE_DRAIN_BATCH_ROWS
+  pass "resumed drain retains deferred rows across prior removals"
+}
+
 test_malformed_or_missing_secondmate_route_fails_closed() {
   local dir root home fakebin state child_home child_state parent_status other_home
   new_case secondmate-route
@@ -3801,4 +3851,5 @@ test_failed_concurrent_send_discards_only_new_record
 test_failed_marked_send_discards_never_bound_record
 test_drain_restores_only_unprocessed_rows
 test_deferred_claim_retains_row_beyond_resume_cursor
+test_resumed_drain_preserves_deferred_row_after_prior_removal
 test_malformed_or_missing_secondmate_route_fails_closed

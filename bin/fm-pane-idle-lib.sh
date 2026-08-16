@@ -276,6 +276,36 @@ sub open_output {
   return $fh;
 }
 
+sub repair_records_tail {
+  my ($path) = @_;
+  return 1 if -l $path || !-f $path;
+  my $fh = open_read($path) or return 0;
+  binmode($fh);
+  local $/ = "\0";
+  my $tail_start = 0;
+  my $partial = 0;
+  while (1) {
+    $tail_start = tell($fh);
+    defined($tail_start) or return 0;
+    my $meta = <$fh>;
+    last unless defined($meta);
+    my $window = <$fh>;
+    my $count = <$fh>;
+    if (!defined($window) || !defined($count)
+        || $meta !~ /\0\z/ || $window !~ /\0\z/ || $count !~ /\0\z/) {
+      $partial = 1;
+      last;
+    }
+  }
+  close($fh) or return 0;
+  return 1 unless $partial;
+  my $wfh;
+  sysopen($wfh, $path, O_RDWR | $nofollow) or return 0;
+  my $ok = truncate($wfh, $tail_start);
+  $ok = 0 unless close($wfh);
+  return $ok ? 1 : 0;
+}
+
 sub expired {
   return defined($deadline) && int(time() * 1000) >= $deadline;
 }
@@ -313,6 +343,7 @@ while (1) {
   }
   exit 0 if $cursor eq 'EOF';
   if (!$state_loaded) {
+    repair_records_tail($records_path) or exit 1;
     my $rfh = open_read($records_path) or exit 1;
     binmode($rfh);
     {
@@ -447,6 +478,36 @@ sub write_atomic {
   rename($tmp, $path) or return 0;
   return 1;
 }
+sub repair_records_tail {
+  my ($path) = @_;
+  return 1 if -l $path || !-f $path;
+  my $fh = open_read($path) or return 0;
+  binmode($fh);
+  local $/ = "\0";
+  my $tail_start = 0;
+  my $partial = 0;
+  while (1) {
+    $tail_start = tell($fh);
+    defined($tail_start) or return 0;
+    my $meta = <$fh>;
+    last unless defined($meta);
+    my $window = <$fh>;
+    my $count = <$fh>;
+    if (!defined($window) || !defined($count)
+        || $meta !~ /\0\z/ || $window !~ /\0\z/ || $count !~ /\0\z/) {
+      $partial = 1;
+      last;
+    }
+  }
+  close($fh) or return 0;
+  return 1 unless $partial;
+  my $wfh;
+  sysopen($wfh, $path, O_RDWR | $nofollow) or return 0;
+  my $ok = truncate($wfh, $tail_start);
+  $ok = 0 unless close($wfh);
+  return $ok ? 1 : 0;
+}
+repair_records_tail($records_path) or exit 1;
 my $offset = 0;
 if (-e $cursor_path) {
   my $cfh = open_read($cursor_path) or exit 1;
@@ -731,6 +792,41 @@ close($fh) or exit 2;
 PERL
 }
 
+fm_pane_idle_meta_index_windows_from_snapshot_resumable() {
+  local snapshot=$1 cursor=${2:-0} deadline_ms=${3:-}
+  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
+  case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pane_idle_run_bounded_perl "$deadline_ms" "$snapshot" "$cursor" <<'PERL'
+use strict;
+use warnings;
+my ($snapshot, $cursor) = @ARGV;
+open(my $fh, '<', $snapshot) or exit 2;
+binmode($fh);
+seek($fh, $cursor, 0) or exit 2;
+local $/ = "\0";
+my %seen;
+while (1) {
+  my $meta = <$fh>;
+  last unless defined $meta;
+  my $window = <$fh>;
+  my $count = <$fh>;
+  defined($window) && defined($count) or exit 2;
+  $meta =~ s/\0\z// or exit 2;
+  $window =~ s/\0\z// or exit 2;
+  $count =~ s/\0\z// or exit 2;
+  my $next = tell($fh);
+  defined($next) or exit 2;
+  if ($window =~ /[\r\n\t]/ || exists $seen{$window}) {
+    print $next, "\0\0" or exit 2;
+    next;
+  }
+  $seen{$window} = 1;
+  print $next, "\0", $window, "\0" or exit 2;
+}
+close($fh) or exit 2;
+PERL
+}
+
 fm_pane_idle_meta_index_windows_direct() {
   local state=$1 deadline_ms=${2:-}
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
@@ -757,6 +853,48 @@ while (defined(my $entry = readdir($dh))) {
   next if exists $seen{$window};
   $seen{$window} = 1;
   print $window, "\n" or exit 2;
+}
+closedir($dh) or exit 2;
+PERL
+}
+
+fm_pane_idle_meta_index_windows_direct_resumable() {
+  local state=$1 cursor=${2:-} deadline_ms=${3:-}
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  case "$cursor" in *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;; esac
+  fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" "$cursor" <<'PERL'
+use strict;
+use warnings;
+my ($state, $cursor) = @ARGV;
+opendir(my $dh, $state) or exit 2;
+my $started = $cursor eq '' ? 1 : 0;
+my %seen;
+while (defined(my $entry = readdir($dh))) {
+  next unless $entry =~ /\.meta\z/;
+  if (!$started) {
+    $started = 1 if $entry eq $cursor;
+    next;
+  }
+  my $path = "$state/$entry";
+  if (!-f $path || -l $path) {
+    print $entry, "\0\0" or exit 2;
+    next;
+  }
+  open(my $fh, '<', $path) or exit 2;
+  my ($window, $count) = ('', 0);
+  while (defined(my $line = <$fh>)) {
+    if ($line =~ /\Awindow=(.*)\n\z/) {
+      $window = $1;
+      $count++;
+    }
+  }
+  close($fh) or exit 2;
+  if ($count != 1 || $window =~ /[\r\n\t]/ || exists $seen{$window}) {
+    print $entry, "\0\0" or exit 2;
+    next;
+  }
+  $seen{$window} = 1;
+  print $entry, "\0", $window, "\0" or exit 2;
 }
 closedir($dh) or exit 2;
 PERL

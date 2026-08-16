@@ -266,7 +266,7 @@ hash_pane() {
 }
 
 window_kind() {
-  local w=$1 deadline_ms=${2:-} meta mw kind
+  local w=$1 deadline_ms=${2:-} meta mw kind kind_count
   if [ -n "$deadline_ms" ]; then
     if [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ]; then
       meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
@@ -276,9 +276,16 @@ window_kind() {
     if [ -z "$meta" ]; then
       return 1
     fi
-    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-    case "$kind" in
-      ship|scout|secondmate) printf '%s\n' "$kind"; return 0 ;;
+    kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
+    case "$kind_count" in
+      0) printf 'ship\n'; return 0 ;;
+      1)
+        kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
+        case "$kind" in
+          ship|scout|secondmate) printf '%s\n' "$kind"; return 0 ;;
+          *) return 1 ;;
+        esac
+        ;;
       *) return 1 ;;
     esac
   fi
@@ -295,7 +302,7 @@ window_kind() {
 }
 
 window_backend_from_meta() {
-  local meta=$1 backend_count backend
+  local meta=$1 backend_count backend session window
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   backend_count=$(grep -c '^backend=' "$meta" 2>/dev/null || true)
   case "$backend_count" in
@@ -303,7 +310,16 @@ window_backend_from_meta() {
     1) backend=$(grep '^backend=' "$meta" | cut -d= -f2-) || return 1 ;;
     *) return 1 ;;
   esac
-  case "$backend" in tmux|herdr) printf '%s' "$backend" ;; *) return 1 ;; esac
+  case "$backend" in
+    tmux) printf '%s' "$backend" ;;
+    herdr)
+      session=$(fm_pane_idle_meta_value_unique "$meta" herdr_session 2>/dev/null) || return 1
+      [ "$session" = firstmate ] || return 1
+      window=$(fm_pane_idle_meta_value_unique "$meta" window 2>/dev/null) || return 1
+      case "$window" in firstmate:*) printf '%s' "$backend" ;; *) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 window_backend() {  # <window>
@@ -348,6 +364,34 @@ recorded_windows() {
     seen="$seen|$w|"
     printf '%s\n' "$w"
   done
+}
+
+watch_window_scan_prepare() {
+  local source=$1 cursor_path="$STATE/.watch-window.cursor" source_path="$STATE/.watch-window.source"
+  local current tmp
+  [ ! -L "$cursor_path" ] && [ ! -L "$source_path" ] || return 1
+  current=$(cat "$source_path" 2>/dev/null || true)
+  if [ "$current" != "$source" ]; then
+    rm -f "$cursor_path" || return 1
+    tmp=$(mktemp "$source_path.XXXXXX") || return 1
+    [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+    if ! printf '%s\n' "$source" > "$tmp" || [ -L "$source_path" ] \
+      || ! mv -f "$tmp" "$source_path"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  FM_WATCH_WINDOW_CURSOR=$(cat "$cursor_path" 2>/dev/null || true)
+  case "$FM_WATCH_WINDOW_CURSOR" in
+    *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;;
+  esac
+}
+
+watch_window_scan_advance() {
+  local cursor=$1
+  case "$cursor" in ''|*$'\r'*|*$'\n'*|*$'\t'*) return 1 ;; esac
+  fm_pane_idle_meta_index_cursor_write "$STATE/.watch-window.cursor" "$cursor" || return 1
+  FM_WATCH_WINDOW_CURSOR=$cursor
 }
 
 event_wait_herdr() {
@@ -1429,17 +1473,54 @@ EOF
     *) exit "$pane_idle_index_status" ;;
   esac
   pane_idle_scan_deadline=$(( $(fm_pane_idle_now_ms) + PANE_IDLE_INDEX_BUDGET_SECS * 1000 ))
-  while IFS= read -r w; do
-    # A secondmate idling on its own watcher is healthy. Its parent supervises
-    # it through status writes and heartbeats, except while a declared pause
-    # marker is active so the same bounded re-surface cadence still applies.
+  window_scan_stream=$(mktemp "$STATE/.watch-window-stream.XXXXXX") || exit 1
+  [ -f "$window_scan_stream" ] && [ ! -L "$window_scan_stream" ] || exit 1
+  window_scan_status=0
+  if [ "$FM_PANE_IDLE_META_INDEX_BUILT" = 1 ] \
+    && [ -f "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ] \
+    && [ ! -L "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ]; then
+    window_scan_source="snapshot:${FM_PANE_IDLE_META_INDEX_STATE_STAMP}"
+    watch_window_scan_prepare "$window_scan_source" || exit 1
+    fm_pane_idle_meta_index_windows_from_snapshot_resumable \
+      "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "${FM_WATCH_WINDOW_CURSOR:-0}" \
+      "$pane_idle_scan_deadline" > "$window_scan_stream" || window_scan_status=$?
+  else
+    window_scan_stamp=$(fm_pane_idle_path_stamp "$STATE" "$pane_idle_scan_deadline") \
+      || window_scan_status=$?
+    if [ "$window_scan_status" = 0 ]; then
+      window_scan_source="direct:$window_scan_stamp"
+      watch_window_scan_prepare "$window_scan_source" || exit 1
+      fm_pane_idle_meta_index_windows_direct_resumable "$STATE" \
+        "${FM_WATCH_WINDOW_CURSOR:-}" "$pane_idle_scan_deadline" > "$window_scan_stream" \
+        || window_scan_status=$?
+    fi
+  fi
+  case "$window_scan_status" in
+    0|124) ;;
+    *) rm -f "$window_scan_stream"; exit "$window_scan_status" ;;
+  esac
+  while IFS= read -r -d '' window_scan_cursor \
+    && IFS= read -r -d '' w; do
+    if [ -z "$w" ]; then
+      watch_window_scan_advance "$window_scan_cursor" || exit 1
+      continue
+    fi
     kind=
-    kind=$(window_kind "$w" "$pane_idle_scan_deadline") || continue
+    kind=$(window_kind "$w" "$pane_idle_scan_deadline") || {
+      watch_window_scan_advance "$window_scan_cursor" || exit 1
+      continue
+    }
     if [ "$kind" = secondmate ]; then
       key=$(printf '%s' "$w" | tr ':/.' '___')
-      [ -e "$STATE/.paused-$key" ] || continue
+      if [ ! -e "$STATE/.paused-$key" ]; then
+        watch_window_scan_advance "$window_scan_cursor" || exit 1
+        continue
+      fi
     fi
-    backend=$(window_backend "$w" "$pane_idle_scan_deadline") || continue
+    backend=$(window_backend "$w" "$pane_idle_scan_deadline") || {
+      watch_window_scan_advance "$window_scan_cursor" || exit 1
+      continue
+    }
     if ! tail40=$(fm_backend_capture "$backend" "$w" 40 2>/dev/null); then
       reason="check: backend capture failed for $w (backend=$backend); inspect the runtime endpoint and task metadata"
       fm_wake_append check "$w" "$reason" || exit 1
@@ -1455,9 +1536,6 @@ EOF
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
-      # Busy match runs on the last 6 non-blank lines only (the TUI footer area,
-      # where every verified harness renders its busy indicator) so busy-looking
-      # strings in displayed content cannot suppress stale detection.
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         if [ "$kind" != secondmate ]; then
           idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
@@ -1485,47 +1563,36 @@ EOF
             fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || true
           fi
         fi
-        # The pane is idle/stale at hash $h. Triage decides whether this wakes
-        # firstmate. Detection itself is unchanged from above.
         if ! afk_present; then
           task=$(window_to_task "$w")
           if [ "$(pause_state_class "$w" "$task")" = paused ]; then
             handle_paused_stale "$w" "$task" "$h"
+            watch_window_scan_advance "$window_scan_cursor" || exit 1
             continue
           fi
         fi
         if afk_present; then
-          # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
-          # Terminal status under a stale pane: actionable -> enqueue + exit.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             terminal_surface_status=0
             surface_terminal_stale_transaction "$w" "$h" || terminal_surface_status=$?
             case "$terminal_surface_status" in
               0) ;;
-              2) continue ;;
+              2)
+                watch_window_scan_advance "$window_scan_cursor" || exit 1
+                continue
+                ;;
               *) exit "$terminal_surface_status" ;;
             esac
             rm -f "$ssf" || exit 1
             wake "stale: $w"
           fi
         else
-          # Non-terminal stale: a crew gone quiet without a captain-relevant status.
-          # Absorb-only-when-provably-working, decided once per distinct stale hash
-          # (the costly run-step read runs only on first sight, never every poll):
-          #   - provably working: an actively-running pipeline legitimately sits on a
-          #     static pane (e.g. waiting on CI), so absorb and start the wedge timer
-          #     so a genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - NOT provably working: no running pipeline, idle pane, no busy
-          #     signature - the crew has STOPPED. Surface immediately so firstmate
-          #     peeks (it may be done via an interactive menu that wrote no done:
-          #     status, waiting on a decision, or wedged) instead of leaving the
-          #     finish to wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w")"; then
               printf '%s' "$h" > "$sf"
@@ -1557,8 +1624,6 @@ EOF
         fi
       else
         fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || exit 1
-        # Pane busy is proven activity once two samples agree; a first baseline
-        # sample must preserve a declared pause marker across watcher restarts.
         if [ "$n" -ge 2 ]; then
           pause_tracking_clear "$w"
         fi
@@ -1568,16 +1633,14 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || exit 1
-      # Pane content changed: the crew is active again, so reset pause and
-      # escalation timers before a later pause starts a fresh cadence. During
-      # the first baseline after a watcher restart, preserve an existing pause
-      # marker until the next stable sample can reconcile it.
       if [ -n "$prev" ]; then
         pause_tracking_clear "$w"
       fi
       rm -f "$ssf"
     fi
-  done < <(recorded_windows "$pane_idle_scan_deadline")
+    watch_window_scan_advance "$window_scan_cursor" || exit 1
+  done < "$window_scan_stream"
+  rm -f "$window_scan_stream" || exit 1
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

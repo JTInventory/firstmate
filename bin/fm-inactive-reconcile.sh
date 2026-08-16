@@ -25,12 +25,15 @@ MAINTENANCE_ORDER_CURSOR="$STATE/.inactive-outcome-maintenance-order.cursor"
 DIRECT_FIND_PENDING="$STATE/.inactive-outcome-find.pending"
 DIRECT_FIND_OFFSET="$STATE/.inactive-outcome-find.pending.offset"
 DIRECT_FIND_RETRY="$STATE/.inactive-outcome-find.pending.retry"
+DIRECT_FIND_INCOMPLETE="$STATE/.inactive-outcome-find.incomplete"
 REPORTED_ROUTE_PENDING="$STATE/.reported-secondmate-route-repair.pending"
 REPORTED_ROUTE_OFFSET="$STATE/.reported-secondmate-route-repair.pending.offset"
 REPORTED_ROUTE_RETRY="$STATE/.reported-secondmate-route-repair.pending.retry"
+REPORTED_ROUTE_ENUM_CURSOR="$STATE/.reported-secondmate-route-repair.enum.cursor"
 PENDING_RECEIPT_PENDING="$STATE/.pending-receipt-republish.pending"
 PENDING_RECEIPT_OFFSET="$STATE/.pending-receipt-republish.pending.offset"
 PENDING_RECEIPT_RETRY="$STATE/.pending-receipt-republish.pending.retry"
+PENDING_RECEIPT_ENUM_CURSOR="$STATE/.pending-receipt-republish.enum.cursor"
 MERGE_TXN="$STATE/.inactive-outcome-merge.txn"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 PANE_IDLE_DIR="$STATE/.pane-idle"
@@ -67,12 +70,15 @@ inactive_state_preflight() {
   inactive_state_path_is_safe "$DIRECT_FIND_PENDING" file || return 1
   inactive_state_path_is_safe "$DIRECT_FIND_OFFSET" file || return 1
   inactive_state_path_is_safe "$DIRECT_FIND_RETRY" file || return 1
+  inactive_state_path_is_safe "$DIRECT_FIND_INCOMPLETE" file || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_PENDING" file || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_OFFSET" file || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_RETRY" file || return 1
+  inactive_state_path_is_safe "$REPORTED_ROUTE_ENUM_CURSOR" file || return 1
   inactive_state_path_is_safe "$PENDING_RECEIPT_PENDING" file || return 1
   inactive_state_path_is_safe "$PENDING_RECEIPT_OFFSET" file || return 1
   inactive_state_path_is_safe "$PENDING_RECEIPT_RETRY" file || return 1
+  inactive_state_path_is_safe "$PENDING_RECEIPT_ENUM_CURSOR" file || return 1
   inactive_state_path_is_safe "$MERGE_TXN" file || return 1
   inactive_state_path_is_safe "$PANE_IDLE_DIR" dir || return 1
   inactive_state_path_is_safe "$PANE_IDLE_INDEX_DIR" dir || return 1
@@ -312,6 +318,19 @@ inactive_append_nul_value() {
   fi
 }
 
+inactive_nul_last_value() {
+  local source=$1 deadline_ms=${2:-} value last=''
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
+  while IFS= read -r -d '' value; do
+    if [ -n "$deadline_ms" ] && [ "$(clock_millis)" -ge "$deadline_ms" ]; then
+      return 124
+    fi
+    last=$value
+  done < "$source"
+  printf '%s' "$last"
+}
+
 inactive_pending_offset() {
   local path=$1 value
   [ -e "$path" ] || { printf '0'; return 0; }
@@ -324,6 +343,27 @@ inactive_pending_offset() {
 inactive_pending_offset_write() {
   local path=$1 value=$2 tmp
   case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ ! -L "$path" ] || return 1
+  tmp=$(mktemp "$path.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  if ! printf '%s\n' "$value" > "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+inactive_text_cursor_read() {
+  local path=$1 value
+  [ -e "$path" ] || { printf ''; return 0; }
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  value=$(cat "$path" 2>/dev/null) || return 1
+  case "$value" in *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;; esac
+  printf '%s' "$value"
+}
+
+inactive_text_cursor_write() {
+  local path=$1 value=$2 tmp
+  case "$value" in *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;; esac
   [ ! -L "$path" ] || return 1
   tmp=$(mktemp "$path.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
@@ -1961,22 +2001,36 @@ reported_secondmate_receipt_valid() {
 }
 
 receipt_candidates() {
-  local suffix=$1 seconds=${2:-1}
+  local suffix=$1 seconds=${2:-1} cursor=${3:-}
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
   case "$seconds" in ''|*[!0-9]*|0) return 0 ;; esac
+  case "$cursor" in *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;; esac
   if command -v perl >/dev/null 2>&1; then
-    run_bounded_child "$seconds" perl - "$OUTCOME_DIR" "$suffix" <<'PERL'
+    run_bounded_child "$seconds" perl - "$OUTCOME_DIR" "$suffix" "$cursor" <<'PERL'
 use strict;
 use warnings;
-my ($dir, $suffix) = @ARGV;
+my ($dir, $suffix, $cursor) = @ARGV;
 opendir(my $dh, $dir) or exit 1;
+my @entries;
 while (defined(my $entry = readdir($dh))) {
   next unless $entry =~ /\.\Q$suffix\E\z/;
-  my $path = "$dir/$entry";
+  push @entries, $entry;
+}
+closedir($dh) or exit 1;
+my $start = 0;
+if ($cursor ne '') {
+  for (my $i = 0; $i < @entries; $i++) {
+    if ($entries[$i] eq $cursor) {
+      $start = $i + 1;
+      last;
+    }
+  }
+}
+for (my $i = $start; $i < @entries; $i++) {
+  my $path = "$dir/$entries[$i]";
   next unless -f $path && !-l $path;
   print "$path\0" or exit 1;
 }
-closedir($dh) or exit 1;
 PERL
   else
     return 124
@@ -1986,6 +2040,7 @@ PERL
 repair_reported_secondmate_routes() {
   local scan_deadline=$1 reported kind corr parent_task_id parent_home parent_status remaining status=0
   local cursor='' cursor_found=0 started=1 pass base last processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
+  local enum_cursor='' enum_last='' enum_incomplete=0 enum_source_drained=0
   local candidate_pending=0 candidate_retain=0 item_status batch_consumed=0 batch_complete=1 retry_path=
   local candidate_pending_offset=0 pending_skip=0 candidate_tmp_owned=0
   MAINTENANCE_ENUM_DEFERRED=0
@@ -1994,6 +2049,12 @@ repair_reported_secondmate_routes() {
   MAINTENANCE_RETRYABLE=0
   MAINTENANCE_ITEMS_PROCESSED=0
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
+  if [ -e "$REPORTED_ROUTE_ENUM_CURSOR" ] || [ -L "$REPORTED_ROUTE_ENUM_CURSOR" ]; then
+    [ -f "$REPORTED_ROUTE_ENUM_CURSOR" ] && [ ! -L "$REPORTED_ROUTE_ENUM_CURSOR" ] || return 1
+    enum_incomplete=1
+    enum_cursor=$(inactive_text_cursor_read "$REPORTED_ROUTE_ENUM_CURSOR") || return 1
+    case "$enum_cursor" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  fi
   remaining=$(budget_remaining_secs "$scan_deadline")
   if [ "$remaining" -le 0 ]; then
     MAINTENANCE_DEADLINE_EXPIRED=1
@@ -2077,7 +2138,23 @@ repair_reported_secondmate_routes() {
     if [ "$candidate_pending" = 1 ]; then
       :
     else
-      receipt_candidates reported "$remaining" > "$candidate_tmp" || enum_rc=$?
+      receipt_candidates reported "$remaining" "$enum_cursor" > "$candidate_tmp" || enum_rc=$?
+      if [ "$enum_rc" = 0 ]; then
+        rm -f "$REPORTED_ROUTE_ENUM_CURSOR" || return 1
+        enum_incomplete=0
+      elif [ "$enum_rc" = 124 ]; then
+        enum_last=$(inactive_nul_last_value "$candidate_tmp" "$scan_deadline") || {
+          [ "$?" = 124 ] || return 1
+        }
+        if [ -n "$enum_last" ]; then
+          enum_last=${enum_last##*/}
+          inactive_text_cursor_write "$REPORTED_ROUTE_ENUM_CURSOR" "$enum_last" || return 1
+          enum_incomplete=1
+        else
+          inactive_text_cursor_write "$REPORTED_ROUTE_ENUM_CURSOR" 0 || return 1
+          enum_incomplete=1
+        fi
+      fi
     fi
     if [ "$enum_rc" -ne 0 ]; then
       status=1
@@ -2226,6 +2303,17 @@ repair_reported_secondmate_routes() {
     [ "$enum_deferred" = 0 ] || break
   done
   if [ "$candidate_pending" = 1 ] && [ "$batch_complete" = 1 ] \
+    && [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && [ "$enum_deferred" = 0 ] \
+    && [ "$enum_incomplete" = 1 ]; then
+    inactive_pending_clear "$REPORTED_ROUTE_PENDING" "$REPORTED_ROUTE_OFFSET" || status=1
+    MAINTENANCE_ENUM_DEFERRED=1
+    enum_deferred=1
+    enum_source_drained=1
+    status=1
+  fi
+  if [ "$enum_source_drained" = 1 ]; then
+    :
+  elif [ "$candidate_pending" = 1 ] && [ "$batch_complete" = 1 ] \
     && [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && [ "$enum_deferred" = 0 ]; then
     inactive_pending_clear "$REPORTED_ROUTE_PENDING" "$REPORTED_ROUTE_OFFSET" || status=1
   elif [ "$enum_deferred" = 1 ] || [ "$candidate_retain" = 1 ] || [ "$candidate_pending" = 1 ]; then
@@ -2331,6 +2419,7 @@ republish_pending_receipts() {
   local scan_deadline=$1 pending remaining status=0
   local cursor='' cursor_found=0 pass started=1
   local base last='' processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
+  local enum_cursor='' enum_last='' enum_incomplete=0 enum_source_drained=0
   local candidate_pending=0 candidate_retain=0 batch_consumed=0 batch_complete=1 retry_path=
   local candidate_pending_offset=0 pending_skip=0 candidate_tmp_owned=0
   local LC_ALL=C
@@ -2340,6 +2429,12 @@ republish_pending_receipts() {
   MAINTENANCE_DEADLINE_EXPIRED=0
   MAINTENANCE_ITEMS_PROCESSED=0
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 0
+  if [ -e "$PENDING_RECEIPT_ENUM_CURSOR" ] || [ -L "$PENDING_RECEIPT_ENUM_CURSOR" ]; then
+    [ -f "$PENDING_RECEIPT_ENUM_CURSOR" ] && [ ! -L "$PENDING_RECEIPT_ENUM_CURSOR" ] || return 1
+    enum_incomplete=1
+    enum_cursor=$(inactive_text_cursor_read "$PENDING_RECEIPT_ENUM_CURSOR") || return 1
+    case "$enum_cursor" in *[!A-Fa-f0-9._-]*) return 1 ;; esac
+  fi
   if [ ! -e "$PENDING_RECEIPT_PENDING" ] && [ ! -L "$PENDING_RECEIPT_PENDING" ] \
     && inactive_pending_retry_exists "$PENDING_RECEIPT_RETRY"; then
     inactive_pending_retry_restore "$PENDING_RECEIPT_RETRY" "$PENDING_RECEIPT_PENDING" || return 1
@@ -2418,7 +2513,23 @@ republish_pending_receipts() {
     if [ "$candidate_pending" = 1 ]; then
       :
     else
-      receipt_candidates pending "$remaining" > "$candidate_tmp" || enum_rc=$?
+      receipt_candidates pending "$remaining" "$enum_cursor" > "$candidate_tmp" || enum_rc=$?
+      if [ "$enum_rc" = 0 ]; then
+        rm -f "$PENDING_RECEIPT_ENUM_CURSOR" || return 1
+        enum_incomplete=0
+      elif [ "$enum_rc" = 124 ]; then
+        enum_last=$(inactive_nul_last_value "$candidate_tmp" "$scan_deadline") || {
+          [ "$?" = 124 ] || return 1
+        }
+        if [ -n "$enum_last" ]; then
+          enum_last=${enum_last##*/}
+          inactive_text_cursor_write "$PENDING_RECEIPT_ENUM_CURSOR" "$enum_last" || return 1
+          enum_incomplete=1
+        else
+          inactive_text_cursor_write "$PENDING_RECEIPT_ENUM_CURSOR" 0 || return 1
+          enum_incomplete=1
+        fi
+      fi
     fi
     if [ "$enum_rc" -ne 0 ]; then
       status=1
@@ -2520,6 +2631,17 @@ republish_pending_receipts() {
     [ "$enum_deferred" = 0 ] || break
   done
   if [ "$candidate_pending" = 1 ] && [ "$batch_complete" = 1 ] \
+    && [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && [ "$enum_deferred" = 0 ] \
+    && [ "$enum_incomplete" = 1 ]; then
+    inactive_pending_clear "$PENDING_RECEIPT_PENDING" "$PENDING_RECEIPT_OFFSET" || status=1
+    MAINTENANCE_ENUM_DEFERRED=1
+    enum_deferred=1
+    enum_source_drained=1
+    status=1
+  fi
+  if [ "$enum_source_drained" = 1 ]; then
+    :
+  elif [ "$candidate_pending" = 1 ] && [ "$batch_complete" = 1 ] \
     && [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && [ "$enum_deferred" = 0 ]; then
     inactive_pending_clear "$PENDING_RECEIPT_PENDING" "$PENDING_RECEIPT_OFFSET" || status=1
   elif [ "$enum_deferred" = 1 ] || [ "$candidate_retain" = 1 ] || [ "$candidate_pending" = 1 ]; then
@@ -3159,6 +3281,7 @@ scan_locked() {
   local maintenance_started maintenance_phase maintenance_next_phase maintenance_phase_tmp
   local maintenance_order next_order maintenance_order_tmp maintenance_ran=0 maintenance_deferred=0 direct_deferred=0
   local find_pending_source=0 find_retain=0 find_ordered=1 batch_consumed=0 batch_complete=1 retry_path=
+  local find_source_drained=0
   local find_pending_offset=0 find_tmp_owned=0 pending_skip=0
   local pane_idle_index_dir= pane_idle_index_ready=0
   inactive_state_preflight || return 1
@@ -3317,6 +3440,9 @@ scan_locked() {
       cursor_identity=
     fi
   fi
+  if [ -e "$DIRECT_FIND_INCOMPLETE" ] || [ -L "$DIRECT_FIND_INCOMPLETE" ]; then
+    [ -f "$DIRECT_FIND_INCOMPLETE" ] && [ ! -L "$DIRECT_FIND_INCOMPLETE" ] || return 1
+  fi
   if [ -n "$cursor" ]; then started=0; fi
   [ -n "$cursor" ] && cursor_seen=0
   if [ ! -e "$DIRECT_FIND_PENDING" ] && [ ! -L "$DIRECT_FIND_PENDING" ] \
@@ -3384,6 +3510,10 @@ scan_locked() {
     else
       if run_bounded_child "$remaining" find "$STATE" \( -type d ! -path "$STATE" -prune \) -o \
         \( -type f -name '*.meta' -print0 \) > "$find_tmp"; then
+        rm -f "$DIRECT_FIND_INCOMPLETE" || {
+          [ "$maintenance_ran" = 1 ] || run_maintenance
+          return 1
+        }
         if inactive_persist_nul_suffix "$find_tmp" "$DIRECT_FIND_PENDING" 0 "" "$scan_deadline"; then
           find_tmp="$DIRECT_FIND_PENDING"
           find_tmp_owned=0
@@ -3417,6 +3547,10 @@ scan_locked() {
         fi
         if [ "$rc" = 124 ]; then
           direct_deferred=1
+          inactive_text_cursor_write "$DIRECT_FIND_INCOMPLETE" "" || {
+            [ "$maintenance_ran" = 1 ] || run_maintenance
+            return 1
+          }
         else
           scan_failed=1
         fi
@@ -3568,13 +3702,24 @@ scan_locked() {
     fi
   done < "$find_tmp"
   if [ "$find_pending_source" = 1 ] && [ "$batch_complete" = 1 ] \
+    && [ "$scan_failed" = 0 ] && [ -e "$DIRECT_FIND_INCOMPLETE" ]; then
+    inactive_pending_clear "$DIRECT_FIND_PENDING" "$DIRECT_FIND_OFFSET" || {
+      complete=0
+      scan_failed=1
+    }
+    find_source_drained=1
+    direct_deferred=1
+  fi
+  if [ "$find_pending_source" = 1 ] && [ "$batch_complete" = 1 ] \
     && [ "$scan_failed" = 0 ]; then
     find_retain=0
   fi
   if [ "$direct_deferred" = 1 ] && [ "$scan_failed" = 0 ]; then
     find_retain=1
   fi
-  if [ "$find_retain" = 1 ] && [ "$scan_failed" = 0 ]; then
+  if [ "$find_source_drained" = 1 ]; then
+    :
+  elif [ "$find_retain" = 1 ] && [ "$scan_failed" = 0 ]; then
     inactive_persist_nul_suffix "$find_tmp" "$DIRECT_FIND_PENDING" "$batch_consumed" "" "$scan_deadline" || {
       rc=$?
       [ "$rc" -ne 0 ] || rc=1

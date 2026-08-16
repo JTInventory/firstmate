@@ -21,6 +21,7 @@ DRAIN_BATCH_COUNT=0
 DRAIN_CURSOR=
 DRAIN_CURRENT_RETAINED=0
 DRAIN_CURRENT_OFFSET=0
+DRAIN_NEXT_OFFSET=0
 DRAIN_RETAINED_ANY=0
 DRAIN_RETAINED_OFFSET=0
 DRAIN_BATCH_ROWS=${FM_WAKE_DRAIN_BATCH_ROWS:-16}
@@ -252,6 +253,18 @@ drain_restore_remaining() {
   restore_unprocessed_rows "$1"
 }
 
+drain_resume_advance() {
+  local removed=${1:-0}
+  [ "$DRAIN_RESUMING" = true ] && [ "$DRAIN_RESTORE_PENDING" != true ] || return 0
+  [ "$DRAIN_CURRENT_RETAINED" = 1 ] && return 0
+  [ "$DRAIN_RETAINED_ANY" = 1 ] && return 0
+  if [ "$removed" = 0 ]; then
+    fm_wake_queue_cursor_write "$DRAIN_NEXT_OFFSET" || return 1
+  fi
+  fm_wake_queue_cursor_read || return 1
+  DRAIN_OFFSET=$FM_WAKE_QUEUE_CURSOR_OFFSET
+}
+
 drain_batch_stop() {
   local next_offset
   if [ "$DRAIN_LOCK_HELD" = true ]; then
@@ -269,12 +282,12 @@ drain_batch_stop() {
     elif [ "$DRAIN_RESUMING" = true ]; then
       if [ "$DRAIN_RETAINED_ANY" = 1 ]; then
         next_offset=$DRAIN_RETAINED_OFFSET
+        fm_wake_queue_cursor_write "$next_offset" || return 1
+        DRAIN_OFFSET=$next_offset
       else
-        next_offset=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
-          "$DRAIN_OFFSET" "$DRAIN_BATCH_COUNT") || return 1
+        fm_wake_queue_cursor_read || return 1
+        DRAIN_OFFSET=$FM_WAKE_QUEUE_CURSOR_OFFSET
       fi
-      fm_wake_queue_cursor_write "$next_offset" || return 1
-      DRAIN_OFFSET=$next_offset
       fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
       DRAIN_LOCK_HELD=false
     else
@@ -399,8 +412,19 @@ fi
 while IFS= read -r drain_row || [ -n "$drain_row" ]; do
   drain_line=$((drain_line + 1))
   DRAIN_BATCH_COUNT=$((DRAIN_BATCH_COUNT + 1))
-  DRAIN_CURRENT_OFFSET=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
-    "$DRAIN_OFFSET" "$((DRAIN_BATCH_COUNT - 1))") || exit 1
+  if [ "$DRAIN_RESUMING" = true ] && [ "$DRAIN_RESTORE_PENDING" != true ]; then
+    fm_wake_queue_cursor_read || exit 1
+    DRAIN_OFFSET=$FM_WAKE_QUEUE_CURSOR_OFFSET
+    DRAIN_CURRENT_OFFSET=$DRAIN_OFFSET
+    DRAIN_NEXT_OFFSET=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
+      "$DRAIN_CURRENT_OFFSET" 1) || exit 1
+  else
+    DRAIN_CURRENT_OFFSET=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
+      "$DRAIN_OFFSET" "$((DRAIN_BATCH_COUNT - 1))") || exit 1
+    DRAIN_NEXT_OFFSET=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
+      "$DRAIN_OFFSET" "$DRAIN_BATCH_COUNT") || exit 1
+  fi
+  DRAIN_CURRENT_REMOVED=0
   IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
   case "$_key" in
     inactive-outcome:*)
@@ -453,16 +477,14 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       esac
       if [ "$claim_status" != 3 ] && [ "$claim_status" != 4 ] \
         && { [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ] || [ "$claim_status" = 5 ]; }; then
+        ack_status=0
         FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-          ack "$_key" "$drain_row" 0 "${FM_WAKE_DRAIN_GENERATION:-}" || {
-          ack_status=$?
-          # 1 means the receipt was already acknowledged or is not ours. Any
-          # other failure keeps the drained row durable for a later turn.
-          if [ "$ack_status" != 1 ]; then
-            drain_restore_remaining "$drain_line" || exit 1
-            exit "$ack_status"
-          fi
-        }
+          ack "$_key" "$drain_row" 0 "${FM_WAKE_DRAIN_GENERATION:-}" || ack_status=$?
+        if [ "$ack_status" != 0 ] && [ "$ack_status" != 1 ]; then
+          drain_restore_remaining "$drain_line" || exit 1
+          exit "$ack_status"
+        fi
+        DRAIN_CURRENT_REMOVED=1
       fi
       ;;
     *)
@@ -477,6 +499,7 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
       DRAIN_ACTIONABLE=1
       ;;
   esac
+  drain_resume_advance "$DRAIN_CURRENT_REMOVED" || exit 1
   if [ "$DRAIN_BATCH_COUNT" -ge "$DRAIN_BATCH_ROWS" ]; then
     drain_batch_stop
     batch_status=$?
