@@ -319,6 +319,22 @@ test_prepared_wake_transaction_recovery_removes_manifest() {
   pass "prepared wake transaction recovery removes its manifest and unblocks appends"
 }
 
+test_orphaned_drain_source_is_recovered() {
+  local dir state row out
+  dir=$(make_case orphaned-drain-source)
+  state="$dir/state"
+  row=$'1\t1\tsignal\torphaned-key\tsignal: orphaned'
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  mv "$state/.wake-queue" "$state/.wake-queue.drain.99999" \
+    || fail "could not stage the interrupted drain source"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
+    || fail "drain did not recover the orphaned source"
+  out=$(cat "$dir/drain.out")
+  grep -Fqx "$row" "$dir/drain.out" || fail "orphaned source row was not drained: $out"
+  [ ! -e "$state/.wake-queue.drain.99999" ] || fail "orphaned source was not removed"
+  pass "drain recovers a source stranded between move and queue recreation"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -329,3 +345,4 @@ test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_unpreparable_lock_refuses_instead_of_spinning
 test_prepared_wake_transaction_recovery_removes_manifest
+test_orphaned_drain_source_is_recovered

@@ -265,6 +265,31 @@ restore_queue_fallback() {
   fm_wake_restore_queue_atomic "$source"
 }
 
+drain_recover_orphaned_sources_locked() {
+  local orphan base tmp
+  [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+  [ ! -e "$DRAIN_RESTORE_MANIFEST" ] && [ ! -L "$DRAIN_RESTORE_MANIFEST" ] || return 0
+  for orphan in "$STATE"/.wake-queue.drain.*; do
+    [ -e "$orphan" ] || continue
+    [ -f "$orphan" ] && [ ! -L "$orphan" ] || return 1
+    base=${orphan##*/}
+    case "$base" in .wake-queue.drain.*) ;; *) return 1 ;; esac
+    case "${base##*.}" in ''|*[!0-9]*) return 1 ;; esac
+    if [ -e "$FM_WAKE_QUEUE" ]; then
+      [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+      tmp=$(mktemp "$STATE/.wake-queue.recover.XXXXXX") || return 1
+      if ! cat "$orphan" "$FM_WAKE_QUEUE" > "$tmp" \
+        || [ -L "$FM_WAKE_QUEUE" ] || ! mv -f "$tmp" "$FM_WAKE_QUEUE"; then
+        rm -f "$tmp"
+        return 1
+      fi
+      rm -f "$orphan" || return 1
+    else
+      mv -f "$orphan" "$FM_WAKE_QUEUE" || return 1
+    fi
+  done
+}
+
 drain_restore_remaining() {
   [ "$DRAIN_RESUMING" = true ] && return 0
   restore_unprocessed_rows "$1"
@@ -416,6 +441,10 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
 DRAIN_LOCK_HELD=true
 fm_wake_queue_txn_recover_transactions_locked || {
   echo "error: wake queue transaction recovery failed; refusing to drain" >&2
+  exit 1
+}
+drain_recover_orphaned_sources_locked || {
+  echo "error: orphaned wake drain source recovery failed; refusing to drain" >&2
   exit 1
 }
 

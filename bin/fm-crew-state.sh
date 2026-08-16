@@ -530,6 +530,13 @@ if [ "$HAVE_RUN" = 1 ]; then
     RUN_DETAIL="$RUN_DETAIL${SEP}convergence-round=$convergence_round${SEP}convergence-fingerprint=unavailable"
   fi
 
+  run_id=$(strip_quotes "$(nm_field id)")
+  case "$RUN_STATE" in
+    done|failed)
+      [ -n "$run_id" ] && RUN_DETAIL="$RUN_DETAIL${SEP}run-id=$run_id"
+      ;;
+  esac
+
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 

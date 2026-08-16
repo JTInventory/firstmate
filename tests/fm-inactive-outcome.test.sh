@@ -336,9 +336,9 @@ test_done_and_failed_are_replayed_once() {
   write_meta "$state" done-x1 inc-done
   write_meta "$state" failed-x1 inc-failed
   export FM_FAKE_CREW_STATE_DONE_X1='state: done · source: pane · pane is quiet'
-  export FM_FAKE_CREW_STATE_FAILED_X1='state: failed · source: run-step · checks failed'
+  export FM_FAKE_CREW_STATE_FAILED_X1='state: failed · source: run-step · checks failed · run-id=run-failed-x1'
   write_run_step_evidence "$state" failed-x1 inc-failed failed \
-    'state: failed · source: run-step · checks failed'
+    'state: failed · source: run-step · checks failed · run-id=run-failed-x1'
   rm -f "$state/.pane-idle/failed-x1"
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 2 ] || fail "done and failed outcomes did not create two pending receipts"
@@ -358,8 +358,8 @@ test_done_and_failed_are_replayed_once() {
       failed-x1)
         [ "$(receipt_value "$rec" incarnation)" = inc-failed ] || fail "failed receipt used the wrong incarnation"
         [ "$(receipt_value "$rec" outcome)" = failed ] || fail "failed receipt outcome was incorrect"
-        [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: failed · source: run-step · checks failed' ] || fail "failed receipt snapshot was not exact"
-        [ "$fingerprint" = "$(receipt_fingerprint 'failed-x1|inc-failed|failed|state: failed · source: run-step · checks failed')" ] || fail "failed receipt fingerprint was not bound to its fields"
+        [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: failed · source: run-step · checks failed · run-id=run-failed-x1' ] || fail "failed receipt snapshot was not exact"
+        [ "$fingerprint" = "$(receipt_fingerprint 'failed-x1|inc-failed|failed|state: failed · source: run-step · checks failed · run-id=run-failed-x1')" ] || fail "failed receipt fingerprint was not bound to its fields"
         ;;
       *) fail "receipt persisted an unexpected task id: $task" ;;
     esac
@@ -400,19 +400,23 @@ test_done_and_failed_are_replayed_once() {
   pass "done and failed inactive outcomes are replayed once and acknowledged on drain"
 }
 
-test_run_step_without_incarnation_evidence_fails_closed() {
-  local dir root home fakebin state
+test_run_step_incarnation_evidence_is_persisted_under_task_lock() {
+  local dir root home fakebin state evidence
   new_case run-step-evidence
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   write_meta "$state" run-step-x1 run-step-inc
   rm -f "$state/.pane-idle/run-step-x1"
-  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green'
+  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-x1'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
-  [ "$(receipt_count "$state" pending)" = 0 ] || fail "run-step state without incarnation evidence was accepted"
-  [ "$(queue_count "$state")" = 0 ] || fail "run-step state without incarnation evidence queued a wake"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "run-step state did not create a receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "run-step state did not queue a wake"
+  evidence="$state/.run-step-incarnation-run-step-x1"
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "run-step evidence was not persisted"
+  [ "$(receipt_value "$evidence" run_id)" = run-step-x1 ] || fail "run-step evidence lost its run id"
+  [ "$(receipt_value "$evidence" spawn_incarnation)" = run-step-inc ] || fail "run-step evidence used the wrong incarnation"
   unset FM_FAKE_CREW_STATE_RUN_STEP_X1
-  pass "run-step outcomes fail closed without incarnation evidence"
+  pass "run-step outcomes persist incarnation evidence under the task lock"
 }
 
 test_portable_timeout_runner_is_used() {
@@ -1529,6 +1533,7 @@ test_session_start_drains_before_inactive_scan() {
 exit 23
 SH
   chmod +x "$root/bin/fm-wake-drain.sh"
+  set +e
   out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
@@ -1739,30 +1744,47 @@ SH
 }
 
 test_canonical_terminal_snapshot_suppresses_status_replay() {
-  local dir root home fakebin state canonical
+  local dir root home fakebin state canonical out status
   new_case canonical-terminal-snapshot
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   cp -a "$ROOT/bin/." "$root/bin/"
   write_meta "$state" canonical-x1 canonical-inc
   printf '%s\n' 'done: checks green' > "$state/canonical-x1.status"
-  canonical='state: done · source: run-step · checks green'
+  canonical='state: done · source: run-step · checks green · run-id=canonical-x1'
   export FM_FAKE_CREW_STATE_CANONICAL_X1="$canonical"
+  rm -f "$state/canonical-x1.turn-ended"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+  *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_HARNESS_PID:-$$}" ;;
+  *"#{window_name}"*) printf '%s\n' firstmate ;;
+  *capture-pane*) printf 'idle prompt\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
   fm_write_meta "$state/.hb-terminal-surfaced-canonical-x1" \
     schema=fm-hb-terminal-surfaced.v1 snapshot="$canonical" \
     spawn_incarnation=canonical-inc tasktmp="$state/work-canonical-x1" \
-    window=tmux:fm-canonical-x1 worktree="$state/work-canonical-x1"
+    window=tmux:fm-canonical-x1 worktree="$state/work-canonical-x1" parent_corr=
   prepare_primary_proof "$root" "$home" "$fakebin"
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
-    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" PATH="$fakebin:$PATH" \
-    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-watch.sh"; terminal_signal_suppressed "$2/canonical-x1.status"' _ \
-    "$root" "$state" || fail "canonical terminal marker did not suppress status replay"
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 timeout 5 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  set -u
+  [ "$status" = 124 ] || fail "watcher canonical suppression failed: $out"
   [ "$(queue_count "$state")" = 0 ] || fail "canonical terminal marker queued a duplicate wake"
   unset FM_FAKE_CREW_STATE_CANONICAL_X1
-  pass "canonical terminal snapshots suppress equivalent status events"
+  pass "watcher suppresses equivalent canonical terminal snapshots"
 }
 
 test_postpublication_uncertainty_is_not_replayed() {
@@ -2448,6 +2470,7 @@ test_watcher_bounded_metadata_fail_closed() {
       deadline=$(fm_pane_idle_now_ms)
       if window_kind tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
       if window_backend tmux:fm-bounded-metadata-x1 "$deadline" >/dev/null; then exit 1; fi
+      fm_pane_idle_meta_index_build "$STATE" || exit 1
       fresh_deadline=$(( $(fm_pane_idle_now_ms) + 1000 ))
       recorded_windows "$fresh_deadline" | grep -Fx tmux:fm-bounded-metadata-x1 >/dev/null || exit 1
       [ "$(window_kind tmux:fm-bounded-metadata-x1 "$fresh_deadline")" = ship ] || exit 1
@@ -3969,7 +3992,7 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
 }
 
 test_done_and_failed_are_replayed_once
-test_run_step_without_incarnation_evidence_fails_closed
+test_run_step_incarnation_evidence_is_persisted_under_task_lock
 test_portable_timeout_runner_is_used
 test_portable_timeout_preserves_signal_failure
 test_portable_timeout_expires_child

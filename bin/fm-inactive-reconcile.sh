@@ -660,10 +660,11 @@ replay_parent_corr() {
   local corr=${FM_PENDING_ROUTE_CORR:-}
   case "${KIND:-}" in
     secondmate)
-      printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+      fm_pending_reply_parent_corr_valid "$corr" || return 1
+      [ -n "$corr" ] || return 1
       printf '%s' "$corr"
       ;;
-    ship|scout|'') printf '%s' '' ;;
+    ship|scout|'') [ -z "$corr" ] || return 1; printf '%s' '' ;;
     *) return 1 ;;
   esac
 }
@@ -2970,6 +2971,30 @@ run_step_incarnation_evidence_path() {
   printf '%s/.run-step-incarnation-%s' "$STATE" "$1"
 }
 
+run_step_incarnation_evidence_write() {
+  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 evidence run_id tmp
+  valid_task_id "$id" || return 1
+  case "$outcome" in done|failed) ;; *) return 1 ;; esac
+  [ -n "$incarnation" ] && [ -n "$snapshot" ] || return 1
+  run_id=$(printf '%s' "$snapshot" | sed -n 's/.* · run-id=\([^ ·]*\)$/\1/p')
+  case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  evidence=$(run_step_incarnation_evidence_path "$id") || return 1
+  if [ -e "$evidence" ] || [ -L "$evidence" ]; then
+    [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
+    if run_step_incarnation_evidence_valid "$id" "$incarnation" "$outcome" "$snapshot"; then
+      return 0
+    fi
+  fi
+  tmp=$(mktemp "$evidence.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  if ! printf 'schema=fm-jt-run-step-incarnation.v1\ntask_id=%s\nrun_id=%s\nspawn_incarnation=%s\noutcome=%s\nterminal_snapshot=%s\n' \
+    "$id" "$run_id" "$incarnation" "$outcome" "$snapshot" > "$tmp" \
+    || [ -L "$evidence" ] || ! mv -f "$tmp" "$evidence"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 run_step_incarnation_evidence_valid() {
   local id=$1 incarnation=$2 outcome=$3 snapshot=$4 evidence run_id
   valid_task_id "$id" || return 1
@@ -3042,6 +3067,7 @@ surface_retry_valid() {
       required["schema"]=1; required["task"]=1; required["snapshot"]=1
       required["spawn_incarnation"]=1; required["tasktmp"]=1
       required["window"]=1; required["worktree"]=1; required["wake_key"]=1
+      required["parent_corr"]=1
       required["wake_published"]=1
       valid=1
     }
@@ -3177,8 +3203,32 @@ surface_retry_published_current() {
   surface_retry_mark_published "$retry" || return 2
 }
 
+prior_secondmate_receipt_exists() {
+  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 parent_corr=$5 suffix rec rec_corr
+  [ "$KIND" = secondmate ] || return 1
+  for suffix in presented reported; do
+    for rec in "$OUTCOME_DIR"/*."$suffix"; do
+      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+      if ! (
+        prepare_pending_receipt "$rec" \
+          && [ "$ID" = "$id" ] \
+          && [ "$INC" = "$incarnation" ] \
+          && [ "$OUTCOME" = "$outcome" ] \
+          && [ "$SNAPSHOT" = "$snapshot" ] \
+          && [ "$KIND" = secondmate ]
+      ); then
+        continue
+      fi
+      rec_corr=$(receipt_field "$rec" parent_corr 2>/dev/null || true)
+      [ "$rec_corr" != "$parent_corr" ] || continue
+      return 0
+    done
+  done
+  return 1
+}
+
 terminal_outcome_surfaced() {
-  local id=$1 meta=$2 outcome=$3 wake_key=${4:-}
+  local id=$1 meta=$2 outcome=$3 wake_key=${4:-} allow_prior_route=${5:-0}
   local key raw raw_outcome marker retry marker_snapshot marker_spawn marker_parent_corr current_parent_corr current_snapshot retry_status
   local current_spawn current_tasktmp current_window current_worktree status_file
   key=$(printf '%s' "$id" | tr ':/.' '___')
@@ -3216,6 +3266,7 @@ terminal_outcome_surfaced() {
       allowed["parent_corr"]=1
       required["schema"]=1; required["snapshot"]=1; required["spawn_incarnation"]=1
       required["tasktmp"]=1; required["window"]=1; required["worktree"]=1
+      required["parent_corr"]=1
       valid=1
     }
     /^[^=]+=/{
@@ -3232,7 +3283,10 @@ terminal_outcome_surfaced() {
     }
   ' "$marker" 2>/dev/null || return 1
   marker_parent_corr=$(meta_value_unique "$marker" parent_corr 2>/dev/null || true)
-  [ "$marker_parent_corr" = "$current_parent_corr" ] || return 1
+  if [ "$marker_parent_corr" != "$current_parent_corr" ]; then
+    [ "$allow_prior_route" = 1 ] || return 1
+    fm_pending_reply_secondmate_route_validate "$FM_HOME" "$marker_parent_corr" || return 1
+  fi
   marker_snapshot=$(meta_value_unique "$marker" snapshot 2>/dev/null) || return 1
   [ "$marker_snapshot" = "$raw" ] || return 1
   marker_spawn=$(meta_value_unique "$marker" spawn_incarnation 2>/dev/null) || return 1
@@ -3338,7 +3392,7 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend window now activity age line outcome source
-  local snapshot token key route_rc parent_corr state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining
+  local snapshot token key route_rc parent_corr allow_prior_route state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
@@ -3409,6 +3463,7 @@ reconcile_child() {
   fi
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
   if [ "$source" = run-step ]; then
+    run_step_incarnation_evidence_write "$id" "$INC" "$outcome" "$snapshot" || return 0
     run_step_incarnation_evidence_valid "$id" "$INC" "$outcome" "$snapshot" || return 0
   elif ! fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS"; then
     return 0
@@ -3428,18 +3483,28 @@ reconcile_child() {
     KIND=secondmate
     fm_pending_reply_secondmate_route_validate "$FM_HOME" || return 75
     parent_corr=$FM_PENDING_ROUTE_CORR
+    allow_prior_route=0
+    case "$FM_PENDING_ROUTE_PHASE" in
+      resolved|retired) allow_prior_route=1 ;;
+    esac
   else
     FM_PENDING_ROUTE_CORR=
     parent_corr=
+    allow_prior_route=0
   fi
   FP=$(terminal_outcome_fingerprint "$id" "$INC" "$outcome" "$snapshot" "$KIND" "$parent_corr") || return 1
   surface_status=0
-  terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" || surface_status=$?
+  terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" "$allow_prior_route" \
+    || surface_status=$?
   case "$surface_status" in
     0) return 0 ;;
     1) ;;
     *) return 2 ;;
   esac
+  if [ "$allow_prior_route" = 1 ] \
+    && prior_secondmate_receipt_exists "$id" "$INC" "$outcome" "$snapshot" "$parent_corr"; then
+    return 0
+  fi
   if [ "$route_rc" = 0 ]; then
     key="inactive-outcome:$FP"
     replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1

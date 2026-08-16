@@ -662,28 +662,80 @@ surface_meta_value_unique() {
 }
 
 surface_snapshot_matches_current() {
-  local task=$1 expected=$2 status_snapshot=$3 current
+  local task=$1 expected=$2 status_snapshot=$3 current state_timeout state_tmp state_rc=0
   case "$expected" in
     done:*|failed:*) [ "$expected" = "$status_snapshot" ]; return $? ;;
     state:\ done\ *|state:\ failed\ *) ;;
     *) return 1 ;;
   esac
-  current=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+  state_timeout=$(positive_seconds_or_default "${FM_WATCH_CREW_STATE_TIMEOUT_SECS:-1}" 1)
+  state_tmp=$(mktemp "$STATE/.hb-crew-state.XXXXXX") || return 1
+  fm_pane_idle_run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
+    "$FM_CREW_STATE_BIN" "$task" > "$state_tmp" 2>/dev/null || state_rc=$?
+  current=
+  if [ "$state_rc" -eq 0 ]; then
+    current=$(cat "$state_tmp" 2>/dev/null) || state_rc=$?
+  fi
+  rm -f "$state_tmp" || [ "$state_rc" -ne 0 ] || state_rc=1
+  [ "$state_rc" -eq 0 ] || return 1
   case "$current" in *$'\n'*) return 1 ;; esac
   [ "$current" = "$expected" ]
 }
 
+surface_task_kind() {
+  local task=$1 meta="$STATE/$1.meta" kind rc
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    if kind=$(surface_meta_value_unique "$meta" kind 2>/dev/null); then
+      :
+    else
+      rc=$?
+      [ "$rc" = 1 ] || return 1
+      kind=ship
+    fi
+  else
+    kind=ship
+  fi
+  case "$kind" in ship|scout|secondmate) printf '%s' "$kind" ;; *) return 1 ;; esac
+}
+
+surface_parent_corr() {
+  local task=$1 kind
+  kind=$(surface_task_kind "$task") || return 1
+  case "$kind" in
+    secondmate)
+      fm_pending_reply_secondmate_route_validate "$FM_HOME" || return 1
+      fm_pending_reply_parent_corr_valid "${FM_PENDING_ROUTE_CORR:-}" || return 1
+      [ -n "${FM_PENDING_ROUTE_CORR:-}" ] || return 1
+      printf '%s' "$FM_PENDING_ROUTE_CORR"
+      ;;
+    ship|scout) FM_PENDING_ROUTE_CORR=; printf '%s' '' ;;
+  esac
+}
+
+surface_receipt_identity_matches_current() {
+  local task=$1 fp=$2 rec=$3 expected_incarnation=$4 outcome=$5 snapshot=$6
+  local kind parent_corr expected_fp
+  kind=$(surface_task_kind "$task") || return 1
+  [ "$(surface_meta_value_unique "$rec" kind 2>/dev/null)" = "$kind" ] || return 1
+  parent_corr=$(surface_parent_corr "$task") || return 1
+  [ "$(surface_meta_value_unique "$rec" parent_corr 2>/dev/null || true)" = "$parent_corr" ] || return 1
+  expected_fp=$(surface_hash_text "$task|$expected_incarnation|$outcome|$snapshot|$kind${parent_corr:+|$parent_corr}") || return 1
+  [ "$expected_fp" = "$fp" ] || return 1
+  [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$expected_fp" ] || return 1
+}
+
 mark_terminal_surfaced_snapshot() {
   local task=$1 last=$2 spawn_incarnation=$3 tasktmp=$4 window=$5 worktree=$6
-  local marker tmp
+  local marker tmp parent_corr
   case "$last" in
     done:*|failed:*|state:\ done\ *|state:\ failed\ *) ;;
     *) return 0 ;;
   esac
+  parent_corr=$(surface_parent_corr "$task") || return 1
   marker=$(_hb_terminal_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
-  if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\n' \
-    "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" > "$tmp" \
+  if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\n' \
+    "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" > "$tmp" \
     || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
@@ -719,10 +771,12 @@ surface_retry_valid() {
       allowed["schema"]=1; allowed["task"]=1; allowed["snapshot"]=1
       allowed["spawn_incarnation"]=1; allowed["tasktmp"]=1
       allowed["window"]=1; allowed["worktree"]=1; allowed["wake_key"]=1
+      allowed["parent_corr"]=1
       allowed["wake_published"]=1
       required["schema"]=1; required["task"]=1; required["snapshot"]=1
       required["spawn_incarnation"]=1; required["tasktmp"]=1
       required["window"]=1; required["worktree"]=1; required["wake_key"]=1
+      required["parent_corr"]=1
       required["wake_published"]=1
       valid=1
     }
@@ -743,9 +797,12 @@ surface_retry_valid() {
 
 surface_retry_matches_current() {
   local retry=$1 task=$2 last=$3 meta="$STATE/$2.meta" current_spawn saved_spawn
-  local current_tasktmp current_window current_worktree saved_snapshot rc
+  local current_tasktmp current_window current_worktree saved_snapshot current_parent_corr saved_parent_corr rc
   surface_retry_valid "$retry" || return 1
   [ "$(surface_meta_value_unique "$retry" task 2>/dev/null)" = "$task" ] || return 1
+  saved_parent_corr=$(surface_meta_value_unique "$retry" parent_corr 2>/dev/null) || return 1
+  current_parent_corr=$(surface_parent_corr "$task") || return 1
+  [ "$saved_parent_corr" = "$current_parent_corr" ] || return 1
   saved_snapshot=$(surface_meta_value_unique "$retry" snapshot 2>/dev/null) || return 1
   surface_snapshot_matches_current "$task" "$saved_snapshot" "$last" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -767,8 +824,9 @@ surface_retry_matches_current() {
 
 surface_retry_write() {
   local task=$1 last=$2 wake_key=$3 wake_published=${4:-1}
-  local meta="$STATE/$1.meta" retry tmp spawn_incarnation tasktmp window worktree rc
+  local meta="$STATE/$1.meta" retry tmp spawn_incarnation tasktmp window worktree parent_corr rc
   case "$wake_published" in 0|1|2) ;; *) return 1 ;; esac
+  parent_corr=$(surface_parent_corr "$task") || return 1
   spawn_incarnation= tasktmp= window= worktree=
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
     if spawn_incarnation=$(surface_meta_value_unique "$meta" spawn_incarnation); then
@@ -790,8 +848,8 @@ surface_retry_write() {
     fi
   fi
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
-  if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nwake_key=%s\nwake_published=%s\n' \
-    "$task" "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$wake_key" "$wake_published" > "$tmp" \
+  if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\nwake_key=%s\nwake_published=%s\n' \
+    "$task" "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$wake_key" "$wake_published" > "$tmp" \
     || ! mv -f "$tmp" "$retry"; then
     rm -f "$tmp"
     return 1
@@ -896,6 +954,8 @@ surface_retry_receipt_consumed() {
     [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
     [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
     receipt_snapshot=$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null) || continue
+    surface_receipt_identity_matches_current "$task" "$fp" "$rec" \
+      "$expected_incarnation" "$outcome" "$receipt_snapshot" || continue
     saved_snapshot=$(surface_meta_value_unique "$retry" snapshot 2>/dev/null) || return 2
     [ "$receipt_snapshot" = "$saved_snapshot" ] || continue
     surface_snapshot_matches_current "$task" "$receipt_snapshot" "$last" || continue
@@ -1139,12 +1199,15 @@ surface_signal_transaction() {
 terminal_surface_marker_current() {
   local task=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status"
   local marker="$STATE/.hb-terminal-surfaced-$(printf '%s' "$1" | tr ':/.' '___')"
-  local last saved_snapshot saved_spawn current_spawn rc
+  local last saved_snapshot saved_spawn current_spawn current_parent_corr saved_parent_corr rc
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
   marker=$(printf '%s' "$marker")
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   [ "$(surface_meta_value_unique "$marker" schema 2>/dev/null)" = fm-hb-terminal-surfaced.v1 ] || return 1
+  saved_parent_corr=$(surface_meta_value_unique "$marker" parent_corr 2>/dev/null) || return 1
+  current_parent_corr=$(surface_parent_corr "$task") || return 1
+  [ "$saved_parent_corr" = "$current_parent_corr" ] || return 1
   last=$(last_status_line "$status_file")
   case "$last" in done:*|failed:*) ;; *) return 1 ;; esac
   saved_snapshot=$(surface_meta_value_unique "$marker" snapshot 2>/dev/null) || return 1
@@ -1209,6 +1272,8 @@ PERL
     [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
     [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
     receipt_snapshot=$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null) || continue
+    surface_receipt_identity_matches_current "$task" "$fp" "$rec" \
+      "$expected_incarnation" "$outcome" "$receipt_snapshot" || continue
     surface_snapshot_matches_current "$task" "$receipt_snapshot" "$last" || continue
     return 0
   done

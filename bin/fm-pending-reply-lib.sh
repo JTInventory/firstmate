@@ -593,6 +593,10 @@ fm_pending_reply_secondmate_route_history_path() {  # <secondmate-home> <corr-id
   printf '%s/state/.fm-jt-parent-route-history.%s' "$1" "$2"
 }
 
+fm_pending_reply_parent_corr_valid() {  # <correlation-or-empty>
+  [ -z "$1" ] || printf '%s' "$1" | grep -Eq '^[A-Fa-f0-9]{16}$'
+}
+
 fm_pending_reply_secondmate_route_lock_path() {  # <secondmate-home>
   printf '%s/state/.fm-jt-parent-route.lock' "$1"
 }
@@ -639,7 +643,8 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   if [ -e "$status_path" ]; then
     [ -f "$status_path" ] || return 1
   fi
-  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  fm_pending_reply_parent_corr_valid "$corr" || return 1
+  [ -n "$corr" ] || return 1
   route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
   if ! fm_lock_acquire_wait "$route_lock"; then
     return 1
