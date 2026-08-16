@@ -27,6 +27,7 @@ DIRECT_FIND_OFFSET="$STATE/.inactive-outcome-find.pending.offset"
 DIRECT_FIND_RETRY="$STATE/.inactive-outcome-find.pending.retry"
 DIRECT_FIND_INCOMPLETE="$STATE/.inactive-outcome-find.incomplete"
 DIRECT_FIND_ENUM_CURSOR="$STATE/.inactive-outcome-find.enum.cursor"
+ENUM_PROGRESS_DIR="$STATE/.inactive-outcome-enum"
 REPORTED_ROUTE_PENDING="$STATE/.reported-secondmate-route-repair.pending"
 REPORTED_ROUTE_OFFSET="$STATE/.reported-secondmate-route-repair.pending.offset"
 REPORTED_ROUTE_RETRY="$STATE/.reported-secondmate-route-repair.pending.retry"
@@ -73,6 +74,7 @@ inactive_state_preflight() {
   inactive_state_path_is_safe "$DIRECT_FIND_RETRY" file || return 1
   inactive_state_path_is_safe "$DIRECT_FIND_INCOMPLETE" file || return 1
   inactive_state_path_is_safe "$DIRECT_FIND_ENUM_CURSOR" file || return 1
+  inactive_state_path_is_safe "$ENUM_PROGRESS_DIR" dir || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_PENDING" file || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_OFFSET" file || return 1
   inactive_state_path_is_safe "$REPORTED_ROUTE_RETRY" file || return 1
@@ -2004,7 +2006,8 @@ reported_secondmate_receipt_valid() {
 
 inactive_directory_candidates() {
   local directory=$1 suffix=$2 seconds=${3:-1} cursor=${4:-} cursor_path=${5:-}
-  local stage_path=
+  local stage_path='' source_dir='' source_key='' source_path='' source_partial='' source_cookie=''
+  local source_complete='' source_stamp='' path
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 0
   case "$seconds" in ''|*[!0-9]*|0) return 0 ;; esac
   case "$cursor" in ''|0) cursor=;; *[!0-9]*) return 1 ;; esac
@@ -2013,56 +2016,163 @@ inactive_directory_candidates() {
     stage_path="$cursor_path.stage"
     [ ! -L "$stage_path" ] || return 1
     rm -f "$stage_path" || return 1
+    source_dir="$(dirname "$cursor_path")/.inactive-outcome-enum"
+    if [ -e "$source_dir" ] || [ -L "$source_dir" ]; then
+      [ -d "$source_dir" ] && [ ! -L "$source_dir" ] || return 1
+    else
+      mkdir "$source_dir" || return 1
+    fi
+    source_key=$(basename "$cursor_path")
+    case "$source_key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    source_path="$source_dir/$source_key.source"
+    source_partial="$source_path.partial"
+    source_cookie="$source_path.cookie"
+    source_complete="$source_path.complete"
+    source_stamp="$source_path.stamp"
+    for path in "$source_path" "$source_partial" "$source_cookie" \
+      "$source_complete" "$source_stamp"; do
+      [ ! -L "$path" ] || return 1
+    done
   fi
   if command -v perl >/dev/null 2>&1; then
-    run_bounded_child "$seconds" perl - "$directory" "$suffix" "$cursor" "$stage_path" <<'PERL'
+    run_bounded_child "$seconds" perl - "$directory" "$suffix" "$cursor" "$stage_path" \
+      "$source_path" "$source_partial" "$source_cookie" "$source_complete" \
+      "$source_stamp" <<'PERL'
 use strict;
 use warnings;
 use Fcntl qw(:DEFAULT);
-my ($dir, $suffix, $cursor, $stage_path) = @ARGV;
+use Digest::SHA qw(sha256_hex);
+use Time::HiRes qw(stat);
+my ($dir, $suffix, $cursor, $stage_path) = @ARGV[0..3];
+my ($source_path, $source_partial, $source_cookie, $source_complete, $source_stamp) = @ARGV[4..8];
 my $nofollow = eval { Fcntl::O_NOFOLLOW() };
 defined($nofollow) or exit 1;
-my $sequence = 0;
-sub write_cursor {
-  my ($value) = @_;
-  return 1 if $stage_path eq '';
-  return 0 if -l $stage_path || $value =~ /[\r\n\t]/;
-  my $tmp = "$stage_path.$$.$sequence";
-  $sequence++;
+sub atomic_write {
+  my ($path, $value) = @_;
+  return 0 if $path eq '' || -l $path;
+  my $tmp = "$path.tmp.$$";
   my $fh;
   sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or return 0;
   binmode($fh);
-  if (!print($fh $value, "\n") || !close($fh)) {
+  if (!print($fh $value) || !close($fh)) {
     unlink($tmp);
     return 0;
   }
-  if (!rename($tmp, $stage_path)) {
+  if (!rename($tmp, $path)) {
     unlink($tmp);
     return 0;
   }
   return 1;
 }
-opendir(my $dh, $dir) or exit 1;
-if ($cursor ne '') {
-  seekdir($dh, 0 + $cursor) or exit 1;
+sub directory_stamp {
+  my @info = stat($dir) or return undef;
+  return sha256_hex(join("\0", @info[0, 1, 2, 7, 9, 10, 11]));
 }
-select((select(STDOUT), $| = 1)[0]);
-while (defined(my $entry = readdir($dh))) {
-  my $next = telldir($dh);
-  defined($next) or exit 1;
-  if ($entry !~ /\.\Q$suffix\E\z/ || $entry =~ /[\r\n\t]/) {
-    write_cursor($next) or exit 1 if $stage_path ne '';
-    next;
-  }
-  my $path = "$dir/$entry";
-  if (-f $path && !-l $path) {
-    print "$path\0" or exit 1;
-  }
-  write_cursor($next) or exit 1 if $stage_path ne '';
+sub read_text {
+  my ($path) = @_;
+  return '' unless $path ne '' && -e $path;
+  return undef if -l $path || !-f $path;
+  open(my $fh, '<', $path) or return undef;
+  local $/;
+  my $value = <$fh> // '';
+  close($fh) or return undef;
+  chomp $value;
+  return $value;
 }
-closedir($dh) or exit 1;
-write_cursor('EOF') or exit 1 if $stage_path ne '';
+my $start = directory_stamp();
+defined($start) or exit 1;
+if ($source_path ne '') {
+  my $saved = read_text($source_stamp);
+  defined($saved) or exit 1 if -e $source_stamp;
+  if (!defined($saved) || $saved ne $start) {
+    unlink($source_path, $source_partial, $source_cookie, $source_complete);
+    atomic_write($source_stamp, "$start\n") or exit 1;
+  }
+  my $done = -e $source_complete;
+  if (!$done) {
+    my $cookie = read_text($source_cookie);
+    defined($cookie) or exit 1 if -e $source_cookie;
+    $cookie = '' unless defined($cookie) && ($cookie eq 'EOF' || $cookie =~ /^\d+\z/);
+    if ($cookie ne 'EOF') {
+      my $pfh;
+      if (-e $source_partial) {
+        -f $source_partial && !-l $source_partial or exit 1;
+        open($pfh, '>>', $source_partial) or exit 1;
+      } else {
+        sysopen($pfh, $source_partial, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 1;
+      }
+      select((select($pfh), $| = 1)[0]);
+      opendir(my $dh, $dir) or exit 1;
+      seekdir($dh, 0 + $cookie) or exit 1 if $cookie ne '';
+      while (defined(my $entry = readdir($dh))) {
+        my $next = telldir($dh);
+        defined($next) or exit 1;
+        next unless $entry =~ /\.\Q$suffix\E\z/ && $entry !~ /[\r\n\t]/;
+        my $path = "$dir/$entry";
+        next unless -f $path && !-l $path;
+        print($pfh $path, "\n") or exit 1;
+        atomic_write($source_cookie, "$next\n") or exit 1;
+      }
+      closedir($dh) or exit 1;
+      close($pfh) or exit 1;
+      atomic_write($source_cookie, "EOF\n") or exit 1;
+    }
+    my $finish = directory_stamp();
+    defined($finish) or exit 1;
+    if ($finish ne $start) {
+      unlink($source_path, $source_partial, $source_cookie, $source_complete);
+      atomic_write($source_stamp, "$finish\n") or exit 1;
+      exit 75;
+    }
+    open(my $pfh, '<', $source_partial) or exit 1;
+    my %seen;
+    my @paths;
+    while (defined(my $path = <$pfh>)) {
+      chomp $path;
+      next unless $path =~ /\A\Q$dir\E\/[^\/\r\n]+\.\Q$suffix\E\z/;
+      next unless -f $path && !-l $path;
+      next if $seen{$path}++;
+      push @paths, $path;
+    }
+    close($pfh) or exit 1;
+    @paths = sort @paths;
+    my $tmp = "$source_path.tmp.$$";
+    open(my $sfh, '>', $tmp) or exit 1;
+    print($sfh "$_\n") for @paths;
+    close($sfh) or exit 1;
+    -l $source_path and exit 1;
+    rename($tmp, $source_path) or exit 1;
+    atomic_write($source_complete, "complete\n") or exit 1;
+    unlink($source_partial, $source_cookie) or exit 1;
+  }
+  open(my $sfh, '<', $source_path) or exit 1;
+  my @paths;
+  while (defined(my $path = <$sfh>)) {
+    chomp $path;
+    push @paths, $path if $path =~ /\A\Q$dir\E\/[^\/\r\n]+\.\Q$suffix\E\z/;
+  }
+  close($sfh) or exit 1;
+  my $index = $cursor eq '' ? 0 : 0 + $cursor;
+  while ($index < @paths) {
+    my $path = $paths[$index];
+    print "$path\0" if -f $path && !-l $path;
+    $index++;
+    atomic_write($stage_path, "$index\n") or exit 1 if $stage_path ne '';
+  }
+  atomic_write($stage_path, "EOF\n") or exit 1 if $stage_path ne '';
+} else {
+  opendir(my $dh, $dir) or exit 1;
+  while (defined(my $entry = readdir($dh))) {
+    next unless $entry =~ /\.\Q$suffix\E\z/ && $entry !~ /[\r\n\t]/;
+    my $path = "$dir/$entry";
+    print "$path\0" if -f $path && !-l $path;
+  }
+  closedir($dh) or exit 1;
+}
 PERL
+    rc=$?
+    [ "$rc" = 75 ] && return 124
+    return "$rc"
   else
     return 124
   fi

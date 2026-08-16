@@ -80,18 +80,130 @@ use Digest::SHA qw(sha256_hex);
 use Time::HiRes qw(stat);
 
 my $state = shift @ARGV;
-opendir(my $dh, $state) or exit 1;
-my @entries = sort grep { /\.meta\z/ && !/[\r\n]/ } readdir($dh);
-closedir($dh) or exit 1;
-my $stamp = '';
-for my $entry (@entries) {
-  my $path = "$state/$entry";
-  next unless -f $path && !-l $path;
-  my @info = stat($path) or exit 1;
-  $stamp .= join("\0", $entry, @info[0, 1, 2, 7, 9, 10]) . "\0";
-}
-print sha256_hex($stamp);
+my @info = stat($state) or exit 1;
+print sha256_hex(join("\0", @info[0, 1, 2, 7, 9, 10, 11]));
 PERL
+}
+
+fm_pane_idle_meta_index_entries_build() {
+  local state=$1 entries_path=$2 complete_path=$3 entries_stamp_path=$4 deadline_ms=${5:-}
+  local partial_path="$entries_path.partial" cookie_path="$entries_path.cookie"
+  local source_stamp_path="$entries_path.source-stamp" remaining rc
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  [ ! -L "$entries_path" ] && [ ! -L "$complete_path" ] || return 1
+  [ ! -L "$entries_stamp_path" ] && [ ! -L "$partial_path" ] || return 1
+  [ ! -L "$cookie_path" ] && [ ! -L "$source_stamp_path" ] || return 1
+  remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || return 124
+  fm_pane_idle_run_bounded_child "$remaining" perl - "$state" "$entries_path" \
+    "$complete_path" "$entries_stamp_path" "$partial_path" "$cookie_path" \
+    "$source_stamp_path" <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT);
+use Digest::SHA qw(sha256_hex);
+use Time::HiRes qw(stat);
+
+my ($state, $entries, $complete, $stamp_path, $partial, $cookie_path, $source_stamp) = @ARGV;
+my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sub atomic_write {
+  my ($path, $value) = @_;
+  return 0 if -l $path;
+  my $tmp = "$path.tmp.$$";
+  my $fh;
+  sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or return 0;
+  binmode($fh);
+  return 0 unless print($fh $value) && close($fh);
+  return 0 if -l $path;
+  rename($tmp, $path) or return 0;
+  return 1;
+}
+sub dir_stamp {
+  my @info = stat($state) or return undef;
+  return sha256_hex(join("\0", @info[0, 1, 2, 7, 9, 10, 11]));
+}
+sub read_text {
+  my ($path) = @_;
+  return '' unless -e $path;
+  return undef if -l $path || !-f $path;
+  open(my $fh, '<', $path) or return undef;
+  local $/;
+  my $value = <$fh> // '';
+  close($fh) or return undef;
+  chomp $value;
+  return $value;
+}
+my $start = dir_stamp();
+defined($start) or exit 1;
+my $old = read_text($source_stamp);
+defined($old) or exit 1 if -e $source_stamp;
+if (!defined($old) || $old ne $start) {
+  unlink($partial, $cookie_path, $entries, $complete, $stamp_path);
+  atomic_write($source_stamp, "$start\n") or exit 1;
+}
+my $cookie = read_text($cookie_path);
+defined($cookie) or exit 1 if -e $cookie_path;
+$cookie = '' unless defined($cookie) && ($cookie eq 'EOF' || $cookie =~ /^\d+\z/);
+if ($cookie ne 'EOF') {
+  my $pfh;
+  if (-e $partial) {
+    exit 1 if -l $partial || !-f $partial;
+    open($pfh, '>>', $partial) or exit 1;
+  } else {
+    sysopen($pfh, $partial, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 1;
+  }
+  select((select($pfh), $| = 1)[0]);
+  opendir(my $dh, $state) or exit 1;
+  seekdir($dh, 0 + $cookie) or exit 1 if $cookie ne '';
+  while (defined(my $entry = readdir($dh))) {
+    my $next = telldir($dh);
+    defined($next) or exit 1;
+    next unless $entry =~ /\.meta\z/ && $entry !~ /[\r\n]/;
+    my $path = "$state/$entry";
+    next unless -f $path && !-l $path;
+    print($pfh $path, "\n") or exit 1;
+    atomic_write($cookie_path, "$next\n") or exit 1;
+  }
+  closedir($dh) or exit 1;
+  close($pfh) or exit 1;
+  atomic_write($cookie_path, "EOF\n") or exit 1;
+  $cookie = 'EOF';
+}
+my $finish = dir_stamp();
+defined($finish) or exit 1;
+if ($finish ne $start) {
+  unlink($partial, $cookie_path, $entries, $complete, $stamp_path);
+  atomic_write($source_stamp, "$finish\n") or exit 1;
+  exit 75;
+}
+open(my $pfh, '<', $partial) or exit 1;
+my %seen;
+my @paths;
+while (defined(my $path = <$pfh>)) {
+  chomp $path;
+  next unless $path =~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/;
+  next unless -f $path && !-l $path;
+  next if $seen{$path}++;
+  push @paths, $path;
+}
+close($pfh) or exit 1;
+@paths = sort @paths;
+my $tmp = "$entries.tmp.$$";
+open(my $efh, '>', $tmp) or exit 1;
+for my $path (@paths) {
+  print($efh $path, "\n") or exit 1;
+}
+close($efh) or exit 1;
+exit 1 if -l $entries;
+rename($tmp, $entries) or exit 1;
+atomic_write($stamp_path, "$finish\n") or exit 1;
+atomic_write($complete, "complete\n") or exit 1;
+unlink($partial, $cookie_path, $source_stamp) or exit 1;
+PERL
+  rc=$?
+  [ "$rc" = 75 ] && return 124
+  [ "$rc" -ne 0 ] || return 0
+  return "$rc"
 }
 
 fm_pane_idle_meta_index_collect() {
@@ -139,83 +251,30 @@ fm_pane_idle_meta_index_collect() {
     fi
     state_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || return $?
     entries_stamp=
+    source_stamp=$(cat "$entries_path.source-stamp" 2>/dev/null || true)
     if [ -f "$entries_path" ] && [ ! -L "$entries_path" ] \
       && [ -f "$entries_complete_path" ] && [ ! -L "$entries_complete_path" ] \
       && [ -f "$entries_stamp_path" ] && [ ! -L "$entries_stamp_path" ]; then
       entries_stamp=$(cat "$entries_stamp_path" 2>/dev/null || true)
     fi
     if [ "$entries_stamp" != "$state_stamp" ]; then
-      rm -f "$entries_path" "$entries_complete_path" "$entries_stamp_path" \
+      if [ "$source_stamp" != "$state_stamp" ]; then
+        rm -f "$entries_path" "$entries_complete_path" "$entries_stamp_path" \
+          "$entries_path.partial" "$entries_path.cookie" "$entries_path.source-stamp" \
+          || return 1
+      else
+        rm -f "$entries_path" "$entries_complete_path" "$entries_stamp_path" || return 1
+      fi
+      rm -f \
         "$cursor_path" "$records_path" "$seen_path" "$aggregate_path" \
         "$aggregate_cursor_path" "$aggregate_complete_path" "$sorted_path" \
         "$sorted_complete_path" || return 1
-      entries_tmp=$(mktemp "$entries_path.XXXXXX") || return 1
-      [ -f "$entries_tmp" ] && [ ! -L "$entries_tmp" ] || {
-        rm -f "$entries_tmp"
-        return 1
-      }
-      remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
-        rm -f "$entries_tmp"
-        return 124
-      }
-      fm_pane_idle_run_bounded_child "$remaining" perl - "$state" > "$entries_tmp" <<'PERL'
-use strict;
-use warnings;
-my $state = shift @ARGV;
-opendir(my $dh, $state) or exit 1;
-while (defined(my $entry = readdir($dh))) {
-  next if $entry !~ /\.meta\z/ || $entry =~ /[\r\n]/;
-  my $path = "$state/$entry";
-  next unless -f $path && !-l $path;
-  print $path, "\n" or exit 1;
-}
-closedir($dh) or exit 1;
-PERL
+      fm_pane_idle_meta_index_entries_build "$state" "$entries_path" \
+        "$entries_complete_path" "$entries_stamp_path" "$deadline_ms"
       rc=$?
       if [ "$rc" -ne 0 ]; then
-        [ "$rc" -ne 0 ] || rc=124
-        rm -f "$entries_tmp"
         return "$rc"
       fi
-      remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
-        rm -f "$entries_tmp"
-        return 124
-      }
-      entries_sorted_tmp=$(mktemp "$entries_path.XXXXXX") || {
-        rm -f "$entries_tmp"
-        return 1
-      }
-      [ -f "$entries_sorted_tmp" ] && [ ! -L "$entries_sorted_tmp" ] || {
-        rm -f "$entries_tmp" "$entries_sorted_tmp"
-        return 1
-      }
-      fm_pane_idle_run_bounded_child "$remaining" env LC_ALL=C sort -u \
-        "$entries_tmp" > "$entries_sorted_tmp"
-      rc=$?
-      rm -f "$entries_tmp"
-      if [ "$rc" -ne 0 ]; then
-        [ "$rc" -ne 0 ] || rc=124
-        rm -f "$entries_sorted_tmp"
-        return "$rc"
-      fi
-      post_state_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
-        rc=$?
-        rm -f "$entries_sorted_tmp"
-        return "$rc"
-      }
-      if [ "$post_state_stamp" != "$state_stamp" ]; then
-        rm -f "$entries_sorted_tmp" "$entries_path" "$entries_complete_path" \
-          "$entries_stamp_path" "$cursor_path" "$records_path" "$seen_path" \
-          "$aggregate_path" "$aggregate_cursor_path" "$aggregate_complete_path" \
-          "$sorted_path" "$sorted_complete_path" || return 1
-        continue
-      fi
-      [ ! -L "$entries_path" ] && mv -f "$entries_sorted_tmp" "$entries_path" || {
-        rm -f "$entries_sorted_tmp"
-        return 1
-      }
-      fm_pane_idle_meta_index_cursor_write "$entries_complete_path" complete || return 1
-      fm_pane_idle_meta_index_cursor_write "$entries_stamp_path" "$post_state_stamp" || return 1
     fi
     break
   done
@@ -509,7 +568,7 @@ sub repair_records_tail {
 }
 sub repair_newline_tail {
   my ($path) = @_;
-  return 1 unless -e $path;
+  return 1 if !-e $path;
   return 0 if -l $path || !-f $path;
   my $fh;
   sysopen($fh, $path, O_RDWR | $nofollow) or return 0;
@@ -856,11 +915,11 @@ while (1) {
   my $next = tell($fh);
   defined($next) or exit 2;
   if ($window =~ /[\r\n\t]/ || exists $seen{$window}) {
-    print $next, "\0\0" or exit 2;
+    print $next, "\0\0\0" or exit 2;
     next;
   }
   $seen{$window} = 1;
-  print $next, "\0", $window, "\0" or exit 2;
+  print $next, "\0", $window, "\0", $meta, "\0" or exit 2;
 }
 close($fh) or exit 2;
 PERL
@@ -868,16 +927,19 @@ PERL
 
 fm_pane_idle_meta_index_windows_direct() {
   local state=$1 deadline_ms=${2:-}
-  [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" <<'PERL'
+  local entries_path="$state/.pane-idle-meta-index/.scan.entries"
+  local complete_path="$state/.pane-idle-meta-index/.scan.entries.complete"
+  [ -f "$entries_path" ] && [ ! -L "$entries_path" ] || return 124
+  [ -f "$complete_path" ] && [ ! -L "$complete_path" ] || return 124
+  fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" "$entries_path" <<'PERL'
 use strict;
 use warnings;
-my $state = shift @ARGV;
-opendir(my $dh, $state) or exit 2;
+my ($state, $entries_path) = @ARGV;
+open(my $entries_fh, '<', $entries_path) or exit 2;
 my %seen;
-while (defined(my $entry = readdir($dh))) {
-  next unless $entry =~ /\.meta\z/;
-  my $path = "$state/$entry";
+while (defined(my $path = <$entries_fh>)) {
+  chomp $path;
+  $path =~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/ or exit 2;
   next unless -f $path && !-l $path;
   open(my $fh, '<', $path) or exit 2;
   my ($window, $count) = ('', 0);
@@ -893,31 +955,34 @@ while (defined(my $entry = readdir($dh))) {
   $seen{$window} = 1;
   print $window, "\n" or exit 2;
 }
-closedir($dh) or exit 2;
+close($entries_fh) or exit 2;
 PERL
 }
 
 fm_pane_idle_meta_index_windows_direct_resumable() {
   local state=$1 cursor=${2:-} deadline_ms=${3:-}
-  [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  case "$cursor" in ''|0) cursor=;; *[!0-9]*) return 1 ;; esac
-  fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" "$cursor" <<'PERL'
+  local entries_path="$state/.pane-idle-meta-index/.scan.entries"
+  local complete_path="$state/.pane-idle-meta-index/.scan.entries.complete"
+  [ -f "$entries_path" ] && [ ! -L "$entries_path" ] || return 124
+  [ -f "$complete_path" ] && [ ! -L "$complete_path" ] || return 124
+  case "$cursor" in ''|0) cursor=0;; *[!0-9]*) return 1 ;; esac
+  fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" "$entries_path" "$cursor" <<'PERL'
 use strict;
 use warnings;
-my ($state, $cursor) = @ARGV;
-opendir(my $dh, $state) or exit 2;
-seekdir($dh, 0 + $cursor) or exit 2 if $cursor ne '';
+my ($state, $entries_path, $cursor) = @ARGV;
+open(my $entries_fh, '<', $entries_path) or exit 2;
+seek($entries_fh, 0 + $cursor, 0) or exit 2;
 my %seen;
-while (defined(my $entry = readdir($dh))) {
-  my $next = telldir($dh);
+while (defined(my $path = <$entries_fh>)) {
+  my $next = tell($entries_fh);
   defined($next) or exit 2;
-  if ($entry !~ /\.meta\z/ || $entry =~ /[\r\n\t]/) {
-    print $next, "\0\0" or exit 2;
+  chomp $path;
+  if ($path !~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/) {
+    print $next, "\0\0\0" or exit 2;
     next;
   }
-  my $path = "$state/$entry";
   if (!-f $path || -l $path) {
-    print $next, "\0\0" or exit 2;
+    print $next, "\0\0\0" or exit 2;
     next;
   }
   open(my $fh, '<', $path) or exit 2;
@@ -930,13 +995,13 @@ while (defined(my $entry = readdir($dh))) {
   }
   close($fh) or exit 2;
   if ($count != 1 || $window =~ /[\r\n\t]/ || exists $seen{$window}) {
-    print $next, "\0\0" or exit 2;
+    print $next, "\0\0\0" or exit 2;
     next;
   }
   $seen{$window} = 1;
-  print $next, "\0", $window, "\0" or exit 2;
+  print $next, "\0", $window, "\0", $path, "\0" or exit 2;
 }
-closedir($dh) or exit 2;
+close($entries_fh) or exit 2;
 PERL
 }
 
@@ -962,10 +1027,56 @@ fm_pane_idle_meta_for_window_bounded() {  # <state> <window> <deadline-ms>
   fm_pane_idle_meta_for_window_direct "$state" "$window" "$deadline_ms"
 }
 
+fm_pane_idle_meta_index_lookup_entries() {
+  local state=$1 entries_path=$2 window=$3 deadline_ms=${4:-} candidate rc
+  [ -f "$entries_path" ] && [ ! -L "$entries_path" ] || return 1
+  candidate=$(fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" \
+    "$entries_path" "$window" <<'PERL'
+use strict;
+use warnings;
+my ($state, $entries_path, $wanted) = @ARGV;
+open(my $entries_fh, '<', $entries_path) or exit 2;
+my ($candidate, $matches) = ('', 0);
+while (defined(my $path = <$entries_fh>)) {
+  chomp $path;
+  $path =~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/ or exit 2;
+  next unless -f $path && !-l $path;
+  open(my $fh, '<', $path) or exit 2;
+  my ($current, $count) = ('', 0);
+  while (defined(my $line = <$fh>)) {
+    chomp $line;
+    next unless $line =~ /\Awindow=(.*)\z/;
+    $current = $1;
+    $count++;
+  }
+  close($fh) or exit 2;
+  next unless $count == 1 && $current eq $wanted;
+  $matches++;
+  $matches == 1 or exit 1;
+  $candidate = $path;
+}
+close($entries_fh) or exit 2;
+$matches == 1 or exit 1;
+print $candidate or exit 2;
+PERL
+  )
+  rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  case "$candidate" in "$state"/*) ;; *) return 1 ;; esac
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  printf '%s' "$candidate"
+}
+
 fm_pane_idle_meta_for_window_direct() {  # <state> <window>
   local state=$1 window=$2 deadline_ms=${3:-${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-}}
   local candidate rc tmp
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  if [ -f "$state/.pane-idle-meta-index/.scan.entries" ] \
+    && [ -f "$state/.pane-idle-meta-index/.scan.entries.complete" ]; then
+    fm_pane_idle_meta_index_lookup_entries "$state" \
+      "$state/.pane-idle-meta-index/.scan.entries" "$window" "$deadline_ms"
+    return $?
+  fi
   tmp=$(mktemp "$state/.pane-idle-meta-direct.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
   fm_pane_idle_meta_index_collect "$state" "$tmp" "$deadline_ms"
@@ -1016,7 +1127,8 @@ fm_pane_idle_meta_index_persist() {
   reclaim_entries_path="$directory/.reclaim.entries"
   reclaim_entries_complete_path="$directory/.reclaim.entries.complete"
   for path in "$cursor_path" "$ready_path" "$snapshot_path" "$reclaim_cursor_path" \
-    "$reclaim_entries_path" "$reclaim_entries_complete_path"; do
+    "$reclaim_entries_path" "$reclaim_entries_complete_path" \
+    "$reclaim_entries_path.partial" "$reclaim_entries_path.cookie"; do
     if [ -e "$path" ] || [ -L "$path" ]; then
       [ -f "$path" ] && [ ! -L "$path" ] || return 1
     fi
@@ -1066,7 +1178,8 @@ fm_pane_idle_meta_index_persist() {
   fi
   if [ "$snapshot_changed" = 1 ]; then
     rm -f "$reclaim_cursor_path" "$reclaim_entries_path" \
-      "$reclaim_entries_complete_path" || {
+      "$reclaim_entries_complete_path" "$reclaim_entries_path.partial" \
+      "$reclaim_entries_path.cookie" || {
       rm -f "$snapshot_tmp"
       return 1
     }
@@ -1183,63 +1296,13 @@ fm_pane_idle_meta_index_reclaim() {
     }
   done < "$snapshot_source"
   if [ ! -f "$entries_path" ] || [ ! -f "$entries_complete_path" ]; then
-    entries_tmp=$(mktemp "$entries_path.XXXXXX") || {
-      rm -f "$current_tmp"
-      return 1
-    }
-    [ -f "$entries_tmp" ] && [ ! -L "$entries_tmp" ] || {
-      rm -f "$entries_tmp" "$current_tmp"
-      return 1
-    }
-    remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
-      rm -f "$entries_tmp" "$current_tmp"
-      return 124
-    }
-    fm_pane_idle_run_bounded_child "$remaining" perl - "$directory" > "$entries_tmp" <<'PERL'
-use strict;
-use warnings;
-my $directory = shift @ARGV;
-opendir(my $dh, $directory) or exit 1;
-while (defined(my $entry = readdir($dh))) {
-  print $entry, "\n" if $entry =~ /^[0-9A-Fa-f]{64}\z/;
-}
-closedir($dh) or exit 1;
-PERL
+    fm_pane_idle_meta_index_reclaim_entries_build \
+      "$directory" "$entries_path" "$entries_complete_path" "$deadline_ms"
     rc=$?
     if [ "$rc" -ne 0 ]; then
-      [ "$rc" -ne 0 ] || rc=124
-      rm -f "$entries_tmp" "$current_tmp"
-      return "$rc"
-    fi
-    remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || {
-      rm -f "$entries_tmp" "$current_tmp"
-      return 124
-    }
-    entries_sorted_tmp=$(mktemp "$entries_path.XXXXXX") || {
-      rm -f "$entries_tmp" "$current_tmp"
-      return 1
-    }
-    [ -f "$entries_sorted_tmp" ] && [ ! -L "$entries_sorted_tmp" ] || {
-      rm -f "$entries_tmp" "$entries_sorted_tmp" "$current_tmp"
-      return 1
-    }
-    fm_pane_idle_run_bounded_child "$remaining" env LC_ALL=C sort -u \
-      "$entries_tmp" > "$entries_sorted_tmp"
-    rc=$?
-    rm -f "$entries_tmp"
-    if [ "$rc" -ne 0 ]; then
-      [ "$rc" -ne 0 ] || rc=124
-      rm -f "$entries_sorted_tmp" "$current_tmp"
-      return "$rc"
-    fi
-    [ ! -L "$entries_path" ] && mv -f "$entries_sorted_tmp" "$entries_path" || {
-      rm -f "$entries_sorted_tmp" "$current_tmp"
-      return 1
-    }
-    fm_pane_idle_meta_index_cursor_write "$entries_complete_path" complete || {
       rm -f "$current_tmp"
-      return 1
-    }
+      return "$rc"
+    fi
   fi
   perl - "$directory" "$current_tmp" "$entries_path" "$cursor_path" "$deadline_ms" <<'PERL' &
 use strict;
@@ -1317,6 +1380,95 @@ PERL
     return "$rc"
   fi
   rm -f "$cursor_path" || return 1
+}
+
+fm_pane_idle_meta_index_reclaim_entries_build() {
+  local directory=$1 entries_path=$2 complete_path=$3 deadline_ms=${4:-}
+  local partial_path="$entries_path.partial" cookie_path="$entries_path.cookie" remaining rc
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  [ ! -L "$entries_path" ] && [ ! -L "$complete_path" ] || return 1
+  [ ! -L "$partial_path" ] && [ ! -L "$cookie_path" ] || return 1
+  remaining=$(fm_pane_idle_budget_secs "$deadline_ms") || return 124
+  fm_pane_idle_run_bounded_child "$remaining" perl - "$directory" "$entries_path" \
+    "$complete_path" "$partial_path" "$cookie_path" <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT);
+
+my ($directory, $entries, $complete, $partial, $cookie_path) = @ARGV;
+my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sub atomic_write {
+  my ($path, $value) = @_;
+  return 0 if -l $path;
+  my $tmp = "$path.tmp.$$";
+  my $fh;
+  sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or return 0;
+  binmode($fh);
+  return 0 unless print($fh $value) && close($fh);
+  return 0 if -l $path;
+  rename($tmp, $path) or return 0;
+}
+sub read_text {
+  my ($path) = @_;
+  return '' unless -e $path;
+  return undef if -l $path || !-f $path;
+  open(my $fh, '<', $path) or return undef;
+  local $/;
+  my $value = <$fh> // '';
+  close($fh) or return undef;
+  chomp $value;
+  return $value;
+}
+my $cookie = read_text($cookie_path);
+defined($cookie) or exit 1 if -e $cookie_path;
+$cookie = '' unless defined($cookie) && ($cookie eq 'EOF' || $cookie =~ /^\d+\z/);
+if ($cookie ne 'EOF') {
+  my $pfh;
+  if (-e $partial) {
+    exit 1 if -l $partial || !-f $partial;
+    open($pfh, '>>', $partial) or exit 1;
+  } else {
+    sysopen($pfh, $partial, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 1;
+  }
+  select((select($pfh), $| = 1)[0]);
+  opendir(my $dh, $directory) or exit 1;
+  seekdir($dh, 0 + $cookie) or exit 1 if $cookie ne '';
+  while (defined(my $entry = readdir($dh))) {
+    my $next = telldir($dh);
+    defined($next) or exit 1;
+    next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
+    print($pfh $entry, "\n") or exit 1;
+    atomic_write($cookie_path, "$next\n") or exit 1;
+  }
+  closedir($dh) or exit 1;
+  close($pfh) or exit 1;
+  atomic_write($cookie_path, "EOF\n") or exit 1;
+  $cookie = 'EOF';
+}
+open(my $pfh, '<', $partial) or exit 1;
+my %seen;
+my @entries;
+while (defined(my $entry = <$pfh>)) {
+  chomp $entry;
+  next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
+  next if $seen{$entry}++;
+  push @entries, $entry;
+}
+close($pfh) or exit 1;
+@entries = sort @entries;
+my $tmp = "$entries.tmp.$$";
+open(my $efh, '>', $tmp) or exit 1;
+print($efh "$_\n") for @entries;
+close($efh) or exit 1;
+exit 1 if -l $entries;
+rename($tmp, $entries) or exit 1;
+atomic_write($complete, "complete\n") or exit 1;
+unlink($partial, $cookie_path) or exit 1;
+PERL
+  rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  return "$rc"
 }
 
 fm_pane_idle_meta_for_window_indexed() {

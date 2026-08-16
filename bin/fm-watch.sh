@@ -266,8 +266,10 @@ hash_pane() {
 }
 
 window_kind() {
-  local w=$1 deadline_ms=${2:-} meta mw kind kind_count
-  if [ -n "$deadline_ms" ]; then
+  local w=$1 deadline_ms=${2:-} meta_hint=${3:-} meta mw kind kind_count
+  if [ -n "$meta_hint" ]; then
+    meta=$meta_hint
+  elif [ -n "$deadline_ms" ]; then
     if [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ]; then
       meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
     else
@@ -276,29 +278,32 @@ window_kind() {
     if [ -z "$meta" ]; then
       return 1
     fi
-    kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
-    case "$kind_count" in
-      0) printf 'ship\n'; return 0 ;;
-      1)
-        kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-        case "$kind" in
-          ship|scout|secondmate) printf '%s\n' "$kind"; return 0 ;;
-          *) return 1 ;;
-        esac
-        ;;
-      *) return 1 ;;
-    esac
-  fi
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
-    [ "$mw" = "$w" ] || continue
-    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-    [ -n "$kind" ] || kind=ship
-    echo "$kind"
+  else
+    for meta in "$STATE"/*.meta; do
+      [ -e "$meta" ] || continue
+      mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+      [ "$mw" = "$w" ] || continue
+      kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
+      [ -n "$kind" ] || kind=ship
+      echo "$kind"
+      return 0
+    done
+    echo unknown
     return 0
-  done
-  echo unknown
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
+  case "$kind_count" in
+    0) printf 'ship\n'; return 0 ;;
+    1)
+      kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
+      case "$kind" in
+        ship|scout|secondmate) printf '%s\n' "$kind"; return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 window_backend_from_meta() {
@@ -323,8 +328,12 @@ window_backend_from_meta() {
 }
 
 window_backend() {  # <window>
-  local w=$1 deadline_ms=${2:-} meta
-  if [ -n "$deadline_ms" ]; then
+  local w=$1 deadline_ms=${2:-} meta_hint=${3:-} meta
+  if [ -n "$meta_hint" ]; then
+    meta=$meta_hint
+    window_backend_from_meta "$meta"
+    return $?
+  elif [ -n "$deadline_ms" ]; then
     if [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ]; then
       meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
     else
@@ -350,7 +359,7 @@ recorded_windows() {
       fm_pane_idle_meta_index_windows_from_snapshot \
         "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "$deadline_ms"
     else
-      fm_pane_idle_meta_index_windows_direct "$STATE" "$deadline_ms"
+      return 124
     fi
     return $?
   fi
@@ -405,24 +414,49 @@ watch_window_scan_advance() {
 
 event_wait_herdr() {
   local timeout=$1 w backend session first_session='' record rc=0 pane_id to agent window meta task reason
-  local event_scan_deadline windows_tmp windows_status=0
+  local event_scan_deadline windows_tmp windows_status=0 event_cursor event_source
+  local event_cursor_path="$STATE/.herdr-window.cursor" event_source_path="$STATE/.herdr-window.source"
+  local event_window_cursor event_meta
   local -a windows=()
   event_scan_deadline=$(( $(fm_pane_idle_now_ms) + PANE_IDLE_INDEX_BUDGET_SECS * 1000 ))
+  [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ] \
+    && [ -f "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ] \
+    && [ ! -L "${FM_PANE_IDLE_META_INDEX_SNAPSHOT:-}" ] || return 2
+  event_source="snapshot:${FM_PANE_IDLE_META_INDEX_STATE_STAMP}"
+  event_cursor=$(cat "$event_source_path" 2>/dev/null || true)
+  if [ "$event_cursor" != "$event_source" ]; then
+    rm -f "$event_cursor_path" || return 2
+    printf '%s\n' "$event_source" > "$event_source_path" || return 2
+  fi
+  event_window_cursor=$(cat "$event_cursor_path" 2>/dev/null || true)
+  if [ "$event_window_cursor" = EOF ]; then
+    rm -f "$event_cursor_path" || return 2
+    event_window_cursor=0
+  fi
+  case "$event_window_cursor" in ''|*[!0-9]*) event_window_cursor=0 ;; esac
   windows_tmp=$(mktemp "$STATE/.herdr-windows.XXXXXX") || return 2
   [ -f "$windows_tmp" ] && [ ! -L "$windows_tmp" ] || { rm -f "$windows_tmp"; return 2; }
-  recorded_windows "$event_scan_deadline" > "$windows_tmp" || windows_status=$?
+  fm_pane_idle_meta_index_windows_from_snapshot_resumable \
+    "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "$event_window_cursor" \
+    "$event_scan_deadline" > "$windows_tmp" || windows_status=$?
   case "$windows_status" in
     0) ;;
-    124) rm -f "$windows_tmp"; return 2 ;;
+    124) ;;
     *) rm -f "$windows_tmp"; return 1 ;;
   esac
-  while IFS= read -r w; do
+  while IFS= read -r -d '' event_window_cursor \
+    && IFS= read -r -d '' w \
+    && IFS= read -r -d '' event_meta; do
     [ "$(fm_pane_idle_now_ms)" -lt "$event_scan_deadline" ] || {
       rm -f "$windows_tmp"
       return 2
     }
+    fm_pane_idle_meta_index_cursor_write "$event_cursor_path" "$event_window_cursor" || {
+      rm -f "$windows_tmp"
+      return 2
+    }
     [ -n "$w" ] || continue
-    backend=$(window_backend "$w" "$event_scan_deadline") || continue
+    backend=$(window_backend "$w" "$event_scan_deadline" "$event_meta") || continue
     [ "$backend" = herdr ] || continue
     session=${w%%:*}
     [ -n "$session" ] && [ "$session" != "$w" ] || continue
@@ -433,6 +467,9 @@ event_wait_herdr() {
     windows+=("$w")
   done < "$windows_tmp"
   rm -f "$windows_tmp" || return 2
+  if [ "$windows_status" = 0 ]; then
+    fm_pane_idle_meta_index_cursor_write "$event_cursor_path" EOF || return 2
+  fi
   [ "${#windows[@]}" -gt 0 ] || return 2
   fm_watch_herdr_events_capable "$first_session" || return 2
 
@@ -1522,7 +1559,8 @@ EOF
       "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "${FM_WATCH_WINDOW_CURSOR:-0}" \
       "$pane_idle_scan_deadline" > "$window_scan_stream" || window_scan_status=$?
   else
-    window_scan_source=direct
+    window_scan_stamp=$(cat "$STATE/.pane-idle-meta-index/.scan.entries.stamp" 2>/dev/null || true)
+    window_scan_source="entries:${window_scan_stamp:-unknown}"
     watch_window_scan_prepare "$window_scan_source" || exit 1
     fm_pane_idle_meta_index_windows_direct_resumable "$STATE" \
       "${FM_WATCH_WINDOW_CURSOR:-}" "$pane_idle_scan_deadline" > "$window_scan_stream" \
@@ -1534,13 +1572,14 @@ EOF
   esac
   window_scan_complete=1
   while IFS= read -r -d '' window_scan_cursor \
-    && IFS= read -r -d '' w; do
+    && IFS= read -r -d '' w \
+    && IFS= read -r -d '' window_meta; do
     if [ -z "$w" ]; then
       watch_window_scan_advance "$window_scan_cursor" || exit 1
       continue
     fi
     kind=
-    kind=$(window_kind "$w" "$pane_idle_scan_deadline") || {
+    kind=$(window_kind "$w" "$pane_idle_scan_deadline" "$window_meta") || {
       window_scan_complete=0
       break
     }
@@ -1551,7 +1590,7 @@ EOF
         continue
       fi
     fi
-    backend=$(window_backend "$w" "$pane_idle_scan_deadline") || {
+    backend=$(window_backend "$w" "$pane_idle_scan_deadline" "$window_meta") || {
       window_scan_complete=0
       break
     }
@@ -1572,8 +1611,7 @@ EOF
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         if [ "$kind" != secondmate ]; then
-          idle_meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" \
-            "$pane_idle_scan_deadline" 2>/dev/null || true)
+          idle_meta=$window_meta
           if [ -n "$idle_meta" ]; then
             idle_task=${idle_meta##*/}
             idle_task=${idle_task%.meta}
@@ -1674,8 +1712,7 @@ EOF
     fi
     watch_window_scan_advance "$window_scan_cursor" || exit 1
   done < "$window_scan_stream"
-  if [ "$window_scan_source" = direct ] && [ "$window_scan_status" = 0 ] \
-    && [ "$window_scan_complete" = 1 ]; then
+  if [ "$window_scan_status" = 0 ] && [ "$window_scan_complete" = 1 ]; then
     watch_window_scan_advance EOF || exit 1
   fi
   rm -f "$window_scan_stream" || exit 1
