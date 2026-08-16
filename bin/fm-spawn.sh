@@ -309,9 +309,11 @@ spawn_abort_recovery_meta() {
       echo "worktree=$record_worktree"
     else
       echo "worktree="
-      echo "slot_lease_state=unresolved"
-      echo "slot_lease_holder=$ID"
-      [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
+      if [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ]; then
+        echo "slot_lease_state=unresolved"
+        echo "slot_lease_holder=$ID"
+        [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
+      fi
     fi
     echo "project=$PROJ_ABS"
     [ -z "${SPAWN_WORKTREE_LEASE_GENERATION:-}" ] || echo "slot_lease_generation=$SPAWN_WORKTREE_LEASE_GENERATION"
@@ -919,6 +921,17 @@ spawn_abort_cleanup() {
   if [ "$status" -ne 0 ] && [ "$endpoint_cleanup_status" -eq 0 ]; then
     if spawn_abort_artifacts_cleanup; then
       SPAWN_ARTIFACTS_CLEAN=1
+      if [ "${KIND:-}" = secondmate ] \
+         && [ "${SPAWN_META_PUBLISHED:-0}" = 1 ] \
+         && [ -e "$STATE/$ID.meta" ]; then
+        if [ ! -L "$STATE/$ID.meta" ] && rm -f "$STATE/$ID.meta" \
+          && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+          SPAWN_META_PUBLISHED=0
+        else
+          echo "warning: spawn abort removed the secondmate endpoint but could not remove its task record" >&2
+          SPAWN_ARTIFACTS_CLEAN=0
+        fi
+      fi
       if [ "${SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED:-0}" = 1 ] \
          && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ] \
          && [ "${SPAWN_WORKTREE_LEASED:-0}" != 1 ] \
@@ -931,6 +944,17 @@ spawn_abort_cleanup() {
       fi
     else
       echo "warning: spawn abort could not remove every task artifact; preserving recovery metadata" >&2
+    fi
+  fi
+  if [ "$status" -ne 0 ] \
+     && [ "${KIND:-}" = secondmate ] \
+     && [ "${SPAWN_META_PUBLISHED:-0}" = 1 ] \
+     && { [ "$endpoint_cleanup_status" -ne 0 ] || [ "$SPAWN_ARTIFACTS_CLEAN" != 1 ]; }; then
+    SPAWN_RECOVERY_META_REPLACE_ALLOWED=1
+    if spawn_abort_recovery_meta; then
+      SPAWN_META_PUBLISHED=0
+    else
+      echo "error: spawn abort could not publish recoverable metadata for secondmate $ID" >&2
     fi
   fi
   if [ "$status" -ne 0 ] \

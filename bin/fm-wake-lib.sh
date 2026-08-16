@@ -638,8 +638,195 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+fm_wake_queue_txn_field() {
+  local manifest=$1 wanted=$2
+  awk -F= -v wanted="$wanted" \
+    '$1 == wanted { print substr($0, index($0, "=") + 1); count++ } END { exit(count == 1 ? 0 : 1) }' \
+    "$manifest" 2>/dev/null
+}
+
+fm_wake_queue_txn_manifest_write() {
+  local txn=$1 phase=$2 action=$3 offset=$4 had_queue=$5 had_cursor=$6 tmp
+  tmp=$(mktemp "$txn/.manifest.XXXXXX") || return 1
+  if ! printf 'schema=fm-wake-queue-transaction.v1\nphase=%s\naction=%s\noffset=%s\nhad_queue=%s\nhad_cursor=%s\n' \
+    "$phase" "$action" "$offset" "$had_queue" "$had_cursor" > "$tmp" \
+    || ! mv -f "$tmp" "$txn/manifest"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  return 0
+}
+
+fm_wake_queue_txn_cleanup_locked() {
+  local txn=$1
+  rm -f "$txn/queue.new" "$txn/queue.old" "$txn/cursor.old" "$txn/manifest" "$txn"/.manifest.* || return 1
+  rmdir "$txn" 2>/dev/null
+}
+
+fm_wake_queue_txn_rollback_locked() {
+  local txn=$1 had_queue=$2 had_cursor=$3 cursor status=0
+  cursor=$(fm_wake_queue_cursor_path)
+  if [ -e "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ]; then
+    [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+    [ -f "$FM_WAKE_QUEUE" ] || return 1
+  fi
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    [ ! -L "$cursor" ] || return 1
+    [ -f "$cursor" ] || return 1
+  fi
+  if [ -e "$txn/queue.old" ] || [ -L "$txn/queue.old" ]; then
+    [ -f "$txn/queue.old" ] && [ ! -L "$txn/queue.old" ] || return 1
+    rm -f "$FM_WAKE_QUEUE" || return 1
+    mv -f "$txn/queue.old" "$FM_WAKE_QUEUE" || return 1
+  elif [ "$had_queue" = 0 ]; then
+    rm -f "$FM_WAKE_QUEUE" || return 1
+  elif [ ! -e "$FM_WAKE_QUEUE" ]; then
+    return 1
+  fi
+  if [ -e "$txn/cursor.old" ] || [ -L "$txn/cursor.old" ]; then
+    [ -f "$txn/cursor.old" ] && [ ! -L "$txn/cursor.old" ] || return 1
+    rm -f "$cursor" || return 1
+    mv -f "$txn/cursor.old" "$cursor" || return 1
+  elif [ "$had_cursor" = 0 ]; then
+    rm -f "$cursor" || return 1
+  elif [ ! -e "$cursor" ]; then
+    return 1
+  fi
+  if [ -e "$txn/queue.new" ] || [ -L "$txn/queue.new" ]; then
+    [ -f "$txn/queue.new" ] && [ ! -L "$txn/queue.new" ] || return 1
+    rm -f "$txn/queue.new" || status=1
+  fi
+  return "$status"
+}
+
+fm_wake_queue_txn_recover_one_locked() {
+  local txn=$1 manifest="$1/manifest" schema phase action offset had_queue had_cursor
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  schema=$(fm_wake_queue_txn_field "$manifest" schema) || return 1
+  [ "$schema" = fm-wake-queue-transaction.v1 ] || return 1
+  phase=$(fm_wake_queue_txn_field "$manifest" phase) || return 1
+  action=$(fm_wake_queue_txn_field "$manifest" action) || return 1
+  offset=$(fm_wake_queue_txn_field "$manifest" offset) || return 1
+  had_queue=$(fm_wake_queue_txn_field "$manifest" had_queue) || return 1
+  had_cursor=$(fm_wake_queue_txn_field "$manifest" had_cursor) || return 1
+  case "$phase" in prepared|staged|queue-saved|cursor-saved|queue-installed|rollback|committed) ;; *) return 1 ;; esac
+  case "$action" in write|remove|keep) ;; *) return 1 ;; esac
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  case "$had_queue" in 0|1) ;; *) return 1 ;; esac
+  case "$had_cursor" in 0|1) ;; *) return 1 ;; esac
+  if [ "$phase" = committed ]; then
+    fm_wake_queue_txn_cleanup_locked "$txn"
+    return $?
+  fi
+  if { [ "$phase" = prepared ] || [ "$phase" = staged ]; } \
+    && [ ! -e "$txn/queue.old" ] && [ ! -e "$txn/cursor.old" ]; then
+    rm -f "$txn/queue.new" "$txn"/.manifest.* || return 1
+    rmdir "$txn" 2>/dev/null
+    return $?
+  fi
+  fm_wake_queue_txn_rollback_locked "$txn" "$had_queue" "$had_cursor" || return 1
+  fm_wake_queue_txn_cleanup_locked "$txn"
+}
+
+fm_wake_queue_txn_recover_transactions_locked() {
+  local txn
+  for txn in "$STATE"/.wake-queue.txn.*; do
+    [ -e "$txn" ] || continue
+    [ -d "$txn" ] && [ ! -L "$txn" ] || return 1
+    fm_wake_queue_txn_recover_one_locked "$txn" || return 1
+  done
+}
+
+fm_wake_queue_txn_replace_locked() {
+  local replacement=$1 action=$2 offset=${3:-0} txn cursor had_queue=0 had_cursor=0 phase
+  [ -f "$replacement" ] && [ ! -L "$replacement" ] || return 1
+  case "$action" in
+    write) case "$offset" in ''|*[!0-9]*) return 1 ;; esac ;;
+    remove|keep) [ "$offset" = 0 ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+  cursor=$(fm_wake_queue_cursor_path)
+  [ ! -L "$cursor" ] || return 1
+  if [ -e "$FM_WAKE_QUEUE" ]; then
+    [ -f "$FM_WAKE_QUEUE" ] || return 1
+    had_queue=1
+  fi
+  if [ -e "$cursor" ]; then
+    [ -f "$cursor" ] || return 1
+    had_cursor=1
+  fi
+  if [ "$action" = keep ] && [ "$had_cursor" = 1 ]; then
+    return 1
+  fi
+  txn=$(mktemp -d "$STATE/.wake-queue.txn.XXXXXX") || return 1
+  chmod 700 "$txn" || { rmdir "$txn" 2>/dev/null; return 1; }
+  if ! fm_wake_queue_txn_manifest_write "$txn" prepared "$action" "$offset" "$had_queue" "$had_cursor"; then
+    rmdir "$txn" 2>/dev/null
+    return 1
+  fi
+  if ! mv -f "$replacement" "$txn/queue.new"; then
+    fm_wake_queue_txn_cleanup_locked "$txn" || true
+    return 1
+  fi
+  fm_wake_queue_txn_manifest_write "$txn" staged "$action" "$offset" "$had_queue" "$had_cursor" || {
+    rm -f "$txn/queue.new"
+    fm_wake_queue_txn_cleanup_locked "$txn" || true
+    return 1
+  }
+  if [ "$had_queue" = 1 ] && ! mv -f "$FM_WAKE_QUEUE" "$txn/queue.old"; then
+    fm_wake_queue_txn_recover_one_locked "$txn" || true
+    return 1
+  fi
+  fm_wake_queue_txn_manifest_write "$txn" queue-saved "$action" "$offset" "$had_queue" "$had_cursor" || {
+    fm_wake_queue_txn_recover_one_locked "$txn" || true
+    return 1
+  }
+  if [ "$had_cursor" = 1 ] && ! mv -f "$cursor" "$txn/cursor.old"; then
+    fm_wake_queue_txn_recover_one_locked "$txn" || true
+    return 1
+  fi
+  fm_wake_queue_txn_manifest_write "$txn" cursor-saved "$action" "$offset" "$had_queue" "$had_cursor" || {
+    fm_wake_queue_txn_recover_one_locked "$txn" || true
+    return 1
+  }
+  if ! mv -f "$txn/queue.new" "$FM_WAKE_QUEUE"; then
+    fm_wake_queue_txn_recover_one_locked "$txn" || true
+    return 1
+  fi
+  fm_wake_queue_txn_manifest_write "$txn" queue-installed "$action" "$offset" "$had_queue" "$had_cursor" || {
+    fm_wake_queue_txn_recover_one_locked "$txn" || true
+    return 1
+  }
+  case "$action" in
+    write)
+      fm_wake_queue_cursor_write "$offset" || phase=failed
+      ;;
+    remove)
+      if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+        [ ! -L "$cursor" ] || phase=failed
+        [ "${phase:-}" = failed ] || rm -f "$cursor" || phase=failed
+      fi
+      ;;
+    keep) : ;;
+  esac
+  if [ "${phase:-}" = failed ]; then
+    fm_wake_queue_txn_rollback_locked "$txn" "$had_queue" "$had_cursor" || return 1
+    fm_wake_queue_txn_manifest_write "$txn" rollback "$action" "$offset" "$had_queue" "$had_cursor" || return 1
+    fm_wake_queue_txn_cleanup_locked "$txn" || return 1
+    return 1
+  fi
+  fm_wake_queue_txn_manifest_write "$txn" committed "$action" "$offset" "$had_queue" "$had_cursor" || {
+    fm_wake_queue_txn_rollback_locked "$txn" "$had_queue" "$had_cursor" || return 1
+    return 1
+  }
+  fm_wake_queue_txn_cleanup_locked "$txn" || true
+  return 0
+}
+
 fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  fm_wake_queue_txn_recover_transactions_locked || return 1
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -727,6 +914,7 @@ fm_wake_append_if_absent_locked() {  # <result-var> <kind> <key> <payload>
 
 fm_wake_remove_key_locked() {
   local key=$1 tmp cursor cursor_offset=0 cursor_active=0 new_offset
+  fm_wake_queue_txn_recover_transactions_locked || return 1
   [ ! -L "$FM_WAKE_QUEUE" ] || return 1
   [ -e "$FM_WAKE_QUEUE" ] || return 0
   [ -f "$FM_WAKE_QUEUE" ] || return 1
@@ -776,9 +964,10 @@ PERL
     case "$new_offset" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
   fi
   [ ! -L "$FM_WAKE_QUEUE" ] || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$FM_WAKE_QUEUE" || { rm -f "$tmp"; return 1; }
   if [ "$cursor_active" = 1 ]; then
-    fm_wake_queue_cursor_write "$new_offset" || return 1
+    fm_wake_queue_txn_replace_locked "$tmp" write "$new_offset" || { rm -f "$tmp"; return 1; }
+  else
+    fm_wake_queue_txn_replace_locked "$tmp" keep 0 || { rm -f "$tmp"; return 1; }
   fi
 }
 
@@ -796,20 +985,21 @@ fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>
 fm_wake_restore_queue() {
   local drained=$1 restore status=0
   [ -f "$drained" ] && [ ! -L "$drained" ] || return 1
-  [ ! -L "$FM_WAKE_QUEUE" ] || return 1
-  restore=$(mktemp "$STATE/.wake-queue.restore.XXXXXX") || return 1
-  [ -f "$restore" ] && [ ! -L "$restore" ] || { rm -f "$restore"; return 1; }
-  if [ -e "$FM_WAKE_QUEUE" ]; then
-    [ -f "$FM_WAKE_QUEUE" ] || { rm -f "$restore"; return 1; }
-    cat "$drained" "$FM_WAKE_QUEUE" > "$restore" || status=1
-  else
-    cat "$drained" > "$restore" || status=1
-  fi
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  fm_wake_queue_txn_recover_transactions_locked || status=1
   if [ "$status" = 0 ]; then
-    [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE" || status=1
-    [ "$status" = 0 ] && rm -f "$(fm_wake_queue_cursor_path)" || status=1
+    [ ! -L "$FM_WAKE_QUEUE" ] || status=1
+    restore=$(mktemp "$STATE/.wake-queue.restore.XXXXXX") || status=1
+    if [ "$status" = 0 ] && [ -e "$FM_WAKE_QUEUE" ]; then
+      [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || status=1
+      [ "$status" -ne 0 ] || cat "$drained" "$FM_WAKE_QUEUE" > "$restore" || status=1
+    elif [ "$status" = 0 ]; then
+      cat "$drained" > "$restore" || status=1
+    fi
+    [ "$status" -ne 0 ] || fm_wake_queue_txn_replace_locked "$restore" remove 0 || status=1
   fi
-  [ "$status" = 0 ] || rm -f "$restore"
+  [ "$status" -eq 0 ] || rm -f "$restore"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
   return "$status"
 }
 
@@ -971,11 +1161,11 @@ fm_wake_install_queue_cursor_atomic() {
       return 1
     fi
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || { rm -f "$restore"; return 1; }
+    fm_wake_queue_txn_recover_transactions_locked || status=1
     current=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || status=1
     if [ "${status:-0}" -eq 0 ] && [ "$current" = "$expected" ] \
-      && [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE"; then
-      status=0
-      fm_wake_queue_cursor_write "$offset" || status=1
+      && [ ! -L "$FM_WAKE_QUEUE" ]; then
+      fm_wake_queue_txn_replace_locked "$restore" write "$offset" || status=1
       fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
       [ "$status" -eq 0 ] && return 0
       return 1
@@ -1005,10 +1195,11 @@ fm_wake_restore_queue_atomic() {
       return 1
     fi
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || { rm -f "$restore"; return 1; }
+    fm_wake_queue_txn_recover_transactions_locked || status=1
     current=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || status=1
     if [ "$status" -eq 0 ] && [ "$current" = "$expected" ] \
-      && [ ! -L "$FM_WAKE_QUEUE" ] && mv -f "$restore" "$FM_WAKE_QUEUE"; then
-      rm -f "$(fm_wake_queue_cursor_path)" || status=1
+      && [ ! -L "$FM_WAKE_QUEUE" ]; then
+      fm_wake_queue_txn_replace_locked "$restore" remove 0 || status=1
       [ "$status" -ne 0 ] && { fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true; return 1; }
       fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
       return 0

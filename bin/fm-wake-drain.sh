@@ -397,6 +397,10 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
   exit 1
 }
 DRAIN_LOCK_HELD=true
+fm_wake_queue_txn_recover_transactions_locked || {
+  echo "error: wake queue transaction recovery failed; refusing to drain" >&2
+  exit 1
+}
 
 DRAIN_CURSOR=$(fm_wake_queue_cursor_path)
 if [ -e "$DRAIN_RESTORE_MANIFEST" ] || [ -L "$DRAIN_RESTORE_MANIFEST" ]; then
