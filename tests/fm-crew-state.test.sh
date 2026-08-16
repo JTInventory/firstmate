@@ -559,6 +559,23 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
+test_active_run_does_not_create_incarnation_binding() {
+  reset_fakes
+  local d out evidence
+  d=$(new_case active-no-binding)
+  make_repo_on_branch "$d/wt" fm/feat-active-no-binding
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-active-no-binding.meta" \
+    "window=fm:fm-feat-active-no-binding" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=active-no-binding-inc"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-active-no-binding)"
+  out=$(run_crew_state "$d" feat-active-no-binding)
+  assert_contains "$out" "state: working" "active run remains authoritative without binding"
+  evidence="$d/state/.run-step-incarnation-feat-active-no-binding"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "active branch/head lookup created a binding"
+  pass "active branch/head lookup cannot create terminal evidence"
+}
+
 test_terminal_first_observation_requires_binding() {
   reset_fakes
   local d out evidence status
@@ -1085,6 +1102,7 @@ test_terminal_passed
 test_terminal_passed_delivery_skipped
 test_terminal_passed_delivery_completed
 test_terminal_failed
+test_active_run_does_not_create_incarnation_binding
 test_terminal_first_observation_requires_binding
 test_terminal_candidate_requires_existing_binding
 test_cross_branch_attribution_via_list

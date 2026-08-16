@@ -400,8 +400,8 @@ test_done_and_failed_are_replayed_once() {
   pass "done and failed inactive outcomes are replayed once and acknowledged on drain"
 }
 
-test_run_step_incarnation_evidence_is_persisted_under_task_lock() {
-  local dir root home fakebin state evidence run_head
+test_run_step_incarnation_evidence_requires_lifecycle_binding() {
+  local dir root home fakebin state
   new_case run-step-evidence-terminal-only
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -411,90 +411,19 @@ test_run_step_incarnation_evidence_is_persisted_under_task_lock() {
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 0 ] || fail "terminal run-step without a binding created a receipt"
   [ "$(queue_count "$state")" = 0 ] || fail "terminal run-step without a binding queued a wake"
-  new_case run-step-evidence
+  new_case run-step-evidence-bound
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   write_meta "$state" run-step-x1 run-step-inc
   rm -f "$state/.pane-idle/run-step-x1"
-  replace_field "$state/run-step-x1.meta" worktree "$root"
-  replace_field "$state/run-step-x1.meta" project "$root"
-  run_head=$(git -C "$root" rev-parse HEAD)
-  set_old_mtime "$state/run-step-x1.meta"
-  cat > "$fakebin/no-mistakes" <<SH
-#!/usr/bin/env bash
-set -u
-if [ "\${1:-}" = axi ] && [ "\${2:-}" = status ]; then
-  run_id="\${FM_RUN_STEP_ID:-run-step-x1}"
-  case "\${FM_RUN_STEP_MODE:-active}" in
-    active)
-      cat <<EOF
-run:
-  id: \$run_id
-  branch: main
-  status: running
-  head: $run_head
-  outcome: ""
-EOF
-      ;;
-    terminal)
-      cat <<EOF
-run:
-  id: \$run_id
-  branch: main
-  status: completed
-  head: $run_head
-  outcome: checks-passed
-EOF
-      ;;
-  esac
-fi
-SH
-  chmod +x "$fakebin/no-mistakes"
-  FM_RUN_STEP_MODE=active PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null \
-    || fail "current run-step state could not persist its binding"
-  unset FM_RUN_STEP_MODE
-  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: working · source: run-step · validating · run-id=run-step-x1'
-  evidence="$state/.run-step-incarnation-run-step-x1"
-  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "active run-step binding was not persisted"
-  [ "$(receipt_value "$evidence" run_id)" = run-step-x1 ] || fail "run-step binding lost its run id"
-  [ "$(receipt_value "$evidence" spawn_incarnation)" = run-step-inc ] || fail "run-step binding used the wrong incarnation"
-  [ "$(receipt_value "$evidence" state)" = active ] || fail "run-step binding was not active"
-  export FM_RUN_STEP_ID=run-step-y1 FM_RUN_STEP_MODE=active
-  set +e
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null 2>&1
-  status=$?
-  set -u
-  [ "$status" -ne 0 ] || fail "run-step relaunch replaced its incarnation binding"
-  [ "$(receipt_value "$evidence" run_id)" = run-step-x1 ] || fail "run-step relaunch altered the bound run"
-  export FM_RUN_STEP_MODE=terminal
-  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-y1'
+  write_run_step_evidence "$state" run-step-x1 run-step-inc \
+    done 'state: done · source: run-step · checks green · run-id=run-step-x1' run-step-x1
+  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-x1'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
-  [ "$(receipt_count "$state" pending)" = 0 ] || fail "mismatched run-step state created a receipt"
-  [ "$(queue_count "$state")" = 0 ] || fail "mismatched run-step state queued a wake"
-  cat > "$fakebin/mv" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "${FM_FAIL_RUN_STEP_BINDING:-0}" = 1 ]; then
-  exit 91
-fi
-exec /usr/bin/mv "$@"
-SH
-  chmod +x "$fakebin/mv"
-  write_meta "$state" run-step-z1 run-step-inc
-  replace_field "$state/run-step-z1.meta" worktree "$root"
-  replace_field "$state/run-step-z1.meta" project "$root"
-  export FM_RUN_STEP_ID=run-step-z1 FM_RUN_STEP_MODE=active FM_FAIL_RUN_STEP_BINDING=1
-  set +e
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-z1 >/dev/null 2>&1
-  status=$?
-  set -u
-  [ "$status" -ne 0 ] || fail "run-step binding publication failure was swallowed"
-  rm -f "$fakebin/mv"
-  unset FM_FAKE_CREW_STATE_RUN_STEP_X1 FM_RUN_STEP_ID FM_RUN_STEP_MODE FM_FAIL_RUN_STEP_BINDING
-  pass "run-step outcomes require durable current incarnation bindings"
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "bound run-step state did not create a receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "bound run-step state did not queue a wake"
+  unset FM_FAKE_CREW_STATE_RUN_STEP_X1
+  pass "run-step outcomes require an explicit lifecycle binding"
 }
 
 test_portable_timeout_runner_is_used() {
@@ -1491,7 +1420,7 @@ test_reused_task_id_gets_new_fingerprint() {
 }
 
 test_spawn_publishes_incarnation_token() {
-  local dir root home fakebin state project worktree tmux_state pane_pid out status meta token
+  local dir root home fakebin state project worktree tmux_state pane_pid out status meta token evidence
   new_case spawn-contract
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1534,6 +1463,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_SPAWN_NO_GUARD=1 \
+    FM_RUN_STEP_ID=run-step-spawn-contract \
     FM_FAKE_PANE_PATH="$worktree" FM_FAKE_PANE_PID="$pane_pid" FM_FAKE_TMUX_STATE="$tmux_state" TMUX=fake,1,0 \
     FM_SPAWN_WT_WAIT_SECS=3 "$root/bin/fm-spawn.sh" spawn-contract "$project" \
     --harness codex 2>&1)
@@ -1545,6 +1475,10 @@ SH
   token=$(receipt_value "$meta" spawn_incarnation)
   case "$token" in ''|legacy-unknown) fail "public fm-spawn path published no incarnation token" ;; esac
   grep -F 'spawn_incarnation=' "$meta" >/dev/null || fail "spawn metadata omitted its incarnation field"
+  evidence="$state/.run-step-incarnation-spawn-contract"
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "spawn did not publish the explicit run-step binding"
+  [ "$(receipt_value "$evidence" run_id)" = run-step-spawn-contract ] || fail "spawn binding used the wrong run id"
+  [ "$(receipt_value "$evidence" spawn_incarnation)" = "$token" ] || fail "spawn binding used the wrong incarnation"
   mkdir -p "$home/data/spawn-mismatch"
   printf 'spawn mismatch brief\n' > "$home/data/spawn-mismatch/brief.md"
   mv "$root/bin/fm-wake-lib.sh" "$root/bin/fm-wake-lib.real.sh"
@@ -4128,7 +4062,7 @@ if [ -n "${FM_INACTIVE_TEST_ONLY:-}" ]; then
 fi
 
 test_done_and_failed_are_replayed_once
-test_run_step_incarnation_evidence_is_persisted_under_task_lock
+test_run_step_incarnation_evidence_requires_lifecycle_binding
 test_portable_timeout_runner_is_used
 test_portable_timeout_preserves_signal_failure
 test_portable_timeout_expires_child

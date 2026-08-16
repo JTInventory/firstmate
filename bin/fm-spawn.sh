@@ -96,6 +96,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-run-step-lib.sh
+. "$SCRIPT_DIR/fm-run-step-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -2209,6 +2211,11 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 SPAWN_META_PUBLISHED=1
+if [ "$KIND" = ship ] && [ -n "${FM_RUN_STEP_ID:-}" ]; then
+  FM_TASK_LOCK_PATH=$SPAWN_TASK_LOCK
+  FM_TASK_LOCK_OWNER=$(fm_lock_link_owner "$SPAWN_TASK_LOCK") || exit 1
+  fm_run_step_binding_publish "$ID" "$FM_RUN_STEP_ID" "$SPAWN_INCARNATION" || exit 1
+fi
 fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
