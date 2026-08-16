@@ -1719,7 +1719,11 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
 replay_pane_idle_publication_valid() {
   local meta=$1 id=$2 window=$3 backend=$4 incarnation=$5 source=${6:-}
   local deadline_ms=${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-} now_ms remaining_ms capture_secs
-  [ "$source" = run-step ] && [ "${SOURCE:-}" = run-step ] && return 0
+  if [ "$source" = run-step ]; then
+    [ "${SOURCE:-}" = run-step ] || return 1
+    run_step_incarnation_evidence_valid "$id" "$incarnation" "${OUTCOME:-}" "${SNAPSHOT:-}"
+    return $?
+  fi
   if [ "${FM_INACTIVE_OUTCOME_CHILD_BOUND:-0}" = 1 ]; then
     fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$incarnation" "$RECONCILE_SECS"
     return $?
@@ -2005,6 +2009,10 @@ prepare_pending_receipt() {
     "$terminal_snapshot" "$kind" "$parent_corr") || return 1
   [ "$serialized_fp" = "$FP" ] || return 1
   [ "$expected_fp" = "$FP" ] || return 1
+  if [ "$terminal_source" = run-step ] \
+    && ! run_step_incarnation_evidence_valid "$task_id" "$incarnation" "$outcome" "$terminal_snapshot"; then
+    return 1
+  fi
   ID=$task_id
   INC=$incarnation
   OUTCOME=$outcome
@@ -2958,6 +2966,71 @@ republish_pending_receipts() {
 
 read_incarnation() { fm_pane_idle_read_incarnation "$@"; }
 
+run_step_incarnation_evidence_path() {
+  printf '%s/.run-step-incarnation-%s' "$STATE" "$1"
+}
+
+run_step_incarnation_evidence_valid() {
+  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 evidence run_id
+  valid_task_id "$id" || return 1
+  case "$outcome" in done|failed) ;; *) return 1 ;; esac
+  [ -n "$incarnation" ] && [ -n "$snapshot" ] || return 1
+  evidence=$(run_step_incarnation_evidence_path "$id") || return 1
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
+  awk -F= '
+    BEGIN {
+      allowed["schema"]=1; allowed["task_id"]=1; allowed["run_id"]=1
+      allowed["spawn_incarnation"]=1; allowed["outcome"]=1
+      allowed["terminal_snapshot"]=1
+      required["schema"]=1; required["task_id"]=1; required["run_id"]=1
+      required["spawn_incarnation"]=1; required["outcome"]=1
+      required["terminal_snapshot"]=1
+      valid=1
+    }
+    /^[^=]+=/ {
+      key=$1
+      if (!(key in allowed) || (key in seen)) valid=0
+      seen[key]=1
+      values[key]=substr($0, index($0, "=") + 1)
+      next
+    }
+    { valid=0 }
+    END {
+      for (key in required) if (!(key in seen)) valid=0
+      exit !(valid && values["schema"] == "fm-jt-run-step-incarnation.v1")
+    }
+  ' "$evidence" 2>/dev/null || return 1
+  [ "$(meta_value_unique "$evidence" schema 2>/dev/null)" = fm-jt-run-step-incarnation.v1 ] || return 1
+  [ "$(meta_value_unique "$evidence" task_id 2>/dev/null)" = "$id" ] || return 1
+  run_id=$(meta_value_unique "$evidence" run_id 2>/dev/null) || return 1
+  case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ "$(meta_value_unique "$evidence" spawn_incarnation 2>/dev/null)" = "$incarnation" ] || return 1
+  [ "$(meta_value_unique "$evidence" outcome 2>/dev/null)" = "$outcome" ] || return 1
+  [ "$(meta_value_unique "$evidence" terminal_snapshot 2>/dev/null)" = "$snapshot" ] || return 1
+}
+
+terminal_snapshot_matches_current() {
+  local id=$1 expected=$2 status_snapshot=$3 state_timeout state_tmp state_rc current
+  case "$expected" in
+    done:*|failed:*) [ "$expected" = "$status_snapshot" ]; return $? ;;
+    state:\ done\ *|state:\ failed\ *) ;;
+    *) return 1 ;;
+  esac
+  state_timeout=$(bounded_secs "${FM_INACTIVE_OUTCOME_STATE_TIMEOUT_SECS:-10}" 10 1 300)
+  state_tmp=$(mktemp "$STATE/.inactive-terminal-snapshot.XXXXXX") || return 1
+  state_rc=0
+  run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
+    "$FM_CREW_STATE_BIN" "$id" > "$state_tmp" 2>/dev/null || state_rc=$?
+  current=
+  if [ "$state_rc" -eq 0 ]; then
+    current=$(cat "$state_tmp" 2>/dev/null) || state_rc=$?
+  fi
+  rm -f "$state_tmp" || [ "$state_rc" -ne 0 ] || state_rc=1
+  [ "$state_rc" -eq 0 ] || return 1
+  case "$current" in *$'\n'*) return 1 ;; esac
+  [ "$current" = "$expected" ]
+}
+
 surface_retry_valid() {
   awk -F= '
     BEGIN {
@@ -2997,7 +3070,7 @@ surface_retry_matches_current() {
   [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
   current_snapshot=$(awk 'NF { line=$0 } END { if (line == "") exit 1; print line }' "$status_file" 2>/dev/null) || return 1
   saved_snapshot=$(meta_value_unique "$retry" snapshot 2>/dev/null) || return 1
-  [ "$saved_snapshot" = "$current_snapshot" ] || return 1
+  terminal_snapshot_matches_current "$id" "$saved_snapshot" "$current_snapshot" || return 1
   saved_parent_corr=$(meta_value_unique "$retry" parent_corr 2>/dev/null || true)
   current_parent_corr=$(replay_parent_corr) || return 1
   [ "$saved_parent_corr" = "$current_parent_corr" ] || return 1
@@ -3106,7 +3179,7 @@ surface_retry_published_current() {
 
 terminal_outcome_surfaced() {
   local id=$1 meta=$2 outcome=$3 wake_key=${4:-}
-  local key raw marker retry marker_snapshot marker_spawn marker_parent_corr current_parent_corr current_snapshot retry_status
+  local key raw raw_outcome marker retry marker_snapshot marker_spawn marker_parent_corr current_parent_corr current_snapshot retry_status
   local current_spawn current_tasktmp current_window current_worktree status_file
   key=$(printf '%s' "$id" | tr ':/.' '___')
   current_parent_corr=$(replay_parent_corr) || return 2
@@ -3125,14 +3198,16 @@ terminal_outcome_surfaced() {
   raw=$(cat "$raw" 2>/dev/null || true)
   [ -n "$raw" ] || return 1
   case "$raw" in
-    done:*|failed:*) ;;
+    done:*|failed:*) raw_outcome=${raw%%:*} ;;
+    state:\ done\ *) raw_outcome=done ;;
+    state:\ failed\ *) raw_outcome=failed ;;
     *) return 1 ;;
   esac
-  [ "${raw%%:*}" = "$outcome" ] || return 1
+  [ "$raw_outcome" = "$outcome" ] || return 1
   status_file="$STATE/$id.status"
   [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
   current_snapshot=$(awk 'NF { line=$0 } END { if (line == "") exit 1; print line }' "$status_file" 2>/dev/null) || return 1
-  [ "$raw" = "$current_snapshot" ] || return 1
+  terminal_snapshot_matches_current "$id" "$raw" "$current_snapshot" || return 1
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   awk -F= '
     BEGIN {
@@ -3333,8 +3408,9 @@ reconcile_child() {
     [ "$state_rc" = 1 ] && backend=tmux || return 0
   fi
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
-  if [ "$source" != run-step ] \
-    && ! fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS"; then
+  if [ "$source" = run-step ]; then
+    run_step_incarnation_evidence_valid "$id" "$INC" "$outcome" "$snapshot" || return 0
+  elif ! fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS"; then
     return 0
   fi
   ID=$id

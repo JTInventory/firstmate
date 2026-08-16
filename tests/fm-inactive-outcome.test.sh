@@ -245,6 +245,14 @@ write_meta() {
   case "$kind" in ship|scout) write_idle_proof "$state" "$id" "$backend" "$window" ;; esac
 }
 
+write_run_step_evidence() {
+  local state=$1 id=$2 incarnation=$3 outcome=$4 snapshot=$5 run_id
+  run_id=${6:-run-$id}
+  fm_write_meta "$state/.run-step-incarnation-$id" \
+    schema=fm-jt-run-step-incarnation.v1 task_id="$id" run_id="$run_id" \
+    spawn_incarnation="$incarnation" outcome="$outcome" terminal_snapshot="$snapshot"
+}
+
 write_legacy_meta() {
   local state=$1 id=$2 kind=${3:-ship} backend=${4:-tmux} window
   window="tmux:fm-$id"
@@ -329,6 +337,9 @@ test_done_and_failed_are_replayed_once() {
   write_meta "$state" failed-x1 inc-failed
   export FM_FAKE_CREW_STATE_DONE_X1='state: done · source: pane · pane is quiet'
   export FM_FAKE_CREW_STATE_FAILED_X1='state: failed · source: run-step · checks failed'
+  write_run_step_evidence "$state" failed-x1 inc-failed failed \
+    'state: failed · source: run-step · checks failed'
+  rm -f "$state/.pane-idle/failed-x1"
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 2 ] || fail "done and failed outcomes did not create two pending receipts"
   [ "$(queue_count "$state")" = 2 ] || fail "done and failed outcomes did not create two wakes"
@@ -387,6 +398,21 @@ test_done_and_failed_are_replayed_once() {
   [ "$(queue_count "$state")" = 0 ] || fail "presented receipts caused a duplicate wake on rescan"
   unset FM_FAKE_CREW_STATE_DONE_X1 FM_FAKE_CREW_STATE_FAILED_X1
   pass "done and failed inactive outcomes are replayed once and acknowledged on drain"
+}
+
+test_run_step_without_incarnation_evidence_fails_closed() {
+  local dir root home fakebin state
+  new_case run-step-evidence
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" run-step-x1 run-step-inc
+  rm -f "$state/.pane-idle/run-step-x1"
+  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "run-step state without incarnation evidence was accepted"
+  [ "$(queue_count "$state")" = 0 ] || fail "run-step state without incarnation evidence queued a wake"
+  unset FM_FAKE_CREW_STATE_RUN_STEP_X1
+  pass "run-step outcomes fail closed without incarnation evidence"
 }
 
 test_portable_timeout_runner_is_used() {
@@ -1710,6 +1736,33 @@ SH
   [ "$(queue_count "$state")" = 1 ] || fail "new incarnation did not queue its inactive wake"
   unset FM_FAKE_CREW_STATE_SURFACED_X1
   pass "terminal replay suppression is bound to surfaced status and incarnation"
+}
+
+test_canonical_terminal_snapshot_suppresses_status_replay() {
+  local dir root home fakebin state canonical
+  new_case canonical-terminal-snapshot
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  write_meta "$state" canonical-x1 canonical-inc
+  printf '%s\n' 'done: checks green' > "$state/canonical-x1.status"
+  canonical='state: done · source: run-step · checks green'
+  export FM_FAKE_CREW_STATE_CANONICAL_X1="$canonical"
+  fm_write_meta "$state/.hb-terminal-surfaced-canonical-x1" \
+    schema=fm-hb-terminal-surfaced.v1 snapshot="$canonical" \
+    spawn_incarnation=canonical-inc tasktmp="$state/work-canonical-x1" \
+    window=tmux:fm-canonical-x1 worktree="$state/work-canonical-x1"
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" PATH="$fakebin:$PATH" \
+    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-watch.sh"; terminal_signal_suppressed "$2/canonical-x1.status"' _ \
+    "$root" "$state" || fail "canonical terminal marker did not suppress status replay"
+  [ "$(queue_count "$state")" = 0 ] || fail "canonical terminal marker queued a duplicate wake"
+  unset FM_FAKE_CREW_STATE_CANONICAL_X1
+  pass "canonical terminal snapshots suppress equivalent status events"
 }
 
 test_postpublication_uncertainty_is_not_replayed() {
@@ -3916,6 +3969,7 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
 }
 
 test_done_and_failed_are_replayed_once
+test_run_step_without_incarnation_evidence_fails_closed
 test_portable_timeout_runner_is_used
 test_portable_timeout_preserves_signal_failure
 test_portable_timeout_expires_child
@@ -3952,6 +4006,7 @@ test_session_start_drains_before_inactive_scan
 test_session_start_generation_bound_replay
 test_watcher_runs_inactive_cadence
 test_surfaced_terminal_is_not_replayed
+test_canonical_terminal_snapshot_suppresses_status_replay
 test_postpublication_uncertainty_is_not_replayed
 test_ordinary_terminal_wake_consumption_is_durable
 test_surface_marker_failure_is_retryable

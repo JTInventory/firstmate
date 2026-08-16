@@ -661,11 +661,23 @@ surface_meta_value_unique() {
   ' "$1" 2>/dev/null
 }
 
+surface_snapshot_matches_current() {
+  local task=$1 expected=$2 status_snapshot=$3 current
+  case "$expected" in
+    done:*|failed:*) [ "$expected" = "$status_snapshot" ]; return $? ;;
+    state:\ done\ *|state:\ failed\ *) ;;
+    *) return 1 ;;
+  esac
+  current=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+  case "$current" in *$'\n'*) return 1 ;; esac
+  [ "$current" = "$expected" ]
+}
+
 mark_terminal_surfaced_snapshot() {
   local task=$1 last=$2 spawn_incarnation=$3 tasktmp=$4 window=$5 worktree=$6
   local marker tmp
-  case "$(status_line_verb "$last")" in
-    done|failed) ;;
+  case "$last" in
+    done:*|failed:*|state:\ done\ *|state:\ failed\ *) ;;
     *) return 0 ;;
   esac
   marker=$(_hb_terminal_surfaced_path "$task")
@@ -731,10 +743,11 @@ surface_retry_valid() {
 
 surface_retry_matches_current() {
   local retry=$1 task=$2 last=$3 meta="$STATE/$2.meta" current_spawn saved_spawn
-  local current_tasktmp current_window current_worktree rc
+  local current_tasktmp current_window current_worktree saved_snapshot rc
   surface_retry_valid "$retry" || return 1
   [ "$(surface_meta_value_unique "$retry" task 2>/dev/null)" = "$task" ] || return 1
-  [ "$(surface_meta_value_unique "$retry" snapshot 2>/dev/null)" = "$last" ] || return 1
+  saved_snapshot=$(surface_meta_value_unique "$retry" snapshot 2>/dev/null) || return 1
+  surface_snapshot_matches_current "$task" "$saved_snapshot" "$last" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   saved_spawn=$(surface_meta_value_unique "$retry" spawn_incarnation 2>/dev/null) || return 1
   if current_spawn=$(surface_meta_value_unique "$meta" spawn_incarnation 2>/dev/null); then
@@ -804,16 +817,17 @@ surface_retry_mark_published() {
 
 surface_retry_complete_consumed() {
   local retry=$1 task=$2 last=$3 spawn_incarnation=$4 tasktmp=$5 window=$6 worktree=$7
-  local marker tmp
-  mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
+  local marker tmp snapshot
+  surface_retry_matches_current "$retry" "$task" "$last" || return 2
+  snapshot=$(surface_meta_value_unique "$retry" snapshot 2>/dev/null) || return 2
+  mark_terminal_surfaced_snapshot "$task" "$snapshot" "$spawn_incarnation" \
     "$tasktmp" "$window" "$worktree" || return 2
   marker=$(_hb_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 2
-  if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf '%s' "$snapshot" > "$tmp" || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 2
   fi
-  surface_retry_matches_current "$retry" "$task" "$last" || return 2
   rm -f "$retry" || return 2
   return 0
 }
@@ -860,7 +874,7 @@ surface_retry_ordinary_consumed() {
 
 surface_retry_receipt_consumed() {
   local retry=$1 task=$2 last=$3 wake_key=$4 fp rec suffix outcome expected_incarnation
-  local spawn_incarnation tasktmp window worktree
+  local spawn_incarnation tasktmp window worktree receipt_snapshot saved_snapshot
   case "$wake_key" in
     inactive-outcome:*) fp=${wake_key#inactive-outcome:} ;;
     *) surface_retry_ordinary_consumed "$retry" "$task" "$last" "$wake_key"; return $? ;;
@@ -881,7 +895,10 @@ surface_retry_receipt_consumed() {
     [ "$(surface_meta_value_unique "$rec" task_id 2>/dev/null)" = "$task" ] || return 2
     [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
     [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
-    [ "$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null)" = "$last" ] || continue
+    receipt_snapshot=$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null) || continue
+    saved_snapshot=$(surface_meta_value_unique "$retry" snapshot 2>/dev/null) || return 2
+    [ "$receipt_snapshot" = "$saved_snapshot" ] || continue
+    surface_snapshot_matches_current "$task" "$receipt_snapshot" "$last" || continue
     surface_retry_complete_consumed "$retry" "$task" "$last" "$spawn_incarnation" \
       "$tasktmp" "$window" "$worktree"
     return $?
@@ -1131,7 +1148,7 @@ terminal_surface_marker_current() {
   last=$(last_status_line "$status_file")
   case "$last" in done:*|failed:*) ;; *) return 1 ;; esac
   saved_snapshot=$(surface_meta_value_unique "$marker" snapshot 2>/dev/null) || return 1
-  [ "$saved_snapshot" = "$last" ] || return 1
+  surface_snapshot_matches_current "$task" "$saved_snapshot" "$last" || return 1
   saved_spawn=$(surface_meta_value_unique "$marker" spawn_incarnation 2>/dev/null) || return 1
   if current_spawn=$(surface_meta_value_unique "$meta" spawn_incarnation 2>/dev/null); then
     [ "$saved_spawn" = "$current_spawn" ] || return 1
@@ -1146,7 +1163,7 @@ terminal_surface_marker_current() {
 }
 
 inactive_replay_queued_for_task() {
-  local task=$1 last outcome fp rec expected_incarnation queue_deadline queue_match rc
+  local task=$1 last outcome fp rec receipt_snapshot expected_incarnation queue_deadline queue_match rc
   [ -e "$FM_WAKE_QUEUE" ] || return 1
   [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 2
   last=$(last_status_line "$STATE/$task.status") || return 2
@@ -1191,7 +1208,8 @@ PERL
     [ "$(surface_meta_value_unique "$rec" task_id 2>/dev/null)" = "$task" ] || return 2
     [ "$(surface_meta_value_unique "$rec" incarnation 2>/dev/null)" = "$expected_incarnation" ] || continue
     [ "$(surface_meta_value_unique "$rec" outcome 2>/dev/null)" = "$outcome" ] || continue
-    [ "$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null)" = "$last" ] || continue
+    receipt_snapshot=$(surface_meta_value_unique "$rec" terminal_snapshot 2>/dev/null) || continue
+    surface_snapshot_matches_current "$task" "$receipt_snapshot" "$last" || continue
     return 0
   done
   return 1
