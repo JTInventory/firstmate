@@ -306,6 +306,13 @@ outcome: failed
 EOF
 }
 
+write_run_step_binding() {  # <state> <id> <run-id> <incarnation>
+  local state=$1 id=$2 run_id=$3 incarnation=$4
+  fm_write_meta "$state/.run-step-incarnation-$id" \
+    schema=fm-jt-run-step-incarnation.v1 task_id="$id" run_id="$run_id" \
+    spawn_incarnation="$incarnation" state=active
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -499,6 +506,7 @@ test_terminal_passed() {
   make_repo_on_branch "$d/wt" fm/feat-d
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
+  write_run_step_binding "$d/state" feat-d 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
   local out; out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
@@ -529,6 +537,7 @@ test_terminal_passed_delivery_completed() {
   make_repo_on_branch "$d/wt" fm/feat-dok
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-dok.meta" "window=fm:fm-feat-dok" "worktree=$d/wt" "kind=ship"
+  write_run_step_binding "$d/state" feat-dok 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed_delivery_completed fm/feat-dok)"
   local out; out=$(run_crew_state "$d" feat-dok)
   assert_contains "$out" "state: done" "passed with completed delivery -> done"
@@ -542,6 +551,7 @@ test_terminal_failed() {
   make_repo_on_branch "$d/wt" fm/feat-e
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-e.meta" "window=fm:fm-feat-e" "worktree=$d/wt" "kind=ship"
+  write_run_step_binding "$d/state" feat-e 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-e)"
   local out; out=$(run_crew_state "$d" feat-e)
   assert_contains "$out" "state: failed" "failed run -> failed"
@@ -549,9 +559,9 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-test_terminal_first_observation_persists_binding() {
+test_terminal_first_observation_requires_binding() {
   reset_fakes
-  local d out evidence
+  local d out evidence status
   d=$(new_case terminal-first-observation)
   make_repo_on_branch "$d/wt" fm/feat-terminal-first
   make_fakebin "$d" >/dev/null
@@ -559,15 +569,14 @@ test_terminal_first_observation_persists_binding() {
     "window=fm:fm-feat-terminal-first" "worktree=$d/wt" "kind=ship" \
     "spawn_incarnation=terminal-first-inc"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-terminal-first)"
+  set +e
   out=$(run_crew_state "$d" feat-terminal-first)
-  assert_contains "$out" "state: done" "terminal first observation -> done"
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "terminal first observation was accepted without a binding"
   evidence="$d/state/.run-step-incarnation-feat-terminal-first"
-  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "terminal first observation did not persist binding"
-  [ "$(awk -F= '$1 == "run_id" { print $2 }' "$evidence")" = 01RUN ] \
-    || fail "terminal first observation persisted the wrong run"
-  [ "$(awk -F= '$1 == "spawn_incarnation" { print $2 }' "$evidence")" = terminal-first-inc ] \
-    || fail "terminal first observation persisted the wrong incarnation"
-  pass "terminal first observation persists its lifecycle binding"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "terminal first observation created a binding"
+  pass "terminal first observation requires a lifecycle binding"
 }
 
 test_terminal_candidate_requires_existing_binding() {
@@ -789,6 +798,7 @@ test_dead_window_still_reports_terminal_run_step() {
   make_repo_on_branch "$d/wt" fm/feat-dead-done
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship"
+  write_run_step_binding "$d/state" feat-dead-done 01RUN test-incarnation
   printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-dead-done.status"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
   FM_FAKE_TMUX_MISSING=1   # the crew's window has closed
@@ -1075,7 +1085,7 @@ test_terminal_passed
 test_terminal_passed_delivery_skipped
 test_terminal_passed_delivery_completed
 test_terminal_failed
-test_terminal_first_observation_persists_binding
+test_terminal_first_observation_requires_binding
 test_terminal_candidate_requires_existing_binding
 test_cross_branch_attribution_via_list
 test_cross_branch_attribution_unquoted_run_list

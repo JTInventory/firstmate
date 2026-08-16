@@ -464,7 +464,6 @@ nm_run_head_matches_worktree() {
 }
 
 HAVE_RUN=0
-RUN_SELECTION_SOURCE=none
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -473,7 +472,6 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
-      RUN_SELECTION_SOURCE=current
     else
       # The active-or-most-recent run is for another branch, or its branch name
       # matches but its code identity does not. Inspect bounded recent runs for
@@ -486,7 +484,6 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         run_branch=$(strip_quotes "$(nm_field branch)")
         if [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
           HAVE_RUN=1
-          RUN_SELECTION_SOURCE=candidate
           break
         fi
       done <<< "$candidate_ids"
@@ -616,15 +613,17 @@ if [ "$HAVE_RUN" = 1 ]; then
   run_id=$(strip_quotes "$(nm_field id)")
   incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
   case "$RUN_STATE" in
-    working|parked|paused|done|failed)
-      binding_create=1
-      if [ "$RUN_SELECTION_SOURCE" != current ] && {
-        [ "$RUN_STATE" = done ] || [ "$RUN_STATE" = failed ];
-      }; then
-        binding_create=0
-      fi
+    working|parked|paused)
       [ -n "$run_id" ] && [ -n "$incarnation" ] \
-        && run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" "$binding_create" \
+        && run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" 1 \
+        || {
+          printf '%s\n' 'state: unknown · source: run-step · incarnation binding unavailable' >&2
+          exit 1
+        }
+      ;;
+    done|failed)
+      [ -n "$run_id" ] && [ -n "$incarnation" ] \
+        && run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" 0 \
         || {
           printf '%s\n' 'state: unknown · source: run-step · incarnation binding unavailable' >&2
           exit 1

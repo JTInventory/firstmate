@@ -1942,7 +1942,7 @@ SH
 }
 
 test_ordinary_terminal_wake_consumption_is_durable() {
-  local dir root home fakebin state retry last out
+  local dir root home fakebin state retry last out signal_file seen_file status
   new_case ordinary-terminal-consumed
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1951,7 +1951,6 @@ test_ordinary_terminal_wake_consumption_is_durable() {
   last='done: ordinary terminal consumed'
   printf '%s\n' "$last" > "$state/ordinary-consumed-x1.status"
   prepare_primary_proof "$root" "$home" "$fakebin"
-  prepare_watcher_protocol "$root" "$home" "$state"
   env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
@@ -1970,30 +1969,32 @@ test_ordinary_terminal_wake_consumption_is_durable() {
     bash -c 'cd "$1" || exit 1; . "$1/bin/fm-wake-lib.sh"; fm_wake_append signal "$3" terminal' _ \
     "$root" "$state" ordinary-consumed-x1 \
     || fail "ordinary terminal wake was not queued"
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
-    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    PATH="$fakebin:$PATH" \
-    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-watch.sh"; terminal_signal_suppressed "$2/ordinary-consumed-x1.status"' _ \
-    "$root" "$state" \
-    || fail "ordinary retry probe did not recognize its queued wake"
-  [ "$(receipt_value "$retry" wake_published)" = 1 ] \
-    || fail "ordinary retry probe did not mark its queued wake published"
-  replace_field "$retry" wake_published 2
   drain "$root" "$home" "$fakebin" >/dev/null || fail "ordinary terminal wake drain failed"
   [ -f "$state/.hb-surface-consumed-ordinary-consumed-x1" ] \
     || fail "drain did not persist ordinary wake consumption"
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
-    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    PATH="$fakebin:$PATH" \
-    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-watch.sh"; terminal_signal_suppressed "$2/ordinary-consumed-x1.status"' _ \
-    "$root" "$state" ordinary-consumed-x1 \
-    || fail "ordinary consumed wake was not recognized by watcher"
+  [ ! -s "$state/.wake-queue" ] || fail "ordinary terminal wake drain left its row queued"
+  for signal_file in "$state/ordinary-consumed-x1.status" "$state/ordinary-consumed-x1.turn-ended"; do
+    case "$(uname -s)" in
+      Darwin) seen=$(stat -f '%z:%Fm' "$signal_file") ;;
+      *) seen=$(stat -c '%s:%Y' "$signal_file") ;;
+    esac
+    seen_file="$state/.seen-$(basename "$signal_file" | tr '.' '_')"
+    printf '%s' "$seen" > "$seen_file"
+  done
+  set +e
+  out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_INACTIVE_OUTCOME_SECS=60 \
+    FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
+    FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 timeout 5 "$root/bin/fm-watch.sh" 2>&1)
+  status=$?
+  set -u
+  [ "$status" = 124 ] || fail "watcher did not remain alive while suppressing the consumed wake: $out"
   [ -f "$state/.hb-terminal-surfaced-ordinary-consumed-x1" ] \
-    || fail "ordinary consumed wake did not complete terminal surfacing"
+    || fail "watcher did not complete ordinary consumed wake surfacing"
   [ ! -e "$retry" ] || fail "ordinary consumed retry was not cleared"
   [ ! -e "$state/.hb-surface-consumed-ordinary-consumed-x1" ] \
     || fail "ordinary consumed marker was not cleared"
@@ -4116,6 +4117,11 @@ test_malformed_or_missing_secondmate_route_fails_closed() {
   unset FM_FAKE_CREW_STATE_CHILD_X1
   pass "malformed and missing secondmate parent routes fail closed without chat scraping"
 }
+
+if [ -n "${FM_INACTIVE_TEST_ONLY:-}" ]; then
+  "$FM_INACTIVE_TEST_ONLY"
+  exit $?
+fi
 
 test_done_and_failed_are_replayed_once
 test_run_step_incarnation_evidence_is_persisted_under_task_lock
