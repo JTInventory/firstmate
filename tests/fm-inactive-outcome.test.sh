@@ -1595,8 +1595,57 @@ SH
   pass "run binding rejects stale bridge generations"
 }
 
-test_run_bridge_rolls_back_failed_metadata_binding() {
+test_run_bridge_metadata_stage_failure_preserves_committed_pair() {
   local dir root home fakebin state handoff meta evidence status
+  new_case bridge-metadata-stage
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-metadata-stage"
+  meta="$state/bridge-metadata-stage.meta"
+  evidence="$state/.run-step-incarnation-bridge-metadata-stage"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-metadata-stage worktree="$state/work-bridge-metadata-stage" \
+    project="$state/work-bridge-metadata-stage" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=bound run_id=01STABLE \
+    run_binding_handoff=.run-step-handoff-bridge-metadata-stage
+  mkdir -p "$state/work-bridge-metadata-stage"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-metadata-stage \
+    spawn_incarnation=inc-a state=bound run_id=01STABLE
+  fm_write_meta "$evidence" schema=fm-jt-run-step-incarnation.v1 \
+    task_id=bridge-metadata-stage run_id=01STABLE spawn_incarnation=inc-a state=active
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01STABLE"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+[ "$target" = "${FM_TEST_META_TARGET:?}" ] && exit 91
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-metadata-stage \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_TEST_META_TARGET="$meta" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "metadata staging failure was treated as success"
+  [ "$(receipt_value "$meta" run_binding_state)" = bound ] \
+    || fail "metadata staging failure changed the committed metadata state"
+  [ "$(receipt_value "$evidence" state)" = active ] \
+    || fail "metadata staging failure replaced committed active evidence"
+  pass "run binding metadata staging failure preserves the committed pair"
+}
+
+test_run_bridge_rolls_back_failed_metadata_binding() {
+  local dir root home fakebin state handoff meta evidence meta_count status
   new_case bridge-metadata-rollback
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -1604,6 +1653,7 @@ test_run_bridge_rolls_back_failed_metadata_binding() {
   handoff="$state/.run-step-handoff-bridge-rollback"
   meta="$state/bridge-rollback.meta"
   evidence="$state/.run-step-incarnation-bridge-rollback"
+  meta_count="$dir/meta-mv-count"
   fm_write_meta "$meta" \
     window=tmux:fm-bridge-rollback worktree="$state/work-bridge-rollback" \
     project="$state/work-bridge-rollback" harness=echo kind=ship mode=no-mistakes \
@@ -1622,7 +1672,10 @@ SH
 set -u
 target="${!#}"
 if [ "$target" = "${FM_TEST_META_TARGET:-}" ]; then
-  exit 91
+  count=$(cat "${FM_TEST_META_COUNT:?}" 2>/dev/null || printf '0')
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_TEST_META_COUNT"
+  [ "$count" = 2 ] && exit 91
 fi
 exec /usr/bin/mv "$@"
 SH
@@ -1631,7 +1684,8 @@ SH
   env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
     FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-rollback \
     FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
-    FM_RUN_BINDING_TMP="$dir" FM_TEST_META_TARGET="$meta" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    FM_RUN_BINDING_TMP="$dir" FM_TEST_META_TARGET="$meta" FM_TEST_META_COUNT="$meta_count" \
+    FM_SESSION_LOCK_BOOTSTRAP=1 \
     "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
     > "$dir/bridge.out" 2>&1
   status=$?
@@ -1639,11 +1693,65 @@ SH
   [ "$status" -ne 0 ] || fail "metadata publication failure was treated as success"
   [ "$(receipt_value "$evidence" state)" = staged ] \
     || fail "metadata publication failure did not leave non-terminal evidence"
-  [ "$(receipt_value "$meta" run_binding_state)" = pending ] \
-    || fail "metadata publication failure changed the pending state"
-  [ "$(grep -c '^run_id=' "$meta" 2>/dev/null || true)" = 0 ] \
-    || fail "metadata publication failure left a stale run id"
-  pass "run binding rolls back evidence when metadata publication fails"
+  [ "$(receipt_value "$meta" run_binding_state)" = staged ] \
+    || fail "metadata publication failure did not leave staged metadata"
+  [ "$(receipt_value "$meta" run_id)" = 01ROLLBACKMETA ] \
+    || fail "metadata publication failure lost the recoverable run id"
+  pass "run binding rolls back to staged state when metadata publication fails"
+}
+
+test_run_bridge_activation_failure_is_recoverable() {
+  local dir root home fakebin state handoff meta evidence count_file status
+  new_case bridge-activation-rollback
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-activation"
+  meta="$state/bridge-activation.meta"
+  evidence="$state/.run-step-incarnation-bridge-activation"
+  count_file="$dir/evidence-mv-count"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-activation worktree="$state/work-bridge-activation" \
+    project="$state/work-bridge-activation" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-activation
+  mkdir -p "$state/work-bridge-activation"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-activation \
+    spawn_incarnation=inc-a state=pending
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01ACTIVATIONFAIL"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+if [ "$target" = "${FM_TEST_EVIDENCE_TARGET:-}" ]; then
+  count=$(cat "${FM_TEST_EVIDENCE_COUNT:?}" 2>/dev/null || printf '0')
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_TEST_EVIDENCE_COUNT"
+  [ "$count" = 2 ] && exit 91
+fi
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-activation \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_TEST_EVIDENCE_TARGET="$evidence" \
+    FM_TEST_EVIDENCE_COUNT="$count_file" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "activation failure was treated as success"
+  [ "$(receipt_value "$meta" run_binding_state)" = staged ] \
+    || fail "activation failure left metadata bound"
+  [ "$(receipt_value "$evidence" state)" = staged ] \
+    || fail "activation failure left terminal evidence active"
+  pass "run binding activation failure leaves a recoverable staged state"
 }
 
 test_pane_idle_reclaim_advances_malformed_cursor() {
@@ -4294,7 +4402,9 @@ test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
 test_spawn_publishes_incarnation_token
 test_run_bridge_rejects_relaunched_generation
+test_run_bridge_metadata_stage_failure_preserves_committed_pair
 test_run_bridge_rolls_back_failed_metadata_binding
+test_run_bridge_activation_failure_is_recoverable
 test_pane_idle_reclaim_advances_malformed_cursor
 test_session_start_drains_before_inactive_scan
 test_session_start_generation_bound_replay

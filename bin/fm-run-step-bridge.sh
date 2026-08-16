@@ -57,12 +57,13 @@ metadata_generation_valid() {
   state=$(awk -F= '$1 == "run_binding_state" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
   handoff=$(awk -F= '$1 == "run_binding_handoff" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
   [ "$incarnation" = "$FM_RUN_BINDING_INCARNATION" ] || return 1
-  case "$state" in pending|bound) ;; *) return 1 ;; esac
+  case "$state" in pending|staged|bound) ;; *) return 1 ;; esac
   [ "$handoff" = "${FM_RUN_BINDING_HANDOFF##*/}" ]
 }
 
-meta_bind_run_id() {
-  local run_id=$1 meta tmp status=0 owner acquired=0
+meta_set_run_binding_state() {
+  local desired_state=$1 run_id=$2 meta tmp status=0 owner acquired=0
+  case "$desired_state" in staged|bound) ;; *) return 1 ;; esac
   meta="$STATE/$FM_RUN_BINDING_TASK.meta"
   owner=${FM_TASK_LOCK_OWNER:-}
   if [ -n "$owner" ] && fm_lock_points_to_owner "$FM_TASK_LOCK_PATH" "$owner"; then
@@ -78,8 +79,8 @@ meta_bind_run_id() {
   else
     tmp=$(mktemp "$STATE/.${FM_RUN_BINDING_TASK}.meta-run-binding.XXXXXX") || status=1
     if [ "$status" = 0 ]; then
-      if ! awk -v run_id="$run_id" '
-        /^run_binding_state=/ { print "run_binding_state=bound"; print "run_id=" run_id; found=1; next }
+      if ! awk -v run_id="$run_id" -v desired_state="$desired_state" '
+        /^run_binding_state=/ { print "run_binding_state=" desired_state; print "run_id=" run_id; found=1; next }
         /^run_id=/ { next }
         { print }
         END { exit(found ? 0 : 1) }
@@ -93,6 +94,14 @@ meta_bind_run_id() {
     fm_lock_release "$FM_TASK_LOCK_PATH" || status=1
   fi
   return "$status"
+}
+
+meta_stage_run_id() {
+  meta_set_run_binding_state staged "$1"
+}
+
+meta_bind_run_id() {
+  meta_set_run_binding_state bound "$1"
 }
 
 publish_run_id() {
@@ -117,13 +126,15 @@ publish_run_id() {
     fi
   fi
   if [ "$status" = 0 ]; then
-    fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION" || status=1
-  fi
-  if [ "$status" = 0 ]; then
-    if ! meta_bind_run_id "$run_id"; then
+    if ! meta_stage_run_id "$run_id"; then
+      status=1
+    elif ! fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
       status=1
     elif ! fm_run_step_binding_activate "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
       status=1
+    elif ! meta_bind_run_id "$run_id"; then
+      status=1
+      fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION" || status=1
     fi
   fi
   if [ "$acquired" = 1 ]; then
