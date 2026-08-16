@@ -874,6 +874,28 @@ close($fh) or exit 1;
 PERL
 }
 
+fm_wake_queue_offset_valid() {
+  local queue=$1 offset=$2
+  [ -f "$queue" ] && [ ! -L "$queue" ] || return 1
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  perl - "$queue" "$offset" <<'PERL'
+use strict;
+use warnings;
+my ($path, $offset) = @ARGV;
+open(my $fh, '<', $path) or exit 1;
+binmode($fh);
+seek($fh, 0, 2) or exit 1;
+my $size = tell($fh);
+defined($size) && $offset <= $size or exit 1;
+if ($offset > 0) {
+  seek($fh, $offset - 1, 0) or exit 1;
+  my $byte = getc($fh);
+  defined($byte) && $byte eq "\n" or exit 1;
+}
+close($fh) or exit 1;
+PERL
+}
+
 fm_wake_queue_offset_after_rows() {
   local queue=$1 offset=$2 rows=$3
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac

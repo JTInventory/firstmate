@@ -20,7 +20,16 @@ DRAIN_OFFSET=0
 DRAIN_BATCH_COUNT=0
 DRAIN_CURSOR=
 DRAIN_CURRENT_RETAINED=0
+DRAIN_CURRENT_OFFSET=0
+DRAIN_RETAINED_ANY=0
+DRAIN_RETAINED_OFFSET=0
 DRAIN_BATCH_ROWS=${FM_WAKE_DRAIN_BATCH_ROWS:-16}
+DRAIN_RESTORE_MANIFEST="$STATE/.wake-queue.restore"
+DRAIN_RESTORE_PENDING=false
+DRAIN_RESTORE_OFFSET=0
+DRAIN_RESTORE_SOURCE=
+FM_WAKE_DRAIN_RESUMED_SOURCE=0
+export FM_WAKE_DRAIN_RESUMED_SOURCE
 case "$DRAIN_BATCH_ROWS" in
   ''|*[!0-9]*|0) DRAIN_BATCH_ROWS=16 ;;
 esac
@@ -78,7 +87,14 @@ present_inactive_row() {
   if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ]; then
     IFS=$(printf '\t') read -r _epoch _seq _kind _queued_key payload <<< "$row"
     [ "$_queued_key" = "$key" ] || return 3
-    fm_wake_append_if_absent_locked retained check "$key" "$payload" || return 3
+    if [ "$DRAIN_RESUMING" = true ]; then
+      if [ "$DRAIN_RETAINED_ANY" = 0 ]; then
+        DRAIN_RETAINED_OFFSET=$DRAIN_CURRENT_OFFSET
+        DRAIN_RETAINED_ANY=1
+      fi
+    else
+      fm_wake_append_if_absent_locked retained check "$key" "$payload" || return 3
+    fi
     DRAIN_CURRENT_RETAINED=1
   fi
   trap - INT TERM HUP
@@ -170,14 +186,65 @@ assert_watcher_liveness() {
 }
 
 restore_unprocessed_rows() {
-  local start=$1 restored
-  restored=$(mktemp "$STATE/.wake-queue.unprocessed.XXXXXX") || return 1
-  [ -f "$restored" ] && [ ! -L "$restored" ] || { rm -f "$restored"; return 1; }
-  awk -v start="$start" 'NR >= start { print }' "$DRAIN_DEDUPED" > "$restored" || {
-    rm -f "$restored"
+  local start=$1 offset
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  offset=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" 0 "$((start - 1))") || return 1
+  DRAIN_RESTORE_OFFSET=$offset
+  DRAIN_RESTORE_SOURCE=$DRAIN_DEDUPED
+  restore_pending_write "$DRAIN_DEDUPED" "$offset" || {
+    DRAIN_RESTORE_SOURCE=
     return 1
   }
-  DRAIN_RESTORE=$restored
+  DRAIN_RESTORE_PENDING=true
+  rm -f "$DRAIN_TMP" || return 1
+  DRAIN_TMP=
+}
+
+restore_pending_write() {
+  local source=$1 offset=$2 base tmp
+  base=${source##*/}
+  [ "$source" = "$STATE/$base" ] || return 1
+  case "$base" in
+    .wake-queue.deduped.*) ;;
+    *) return 1 ;;
+  esac
+  case "${base##*.}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  [ ! -L "$DRAIN_RESTORE_MANIFEST" ] || return 1
+  tmp=$(mktemp "$DRAIN_RESTORE_MANIFEST.XXXXXX") || return 1
+  if ! printf 'schema=fm-wake-queue-restore.v1\nsource=%s\noffset=%s\n' \
+    "$base" "$offset" > "$tmp" || [ -L "$DRAIN_RESTORE_MANIFEST" ] \
+    || ! mv -f "$tmp" "$DRAIN_RESTORE_MANIFEST"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+restore_pending_read() {
+  local schema source offset base
+  [ -f "$DRAIN_RESTORE_MANIFEST" ] && [ ! -L "$DRAIN_RESTORE_MANIFEST" ] || return 1
+  schema=$(awk -F= '$1 == "schema" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' \
+    "$DRAIN_RESTORE_MANIFEST" 2>/dev/null) || return 1
+  [ "$schema" = fm-wake-queue-restore.v1 ] || return 1
+  source=$(awk -F= '$1 == "source" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' \
+    "$DRAIN_RESTORE_MANIFEST" 2>/dev/null) || return 1
+  offset=$(awk -F= '$1 == "offset" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' \
+    "$DRAIN_RESTORE_MANIFEST" 2>/dev/null) || return 1
+  case "$source" in
+    .wake-queue.deduped.*) ;;
+    *) return 1 ;;
+  esac
+  case "${source##*.}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  base="$STATE/$source"
+  [ -f "$base" ] && [ ! -L "$base" ] || return 1
+  fm_wake_queue_offset_valid "$base" "$offset" || return 1
+  DRAIN_RESTORE_SOURCE=$base
+  DRAIN_RESTORE_OFFSET=$offset
 }
 
 drain_restore_remaining() {
@@ -188,9 +255,24 @@ drain_restore_remaining() {
 drain_batch_stop() {
   local next_offset
   if [ "$DRAIN_LOCK_HELD" = true ]; then
-    if [ "$DRAIN_RESUMING" = true ]; then
-      next_offset=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
-        "$DRAIN_OFFSET" "$DRAIN_BATCH_COUNT") || return 1
+    if [ "$DRAIN_RESTORE_PENDING" = true ]; then
+      if [ "$DRAIN_RETAINED_ANY" = 1 ]; then
+        next_offset=$DRAIN_RETAINED_OFFSET
+      else
+        next_offset=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
+          "$DRAIN_OFFSET" "$DRAIN_BATCH_COUNT") || return 1
+      fi
+      restore_pending_write "$DRAIN_DEDUPED" "$next_offset" || return 1
+      DRAIN_OFFSET=$next_offset
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
+      DRAIN_LOCK_HELD=false
+    elif [ "$DRAIN_RESUMING" = true ]; then
+      if [ "$DRAIN_RETAINED_ANY" = 1 ]; then
+        next_offset=$DRAIN_RETAINED_OFFSET
+      else
+        next_offset=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
+          "$DRAIN_OFFSET" "$DRAIN_BATCH_COUNT") || return 1
+      fi
       fm_wake_queue_cursor_write "$next_offset" || return 1
       DRAIN_OFFSET=$next_offset
       fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
@@ -228,7 +310,9 @@ cleanup() {
     fi
   fi
   if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] && [ "$DRAIN_LOCK_HELD" = true ]; then
-    if [ -n "$DRAIN_RESTORE" ] && [ -e "$DRAIN_RESTORE" ]; then
+    if [ "$DRAIN_RESTORE_PENDING" = true ]; then
+      :
+    elif [ -n "$DRAIN_RESTORE" ] && [ -e "$DRAIN_RESTORE" ]; then
       fm_wake_restore_queue "$DRAIN_RESTORE" || restore_status=1
     elif [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ]; then
       fm_wake_restore_queue "$DRAIN_TMP" || restore_status=1
@@ -238,7 +322,8 @@ cleanup() {
     [ -z "$DRAIN_TMP" ] || rm -f "$DRAIN_TMP" || true
     [ -z "$DRAIN_RESTORE" ] || rm -f "$DRAIN_RESTORE" || true
   fi
-  if [ -n "$DRAIN_DEDUPED" ] && [ "$DRAIN_DEDUPED" != "$FM_WAKE_QUEUE" ]; then
+  if [ "$DRAIN_RESTORE_PENDING" != true ] && [ -n "$DRAIN_DEDUPED" ] \
+    && [ "$DRAIN_DEDUPED" != "$FM_WAKE_QUEUE" ]; then
     rm -f "$DRAIN_DEDUPED" || true
   fi
   if [ "$DRAIN_LOCK_HELD" = true ]; then
@@ -258,17 +343,28 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
 DRAIN_LOCK_HELD=true
 
 DRAIN_CURSOR=$(fm_wake_queue_cursor_path)
-if [ -e "$DRAIN_CURSOR" ] || [ -L "$DRAIN_CURSOR" ]; then
+if [ -e "$DRAIN_RESTORE_MANIFEST" ] || [ -L "$DRAIN_RESTORE_MANIFEST" ]; then
+  restore_pending_read || {
+    echo "error: wake restoration manifest is invalid; refusing to drain" >&2
+    exit 1
+  }
+  DRAIN_RESTORE_PENDING=true
+  DRAIN_RESUMING=true
+  FM_WAKE_DRAIN_RESUMED_SOURCE=1
+  DRAIN_DEDUPED=$DRAIN_RESTORE_SOURCE
+  DRAIN_OFFSET=$DRAIN_RESTORE_OFFSET
+elif [ -e "$DRAIN_CURSOR" ] || [ -L "$DRAIN_CURSOR" ]; then
   fm_wake_queue_cursor_read || {
     echo "error: wake queue cursor is invalid; refusing to drain" >&2
     exit 1
   }
   DRAIN_RESUMING=true
+  FM_WAKE_DRAIN_RESUMED_SOURCE=1
   DRAIN_OFFSET=$FM_WAKE_QUEUE_CURSOR_OFFSET
   DRAIN_DEDUPED=$FM_WAKE_QUEUE
 fi
 
-if [ ! -s "$FM_WAKE_QUEUE" ]; then
+if [ "$DRAIN_RESTORE_PENDING" != true ] && [ ! -s "$FM_WAKE_QUEUE" ]; then
   rm -f "$DRAIN_CURSOR"
   : > "$FM_WAKE_QUEUE"
   assert_watcher_liveness
@@ -303,6 +399,8 @@ fi
 while IFS= read -r drain_row || [ -n "$drain_row" ]; do
   drain_line=$((drain_line + 1))
   DRAIN_BATCH_COUNT=$((DRAIN_BATCH_COUNT + 1))
+  DRAIN_CURRENT_OFFSET=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
+    "$DRAIN_OFFSET" "$((DRAIN_BATCH_COUNT - 1))") || exit 1
   IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$drain_row"
   case "$_key" in
     inactive-outcome:*)
@@ -336,9 +434,11 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
         4)
           if [ "$DRAIN_RESUMING" != true ]; then
             drain_restore_remaining "$drain_line" || exit 1
-            fm_wake_restore_queue "$DRAIN_RESTORE" || exit 1
-            rm -f "$DRAIN_RESTORE"
-            DRAIN_RESTORE=
+            if [ "$DRAIN_RESTORE_PENDING" != true ]; then
+              fm_wake_restore_queue "$DRAIN_RESTORE" || exit 1
+              rm -f "$DRAIN_RESTORE"
+              DRAIN_RESTORE=
+            fi
           fi
           exit 0
           ;;
@@ -385,10 +485,21 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
   fi
 done <&7
 exec 7<&-
-if [ "$DRAIN_RESUMING" = true ]; then
-  if [ "$DRAIN_CURRENT_RETAINED" = 1 ]; then
-    next_offset=$(fm_wake_queue_offset_after_rows "$DRAIN_DEDUPED" \
-      "$DRAIN_OFFSET" "$DRAIN_BATCH_COUNT") || exit 1
+if [ "$DRAIN_RESTORE_PENDING" = true ]; then
+  if [ "$DRAIN_RETAINED_ANY" = 1 ]; then
+    drain_batch_stop
+    batch_status=$?
+    [ "$batch_status" = 0 ] || [ "$batch_status" = 3 ] || exit "$batch_status"
+    exit "$batch_status"
+  fi
+  rm -f "$DRAIN_RESTORE_MANIFEST" || exit 1
+  rm -f "$DRAIN_DEDUPED" || exit 1
+  DRAIN_DEDUPED=
+  DRAIN_RESTORE_SOURCE=
+  DRAIN_RESTORE_PENDING=false
+elif [ "$DRAIN_RESUMING" = true ]; then
+  if [ "$DRAIN_RETAINED_ANY" = 1 ]; then
+    next_offset=$DRAIN_RETAINED_OFFSET
     fm_wake_queue_cursor_write "$next_offset" || exit 1
   else
     : > "$FM_WAKE_QUEUE" || exit 1

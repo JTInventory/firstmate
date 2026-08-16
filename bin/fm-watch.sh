@@ -294,6 +294,18 @@ window_kind() {
   echo unknown
 }
 
+window_backend_from_meta() {
+  local meta=$1 backend_count backend
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  backend_count=$(grep -c '^backend=' "$meta" 2>/dev/null || true)
+  case "$backend_count" in
+    0) printf 'tmux'; return 0 ;;
+    1) backend=$(grep '^backend=' "$meta" | cut -d= -f2-) || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$backend" in tmux|herdr) printf '%s' "$backend" ;; *) return 1 ;; esac
+}
+
 window_backend() {  # <window>
   local w=$1 deadline_ms=${2:-} meta
   if [ -n "$deadline_ms" ]; then
@@ -305,13 +317,12 @@ window_backend() {  # <window>
     if [ -z "$meta" ]; then
       return 1
     fi
-    case "$(grep '^backend=' "$meta" | cut -d= -f2- || true)" in
-      tmux|herdr) grep '^backend=' "$meta" | cut -d= -f2-; return 0 ;;
-      *) return 1 ;;
-    esac
+    window_backend_from_meta "$meta"
+    return $?
   fi
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
-  [ -n "$meta" ] && fm_backend_of_meta "$meta" || printf 'tmux'
+  [ -n "$meta" ] || return 1
+  window_backend_from_meta "$meta"
 }
 
 recorded_windows() {
@@ -767,6 +778,20 @@ surface_retry_receipt_consumed() {
   return 1
 }
 
+surface_retry_wake_state() {
+  local wake_key=$1 status
+  [ -e "$FM_WAKE_QUEUE" ] || return 1
+  [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 2
+  if awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
+      "$FM_WAKE_QUEUE" 2>/dev/null; then
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" = 1 ] && return 1
+  return 2
+}
+
 surface_retry_published_current() {
   local retry=$1 task=$2 last=$3 wake_key=$4 published
   if [ -L "$retry" ] || [ -e "$retry" ]; then
@@ -780,22 +805,22 @@ surface_retry_published_current() {
   case "$published" in
     1) return 0 ;;
     2)
-      if [ ! -f "$FM_WAKE_QUEUE" ] || [ ! -L "$FM_WAKE_QUEUE" ] \
-        || ! awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
-          "$FM_WAKE_QUEUE" 2>/dev/null; then
-        surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"
-        return $?
-      fi
-      surface_retry_mark_published "$task" "$last" "$wake_key" || return 2
-      return 0
+      surface_retry_wake_state "$wake_key"
+      case "$?" in
+        0) surface_retry_mark_published "$task" "$last" "$wake_key" || return 2; return 0 ;;
+        1) surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"; return $? ;;
+        *) return 2 ;;
+      esac
       ;;
     0) ;;
     *) return 2 ;;
   esac
-  [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
-  awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
-    "$FM_WAKE_QUEUE" 2>/dev/null || return 1
-  surface_retry_mark_published "$task" "$last" "$wake_key" || return 2
+  surface_retry_wake_state "$wake_key"
+  case "$?" in
+    0) surface_retry_mark_published "$task" "$last" "$wake_key" || return 2; return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 surface_hash_text() {
@@ -850,16 +875,15 @@ surface_retry_repair() {
       1) ;;
       2)
         wake_key=$(surface_meta_value_unique "$retry" wake_key 2>/dev/null) || { status=1; continue; }
-        if ! [ -f "$FM_WAKE_QUEUE" ] || [ ! -e "$FM_WAKE_QUEUE" ] \
-          || ! awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-          surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"
-          case "$?" in
-            0) continue ;;
-            1) continue ;;
-            *) status=1; continue ;;
-          esac
-        fi
-        surface_retry_mark_published "$task" "$last" "$wake_key" || { status=1; continue; }
+        surface_retry_wake_state "$wake_key"
+        case "$?" in
+          0) surface_retry_mark_published "$task" "$last" "$wake_key" || { status=1; continue; } ;;
+          1)
+            surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"
+            case "$?" in 0|1) continue ;; *) status=1; continue ;; esac
+            ;;
+          *) status=1; continue ;;
+        esac
         ;;
       0) continue ;;
       *) status=1; continue ;;
@@ -950,7 +974,7 @@ surface_signal_transaction() {
     if [ "$terminal" = 1 ]; then
       surface_retry_write "$task" "$last" "$task" 2 || { status=1; break; }
     fi
-    if ! fm_wake_append_locked signal "$(basename "$f")" "$reason"; then
+    if ! fm_wake_append_locked signal "$task" "$reason"; then
       status=1
       break
     fi

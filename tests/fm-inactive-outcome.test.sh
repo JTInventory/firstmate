@@ -297,10 +297,24 @@ receipt_count() {
 }
 
 queue_count() {
-  local state=$1
-  [ -f "$state/.wake-queue" ] || { printf '0'; return 0; }
-  awk -F '\t' '$3 == "check" && $4 ~ /^inactive-outcome:/ { n++ } END { print n + 0 }' \
-    "$state/.wake-queue" 2>/dev/null
+  local state=$1 count=0 source offset suffix_count
+  if [ -f "$state/.wake-queue" ]; then
+    count=$(awk -F '\t' '$3 == "check" && $4 ~ /^inactive-outcome:/ { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null)
+  fi
+  if [ -f "$state/.wake-queue.restore" ]; then
+    source=$(awk -F= '$1 == "source" { print $2; exit }' "$state/.wake-queue.restore")
+    offset=$(awk -F= '$1 == "offset" { print $2; exit }' "$state/.wake-queue.restore")
+    if [ -f "$state/$source" ]; then
+      suffix_count=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$ROOT" \
+        FM_HOME="$CASE_HOME" FM_STATE_OVERRIDE="$state" bash -c \
+        '. "$1/bin/fm-wake-lib.sh"; fm_wake_queue_stream_from_offset "$2" "$3"' _ \
+        "$ROOT" "$state/$source" "$offset" | \
+        awk -F '\t' '$3 == "check" && $4 ~ /^inactive-outcome:/ { n++ } END { print n + 0 }')
+      count=$((count + suffix_count))
+    fi
+  fi
+  printf '%s' "$count"
 }
 
 test_done_and_failed_are_replayed_once() {
@@ -537,7 +551,7 @@ SH
 }
 
 test_ack_recomputes_fingerprint_from_receipt_fields() {
-  local dir root home fakebin state rec fingerprint field tampered
+  local dir root home fakebin state rec fingerprint field tampered deduped offset remainder
   for field in task_id incarnation outcome terminal_snapshot kind fingerprint; do
     new_case "fingerprint-binding-$field"
     dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
@@ -560,7 +574,22 @@ test_ack_recomputes_fingerprint_from_receipt_fields() {
       fail "drain accepted a receipt whose $field no longer matched its fingerprint"
     fi
     [ -f "$rec" ] || fail "$field fingerprint mismatch removed the pending receipt"
-    [ "$(queue_count "$state")" = 1 ] || fail "$field fingerprint mismatch did not preserve the wake for retry"
+    [ -f "$state/.wake-queue.restore" ] \
+      || fail "$field fingerprint mismatch did not persist its restore boundary"
+    deduped=
+    for candidate in "$state"/.wake-queue.deduped.*; do
+      [ -f "$candidate" ] || continue
+      deduped=$candidate
+      break
+    done
+    [ -n "$deduped" ] || fail "$field fingerprint mismatch did not retain its durable source"
+    offset=$(awk -F= '$1 == "offset" { print $2; exit }' "$state/.wake-queue.restore")
+    remainder=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" bash -c \
+      '. "$1/bin/fm-wake-lib.sh"; fm_wake_queue_stream_from_offset "$2" "$3"' _ \
+      "$ROOT" "$deduped" "$offset")
+    [ "$(printf '%s\n' "$remainder" | awk -F '\t' -v wanted="inactive-outcome:$fingerprint" '$4 == wanted { n++ } END { print n + 0 }')" = 1 ] \
+      || fail "$field fingerprint mismatch did not preserve its wake for retry"
     if [ "$field" = fingerprint ]; then
       [ "$(receipt_value "$rec" fingerprint)" = "$tampered" ] || fail "$field fixture did not retain its tampered serialized value"
     else
@@ -811,7 +840,7 @@ test_direct_drain_finalizes_after_successful_output() {
 }
 
 test_standalone_drain_refuses_inactive_ack() {
-  local dir root home fakebin state fingerprint row
+  local dir root home fakebin state fingerprint row deduped offset remainder
   new_case standalone-no-generation
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -826,7 +855,20 @@ test_standalone_drain_refuses_inactive_ack() {
   fi
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "standalone drain removed the pending receipt"
   [ "$(queue_count "$state")" = 1 ] || fail "standalone drain removed the wake row"
-  grep -F "$row" "$state/.wake-queue" >/dev/null || fail "standalone drain did not restore the wake row"
+  [ -f "$state/.wake-queue.restore" ] || fail "standalone drain did not persist its restore boundary"
+  deduped=
+  for candidate in "$state"/.wake-queue.deduped.*; do
+    [ -f "$candidate" ] || continue
+    deduped=$candidate
+    break
+  done
+  [ -n "$deduped" ] || fail "standalone drain did not retain its durable source"
+  offset=$(awk -F= '$1 == "offset" { print $2; exit }' "$state/.wake-queue.restore")
+  remainder=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_queue_stream_from_offset "$2" "$3"' _ \
+    "$ROOT" "$deduped" "$offset")
+  [ "$remainder" = "$row" ] || fail "standalone drain did not retain the wake suffix"
   unset FM_FAKE_CREW_STATE_STANDALONE_X1
   pass "standalone drain refuses inactive acknowledgement"
 }
@@ -1746,6 +1788,17 @@ test_ordinary_terminal_wake_consumption_is_durable() {
     bash -c 'cd "$1" || exit 1; . "$1/bin/fm-wake-lib.sh"; fm_wake_append signal "$3" terminal' _ \
     "$root" "$state" ordinary-consumed-x1 \
     || fail "ordinary terminal wake was not queued"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    _FM_WORKER_ISOLATION_SNAPSHOT_READY=0 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" \
+    bash -c 'cd "$1" || exit 1; . "$1/bin/fm-watch.sh"; terminal_signal_suppressed "$2/ordinary-consumed-x1.status"' _ \
+    "$root" "$state" \
+    || fail "ordinary retry probe did not recognize its queued wake"
+  [ "$(receipt_value "$retry" wake_published)" = 1 ] \
+    || fail "ordinary retry probe did not mark its queued wake published"
+  replace_field "$retry" wake_published 2
   drain "$root" "$home" "$fakebin" >/dev/null || fail "ordinary terminal wake drain failed"
   [ -f "$state/.hb-surface-consumed-ordinary-consumed-x1" ] \
     || fail "drain did not persist ordinary wake consumption"
@@ -1866,11 +1919,16 @@ SH
 }
 
 test_legacy_metadata_uses_stable_fallback() {
-  local dir root home fakebin state rec incarnation
+  local dir root home fakebin state rec incarnation tmp
   new_case legacy-fallback
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   write_legacy_meta "$state" legacy-x1
+  tmp=$(mktemp "$state/.legacy-meta.XXXXXX") || fail "legacy metadata fixture could not be staged"
+  awk -F= '$1 != "backend"' "$state/legacy-x1.meta" > "$tmp" \
+    || fail "legacy metadata backend could not be removed"
+  mv -f "$tmp" "$state/legacy-x1.meta"
+  set_old_mtime "$state/legacy-x1.meta"
   export FM_FAKE_CREW_STATE_LEGACY_X1='state: done · source: pane · legacy quiet'
   scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "legacy metadata scan failed"
   rec=$(direct_first_file "$state/terminal-outcomes" '*.pending')
@@ -3529,7 +3587,7 @@ SH
 }
 
 test_drain_restores_only_unprocessed_rows() {
-  local dir root home fakebin state first second
+  local dir root home fakebin state first second deduped offset remainder
   new_case drain-rollback
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -3551,11 +3609,60 @@ test_drain_restores_only_unprocessed_rows() {
   [ -e "$state/terminal-outcomes/$first.presented" ] || fail "presented receipt was not acknowledged"
   [ ! -e "$state/terminal-outcomes/$first.pending" ] || fail "presented receipt remained pending"
   [ -e "$state/terminal-outcomes/$second.pending" ] || fail "failed receipt was lost"
-  [ "$(awk -F '\t' '$4 == "inactive-outcome:'"$first"'" { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
-    || fail "already-presented receipt was requeued"
-  [ "$(awk -F '\t' '$4 == "inactive-outcome:'"$second"'" { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
-    || fail "unprocessed receipt was not requeued"
-  pass "drain rollback preserves only unprocessed inactive outcomes"
+  [ -f "$state/.wake-queue.restore" ] || fail "drain rollback did not persist its restore boundary"
+  deduped=
+  for candidate in "$state"/.wake-queue.deduped.*; do
+    [ -f "$candidate" ] || continue
+    deduped=$candidate
+    break
+  done
+  [ -n "$deduped" ] || fail "drain rollback did not retain its deduplicated source"
+  offset=$(awk -F= '$1 == "offset" { print $2; exit }' "$state/.wake-queue.restore")
+  remainder=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_queue_stream_from_offset "$2" "$3"' _ \
+    "$ROOT" "$deduped" "$offset")
+  [ "$(printf '%s\n' "$remainder" | awk -F '\t' -v wanted="inactive-outcome:$second" \
+    '$4 == wanted && $5 == "second" { n++ } END { print n + 0 }')" = 1 ] \
+    || fail "drain rollback did not retain only the unprocessed suffix"
+  [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" = 0 ] \
+    || fail "drain rollback rewrote the live queue while persisting its suffix"
+  [ "$(direct_file_count "$state" '.wake-queue.unprocessed.*')" = 0 ] \
+    || fail "drain rollback created an unbounded suffix copy"
+  pass "drain rollback persists a bounded unprocessed suffix"
+}
+
+test_deferred_claim_retains_row_beyond_resume_cursor() {
+  local dir root home fakebin state fingerprint row offset
+  new_case deferred-resume-cursor
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  fingerprint=$(receipt_fingerprint 'deferred-resume-x1|deferred-resume-inc|done|state: done · source: pane · deferred resume')
+  mkdir -p "$state/terminal-outcomes"
+  fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
+    schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id=deferred-resume-x1 \
+    incarnation=deferred-resume-inc outcome=done terminal_source=pane \
+    terminal_snapshot='state: done · source: pane · deferred resume' kind=ship
+  row=$'1\t1\tcheck\tinactive-outcome:'"$fingerprint"$'\tdeferred resume row'
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+      status=0
+      fm_wake_queue_cursor_write 0 || status=$?
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+      exit "$status"
+    ' _ "$ROOT" || fail "deferred resume cursor fixture could not be written"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
+  drain "$root" "$home" "$fakebin" >"$dir/deferred-resume.out" \
+    || fail "deferred resume drain failed"
+  offset=$(awk -F= '$1 == "offset" { print $2; exit }' "$state/.wake-queue.cursor")
+  [ "$offset" = 0 ] || fail "deferred inactive row cursor advanced past the unacknowledged claim"
+  [ "$(awk -F '\t' -v wanted="inactive-outcome:$fingerprint" '$4 == wanted { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
+    || fail "deferred inactive row was not retained for replay"
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
+  pass "deferred inactive rows remain durable beyond resume cursors"
 }
 
 test_malformed_or_missing_secondmate_route_fails_closed() {
@@ -3693,4 +3800,5 @@ test_failed_marked_send_restores_record_on_route_cleanup_failure
 test_failed_concurrent_send_discards_only_new_record
 test_failed_marked_send_discards_never_bound_record
 test_drain_restores_only_unprocessed_rows
+test_deferred_claim_retains_row_beyond_resume_cursor
 test_malformed_or_missing_secondmate_route_fails_closed

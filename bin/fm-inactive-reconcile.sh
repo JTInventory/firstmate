@@ -664,8 +664,14 @@ is_secondmate_home() {
 }
 
 herdr_identity_allowed() {  # <meta>
-  local meta=$1 backend session window
-  backend=$(meta_value_unique "$meta" backend) || return 1
+  local meta=$1 backend session window rc
+  if backend=$(meta_value_unique "$meta" backend); then
+    :
+  else
+    rc=$?
+    [ "$rc" = 1 ] || return 1
+    backend=tmux
+  fi
   case "$backend" in
     tmux) return 0 ;;
     herdr) ;;
@@ -770,7 +776,7 @@ claim_defer_generation_live() {
 }
 
 drain_claim_owner() {
-  local row=$1 owner parent_pid drain_file drain_dir state_dir
+  local row=$1 owner parent_pid drain_file drain_dir state_dir drain_base
   owner=$(fm_lock_link_owner "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true)
   if [ "${FM_WAKE_DRAIN_DELEGATED:-0}" = 1 ]; then
     parent_pid=${FM_WAKE_DRAIN_PARENT_PID:-}
@@ -785,7 +791,16 @@ drain_claim_owner() {
   drain_dir=$(cd "$(dirname "$drain_file")" 2>/dev/null && pwd -P) || return 1
   state_dir=$(cd "$STATE" 2>/dev/null && pwd -P) || return 1
   [ "$drain_dir" = "$state_dir" ] || return 1
-  [ "$(basename "$drain_file")" = ".wake-queue.deduped.$parent_pid" ] || return 1
+  if [ "${FM_WAKE_DRAIN_RESUMED_SOURCE:-0}" = 1 ]; then
+    drain_base=$(basename "$drain_file") || return 1
+    case "$drain_base" in
+      .wake-queue) ;;
+      .wake-queue.deduped.*) case "${drain_base##*.}" in ''|*[!0-9]*) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+  else
+    [ "$(basename "$drain_file")" = ".wake-queue.deduped.$parent_pid" ] || return 1
+  fi
   awk -v wanted="$row" '$0 == wanted { found=1; exit } END { exit !found }' "$drain_file"
 }
 
@@ -2282,7 +2297,8 @@ republish_pending_receipt() {
       if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
         case "$backend" in tmux|herdr) ;; *) status=75 ;; esac
       else
-        status=75
+        rc=$?
+        [ "$rc" = 1 ] && backend=tmux || status=75
       fi
     fi
     if [ "$status" = 0 ]; then
@@ -2895,7 +2911,12 @@ reconcile_child() {
   snapshot=$(single_line "$line")
   INC=$(read_incarnation "$meta" "$id") || return 0
   window=$(meta_value_unique "$meta" window) || return 0
-  backend=$(meta_value_unique "$meta" backend 2>/dev/null) || return 0
+  if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
+    :
+  else
+    state_rc=$?
+    [ "$state_rc" = 1 ] && backend=tmux || return 0
+  fi
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
   fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS" || return 0
   ID=$id
