@@ -1856,7 +1856,9 @@ SH
     FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
     FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 timeout 5 "$root/bin/fm-watch.sh" 2>&1)
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 bash -c \
+      '. "$1/bin/fm-pane-idle-lib.sh"; shift; fm_pane_idle_run_bounded_child "$@"' \
+      _ "$ROOT" 5 "$root/bin/fm-watch.sh" 2>&1)
   status=$?
   set -u
   [ "$status" = 124 ] || fail "watcher canonical suppression failed: $out"
@@ -1989,7 +1991,9 @@ test_ordinary_terminal_wake_consumption_is_durable() {
     FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
     FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 timeout 5 "$root/bin/fm-watch.sh" 2>&1)
+    FM_HEARTBEAT=999999 FM_WATCHER_HEARTBEAT=999999 bash -c \
+      '. "$1/bin/fm-pane-idle-lib.sh"; shift; fm_pane_idle_run_bounded_child "$@"' \
+      _ "$ROOT" 5 "$root/bin/fm-watch.sh" 2>&1)
   status=$?
   set -u
   [ "$status" = 124 ] || fail "watcher did not remain alive while suppressing the consumed wake: $out"

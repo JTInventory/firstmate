@@ -200,10 +200,12 @@ if ($cookie ne 'EOF') {
   while (defined(my $entry = readdir($dh))) {
     my $next = telldir($dh);
     defined($next) or exit 1;
-    next unless $entry =~ /\.meta\z/ && $entry !~ /[\r\n]/;
-    my $path = "$state/$entry";
-    next unless -f $path && !-l $path;
-    print($pfh $path, "\n") or exit 1;
+    if ($entry =~ /\.meta\z/ && $entry !~ /[\r\n]/) {
+      my $path = "$state/$entry";
+      if (-f $path && !-l $path) {
+        print($pfh $path, "\n") or exit 1;
+      }
+    }
     atomic_write($cookie_path, "$next\n") or exit 1;
   }
   closedir($dh) or exit 1;
@@ -1482,8 +1484,9 @@ if ($cookie ne 'EOF') {
   while (defined(my $entry = readdir($dh))) {
     my $next = telldir($dh);
     defined($next) or exit 1;
-    next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
-    print($pfh $entry, "\n") or exit 1;
+    if ($entry =~ /^[0-9A-Fa-f]{64}\z/) {
+      print($pfh $entry, "\n") or exit 1;
+    }
     atomic_write($cookie_path, "$next\n") or exit 1;
   }
   closedir($dh) or exit 1;

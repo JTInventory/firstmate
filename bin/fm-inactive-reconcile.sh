@@ -2210,10 +2210,12 @@ if ($source_path ne '') {
       while (defined(my $entry = readdir($dh))) {
         my $next = telldir($dh);
         defined($next) or exit 1;
-        next unless $entry =~ /\.\Q$suffix\E\z/ && $entry !~ /[\r\n\t]/;
-        my $path = "$dir/$entry";
-        next unless -f $path && !-l $path;
-        print($pfh $path, "\n") or exit 1;
+        if ($entry =~ /\.\Q$suffix\E\z/ && $entry !~ /[\r\n\t]/) {
+          my $path = "$dir/$entry";
+          if (-f $path && !-l $path) {
+            print($pfh $path, "\n") or exit 1;
+          }
+        }
         atomic_write($source_cookie, "$next\n") or exit 1;
       }
       closedir($dh) or exit 1;
