@@ -1474,12 +1474,9 @@ SH
   token=$(receipt_value "$meta" spawn_incarnation)
   case "$token" in ''|legacy-unknown) fail "public fm-spawn path published no incarnation token" ;; esac
   grep -F 'spawn_incarnation=' "$meta" >/dev/null || fail "spawn metadata omitted its incarnation field"
-  run_id=$(receipt_value "$meta" run_step_id)
-  case "$run_id" in spawn-spawn-contract-*) ;; *) fail "spawn metadata omitted its generated run id" ;; esac
   evidence="$state/.run-step-incarnation-spawn-contract"
-  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "spawn did not publish the generated run-step binding"
-  [ "$(receipt_value "$evidence" run_id)" = "$run_id" ] || fail "spawn binding did not match metadata run id"
-  [ "$(receipt_value "$evidence" spawn_incarnation)" = "$token" ] || fail "spawn binding used the wrong incarnation"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "spawn fabricated a run-step binding without the actual no-mistakes run id"
+  [ "$(grep -c '^run_step_id=' "$meta" 2>/dev/null || true)" = 0 ] || fail "spawn persisted a synthetic run-step id"
   mkdir -p "$home/data/spawn-mismatch"
   printf 'spawn mismatch brief\n' > "$home/data/spawn-mismatch/brief.md"
   mv "$root/bin/fm-wake-lib.sh" "$root/bin/fm-wake-lib.real.sh"

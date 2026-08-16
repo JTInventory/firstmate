@@ -41,7 +41,7 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
-#   Ship spawns generate and persist the lifecycle run id that owns the crew.
+#   Ship terminal replay requires an externally bound no-mistakes run id.
 #   Matching JT Control Room ship spawns for .openclaw or jt-control-room append a
 #   JT PR Intake Governor block to direct-PR/no-mistakes briefs before launch.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
@@ -203,7 +203,6 @@ HERDR_FLAT_ABORT_UNCERTAINTY_FILE=
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 SPAWN_INCARNATION=
-SPAWN_RUN_STEP_ID=
 SPAWN_ENDPOINT_CREATED=0
 SPAWN_WORKTREE_LEASED=0
 SPAWN_WORKTREE_PROVEN=0
@@ -326,7 +325,6 @@ spawn_abort_recovery_meta() {
     echo "mode=${MODE:-no-mistakes}"
     echo "yolo=${YOLO:-off}"
     echo "spawn_incarnation=${SPAWN_INCARNATION:-legacy-unknown}"
-    [ "${KIND:-ship}" != ship ] || echo "run_step_id=${SPAWN_RUN_STEP_ID:-}"
     echo "tasktmp=${TASK_TMP:-}"
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
@@ -388,7 +386,6 @@ spawn_endpoint_recovery_meta() {
     printf 'mode=%s\n' "${MODE:-no-mistakes}"
     printf 'yolo=%s\n' "${YOLO:-off}"
     printf 'spawn_incarnation=%s\n' "${SPAWN_INCARNATION:-legacy-unknown}"
-    [ "${KIND:-ship}" != ship ] || printf 'run_step_id=%s\n' "${SPAWN_RUN_STEP_ID:-}"
     printf 'backend=tmux\n'
     printf 'endpoint_recovery=1\n'
     printf 'spawn_state=aborted\n'
@@ -417,7 +414,6 @@ spawn_endpoint_recovery_reservation() {
     printf 'mode=%s\n' "${MODE:-no-mistakes}"
     printf 'yolo=%s\n' "${YOLO:-off}"
     printf 'spawn_incarnation=%s\n' "${SPAWN_INCARNATION:-legacy-unknown}"
-    [ "${KIND:-ship}" != ship ] || printf 'run_step_id=%s\n' "${SPAWN_RUN_STEP_ID:-}"
     printf 'backend=tmux\n'
     printf 'endpoint_recovery=1\n'
     printf 'endpoint_recovery_pending=1\n'
@@ -903,7 +899,6 @@ spawn_abort_cleanup() {
             echo "mode=${MODE:-no-mistakes}"
             echo "yolo=${YOLO:-off}"
             echo "spawn_incarnation=${SPAWN_INCARNATION:-legacy-unknown}"
-            [ "${KIND:-ship}" != ship ] || echo "run_step_id=${SPAWN_RUN_STEP_ID:-}"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
@@ -1102,10 +1097,7 @@ spawn_task_lock_incarnation_valid || {
   echo "error: task lock incarnation could not be verified for $ID" >&2
   exit 1
 }
-if [ "$KIND" = ship ]; then
-  SPAWN_RUN_STEP_ID="spawn-${ID}-${SPAWN_INCARNATION}"
-  export FM_RUN_STEP_ID="$SPAWN_RUN_STEP_ID"
-fi
+unset FM_RUN_STEP_ID
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/$ID.herdr-cleanup-uncertain"
 if [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; then
   echo "error: unresolved Herdr cleanup uncertainty for $ID at $HERDR_FLAT_ABORT_UNCERTAINTY_FILE; refusing another spawn" >&2
@@ -2188,7 +2180,6 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "spawn_incarnation=$SPAWN_INCARNATION"
-  [ "$KIND" != ship ] || echo "run_step_id=$SPAWN_RUN_STEP_ID"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -2222,11 +2213,6 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 SPAWN_META_PUBLISHED=1
-if [ "$KIND" = ship ]; then
-  FM_TASK_LOCK_PATH=$SPAWN_TASK_LOCK
-  FM_TASK_LOCK_OWNER=$(fm_lock_link_owner "$SPAWN_TASK_LOCK") || exit 1
-  fm_run_step_binding_publish "$ID" "$SPAWN_RUN_STEP_ID" "$SPAWN_INCARNATION" || exit 1
-fi
 fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
@@ -2261,11 +2247,6 @@ LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 sq_gotmpdir=$(shell_quote "$TASK_TMP/gotmp")
-if [ "$KIND" = ship ]; then
-  sq_run_step_id=$(shell_quote "$SPAWN_RUN_STEP_ID")
-  fm_backend_send_text_line "$BACKEND" "$WID" "export FM_RUN_STEP_ID=$sq_run_step_id"
-  sleep 0.3
-fi
 fm_backend_send_text_line "$BACKEND" "$WID" "export GOTMPDIR=$sq_gotmpdir"
 sleep 0.3
 fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"

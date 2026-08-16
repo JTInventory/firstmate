@@ -57,7 +57,7 @@ case "${1:-}" in
     shift
     if [ "${1:-}" = --run ]; then
       run_key="FM_FAKE_AXI_STATUS_RUN_${2:-}"
-      printf '%s\n' "${!run_key:-${FM_FAKE_AXI_STATUS_RUN:-}}"
+      printf '%s\n' "${!run_key:-${FM_FAKE_AXI_STATUS_RUN:-${FM_FAKE_AXI_STATUS:-}}}"
     else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
   '') printf '%s\n' "${FM_FAKE_AXI_LIST:-}" ;;
 esac
@@ -646,6 +646,25 @@ test_terminal_metadata_run_id_must_match_binding() {
   pass "terminal state requires the metadata and binding run ids to match"
 }
 
+test_bound_run_id_is_selected_before_current_run() {
+  reset_fakes
+  local d out
+  d=$(new_case bound-run-selection)
+  make_repo_on_branch "$d/wt" fm/feat-bound-selection
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bound-selection.meta" \
+    "window=fm:fm-feat-bound-selection" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=bound-selection-inc" "run_step_id=01BOUND"
+  write_run_step_binding "$d/state" feat-bound-selection 01BOUND bound-selection-inc
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bound-selection)"
+  export FM_FAKE_AXI_STATUS_RUN_01BOUND="$(run_failed fm/feat-bound-selection | sed 's/id: "01RUN"/id: "01BOUND"/')"
+  out=$(run_crew_state "$d" feat-bound-selection)
+  assert_contains "$out" "state: failed" "bound run id selects its exact terminal run"
+  assert_contains "$out" "run-id=01BOUND" "bound run id remains in the terminal detail"
+  unset FM_FAKE_AXI_STATUS_RUN_01BOUND
+  pass "stored run binding wins over the current same-branch run"
+}
+
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run, so the
 # helper finds THIS branch's own run via the run list and inspects it directly.
 test_cross_branch_attribution_via_list() {
@@ -1127,6 +1146,7 @@ test_active_run_does_not_create_incarnation_binding
 test_terminal_first_observation_requires_binding
 test_terminal_candidate_requires_existing_binding
 test_terminal_metadata_run_id_must_match_binding
+test_bound_run_id_is_selected_before_current_run
 test_cross_branch_attribution_via_list
 test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored
