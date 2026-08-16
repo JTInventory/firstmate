@@ -839,7 +839,9 @@ drain_claim_owner() {
     drain_base=$(basename "$drain_file") || return 1
     case "$drain_base" in
       .wake-queue) ;;
-      .wake-queue.deduped.*) case "${drain_base##*.}" in ''|*[!0-9]*) return 1 ;; esac ;;
+      .wake-queue.deduped.*|.wake-queue.drain.*)
+        case "${drain_base##*.}" in ''|*[!0-9]*) return 1 ;; esac
+        ;;
       *) return 1 ;;
     esac
   else
@@ -1688,8 +1690,9 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
 }
 
 replay_pane_idle_publication_valid() {
-  local meta=$1 id=$2 window=$3 backend=$4 incarnation=$5
+  local meta=$1 id=$2 window=$3 backend=$4 incarnation=$5 source=${6:-}
   local deadline_ms=${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-} now_ms remaining_ms capture_secs
+  [ "$source" = run-step ] && [ "${SOURCE:-}" = run-step ] && return 0
   if [ "${FM_INACTIVE_OUTCOME_CHILD_BOUND:-0}" = 1 ]; then
     fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$incarnation" "$RECONCILE_SECS"
     return $?
@@ -1710,14 +1713,14 @@ replay_pane_idle_publication_valid() {
 
 publish_receipt_and_wake() {
   local status=0 release_lock=0
-  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-}
+  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-} source=${6:-}
   FM_WAKE_APPEND_CREATED=0
   if [ "$WAKE_QUEUE_LOCK_HELD" != 1 ]; then
     wake_queue_lock_acquire || return 75
     release_lock=1
   fi
   if [ -n "$pane_meta" ] \
-    && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation"; then
+    && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation" "$source"; then
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
     return 75
   fi
@@ -1788,7 +1791,7 @@ receipt_existing_core() {
 
 republish_existing_receipt_wake() {
   local existing task outcome status=0 existing_rc release_lock=0
-  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-}
+  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-} source=${6:-}
   FM_WAKE_APPEND_CREATED=0
   if [ "$WAKE_QUEUE_LOCK_HELD" != 1 ]; then
     wake_queue_lock_acquire || return 75
@@ -1800,7 +1803,7 @@ republish_existing_receipt_wake() {
       task=$(receipt_field "$existing" task_id)
       outcome=$(receipt_field "$existing" outcome)
       if [ -n "$pane_meta" ] \
-        && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation"; then
+        && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation" "$source"; then
         status=75
       else
         fm_wake_append_if_absent_locked FM_WAKE_APPEND_CREATED check "inactive-outcome:$FP" \
@@ -1820,7 +1823,7 @@ republish_existing_receipt_wake() {
 publish_secondmate_receipt_and_wake() {
   local route_lock status=0 route_invalid=0 existing_rc pending pending_corr pending_parent_id pending_parent_home pending_parent_status
   local release_lock=0
-  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-}
+  local pane_meta=${1:-} pane_id=${2:-} pane_window=${3:-} pane_backend=${4:-} pane_incarnation=${5:-} source=${6:-}
   FM_WAKE_APPEND_CREATED=0
   if [ "$WAKE_QUEUE_LOCK_HELD" != 1 ]; then
     wake_queue_lock_acquire || return 75
@@ -1863,7 +1866,7 @@ publish_secondmate_receipt_and_wake() {
     return 75
   fi
   if [ -n "$pane_meta" ] \
-    && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation"; then
+    && ! replay_pane_idle_publication_valid "$pane_meta" "$pane_id" "$pane_window" "$pane_backend" "$pane_incarnation" "$source"; then
     fm_lock_release "$route_lock" || true
     [ "$release_lock" = 1 ] && wake_queue_lock_release || true
     return 75
@@ -1970,8 +1973,31 @@ prepare_pending_receipt() {
   return 0
 }
 
+parent_status_line_status() {
+  local parent_status=$1 wanted=$2 scan_secs now_ms deadline_ms status
+  [ -f "$parent_status" ] && [ ! -L "$parent_status" ] || return 2
+  scan_secs=$(bounded_secs "${FM_INACTIVE_OUTCOME_PARENT_STATUS_SCAN_SECS:-1}" 1 1 60)
+  deadline_ms=${FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS:-}
+  case "$deadline_ms" in
+    ''|*[!0-9]*) ;;
+    *)
+      now_ms=$(clock_millis)
+      [ "$deadline_ms" -gt "$now_ms" ] || return 124
+      [ "$((deadline_ms - now_ms))" -ge 1000 ] || return 124
+      scan_secs=$(((deadline_ms - now_ms) / 1000))
+      scan_secs=$(bounded_secs "$scan_secs" 1 1 60)
+      ;;
+  esac
+  run_bounded_child "$scan_secs" grep -Fqx -- "$wanted" "$parent_status"
+  status=$?
+  case "$status" in
+    0|1|124) return "$status" ;;
+    *) return 2 ;;
+  esac
+}
+
 pending_secondmate_report_recorded() {
-  local fp=$1 pending kind task_id outcome parent_status parent_corr line
+  local fp=$1 pending kind task_id outcome parent_status parent_corr line status
   pending=$(receipt_path "$fp" pending)
   kind=$(receipt_field "$pending" kind) || return 2
   case "$kind" in
@@ -1986,10 +2012,13 @@ pending_secondmate_report_recorded() {
   parent_corr=$(receipt_field "$pending" parent_corr) || return 2
   [ -f "$parent_status" ] && [ ! -L "$parent_status" ] || return 1
   line="$outcome [corr=$parent_corr]: inactive terminal outcome replayed: task=$task_id fingerprint=$fp"
-  while IFS= read -r existing_line || [ -n "$existing_line" ]; do
-    [ "$existing_line" = "$line" ] && return 0
-  done < "$parent_status"
-  return 1
+  parent_status_line_status "$parent_status" "$line"
+  status=$?
+  case "$status" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 reported_secondmate_receipt_valid() {
@@ -2606,10 +2635,10 @@ republish_pending_receipt() {
       if [ "$status" = 0 ]; then
         if [ "$KIND" = secondmate ]; then
           FM_LOCK_WAIT_SECS="$wait_secs" publish_secondmate_receipt_and_wake \
-            "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
+            "$meta" "$ID" "$window" "$backend" "$current_incarnation" "$SOURCE" || status=$?
         else
           FM_LOCK_WAIT_SECS="$wait_secs" republish_existing_receipt_wake \
-            "$meta" "$ID" "$window" "$backend" "$current_incarnation" || status=$?
+            "$meta" "$ID" "$window" "$backend" "$current_incarnation" "$SOURCE" || status=$?
         fi
       fi
     fi
@@ -3253,7 +3282,10 @@ reconcile_child() {
     [ "$state_rc" = 1 ] && backend=tmux || return 0
   fi
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
-  fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS" || return 0
+  if [ "$source" != run-step ] \
+    && ! fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS"; then
+    return 0
+  fi
   ID=$id
   OUTCOME=$outcome
   SNAPSHOT=$snapshot
@@ -3277,7 +3309,7 @@ reconcile_child() {
   if [ "$route_rc" = 0 ]; then
     key="inactive-outcome:$FP"
     replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
-    publish_secondmate_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" \
+    publish_secondmate_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" "$source" \
       || { publication_status=$?; return "$publication_status"; }
     if replay_receipt_exists; then
       replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
@@ -3291,7 +3323,7 @@ reconcile_child() {
     key="inactive-outcome:$FP"
     replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
     if [ "$RECEIPT_EXISTING_SUFFIX" = pending ]; then
-      republish_existing_receipt_wake "$meta" "$id" "$window" "$backend" "$INC" \
+      republish_existing_receipt_wake "$meta" "$id" "$window" "$backend" "$INC" "$source" \
         || { publication_status=$?; return "$publication_status"; }
       if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
         printf 'queued inactive outcome: task=%s state=%s fingerprint=%s\n' "$id" "$outcome" "$FP"
@@ -3305,7 +3337,7 @@ reconcile_child() {
   fi
   key="inactive-outcome:$FP"
   replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
-  publish_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" \
+  publish_receipt_and_wake "$meta" "$id" "$window" "$backend" "$INC" "$source" \
     || { publication_status=$?; return "$publication_status"; }
   replay_surface_marker "$id" "$meta" "$snapshot" "$INC" "$key" || return 1
   if [ "$FM_WAKE_APPEND_CREATED" = 1 ]; then
@@ -3425,7 +3457,7 @@ caller_output_complete() {
 
 secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent-status> <corr> <outcome> <task-id> <fingerprint>
   local secondmate_home=$1 parent_task_id=$2 parent_home=$3 parent_status=$4 corr=$5 outcome=$6 task_id=$7 fp=$8
-  local parent_state token route_lock route_marker route_history line phase rc=0 route_lock_held=0 marker_present=0 report_recorded=0
+  local parent_state token route_lock route_marker route_history line phase rc=0 route_lock_held=0 marker_present=0 report_recorded=0 report_probe_status
   fm_pending_reply_secondmate_receipt_validate \
     "$secondmate_home" "$parent_task_id" "$parent_home" "$parent_status" "$corr" || return 2
   parent_state=${FM_PENDING_ROUTE_STATE:-}
@@ -3441,9 +3473,14 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
     if [ "$rc" = 0 ] && [ -e "$parent_status" ]; then
       [ -f "$parent_status" ] || rc=2
     fi
-    if [ "$rc" = 0 ] && [ -f "$parent_status" ] \
-      && grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-      report_recorded=1
+    if [ "$rc" = 0 ] && [ -f "$parent_status" ]; then
+      parent_status_line_status "$parent_status" "$line"
+      report_probe_status=$?
+      case "$report_probe_status" in
+        0) report_recorded=1 ;;
+        1) ;;
+        *) rc=2 ;;
+      esac
     fi
     route_lock=$(fm_pending_reply_secondmate_route_lock_path "$secondmate_home")
     if [ "$rc" = 0 ] && fm_lock_acquire_wait "$route_lock"; then
@@ -3472,8 +3509,14 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
         if [ ! -e "$parent_status" ]; then
           : > "$parent_status" || rc=2
         fi
-        if [ "$rc" = 0 ] && ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-          printf '%s\n' "$line" >> "$parent_status" || rc=2
+        if [ "$rc" = 0 ]; then
+          parent_status_line_status "$parent_status" "$line"
+          report_probe_status=$?
+          case "$report_probe_status" in
+            0) report_recorded=1 ;;
+            1) printf '%s\n' "$line" >> "$parent_status" || rc=2 ;;
+            *) rc=2 ;;
+          esac
         fi
       fi
       fm_lock_release "$route_lock" || rc=2

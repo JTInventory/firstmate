@@ -254,6 +254,16 @@ restore_pending_read() {
   DRAIN_RESTORE_OFFSET=$offset
 }
 
+restore_queue_fallback() {
+  local source=$1
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  if [ "$DRAIN_LOCK_HELD" = true ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 1
+    DRAIN_LOCK_HELD=false
+  fi
+  fm_wake_restore_queue_atomic "$source"
+}
+
 drain_restore_remaining() {
   [ "$DRAIN_RESUMING" = true ] && return 0
   restore_unprocessed_rows "$1"
@@ -321,7 +331,7 @@ cleanup() {
   local status=$? restore_status=0
   if [ "$status" -ne 0 ] && [ "$status" -ne 3 ] \
     && [ "$DRAIN_LOCK_HELD" = false ] \
-    && { [ -n "$DRAIN_TMP" ] || [ -n "$DRAIN_RESTORE" ]; }; then
+    && { [ -n "$DRAIN_TMP" ] || [ -n "$DRAIN_RESTORE" ] || [ -n "$DRAIN_DEDUPED" ]; }; then
     if fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; then
       DRAIN_LOCK_HELD=true
     else
@@ -341,13 +351,24 @@ cleanup() {
           restore_status=1
         fi
       else
-        restore_status=1
+        if [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ] \
+          && restore_queue_fallback "$DRAIN_TMP"; then
+          rm -f "$DRAIN_TMP" || restore_status=1
+          [ "$restore_status" = 0 ] && DRAIN_TMP=
+        else
+          restore_status=1
+        fi
       fi
     elif [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ]; then
       if restore_pending_write "$DRAIN_TMP" 0; then
         DRAIN_RESTORE_PENDING=true
       else
-        restore_status=1
+        if restore_queue_fallback "$DRAIN_TMP"; then
+          rm -f "$DRAIN_TMP" || restore_status=1
+          [ "$restore_status" = 0 ] && DRAIN_TMP=
+        else
+          restore_status=1
+        fi
       fi
     fi
   fi
@@ -357,7 +378,7 @@ cleanup() {
       [ -z "$DRAIN_RESTORE" ] || rm -f "$DRAIN_RESTORE" || true
     fi
   fi
-  if [ "$DRAIN_RESTORE_PENDING" != true ] && [ -n "$DRAIN_DEDUPED" ] \
+  if [ "$restore_status" = 0 ] && [ "$DRAIN_RESTORE_PENDING" != true ] && [ -n "$DRAIN_DEDUPED" ] \
     && [ "$DRAIN_DEDUPED" != "$FM_WAKE_QUEUE" ]; then
     rm -f "$DRAIN_DEDUPED" || true
   fi
