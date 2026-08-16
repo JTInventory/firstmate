@@ -387,7 +387,12 @@ watch_window_scan_prepare() {
     FM_WATCH_WINDOW_CURSOR=
   fi
   case "$FM_WATCH_WINDOW_CURSOR" in
-    *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;;
+    ''|*[!0-9]*)
+      if [ -n "$FM_WATCH_WINDOW_CURSOR" ]; then
+        rm -f "$cursor_path" || return 1
+      fi
+      FM_WATCH_WINDOW_CURSOR=
+      ;;
   esac
 }
 
@@ -1527,6 +1532,7 @@ EOF
     0|124) ;;
     *) rm -f "$window_scan_stream"; exit "$window_scan_status" ;;
   esac
+  window_scan_complete=1
   while IFS= read -r -d '' window_scan_cursor \
     && IFS= read -r -d '' w; do
     if [ -z "$w" ]; then
@@ -1535,8 +1541,8 @@ EOF
     fi
     kind=
     kind=$(window_kind "$w" "$pane_idle_scan_deadline") || {
-      watch_window_scan_advance "$window_scan_cursor" || exit 1
-      continue
+      window_scan_complete=0
+      break
     }
     if [ "$kind" = secondmate ]; then
       key=$(printf '%s' "$w" | tr ':/.' '___')
@@ -1546,8 +1552,8 @@ EOF
       fi
     fi
     backend=$(window_backend "$w" "$pane_idle_scan_deadline") || {
-      watch_window_scan_advance "$window_scan_cursor" || exit 1
-      continue
+      window_scan_complete=0
+      break
     }
     if ! tail40=$(fm_backend_capture "$backend" "$w" 40 2>/dev/null); then
       reason="check: backend capture failed for $w (backend=$backend); inspect the runtime endpoint and task metadata"
@@ -1668,7 +1674,8 @@ EOF
     fi
     watch_window_scan_advance "$window_scan_cursor" || exit 1
   done < "$window_scan_stream"
-  if [ "$window_scan_source" = direct ] && [ "$window_scan_status" = 0 ]; then
+  if [ "$window_scan_source" = direct ] && [ "$window_scan_status" = 0 ] \
+    && [ "$window_scan_complete" = 1 ]; then
     watch_window_scan_advance EOF || exit 1
   fi
   rm -f "$window_scan_stream" || exit 1

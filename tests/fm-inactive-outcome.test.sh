@@ -522,10 +522,10 @@ if [ "\$1" = - ] && [ "\$3" = meta ]; then
   : > "\${FM_FIND_LOG:?}"
   if [ "\$4" = 0 ] || [ -z "\$4" ]; then
     printf '%s\\0' "\$2/find-budget-x1.meta"
-    printf '%s\\n' find-budget-x1.meta > "\$5"
+    printf '%s\\n' 1 > "\$5"
   else
     printf '%s\\0' "\$2/find-budget-x2.meta"
-    printf '%s\\n' find-budget-x2.meta > "\$5"
+    printf '%s\\n' 2 > "\$5"
   fi
   sleep 3
   exit 0
@@ -541,13 +541,13 @@ SH
   [ -e "$find_log" ] || fail "bounded scan did not invoke the find child"
   [ -f "$state/.inactive-outcome-find.incomplete" ] \
     || fail "budget-exhausted enumeration did not persist resumable progress"
-  [ "$(cat "$state/.inactive-outcome-find.enum.cursor")" = find-budget-x1.meta ] \
+  [ "$(cat "$state/.inactive-outcome-find.enum.cursor")" = 1 ] \
     || fail "budget-exhausted enumeration did not persist its source cursor"
   scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
     || fail "resumable enumeration retry terminated supervision"
   scan "$root" "$home" "$fakebin" --startup >/dev/null 2>&1 \
     || fail "resumable enumeration suffix retry terminated supervision"
-  [ "$(cat "$state/.inactive-outcome-find.enum.cursor")" = find-budget-x2.meta ] \
+  [ "$(cat "$state/.inactive-outcome-find.enum.cursor")" = 2 ] \
     || fail "resumable enumeration restarted from the beginning"
   unset FM_INACTIVE_OUTCOME_BUDGET_SECS FM_FIND_LOG
   pass "inactive enumeration is bounded by the per-scan budget"
@@ -2564,6 +2564,7 @@ test_pane_idle_index_retries_partial_publication_idempotently() {
   rm -f "$progress/.scan.complete" "$progress/.scan.aggregate.complete" \
     "$progress/.scan.sorted" "$progress/.scan.sorted.complete"
   printf 'partial-record\0' >> "$progress/.scan.records"
+  printf 'partial-aggregate' >> "$progress/.scan.aggregate"
   printf '%s\n' "$state/0.meta" > "$progress/.scan.cursor"
   printf '0\n' > "$progress/.scan.aggregate.cursor"
   env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \

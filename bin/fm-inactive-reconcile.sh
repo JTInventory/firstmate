@@ -2004,24 +2004,30 @@ reported_secondmate_receipt_valid() {
 
 inactive_directory_candidates() {
   local directory=$1 suffix=$2 seconds=${3:-1} cursor=${4:-} cursor_path=${5:-}
+  local stage_path=
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 0
   case "$seconds" in ''|*[!0-9]*|0) return 0 ;; esac
-  case "$cursor" in *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;; esac
+  case "$cursor" in ''|0) cursor=;; *[!0-9]*) return 1 ;; esac
   [ -z "$cursor_path" ] || { [ ! -L "$cursor_path" ] || return 1; }
+  if [ -n "$cursor_path" ]; then
+    stage_path="$cursor_path.stage"
+    [ ! -L "$stage_path" ] || return 1
+    rm -f "$stage_path" || return 1
+  fi
   if command -v perl >/dev/null 2>&1; then
-    run_bounded_child "$seconds" perl - "$directory" "$suffix" "$cursor" "$cursor_path" <<'PERL'
+    run_bounded_child "$seconds" perl - "$directory" "$suffix" "$cursor" "$stage_path" <<'PERL'
 use strict;
 use warnings;
 use Fcntl qw(:DEFAULT);
-my ($dir, $suffix, $cursor, $cursor_path) = @ARGV;
+my ($dir, $suffix, $cursor, $stage_path) = @ARGV;
 my $nofollow = eval { Fcntl::O_NOFOLLOW() };
 defined($nofollow) or exit 1;
 my $sequence = 0;
 sub write_cursor {
   my ($value) = @_;
-  return 1 if $cursor_path eq '';
-  return 0 if -l $cursor_path || $value =~ /[\r\n\t]/;
-  my $tmp = "$cursor_path.$$.$sequence";
+  return 1 if $stage_path eq '';
+  return 0 if -l $stage_path || $value =~ /[\r\n\t]/;
+  my $tmp = "$stage_path.$$.$sequence";
   $sequence++;
   my $fh;
   sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or return 0;
@@ -2030,29 +2036,51 @@ sub write_cursor {
     unlink($tmp);
     return 0;
   }
-  if (!rename($tmp, $cursor_path)) {
+  if (!rename($tmp, $stage_path)) {
     unlink($tmp);
     return 0;
   }
   return 1;
 }
 opendir(my $dh, $dir) or exit 1;
+if ($cursor ne '') {
+  seekdir($dh, 0 + $cursor) or exit 1;
+}
 select((select(STDOUT), $| = 1)[0]);
 while (defined(my $entry = readdir($dh))) {
-  next unless $entry =~ /\.\Q$suffix\E\z/;
-  next if $entry =~ /[\r\n\t]/;
-  next if $cursor ne '' && $cursor ne '0' && $entry le $cursor;
+  my $next = telldir($dh);
+  defined($next) or exit 1;
+  if ($entry !~ /\.\Q$suffix\E\z/ || $entry =~ /[\r\n\t]/) {
+    write_cursor($next) or exit 1 if $stage_path ne '';
+    next;
+  }
   my $path = "$dir/$entry";
   if (-f $path && !-l $path) {
     print "$path\0" or exit 1;
   }
-  write_cursor($entry) or exit 1;
+  write_cursor($next) or exit 1 if $stage_path ne '';
 }
 closedir($dh) or exit 1;
+write_cursor('EOF') or exit 1 if $stage_path ne '';
 PERL
   else
     return 124
   fi
+}
+
+inactive_enum_cursor_promote() {
+  local path=$1 stage="$1.stage" value
+  [ ! -L "$path" ] && [ ! -L "$stage" ] || return 1
+  [ -e "$stage" ] || return 0
+  value=$(inactive_text_cursor_read "$stage") || return 1
+  inactive_text_cursor_write "$path" "$value" || return 1
+  rm -f "$stage" || return 1
+}
+
+inactive_enum_cursor_discard() {
+  local path=$1
+  [ ! -L "$path.stage" ] || return 1
+  rm -f "$path.stage"
 }
 
 receipt_candidates() {
@@ -2068,7 +2096,7 @@ inactive_find_candidates() {
 repair_reported_secondmate_routes() {
   local scan_deadline=$1 reported kind corr parent_task_id parent_home parent_status remaining status=0
   local cursor='' cursor_found=0 started=1 pass base last processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
-  local enum_cursor='' enum_incomplete=0 enum_source_drained=0
+  local enum_cursor='' enum_incomplete=0 enum_source_drained=0 enum_complete=0 enum_persisted=0
   local candidate_pending=0 candidate_retain=0 item_status batch_consumed=0 batch_complete=1 retry_path=
   local candidate_pending_offset=0 pending_skip=0 candidate_tmp_owned=0
   MAINTENANCE_ENUM_DEFERRED=0
@@ -2081,7 +2109,10 @@ repair_reported_secondmate_routes() {
     [ -f "$REPORTED_ROUTE_ENUM_CURSOR" ] && [ ! -L "$REPORTED_ROUTE_ENUM_CURSOR" ] || return 1
     enum_incomplete=1
     enum_cursor=$(inactive_text_cursor_read "$REPORTED_ROUTE_ENUM_CURSOR") || return 1
-    case "$enum_cursor" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+    case "$enum_cursor" in
+      ''|0) enum_cursor=;;
+      *[!0-9]*) enum_cursor=;;
+    esac
   fi
   remaining=$(budget_remaining_secs "$scan_deadline")
   if [ "$remaining" -le 0 ]; then
@@ -2168,22 +2199,15 @@ repair_reported_secondmate_routes() {
     else
       receipt_candidates reported "$remaining" "$enum_cursor" "$REPORTED_ROUTE_ENUM_CURSOR" > "$candidate_tmp" || enum_rc=$?
       if [ "$enum_rc" = 0 ]; then
-        rm -f "$REPORTED_ROUTE_ENUM_CURSOR" || return 1
+        enum_complete=1
         enum_incomplete=0
       elif [ "$enum_rc" = 124 ]; then
-        if [ ! -e "$REPORTED_ROUTE_ENUM_CURSOR" ]; then
-          inactive_text_cursor_write "$REPORTED_ROUTE_ENUM_CURSOR" "${enum_cursor:-0}" || return 1
-        fi
         enum_incomplete=1
       fi
     fi
     if [ "$enum_rc" -ne 0 ]; then
       if [ "$enum_rc" != 124 ]; then
-        if [ -n "$enum_cursor" ]; then
-          inactive_text_cursor_write "$REPORTED_ROUTE_ENUM_CURSOR" "$enum_cursor" || return 1
-        else
-          rm -f "$REPORTED_ROUTE_ENUM_CURSOR" || return 1
-        fi
+        inactive_enum_cursor_discard "$REPORTED_ROUTE_ENUM_CURSOR" || return 1
       fi
       status=1
       if [ "$enum_rc" = 124 ]; then
@@ -2345,14 +2369,26 @@ repair_reported_secondmate_routes() {
     && [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && [ "$enum_deferred" = 0 ]; then
     inactive_pending_clear "$REPORTED_ROUTE_PENDING" "$REPORTED_ROUTE_OFFSET" || status=1
   elif [ "$enum_deferred" = 1 ] || [ "$candidate_retain" = 1 ] || [ "$candidate_pending" = 1 ]; then
-    inactive_persist_nul_suffix "$candidate_tmp" "$REPORTED_ROUTE_PENDING" "$batch_consumed" "" "$scan_deadline" || {
+    if inactive_persist_nul_suffix "$candidate_tmp" "$REPORTED_ROUTE_PENDING" "$batch_consumed" "" "$scan_deadline"; then
+      enum_persisted=1
+    else
       enum_rc=$?
       if [ "$enum_rc" = 124 ]; then
         MAINTENANCE_DEADLINE_EXPIRED=1
       else
         status=1
       fi
+    fi
+  fi
+  if [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && {
+    [ "$enum_persisted" = 1 ] || {
+      [ "$enum_complete" = 1 ] && [ "$candidate_retain" = 0 ]
     }
+  }; then
+    inactive_enum_cursor_promote "$REPORTED_ROUTE_ENUM_CURSOR" || status=1
+    [ "$status" = 0 ] && rm -f "$REPORTED_ROUTE_ENUM_CURSOR" || true
+  else
+    inactive_enum_cursor_discard "$REPORTED_ROUTE_ENUM_CURSOR" || status=1
   fi
   if [ "$candidate_tmp_owned" = 1 ]; then
     rm -f "$candidate_tmp" || status=1
@@ -2447,7 +2483,7 @@ republish_pending_receipts() {
   local scan_deadline=$1 pending remaining status=0
   local cursor='' cursor_found=0 pass started=1
   local base last='' processed=0 cursor_tmp candidate_tmp enum_rc enum_deferred=0
-  local enum_cursor='' enum_incomplete=0 enum_source_drained=0
+  local enum_cursor='' enum_incomplete=0 enum_source_drained=0 enum_complete=0 enum_persisted=0
   local candidate_pending=0 candidate_retain=0 batch_consumed=0 batch_complete=1 retry_path=
   local candidate_pending_offset=0 pending_skip=0 candidate_tmp_owned=0
   local LC_ALL=C
@@ -2461,7 +2497,10 @@ republish_pending_receipts() {
     [ -f "$PENDING_RECEIPT_ENUM_CURSOR" ] && [ ! -L "$PENDING_RECEIPT_ENUM_CURSOR" ] || return 1
     enum_incomplete=1
     enum_cursor=$(inactive_text_cursor_read "$PENDING_RECEIPT_ENUM_CURSOR") || return 1
-    case "$enum_cursor" in *[!A-Fa-f0-9._-]*) return 1 ;; esac
+    case "$enum_cursor" in
+      ''|0) enum_cursor=;;
+      *[!0-9]*) enum_cursor=;;
+    esac
   fi
   if [ ! -e "$PENDING_RECEIPT_PENDING" ] && [ ! -L "$PENDING_RECEIPT_PENDING" ] \
     && inactive_pending_retry_exists "$PENDING_RECEIPT_RETRY"; then
@@ -2543,22 +2582,15 @@ republish_pending_receipts() {
     else
       receipt_candidates pending "$remaining" "$enum_cursor" "$PENDING_RECEIPT_ENUM_CURSOR" > "$candidate_tmp" || enum_rc=$?
       if [ "$enum_rc" = 0 ]; then
-        rm -f "$PENDING_RECEIPT_ENUM_CURSOR" || return 1
+        enum_complete=1
         enum_incomplete=0
       elif [ "$enum_rc" = 124 ]; then
-        if [ ! -e "$PENDING_RECEIPT_ENUM_CURSOR" ]; then
-          inactive_text_cursor_write "$PENDING_RECEIPT_ENUM_CURSOR" "${enum_cursor:-0}" || return 1
-        fi
         enum_incomplete=1
       fi
     fi
     if [ "$enum_rc" -ne 0 ]; then
       if [ "$enum_rc" != 124 ]; then
-        if [ -n "$enum_cursor" ]; then
-          inactive_text_cursor_write "$PENDING_RECEIPT_ENUM_CURSOR" "$enum_cursor" || return 1
-        else
-          rm -f "$PENDING_RECEIPT_ENUM_CURSOR" || return 1
-        fi
+        inactive_enum_cursor_discard "$PENDING_RECEIPT_ENUM_CURSOR" || return 1
       fi
       status=1
       if [ "$enum_rc" = 124 ]; then
@@ -2673,14 +2705,26 @@ republish_pending_receipts() {
     && [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && [ "$enum_deferred" = 0 ]; then
     inactive_pending_clear "$PENDING_RECEIPT_PENDING" "$PENDING_RECEIPT_OFFSET" || status=1
   elif [ "$enum_deferred" = 1 ] || [ "$candidate_retain" = 1 ] || [ "$candidate_pending" = 1 ]; then
-    inactive_persist_nul_suffix "$candidate_tmp" "$PENDING_RECEIPT_PENDING" "$batch_consumed" "" "$scan_deadline" || {
+    if inactive_persist_nul_suffix "$candidate_tmp" "$PENDING_RECEIPT_PENDING" "$batch_consumed" "" "$scan_deadline"; then
+      enum_persisted=1
+    else
       enum_rc=$?
       if [ "$enum_rc" = 124 ]; then
         MAINTENANCE_DEADLINE_EXPIRED=1
       else
         status=1
       fi
+    fi
+  fi
+  if [ "$MAINTENANCE_ENUM_FAILED" = 0 ] && {
+    [ "$enum_persisted" = 1 ] || {
+      [ "$enum_complete" = 1 ] && [ "$candidate_retain" = 0 ]
     }
+  }; then
+    inactive_enum_cursor_promote "$PENDING_RECEIPT_ENUM_CURSOR" || status=1
+    [ "$status" = 0 ] && rm -f "$PENDING_RECEIPT_ENUM_CURSOR" || true
+  else
+    inactive_enum_cursor_discard "$PENDING_RECEIPT_ENUM_CURSOR" || status=1
   fi
   if [ "$candidate_tmp_owned" = 1 ]; then
     rm -f "$candidate_tmp" || status=1
@@ -3311,6 +3355,7 @@ scan_locked() {
   local find_pending_source=0 find_retain=0 find_ordered=1 batch_consumed=0 batch_complete=1 retry_path=
   local find_source_drained=0
   local find_pending_offset=0 find_tmp_owned=0 pending_skip=0 find_enum_cursor=
+  local find_enum_complete=0 find_enum_persisted=0
   local pane_idle_index_dir= pane_idle_index_ready=0
   inactive_state_preflight || return 1
   inactive_merge_txn_recover || return 1
@@ -3475,7 +3520,8 @@ scan_locked() {
     [ -f "$DIRECT_FIND_ENUM_CURSOR" ] && [ ! -L "$DIRECT_FIND_ENUM_CURSOR" ] || return 1
     find_enum_cursor=$(inactive_text_cursor_read "$DIRECT_FIND_ENUM_CURSOR") || return 1
     case "$find_enum_cursor" in
-      ''|0|*[!A-Za-z0-9._-]*) return 1 ;;
+      ''|0) find_enum_cursor=;;
+      *[!0-9]*) find_enum_cursor=;;
     esac
   fi
   if [ -n "$cursor" ]; then started=0; fi
@@ -3545,11 +3591,13 @@ scan_locked() {
     else
       if inactive_find_candidates "$remaining" "$find_enum_cursor" \
         "$DIRECT_FIND_ENUM_CURSOR" > "$find_tmp"; then
-        rm -f "$DIRECT_FIND_INCOMPLETE" "$DIRECT_FIND_ENUM_CURSOR" || {
+        rm -f "$DIRECT_FIND_INCOMPLETE" || {
           [ "$maintenance_ran" = 1 ] || run_maintenance
           return 1
         }
+        find_enum_complete=1
         if inactive_persist_nul_suffix "$find_tmp" "$DIRECT_FIND_PENDING" 0 "" "$scan_deadline"; then
+          find_enum_persisted=1
           find_tmp="$DIRECT_FIND_PENDING"
           find_tmp_owned=0
           find_pending_source=1
@@ -3573,6 +3621,7 @@ scan_locked() {
         complete=0
         find_retain=1
         if inactive_persist_nul_suffix "$find_tmp" "$DIRECT_FIND_PENDING" 0 "" "$scan_deadline"; then
+          find_enum_persisted=1
           find_tmp="$DIRECT_FIND_PENDING"
           find_tmp_owned=0
           find_pending_source=1
@@ -3582,29 +3631,16 @@ scan_locked() {
         fi
         if [ "$rc" = 124 ]; then
           direct_deferred=1
-          if [ ! -e "$DIRECT_FIND_ENUM_CURSOR" ]; then
-            inactive_text_cursor_write "$DIRECT_FIND_ENUM_CURSOR" "${find_enum_cursor:-0}" || {
-              [ "$maintenance_ran" = 1 ] || run_maintenance
-              return 1
-            }
-          fi
           inactive_text_cursor_write "$DIRECT_FIND_INCOMPLETE" "" || {
             [ "$maintenance_ran" = 1 ] || run_maintenance
             return 1
           }
         else
           scan_failed=1
-          if [ -n "$find_enum_cursor" ]; then
-            inactive_text_cursor_write "$DIRECT_FIND_ENUM_CURSOR" "$find_enum_cursor" || {
-              [ "$maintenance_ran" = 1 ] || run_maintenance
-              return 1
-            }
-          else
-            rm -f "$DIRECT_FIND_ENUM_CURSOR" || {
-              [ "$maintenance_ran" = 1 ] || run_maintenance
-              return 1
-            }
-          fi
+          inactive_enum_cursor_discard "$DIRECT_FIND_ENUM_CURSOR" || {
+            [ "$maintenance_ran" = 1 ] || run_maintenance
+            return 1
+          }
         fi
       fi
     fi
@@ -3790,6 +3826,14 @@ scan_locked() {
       complete=0
       scan_failed=1
     }
+  fi
+  if [ "$scan_failed" = 0 ] && [ "$find_enum_persisted" = 1 ]; then
+    inactive_enum_cursor_promote "$DIRECT_FIND_ENUM_CURSOR" || scan_failed=1
+    if [ "$scan_failed" = 0 ] && [ "$find_enum_complete" = 1 ]; then
+      rm -f "$DIRECT_FIND_ENUM_CURSOR" || scan_failed=1
+    fi
+  elif [ "$scan_failed" != 0 ]; then
+    inactive_enum_cursor_discard "$DIRECT_FIND_ENUM_CURSOR" || scan_failed=1
   fi
   if [ "$find_tmp_owned" = 1 ]; then
     if ! rm -f "$find_tmp"; then

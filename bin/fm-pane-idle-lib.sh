@@ -507,7 +507,46 @@ sub repair_records_tail {
   $ok = 0 unless close($wfh);
   return $ok ? 1 : 0;
 }
+sub repair_newline_tail {
+  my ($path) = @_;
+  return 1 unless -e $path;
+  return 0 if -l $path || !-f $path;
+  my $fh;
+  sysopen($fh, $path, O_RDWR | $nofollow) or return 0;
+  binmode($fh);
+  seek($fh, 0, 2) or return 0;
+  my $size = tell($fh);
+  defined($size) or return 0;
+  if ($size > 0) {
+    seek($fh, $size - 1, 0) or return 0;
+    my $last = getc($fh);
+    return 0 unless defined($last);
+    if ($last ne "\n") {
+      my $position = $size;
+      my $boundary = 0;
+      while ($position > 0) {
+        my $start = $position > 4096 ? $position - 4096 : 0;
+        my $length = $position - $start;
+        seek($fh, $start, 0) or return 0;
+        my $buffer = '';
+        read($fh, $buffer, $length) == $length or return 0;
+        for (my $index = length($buffer) - 1; $index >= 0; $index--) {
+          if (substr($buffer, $index, 1) eq "\n") {
+            $boundary = $start + $index + 1;
+            last;
+          }
+        }
+        last if $boundary;
+        $position = $start;
+      }
+      truncate($fh, $boundary) or return 0;
+    }
+  }
+  close($fh) or return 0;
+  return 1;
+}
 repair_records_tail($records_path) or exit 1;
+repair_newline_tail($aggregate_path) or exit 1;
 my $offset = 0;
 if (-e $cursor_path) {
   my $cfh = open_read($cursor_path) or exit 1;
@@ -861,19 +900,24 @@ PERL
 fm_pane_idle_meta_index_windows_direct_resumable() {
   local state=$1 cursor=${2:-} deadline_ms=${3:-}
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  case "$cursor" in *$'\r'*|*$'\n'*|*$'\t'*) return 1 ;; esac
+  case "$cursor" in ''|0) cursor=;; *[!0-9]*) return 1 ;; esac
   fm_pane_idle_run_bounded_perl "$deadline_ms" "$state" "$cursor" <<'PERL'
 use strict;
 use warnings;
 my ($state, $cursor) = @ARGV;
 opendir(my $dh, $state) or exit 2;
+seekdir($dh, 0 + $cursor) or exit 2 if $cursor ne '';
 my %seen;
 while (defined(my $entry = readdir($dh))) {
-  next unless $entry =~ /\.meta\z/;
-  next if $cursor ne '' && $entry ne '0' && $entry le $cursor;
+  my $next = telldir($dh);
+  defined($next) or exit 2;
+  if ($entry !~ /\.meta\z/ || $entry =~ /[\r\n\t]/) {
+    print $next, "\0\0" or exit 2;
+    next;
+  }
   my $path = "$state/$entry";
   if (!-f $path || -l $path) {
-    print $entry, "\0\0" or exit 2;
+    print $next, "\0\0" or exit 2;
     next;
   }
   open(my $fh, '<', $path) or exit 2;
@@ -886,11 +930,11 @@ while (defined(my $entry = readdir($dh))) {
   }
   close($fh) or exit 2;
   if ($count != 1 || $window =~ /[\r\n\t]/ || exists $seen{$window}) {
-    print $entry, "\0\0" or exit 2;
+    print $next, "\0\0" or exit 2;
     next;
   }
   $seen{$window} = 1;
-  print $entry, "\0", $window, "\0" or exit 2;
+  print $next, "\0", $window, "\0" or exit 2;
 }
 closedir($dh) or exit 2;
 PERL

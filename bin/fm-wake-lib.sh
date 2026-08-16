@@ -675,13 +675,43 @@ fm_wake_append() {
   return "$status"
 }
 
+fm_wake_queue_key_status_locked() {
+  local queue=$1 key=$2 budget=${FM_WAKE_QUEUE_STATUS_BUDGET_SECS:-1}
+  case "$budget" in ''|*[!0-9]*|0) budget=1 ;; esac
+  command -v perl >/dev/null 2>&1 || return 2
+  perl - "$queue" "$key" "$budget" <<'PERL'
+use strict;
+use warnings;
+
+my ($path, $wanted, $seconds) = @ARGV;
+$SIG{ALRM} = sub { exit 124 };
+alarm($seconds);
+open(my $fh, '<', $path) or exit 2;
+while (defined(my $line = <$fh>)) {
+  my @fields = split(/\t/, $line, -1);
+  if (defined($fields[3]) && $fields[3] eq $wanted) {
+    close($fh) or exit 2;
+    exit 0;
+  }
+}
+$fh->error() and exit 2;
+close($fh) or exit 2;
+exit 1;
+PERL
+  local status=$?
+  case "$status" in
+    0|1) return "$status" ;;
+    *) return 2 ;;
+  esac
+}
+
 fm_wake_append_if_absent_locked() {  # <result-var> <kind> <key> <payload>
   local result_var=$1 kind=$2 key=$3 payload=$4 status=0
   FM_WAKE_APPEND_CREATED=0
   case "$result_var" in ''|*[!A-Za-z0-9_]*) return 2 ;; esac
   if [ -e "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ]; then
     [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
-    if awk -F '\t' -v wanted="$key" '$4 == wanted { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+    if fm_wake_queue_key_status_locked "$FM_WAKE_QUEUE" "$key"; then
       printf -v "$result_var" '%s' 0
       return 0
     else
