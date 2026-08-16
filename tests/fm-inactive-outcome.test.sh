@@ -538,7 +538,7 @@ SH
 
 test_ack_recomputes_fingerprint_from_receipt_fields() {
   local dir root home fakebin state rec fingerprint field tampered
-  for field in task_id incarnation outcome terminal_snapshot kind; do
+  for field in task_id incarnation outcome terminal_snapshot kind fingerprint; do
     new_case "fingerprint-binding-$field"
     dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
     state="$home/state"
@@ -553,6 +553,7 @@ test_ack_recomputes_fingerprint_from_receipt_fields() {
       outcome) tampered=failed ;;
       terminal_snapshot) tampered='tampered snapshot' ;;
       kind) tampered=secondmate ;;
+      fingerprint) tampered=tampered-fingerprint ;;
     esac
     replace_field "$rec" "$field" "$tampered"
     if drain "$root" "$home" "$fakebin" >/dev/null 2>&1; then
@@ -560,7 +561,11 @@ test_ack_recomputes_fingerprint_from_receipt_fields() {
     fi
     [ -f "$rec" ] || fail "$field fingerprint mismatch removed the pending receipt"
     [ "$(queue_count "$state")" = 1 ] || fail "$field fingerprint mismatch did not preserve the wake for retry"
-    [ "$(receipt_value "$rec" fingerprint)" = "$fingerprint" ] || fail "$field fixture changed its filename binding"
+    if [ "$field" = fingerprint ]; then
+      [ "$(receipt_value "$rec" fingerprint)" = "$tampered" ] || fail "$field fixture did not retain its tampered serialized value"
+    else
+      [ "$(receipt_value "$rec" fingerprint)" = "$fingerprint" ] || fail "$field fixture changed its filename binding"
+    fi
     unset FM_FAKE_CREW_STATE_FINGERPRINT_X1
   done
   pass "drain recomputes the receipt fingerprint from bound fields"

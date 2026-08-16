@@ -820,7 +820,7 @@ fm_pane_idle_meta_index_persist() {
   local state=$1 directory=$2 deadline_ms=${3:-} window meta count key path
   local cursor_path ready_path snapshot_path reclaim_cursor_path cursor= cursor_found=0 started=1
   local reclaim_entries_path reclaim_entries_complete_path snapshot_source
-  local snapshot_tmp snapshot_changed=1 tmp rc compare_rc publish_stamp final_stamp
+  local snapshot_tmp snapshot_changed=1 tmp rc compare_rc source_stamp publish_stamp final_stamp
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
@@ -828,6 +828,8 @@ fm_pane_idle_meta_index_persist() {
   rc=$?
   [ "$rc" = 0 ] || return "$rc"
   snapshot_source=$FM_PANE_IDLE_META_INDEX_SNAPSHOT
+  source_stamp=$FM_PANE_IDLE_META_INDEX_STATE_STAMP
+  [ -n "$source_stamp" ] || return 1
   [ -f "$snapshot_source" ] && [ ! -L "$snapshot_source" ] || return 1
   cursor_path="$directory/.cursor"
   ready_path="$directory/.ready"
@@ -908,6 +910,10 @@ fm_pane_idle_meta_index_persist() {
     rm -f "$snapshot_tmp"
     return "$rc"
   }
+  [ "$publish_stamp" = "$source_stamp" ] || {
+    rm -f "$snapshot_tmp"
+    return 124
+  }
   while :; do
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then
       rm -f "$snapshot_tmp"
@@ -947,7 +953,7 @@ fm_pane_idle_meta_index_persist() {
   fi
   fm_pane_idle_meta_index_reclaim "$directory" "$deadline_ms" "$snapshot_source" || return $?
   final_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || return $?
-  if [ "$final_stamp" != "$publish_stamp" ]; then
+  if [ "$final_stamp" != "$source_stamp" ]; then
     rm -f "$ready_path"
     return 124
   fi

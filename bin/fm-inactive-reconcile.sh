@@ -664,15 +664,13 @@ is_secondmate_home() {
 }
 
 herdr_identity_allowed() {  # <meta>
-  local meta=$1 backend session window rc
-  if backend=$(meta_value_unique "$meta" backend); then
-    :
-  else
-    rc=$?
-    [ "$rc" = 1 ] && return 0
-    return 1
-  fi
-  [ "$backend" = herdr ] || return 0
+  local meta=$1 backend session window
+  backend=$(meta_value_unique "$meta" backend) || return 1
+  case "$backend" in
+    tmux) return 0 ;;
+    herdr) ;;
+    *) return 1 ;;
+  esac
   session=$(meta_value_unique "$meta" herdr_session) || return 1
   window=$(meta_value_unique "$meta" window) || return 1
   case "$session" in
@@ -1839,7 +1837,7 @@ publish_secondmate_receipt_and_wake() {
 }
 
 prepare_pending_receipt() {
-  local pending=$1 expected_fp schema task_id incarnation outcome terminal_source terminal_snapshot kind key
+  local pending=$1 expected_fp serialized_fp schema task_id incarnation outcome terminal_source terminal_snapshot kind key
   local parent_task_id parent_home parent_status parent_corr
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
   FP=${pending##*/}
@@ -1883,6 +1881,7 @@ prepare_pending_receipt() {
   terminal_source=$(receipt_field "$pending" terminal_source) || return 1
   terminal_snapshot=$(receipt_field "$pending" terminal_snapshot) || return 1
   kind=$(receipt_field "$pending" kind) || return 1
+  serialized_fp=$(receipt_field "$pending" fingerprint) || return 1
   parent_task_id=$(receipt_field "$pending" parent_task_id 2>/dev/null || true)
   parent_home=$(receipt_field "$pending" parent_home 2>/dev/null || true)
   parent_status=$(receipt_field "$pending" parent_status 2>/dev/null || true)
@@ -1902,7 +1901,7 @@ prepare_pending_receipt() {
     *) return 1 ;;
   esac
   expected_fp=$(hash_text "$task_id|$incarnation|$outcome|$terminal_snapshot|$kind") || return 1
-  [ "$expected_fp" = "$FP" ] || return 1
+  [ "$serialized_fp" = "$FP" ] && [ "$expected_fp" = "$FP" ] || return 1
   ID=$task_id
   INC=$incarnation
   OUTCOME=$outcome
@@ -2281,11 +2280,9 @@ republish_pending_receipt() {
     if [ "$status" = 0 ]; then
       window=$(meta_value_unique "$meta" window 2>/dev/null) || status=75
       if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
-        :
+        case "$backend" in tmux|herdr) ;; *) status=75 ;; esac
       else
-        rc=$?
-        [ "$rc" = 1 ] || status=75
-        backend=tmux
+        status=75
       fi
     fi
     if [ "$status" = 0 ]; then
@@ -2898,13 +2895,8 @@ reconcile_child() {
   snapshot=$(single_line "$line")
   INC=$(read_incarnation "$meta" "$id") || return 0
   window=$(meta_value_unique "$meta" window) || return 0
-  if backend=$(meta_value_unique "$meta" backend 2>/dev/null); then
-    :
-  else
-    state_rc=$?
-    [ "$state_rc" = 1 ] || return 0
-    backend=tmux
-  fi
+  backend=$(meta_value_unique "$meta" backend 2>/dev/null) || return 0
+  case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
   fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS" || return 0
   ID=$id
   OUTCOME=$outcome

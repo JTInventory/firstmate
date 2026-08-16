@@ -679,13 +679,19 @@ fm_wake_append_if_absent_locked() {  # <result-var> <kind> <key> <payload>
   local result_var=$1 kind=$2 key=$3 payload=$4 status=0
   FM_WAKE_APPEND_CREATED=0
   case "$result_var" in ''|*[!A-Za-z0-9_]*) return 2 ;; esac
-  if [ -f "$FM_WAKE_QUEUE" ] && awk -F '\t' -v wanted="$key" '$4 == wanted { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-    printf -v "$result_var" '%s' 0
-  else
-    fm_wake_append_locked "$kind" "$key" "$payload"
-    status=$?
-    [ "$status" -eq 0 ] && { FM_WAKE_APPEND_CREATED=1; printf -v "$result_var" '%s' 1; }
+  if [ -e "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ]; then
+    [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
+    if awk -F '\t' -v wanted="$key" '$4 == wanted { found=1 } END { exit(found ? 0 : 1) }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+      printf -v "$result_var" '%s' 0
+      return 0
+    else
+      status=$?
+    fi
+    [ "$status" -eq 1 ] || return "$status"
   fi
+  fm_wake_append_locked "$kind" "$key" "$payload"
+  status=$?
+  [ "$status" -eq 0 ] && { FM_WAKE_APPEND_CREATED=1; printf -v "$result_var" '%s' 1; }
   return "$status"
 }
 
