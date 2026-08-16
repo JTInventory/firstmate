@@ -95,20 +95,8 @@ meta_bind_run_id() {
   return "$status"
 }
 
-rollback_published_run_id() {
-  local run_id=$1 evidence stored
-  handoff_valid || return 1
-  metadata_generation_valid || return 1
-  stored=$(fm_run_step_binding_read "$FM_RUN_BINDING_TASK" "$FM_RUN_BINDING_INCARNATION" 2>/dev/null) || return 1
-  [ "$stored" = "$run_id" ] || return 1
-  evidence=$(fm_run_step_binding_path "$FM_RUN_BINDING_TASK") || return 1
-  [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
-  rm -f "$evidence" || return 1
-  [ ! -e "$evidence" ] && [ ! -L "$evidence" ]
-}
-
 publish_run_id() {
-  local run_id=$1 existing status=0 existing_status owner old_owner acquired=0 published_new=0
+  local run_id=$1 existing status=0 existing_status owner old_owner acquired=0
   case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   old_owner=${FM_TASK_LOCK_OWNER:-}
   fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
@@ -125,23 +113,17 @@ publish_run_id() {
       [ "$existing" = "$run_id" ] || status=1
     else
       existing_status=$?
-      if [ "$existing_status" = 75 ]; then
-        if fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
-          published_new=1
-        else
-          status=1
-        fi
-      else
-        status=1
-      fi
+      [ "$existing_status" = 75 ] || status=1
     fi
+  fi
+  if [ "$status" = 0 ]; then
+    fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION" || status=1
   fi
   if [ "$status" = 0 ]; then
     if ! meta_bind_run_id "$run_id"; then
       status=1
-      if [ "$published_new" = 1 ]; then
-        rollback_published_run_id "$run_id" || status=1
-      fi
+    elif ! fm_run_step_binding_activate "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
+      status=1
     fi
   fi
   if [ "$acquired" = 1 ]; then

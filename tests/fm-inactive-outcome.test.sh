@@ -1490,6 +1490,8 @@ SH
     || fail "run-id bridge did not preserve no-mistakes output"
   [ "$(receipt_value "$evidence" run_id)" = 01SPAWNCONTRACT ] \
     || fail "run-id bridge did not persist the actual no-mistakes run id"
+  [ "$(receipt_value "$evidence" state)" = active ] \
+    || fail "run-id bridge did not activate evidence after metadata binding"
   [ "$(receipt_value "$evidence" spawn_incarnation)" = "$token" ] \
     || fail "run-id bridge bound the wrong spawn incarnation"
   [ "$(receipt_value "$meta" run_binding_state)" = bound ] \
@@ -1635,8 +1637,8 @@ SH
   status=$?
   set -u
   [ "$status" -ne 0 ] || fail "metadata publication failure was treated as success"
-  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
-    || fail "metadata publication failure left active run evidence"
+  [ "$(receipt_value "$evidence" state)" = staged ] \
+    || fail "metadata publication failure did not leave non-terminal evidence"
   [ "$(receipt_value "$meta" run_binding_state)" = pending ] \
     || fail "metadata publication failure changed the pending state"
   [ "$(grep -c '^run_id=' "$meta" 2>/dev/null || true)" = 0 ] \

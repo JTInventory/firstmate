@@ -72,6 +72,37 @@ fm_run_step_binding_read() {
   printf '%s\n' "$stored_run"
 }
 
+fm_run_step_binding_metadata_validate() {
+  local id=$1 run_id=$2 incarnation=$3 meta result
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 75
+  result=$(awk -F= -v run_id="$run_id" -v inc="$incarnation" '
+    BEGIN { invalid=0 }
+    /^[^=]+=/ {
+      key=$1
+      value=substr($0, index($0, "=") + 1)
+      if (key == "run_binding_state") { state=value; state_n++ }
+      if (key == "run_id") { stored_run=value; run_n++ }
+      if (key == "spawn_incarnation") { stored_inc=value; inc_n++ }
+      next
+    }
+    { invalid=1 }
+    END {
+      if (state_n == 0 && !invalid) { print "legacy"; exit 0 }
+      if (!invalid && state_n == 1 && run_n == 1 && inc_n == 1 \
+        && state == "bound" && stored_run == run_id && stored_inc == inc) {
+        print "bound"
+        exit 0
+      }
+      print "invalid"
+    }
+  ' "$meta" 2>/dev/null) || return 1
+  case "$result" in
+    legacy|bound) return 0 ;;
+    *) return 75 ;;
+  esac
+}
+
 fm_run_step_binding_validate() {
   local id=$1 run_id=$2 incarnation=$3 stored_run
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 75 ;; esac
@@ -79,6 +110,7 @@ fm_run_step_binding_validate() {
   case "$incarnation" in ''|*[!A-Za-z0-9._:-]*) return 75 ;; esac
   stored_run=$(fm_run_step_binding_read "$id" "$incarnation") || return $?
   [ "$stored_run" = "$run_id" ] || return 75
+  fm_run_step_binding_metadata_validate "$id" "$run_id" "$incarnation"
 }
 
 fm_run_step_binding_publish() {
@@ -102,10 +134,64 @@ fm_run_step_binding_publish() {
     tmp=$(mktemp "$STATE/.run-step-incarnation.$id.XXXXXX") || status=1
   fi
   if [ "$status" = 0 ]; then
-    if ! printf 'schema=fm-jt-run-step-incarnation.v1\ntask_id=%s\nrun_id=%s\nspawn_incarnation=%s\nstate=active\n' \
+    if ! printf 'schema=fm-jt-run-step-incarnation.v1\ntask_id=%s\nrun_id=%s\nspawn_incarnation=%s\nstate=staged\n' \
       "$id" "$run_id" "$incarnation" > "$tmp" || ! mv -f "$tmp" "$evidence"; then
       rm -f "$tmp"
       status=1
+    fi
+  fi
+  fm_run_step_binding_lock_release "$lock" "$acquired" || status=1
+  return "$status"
+}
+
+fm_run_step_binding_activate() {
+  local id=$1 run_id=$2 incarnation=$3 evidence lock owner acquired=0 tmp status=0
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  case "$incarnation" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  evidence=$(fm_run_step_binding_path "$id") || return 1
+  lock=${FM_TASK_LOCK_PATH:-$STATE/.spawn-$id.lock}
+  owner=${FM_TASK_LOCK_OWNER:-}
+  if [ -n "$owner" ] && fm_lock_points_to_owner "$lock" "$owner"; then
+    :
+  else
+    fm_lock_acquire_wait "$lock" || return 1
+    acquired=1
+  fi
+  if [ ! -f "$evidence" ] || [ -L "$evidence" ]; then
+    status=1
+  else
+    tmp=$(mktemp "$STATE/.run-step-incarnation.$id.XXXXXX") || status=1
+    if [ "$status" = 0 ]; then
+      if ! awk -F= -v task="$id" -v run_id="$run_id" -v inc="$incarnation" '
+        BEGIN { valid=1 }
+        /^[^=]+=/ {
+          key=$1
+          if (key in seen) valid=0
+          seen[key]=1
+          value=substr($0, index($0, "=") + 1)
+          if (key == "schema" && value != "fm-jt-run-step-incarnation.v1") valid=0
+          if (key == "task_id" && value != task) valid=0
+          if (key == "run_id" && value != run_id) valid=0
+          if (key == "spawn_incarnation" && value != inc) valid=0
+          if (key == "state") {
+            if (value != "staged") valid=0
+            print "state=active"
+            next
+          }
+          print
+          next
+        }
+        { valid=0 }
+        END {
+          if (!("schema" in seen) || !("task_id" in seen) || !("run_id" in seen) \
+            || !("spawn_incarnation" in seen) || !("state" in seen)) valid=0
+          exit(valid ? 0 : 1)
+        }
+      ' "$evidence" > "$tmp" || ! mv -f "$tmp" "$evidence"; then
+        rm -f "$tmp"
+        status=1
+      fi
     fi
   fi
   fm_run_step_binding_lock_release "$lock" "$acquired" || status=1
