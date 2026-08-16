@@ -77,6 +77,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "spawn" || exit 1
+# shellcheck source=bin/fm-pane-idle-lib.sh
+. "$SCRIPT_DIR/fm-pane-idle-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -2178,6 +2180,7 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 } > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
+fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 SPAWN_META_PUBLISHED=1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"

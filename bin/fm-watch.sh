@@ -451,12 +451,18 @@ event_wait_herdr() {
       rm -f "$windows_tmp"
       return 2
     }
+    if [ -z "$w" ]; then
+      fm_pane_idle_meta_index_cursor_write "$event_cursor_path" "$event_window_cursor" || {
+        rm -f "$windows_tmp"
+        return 2
+      }
+      continue
+    fi
+    backend=$(window_backend "$w" "$event_scan_deadline" "$event_meta") || continue
     fm_pane_idle_meta_index_cursor_write "$event_cursor_path" "$event_window_cursor" || {
       rm -f "$windows_tmp"
       return 2
     }
-    [ -n "$w" ] || continue
-    backend=$(window_backend "$w" "$event_scan_deadline" "$event_meta") || continue
     [ "$backend" = herdr ] || continue
     session=${w%%:*}
     [ -n "$session" ] && [ "$session" != "$w" ] || continue

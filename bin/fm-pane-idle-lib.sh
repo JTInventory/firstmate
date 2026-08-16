@@ -70,9 +70,42 @@ fm_pane_idle_compare_files() {
   fi
 }
 
+fm_pane_idle_meta_freshness_path() {
+  printf '%s/.pane-idle-meta-index/.metadata-freshness' "$1"
+}
+
+fm_pane_idle_meta_freshness_bump() {
+  local state=$1 boundary_dir boundary_path tmp value
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  boundary_dir="$state/.pane-idle-meta-index"
+  if [ -e "$boundary_dir" ] || [ -L "$boundary_dir" ]; then
+    [ -d "$boundary_dir" ] && [ ! -L "$boundary_dir" ] || return 1
+  else
+    mkdir "$boundary_dir" || return 1
+  fi
+  boundary_path="$boundary_dir/.metadata-freshness"
+  [ ! -L "$boundary_path" ] || return 1
+  value="$(fm_pane_idle_now_ms).$$.${RANDOM:-0}"
+  tmp=$(mktemp "$boundary_path.XXXXXX") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
+  printf '%s\n' "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
+  [ ! -L "$boundary_path" ] && mv -f "$tmp" "$boundary_path" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
 fm_pane_idle_path_stamp() {
-  local path=$1 deadline_ms=${2:-}
+  local path=$1 deadline_ms=${2:-} boundary boundary_value
   [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  boundary=$(fm_pane_idle_meta_freshness_path "$path")
+  if [ -f "$boundary" ] && [ ! -L "$boundary" ]; then
+    boundary_value=$(head -n 1 "$boundary" 2>/dev/null || true)
+    case "$boundary_value" in
+      ''|*[!A-Za-z0-9._-]*) ;;
+      *) printf '%s' "$boundary_value"; return 0 ;;
+    esac
+  fi
   fm_pane_idle_run_bounded_perl "$deadline_ms" "$path" <<'PERL'
 use strict;
 use warnings;
@@ -106,6 +139,7 @@ use Time::HiRes qw(stat);
 my ($state, $entries, $complete, $stamp_path, $partial, $cookie_path, $source_stamp) = @ARGV;
 my $nofollow = eval { Fcntl::O_NOFOLLOW() };
 defined($nofollow) or exit 1;
+my $boundary = "$state/.pane-idle-meta-index/.metadata-freshness";
 sub atomic_write {
   my ($path, $value) = @_;
   return 0 if -l $path;
@@ -119,6 +153,14 @@ sub atomic_write {
   return 1;
 }
 sub dir_stamp {
+  if (-f $boundary && !-l $boundary) {
+    open(my $bfh, '<', $boundary) or return undef;
+    local $/;
+    my $value = <$bfh> // '';
+    close($bfh) or return undef;
+    chomp $value;
+    return $value if $value =~ /\A[A-Za-z0-9._-]+\z/;
+  }
   my @info = stat($state) or return undef;
   return sha256_hex(join("\0", @info[0, 1, 2, 7, 9, 10, 11]));
 }

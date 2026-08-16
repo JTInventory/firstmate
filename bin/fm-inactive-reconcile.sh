@@ -2007,15 +2007,12 @@ reported_secondmate_receipt_valid() {
 inactive_directory_candidates() {
   local directory=$1 suffix=$2 seconds=${3:-1} cursor=${4:-} cursor_path=${5:-}
   local stage_path='' source_dir='' source_key='' source_path='' source_partial='' source_cookie=''
-  local source_complete='' source_stamp='' path
+  local source_complete='' source_stamp='' metadata_boundary='' legacy_stage='' path
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 0
   case "$seconds" in ''|*[!0-9]*|0) return 0 ;; esac
   case "$cursor" in ''|0) cursor=;; *[!0-9]*) return 1 ;; esac
   [ -z "$cursor_path" ] || { [ ! -L "$cursor_path" ] || return 1; }
   if [ -n "$cursor_path" ]; then
-    stage_path="$cursor_path.stage"
-    [ ! -L "$stage_path" ] || return 1
-    rm -f "$stage_path" || return 1
     source_dir="$(dirname "$cursor_path")/.inactive-outcome-enum"
     if [ -e "$source_dir" ] || [ -L "$source_dir" ]; then
       [ -d "$source_dir" ] && [ ! -L "$source_dir" ] || return 1
@@ -2024,6 +2021,13 @@ inactive_directory_candidates() {
     fi
     source_key=$(basename "$cursor_path")
     case "$source_key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    stage_path="$source_dir/$source_key.stage"
+    legacy_stage="$cursor_path.stage"
+    [ ! -L "$stage_path" ] && [ ! -L "$legacy_stage" ] || return 1
+    if [ -e "$legacy_stage" ]; then
+      [ -f "$legacy_stage" ] && [ ! -e "$stage_path" ] || return 1
+      mv "$legacy_stage" "$stage_path" || return 1
+    fi
     source_path="$source_dir/$source_key.source"
     source_partial="$source_path.partial"
     source_cookie="$source_path.cookie"
@@ -2033,11 +2037,21 @@ inactive_directory_candidates() {
       "$source_complete" "$source_stamp"; do
       [ ! -L "$path" ] || return 1
     done
+    if [ "$directory" = "$STATE" ]; then
+      metadata_boundary=$(fm_pane_idle_meta_freshness_path "$STATE")
+      boundary_dir=$(dirname "$metadata_boundary")
+      if [ -e "$boundary_dir" ] || [ -L "$boundary_dir" ]; then
+        [ -d "$boundary_dir" ] && [ ! -L "$boundary_dir" ] || return 1
+      else
+        mkdir "$boundary_dir" || return 1
+      fi
+      [ ! -L "$metadata_boundary" ] || return 1
+    fi
   fi
   if command -v perl >/dev/null 2>&1; then
     run_bounded_child "$seconds" perl - "$directory" "$suffix" "$cursor" "$stage_path" \
       "$source_path" "$source_partial" "$source_cookie" "$source_complete" \
-      "$source_stamp" <<'PERL'
+      "$source_stamp" "$metadata_boundary" <<'PERL'
 use strict;
 use warnings;
 use Fcntl qw(:DEFAULT);
@@ -2045,6 +2059,7 @@ use Digest::SHA qw(sha256_hex);
 use Time::HiRes qw(stat);
 my ($dir, $suffix, $cursor, $stage_path) = @ARGV[0..3];
 my ($source_path, $source_partial, $source_cookie, $source_complete, $source_stamp) = @ARGV[4..8];
+my $metadata_boundary = $ARGV[9] // '';
 my $nofollow = eval { Fcntl::O_NOFOLLOW() };
 defined($nofollow) or exit 1;
 sub atomic_write {
@@ -2065,6 +2080,14 @@ sub atomic_write {
   return 1;
 }
 sub directory_stamp {
+  if ($metadata_boundary ne '' && -f $metadata_boundary && !-l $metadata_boundary) {
+    open(my $bfh, '<', $metadata_boundary) or return undef;
+    local $/;
+    my $value = <$bfh> // '';
+    close($bfh) or return undef;
+    chomp $value;
+    return $value if $value =~ /\A[A-Za-z0-9._-]+\z/;
+  }
   my @info = stat($dir) or return undef;
   return sha256_hex(join("\0", @info[0, 1, 2, 7, 9, 10, 11]));
 }
@@ -2124,6 +2147,9 @@ if ($source_path ne '') {
       atomic_write($source_stamp, "$finish\n") or exit 1;
       exit 75;
     }
+    if ($metadata_boundary ne '' && !-e $metadata_boundary) {
+      atomic_write($metadata_boundary, "$finish\n") or exit 1;
+    }
     open(my $pfh, '<', $source_partial) or exit 1;
     my %seen;
     my @paths;
@@ -2179,7 +2205,9 @@ PERL
 }
 
 inactive_enum_cursor_promote() {
-  local path=$1 stage="$1.stage" value
+  local path=$1 stage value progress_dir
+  progress_dir="$(dirname "$path")/.inactive-outcome-enum"
+  stage="$progress_dir/$(basename "$path").stage"
   [ ! -L "$path" ] && [ ! -L "$stage" ] || return 1
   [ -e "$stage" ] || return 0
   value=$(inactive_text_cursor_read "$stage") || return 1
@@ -2188,9 +2216,12 @@ inactive_enum_cursor_promote() {
 }
 
 inactive_enum_cursor_discard() {
-  local path=$1
-  [ ! -L "$path.stage" ] || return 1
-  rm -f "$path.stage"
+  local path=$1 stage legacy_stage progress_dir
+  progress_dir="$(dirname "$path")/.inactive-outcome-enum"
+  stage="$progress_dir/$(basename "$path").stage"
+  legacy_stage="$path.stage"
+  [ ! -L "$stage" ] && [ ! -L "$legacy_stage" ] || return 1
+  rm -f "$stage" "$legacy_stage"
 }
 
 receipt_candidates() {

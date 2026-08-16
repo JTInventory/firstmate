@@ -66,6 +66,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "teardown" || exit 1
+# shellcheck source=bin/fm-pane-idle-lib.sh
+. "$SCRIPT_DIR/fm-pane-idle-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -2862,6 +2864,10 @@ elif ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   echo "error: could not remove task records for $ID; ownership evidence was preserved" >&2
   exit 1
 fi
+fm_pane_idle_meta_freshness_bump "$STATE" || {
+  echo "error: could not advance metadata freshness boundary for $ID" >&2
+  exit 1
+}
 if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   # A slot whose directory is gone has no stamp to serialize against; demanding
   # a lock on it would strand the record this teardown already retired.
