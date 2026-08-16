@@ -11,24 +11,11 @@ fm_run_step_binding_lock_release() {
   fi
 }
 
-fm_run_step_binding_read() {
-  local id=$1 incarnation=$2 evidence lock owner acquired=0 stored_run status
-  case "$id" in ''|*[!A-Za-z0-9._-]*) return 75 ;; esac
-  case "$incarnation" in ''|*[!A-Za-z0-9._:-]*) return 75 ;; esac
-  evidence=$(fm_run_step_binding_path "$id") || return 1
-  lock=${FM_TASK_LOCK_PATH:-$STATE/.spawn-$id.lock}
-  owner=${FM_TASK_LOCK_OWNER:-}
-  if [ -n "$owner" ] && fm_lock_points_to_owner "$lock" "$owner"; then
-    :
-  else
-    fm_lock_acquire_wait "$lock" || return 1
-    acquired=1
-  fi
-  if [ ! -f "$evidence" ] || [ -L "$evidence" ]; then
-    fm_run_step_binding_lock_release "$lock" "$acquired" || return 1
-    return 75
-  fi
-  stored_run=$(awk -F= -v task="$id" -v inc="$incarnation" '
+fm_run_step_binding_read_state() {
+  local evidence=$1 id=$2 incarnation=$3 expected_state=$4 stored_run status
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 75
+  case "$expected_state" in active|staged) ;; *) return 75 ;; esac
+  stored_run=$(awk -F= -v task="$id" -v inc="$incarnation" -v expected_state="$expected_state" '
     BEGIN {
       allowed["schema"]=1; allowed["task_id"]=1; allowed["run_id"]=1
       allowed["spawn_incarnation"]=1; allowed["state"]=1
@@ -44,7 +31,7 @@ fm_run_step_binding_read() {
       if (key == "task_id" && value != task) valid=0
       if (key == "run_id" && value == "") valid=0
       if (key == "spawn_incarnation" && value != inc) valid=0
-      if (key == "state" && value != "active") valid=0
+      if (key == "state" && value != expected_state) valid=0
       next
     }
     { valid=0 }
@@ -56,20 +43,41 @@ fm_run_step_binding_read() {
     }
   ' "$evidence" 2>/dev/null)
   status=$?
-  case "$status" in
-    0) ;;
-    75)
-      fm_run_step_binding_lock_release "$lock" "$acquired" || return 1
-      return 75
-      ;;
-    *)
-      fm_run_step_binding_lock_release "$lock" "$acquired" || true
-      return 1
-      ;;
-  esac
-  fm_run_step_binding_lock_release "$lock" "$acquired" || return 1
+  [ "$status" = 0 ] || return "$status"
   case "$stored_run" in ''|*[!A-Za-z0-9._:-]*) return 75 ;; esac
   printf '%s\n' "$stored_run"
+}
+
+fm_run_step_binding_read_variant() {
+  local id=$1 incarnation=$2 expected_state=$3 evidence lock owner acquired=0 stored_run status
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 75 ;; esac
+  case "$incarnation" in ''|*[!A-Za-z0-9._:-]*) return 75 ;; esac
+  evidence=$(fm_run_step_binding_path "$id") || return 1
+  if [ "${FM_RUN_STEP_READ_ONLY:-0}" = 1 ]; then
+    fm_run_step_binding_read_state "$evidence" "$id" "$incarnation" "$expected_state"
+    return $?
+  fi
+  lock=${FM_TASK_LOCK_PATH:-$STATE/.spawn-$id.lock}
+  owner=${FM_TASK_LOCK_OWNER:-}
+  if [ -n "$owner" ] && fm_lock_points_to_owner "$lock" "$owner"; then
+    :
+  else
+    fm_lock_acquire_wait "$lock" || return 1
+    acquired=1
+  fi
+  stored_run=$(fm_run_step_binding_read_state "$evidence" "$id" "$incarnation" "$expected_state")
+  status=$?
+  fm_run_step_binding_lock_release "$lock" "$acquired" || return 1
+  [ "$status" = 0 ] || return "$status"
+  printf '%s\n' "$stored_run"
+}
+
+fm_run_step_binding_read() {
+  fm_run_step_binding_read_variant "$1" "$2" active
+}
+
+fm_run_step_binding_staged_read() {
+  fm_run_step_binding_read_variant "$1" "$2" staged
 }
 
 fm_run_step_binding_metadata_validate() {
@@ -128,7 +136,7 @@ fm_run_step_binding_publish() {
     acquired=1
   fi
   if [ -e "$evidence" ] || [ -L "$evidence" ]; then
-    [ -f "$evidence" ] && [ ! -L "$evidence" ] || status=1
+    status=1
   fi
   if [ "$status" = 0 ]; then
     tmp=$(mktemp "$STATE/.run-step-incarnation.$id.XXXXXX") || status=1

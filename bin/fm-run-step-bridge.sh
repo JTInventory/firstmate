@@ -138,7 +138,8 @@ meta_bind_run_id() {
 }
 
 publish_run_id() {
-  local run_id=$1 existing staged_existing status=0 existing_status staged_status owner old_owner acquired=0
+  local run_id=$1 existing staged_existing status=0 existing_status staged_status owner old_owner acquired=0 \
+    evidence existing_active=0 existing_staged=0
   case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   old_owner=${FM_TASK_LOCK_OWNER:-}
   fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
@@ -152,15 +153,33 @@ publish_run_id() {
   fi
   if [ "$status" = 0 ]; then
     if existing=$(fm_run_step_binding_read "$FM_RUN_BINDING_TASK" "$FM_RUN_BINDING_INCARNATION" 2>/dev/null); then
-      [ "$existing" = "$run_id" ] || status=1
+      if [ "$existing" = "$run_id" ]; then
+        existing_active=1
+      else
+        status=1
+      fi
     else
       existing_status=$?
       if [ "$existing_status" = 75 ]; then
-        if staged_existing=$(metadata_staged_run_id 2>/dev/null); then
-          [ "$staged_existing" = "$run_id" ] || status=1
-        else
-          staged_status=$?
-          [ "$staged_status" = 75 ] || status=1
+        evidence=$(fm_run_step_binding_path "$FM_RUN_BINDING_TASK") || status=1
+        if [ "$status" = 0 ] && { [ -e "$evidence" ] || [ -L "$evidence" ]; }; then
+          if staged_existing=$(fm_run_step_binding_staged_read \
+            "$FM_RUN_BINDING_TASK" "$FM_RUN_BINDING_INCARNATION" 2>/dev/null); then
+            if [ "$staged_existing" = "$run_id" ]; then
+              existing_staged=1
+            else
+              status=1
+            fi
+          else
+            status=1
+          fi
+        elif [ "$status" = 0 ]; then
+          if staged_existing=$(metadata_staged_run_id 2>/dev/null); then
+            [ "$staged_existing" = "$run_id" ] || status=1
+          else
+            staged_status=$?
+            [ "$staged_status" = 75 ] || status=1
+          fi
         fi
       else
         status=1
@@ -168,15 +187,23 @@ publish_run_id() {
     fi
   fi
   if [ "$status" = 0 ]; then
-    if ! meta_stage_run_id "$run_id"; then
-      status=1
-    elif ! fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
-      status=1
-    elif ! fm_run_step_binding_activate "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
-      status=1
-    elif ! meta_bind_run_id "$run_id"; then
-      status=1
-      fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION" || status=1
+    if [ "$existing_active" = 1 ]; then
+      meta_bind_run_id "$run_id" || status=1
+    else
+      if [ "$existing_staged" = 0 ]; then
+        if ! meta_stage_run_id "$run_id"; then
+          status=1
+        elif ! fm_run_step_binding_publish "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
+          status=1
+        fi
+      fi
+      if [ "$status" = 0 ] && ! fm_run_step_binding_activate \
+        "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION"; then
+        status=1
+      fi
+      if [ "$status" = 0 ] && ! meta_bind_run_id "$run_id"; then
+        status=1
+      fi
     fi
   fi
   if [ "$acquired" = 1 ]; then

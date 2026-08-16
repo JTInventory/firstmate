@@ -1005,6 +1005,17 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+test_missing_state_read_is_side_effect_free() {
+  reset_fakes
+  local d out
+  d=$(new_case missing-state)
+  rmdir "$d/state" || fail "missing-state fixture could not remove its state directory"
+  out=$(run_crew_state "$d" missing-state)
+  assert_contains "$out" "state: unknown" "missing state -> unknown"
+  [ ! -e "$d/state" ] || fail "crew-state recreated missing state"
+  pass "missing state reads remain side-effect free"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1167,6 +1178,7 @@ test_unknown_fixing_round_stays_visible_unknown
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
+test_missing_state_read_is_side_effect_free
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current

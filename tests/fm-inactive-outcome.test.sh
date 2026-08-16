@@ -1721,6 +1721,55 @@ SH
   pass "staged run bindings reject rebinding within one incarnation"
 }
 
+test_run_bridge_rejects_existing_evidence_rebinding() {
+  local dir root home fakebin state handoff meta evidence status
+  run_case() {
+    local evidence_state=$1 expected_run=$2
+    new_case "bridge-existing-evidence-$evidence_state"
+    dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+    state="$home/state"
+    cp -a "$ROOT/bin/." "$root/bin/"
+    handoff="$state/.run-step-handoff-bridge-existing-evidence"
+    meta="$state/bridge-existing-evidence.meta"
+    evidence="$state/.run-step-incarnation-bridge-existing-evidence"
+    fm_write_meta "$meta" \
+      window=tmux:fm-bridge-existing-evidence worktree="$state/work-bridge-existing-evidence" \
+      project="$state/work-bridge-existing-evidence" harness=echo kind=ship mode=no-mistakes \
+      yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+      run_binding_handoff=.run-step-handoff-bridge-existing-evidence
+    mkdir -p "$state/work-bridge-existing-evidence"
+    fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-existing-evidence \
+      spawn_incarnation=inc-a state=pending
+    fm_write_meta "$evidence" schema=fm-jt-run-step-incarnation.v1 \
+      task_id=bridge-existing-evidence run_id="$expected_run" spawn_incarnation=inc-a \
+      state="$evidence_state"
+    cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01REPLACEMENT"\n'
+SH
+    chmod +x "$fakebin/real-no-mistakes"
+    set +e
+    env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+      FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-existing-evidence \
+      FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+      FM_RUN_BINDING_TMP="$dir" FM_SESSION_LOCK_BOOTSTRAP=1 \
+      "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+      > "$dir/bridge.out" 2>&1
+    status=$?
+    set -u
+    [ "$status" -ne 0 ] || fail "existing $evidence_state evidence was overwritten"
+    [ "$(receipt_value "$meta" run_binding_state)" = pending ] \
+      || fail "existing $evidence_state evidence changed metadata state"
+    [ "$(receipt_value "$evidence" run_id)" = "$expected_run" ] \
+      || fail "existing $evidence_state evidence changed its run id"
+    [ "$(receipt_value "$evidence" state)" = "$evidence_state" ] \
+      || fail "existing $evidence_state evidence changed its state"
+  }
+  run_case staged 01STAGED
+  run_case corrupt 01CORRUPT
+  pass "existing run evidence rejects replacement binding"
+}
+
 test_run_bridge_rolls_back_failed_metadata_binding() {
   local dir root home fakebin state handoff meta evidence meta_count status
   new_case bridge-metadata-rollback
@@ -4481,6 +4530,7 @@ test_spawn_publishes_incarnation_token
 test_run_bridge_rejects_relaunched_generation
 test_run_bridge_metadata_stage_failure_preserves_committed_pair
 test_run_bridge_rejects_staged_run_rebinding
+test_run_bridge_rejects_existing_evidence_rebinding
 test_run_bridge_rolls_back_failed_metadata_binding
 test_run_bridge_activation_failure_is_recoverable
 test_pane_idle_reclaim_advances_malformed_cursor

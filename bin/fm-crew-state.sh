@@ -59,8 +59,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-numeric-lib.sh
 . "$SCRIPT_DIR/fm-numeric-lib.sh"
-FM_SESSION_LOCK_BOOTSTRAP=1 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-run-step-lib.sh
+FM_RUN_STEP_READ_ONLY=1
 . "$SCRIPT_DIR/fm-run-step-lib.sh"
 
 ID=${1:-}
