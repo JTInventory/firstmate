@@ -690,18 +690,60 @@ fm_wake_append_if_absent_locked() {  # <result-var> <kind> <key> <payload>
 }
 
 fm_wake_remove_key_locked() {
-  local key=$1 tmp
+  local key=$1 tmp cursor cursor_offset=0 cursor_active=0 new_offset
   [ ! -L "$FM_WAKE_QUEUE" ] || return 1
   [ -e "$FM_WAKE_QUEUE" ] || return 0
   [ -f "$FM_WAKE_QUEUE" ] || return 1
+  cursor=$(fm_wake_queue_cursor_path)
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    fm_wake_queue_cursor_read || return 1
+    cursor_offset=$FM_WAKE_QUEUE_CURSOR_OFFSET
+    cursor_active=1
+  fi
   tmp=$(mktemp "$STATE/.wake-queue.remove.XXXXXX") || return 1
-  if ! awk -F '\t' -v wanted="$key" '$4 != wanted { print }' "$FM_WAKE_QUEUE" > "$tmp"; then
+  if ! new_offset=$(perl - "$FM_WAKE_QUEUE" "$tmp" "$key" "$cursor_offset" "$cursor_active" <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT);
+
+my ($input, $output, $wanted, $cursor_offset, $cursor_active) = @ARGV;
+open(my $in, '<', $input) or exit 1;
+binmode($in);
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sysopen(my $out, $output, O_WRONLY | O_TRUNC | $nofollow) or exit 1;
+binmode($out);
+my $removed_before = 0;
+while (1) {
+  my $start = tell($in);
+  defined($start) or exit 1;
+  my $line = <$in>;
+  last unless defined $line;
+  my $end = tell($in);
+  defined($end) or exit 1;
+  my @fields = split(/\t/, $line, -1);
+  if (defined($fields[3]) && $fields[3] eq $wanted) {
+    $removed_before += $end - $start if $cursor_active && $start < $cursor_offset;
+    next;
+  }
+  print $out $line or exit 1;
+}
+close($in) or exit 1;
+close($out) or exit 1;
+print $cursor_offset - $removed_before if $cursor_active;
+PERL
+  ); then
     rm -f "$tmp"
     return 1
   fi
+  if [ "$cursor_active" = 1 ]; then
+    case "$new_offset" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
+  fi
   [ ! -L "$FM_WAKE_QUEUE" ] || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$FM_WAKE_QUEUE" || { rm -f "$tmp"; return 1; }
-  rm -f "$(fm_wake_queue_cursor_path)" || return 1
+  if [ "$cursor_active" = 1 ]; then
+    fm_wake_queue_cursor_write "$new_offset" || return 1
+  fi
 }
 
 fm_wake_append_if_absent() {  # <result-var> <kind> <key> <payload>

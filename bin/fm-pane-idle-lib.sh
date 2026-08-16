@@ -199,8 +199,9 @@ PERL
         return "$rc"
       fi
       post_state_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
+        rc=$?
         rm -f "$entries_sorted_tmp"
-        return 1
+        return "$rc"
       }
       if [ "$post_state_stamp" != "$state_stamp" ]; then
         rm -f "$entries_sorted_tmp" "$entries_path" "$entries_complete_path" \
@@ -576,8 +577,9 @@ PERL
     return "$rc"
   fi
   post_state_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
+    rc=$?
     rm -f "$output"
-    return 1
+    return "$rc"
   }
   if [ "$post_state_stamp" != "$state_stamp" ]; then
     rm -f "$output" "$entries_path" "$entries_complete_path" "$entries_stamp_path" \
@@ -644,8 +646,9 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
       return "$rc"
     fi
     post_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
+      rc=$?
       rm -f "$tmp"
-      return 1
+      return "$rc"
     }
     if [ "$post_stamp" != "$stamp" ]; then
       rm -f "$tmp"
@@ -901,8 +904,9 @@ fm_pane_idle_meta_index_persist() {
     started=0
   fi
   publish_stamp=$(fm_pane_idle_path_stamp "$state" "$deadline_ms") || {
+    rc=$?
     rm -f "$snapshot_tmp"
-    return 1
+    return "$rc"
   }
   while :; do
     if [ -n "$deadline_ms" ] && [ "$(fm_pane_idle_now_ms)" -ge "$deadline_ms" ]; then

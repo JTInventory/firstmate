@@ -1074,11 +1074,10 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   rec=$(fm_pending_reply_active_path "$state" "$corr")
   fm_pending_reply_record_validate "$rec" "$state" "$corr" "$task_id" || return 1
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-  [ -n "$delivered" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
     awaiting_report|delivery_unknown) return 0 ;;
-    recovery_sending|recovery_sent) [ -n "$delivered" ] && return 0 ;;
+    recovery_sending|recovery_sent) [ -n "$delivered" ] || return 1; return 0 ;;
   esac
   return 1
 }

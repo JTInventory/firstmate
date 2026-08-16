@@ -334,10 +334,12 @@ while IFS= read -r drain_row || [ -n "$drain_row" ]; do
         1|5) ;;
         3) ;;
         4)
-          drain_restore_remaining "$drain_line" || exit 1
-          fm_wake_restore_queue "$DRAIN_RESTORE" || exit 1
-          rm -f "$DRAIN_RESTORE"
-          DRAIN_RESTORE=
+          if [ "$DRAIN_RESUMING" != true ]; then
+            drain_restore_remaining "$drain_line" || exit 1
+            fm_wake_restore_queue "$DRAIN_RESTORE" || exit 1
+            rm -f "$DRAIN_RESTORE"
+            DRAIN_RESTORE=
+          fi
           exit 0
           ;;
         6)

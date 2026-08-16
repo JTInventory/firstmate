@@ -874,6 +874,40 @@ test_drain_processes_bounded_batches() {
   pass "wake drain restores unprocessed bounded batches"
 }
 
+test_wake_cursor_survives_processed_row_removal() {
+  local dir root home fakebin state first second remainder
+  new_case wake-cursor-removal
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  first=$'1\t1\tcheck\tcursor-first\tfirst cursor wake'
+  second=$'1\t2\tcheck\tcursor-second\tsecond cursor wake'
+  printf '%s\n%s\n' "$first" "$second" > "$state/.wake-queue"
+  export FM_WAKE_DRAIN_BATCH_ROWS=1
+  drain "$root" "$home" "$fakebin" > "$dir/drain.out" \
+    || fail "cursor removal setup drain failed"
+  unset FM_WAKE_DRAIN_BATCH_ROWS
+  env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+      status=0
+      fm_wake_remove_key_locked cursor-second || status=$?
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+      exit "$status"
+    ' _ "$ROOT" || fail "processed-row removal failed"
+  [ -f "$state/.wake-queue.cursor" ] || fail "processed-row removal discarded the cursor"
+  remainder=$(env FM_SESSION_LOCK_BOOTSTRAP=1 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_queue_cursor_read && fm_wake_queue_stream_from_offset "$FM_WAKE_QUEUE" "$FM_WAKE_QUEUE_CURSOR_OFFSET"' \
+    _ "$ROOT" | sed '/^$/d')
+  [ -z "$remainder" ] || fail "processed-row removal replayed a consumed wake"
+  drain "$root" "$home" "$fakebin" > "$dir/retry.out" \
+    || fail "drain after processed-row removal failed"
+  ! grep -Fqx "$first" "$dir/retry.out" || fail "processed wake replayed after row removal"
+  [ ! -e "$state/.wake-queue.cursor" ] || fail "cursor remained after removed-row retry"
+  [ ! -s "$state/.wake-queue" ] || fail "removed-row retry left queue data"
+  pass "wake cursor survives removal of processed rows"
+}
+
 test_malformed_finalized_receipt_fails_closed() {
   local dir root home fakebin state fingerprint row
   new_case malformed-finalized-receipt
@@ -3598,6 +3632,7 @@ test_output_completion_failure_does_not_reprint
 test_direct_drain_finalizes_after_successful_output
 test_standalone_drain_refuses_inactive_ack
 test_drain_processes_bounded_batches
+test_wake_cursor_survives_processed_row_removal
 test_finalized_receipt_rows_are_suppressed
 test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
