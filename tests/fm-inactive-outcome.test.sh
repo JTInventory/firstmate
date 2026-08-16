@@ -461,29 +461,34 @@ SH
   [ "$(receipt_value "$evidence" spawn_incarnation)" = run-step-inc ] || fail "run-step binding used the wrong incarnation"
   [ "$(receipt_value "$evidence" state)" = active ] || fail "run-step binding was not active"
   export FM_RUN_STEP_ID=run-step-y1 FM_RUN_STEP_MODE=active
+  set +e
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null \
-    || fail "run-step relaunch could not replace its incarnation binding"
-  [ "$(receipt_value "$evidence" run_id)" = run-step-y1 ] || fail "run-step relaunch retained the stale binding"
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "run-step relaunch replaced its incarnation binding"
+  [ "$(receipt_value "$evidence" run_id)" = run-step-x1 ] || fail "run-step relaunch altered the bound run"
   export FM_RUN_STEP_MODE=terminal
   export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-y1'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
-  [ "$(receipt_count "$state" pending)" = 1 ] || fail "bound run-step state did not create a receipt"
-  [ "$(queue_count "$state")" = 1 ] || fail "bound run-step state did not queue a wake"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "mismatched run-step state created a receipt"
+  [ "$(queue_count "$state")" = 0 ] || fail "mismatched run-step state queued a wake"
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 set -u
-target="${!#}"
-if [ "${FM_FAIL_RUN_STEP_BINDING:-0}" = 1 ] && [[ "$target" == *.run-step-incarnation-run-step-x1 ]]; then
+if [ "${FM_FAIL_RUN_STEP_BINDING:-0}" = 1 ]; then
   exit 91
 fi
 exec /usr/bin/mv "$@"
 SH
   chmod +x "$fakebin/mv"
+  write_meta "$state" run-step-z1 run-step-inc
+  replace_field "$state/run-step-z1.meta" worktree "$root"
+  replace_field "$state/run-step-z1.meta" project "$root"
   export FM_RUN_STEP_ID=run-step-z1 FM_RUN_STEP_MODE=active FM_FAIL_RUN_STEP_BINDING=1
   set +e
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null 2>&1
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-z1 >/dev/null 2>&1
   status=$?
   set -u
   [ "$status" -ne 0 ] || fail "run-step binding publication failure was swallowed"

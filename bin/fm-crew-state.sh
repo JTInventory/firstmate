@@ -235,6 +235,8 @@ run_step_incarnation_binding_write() {
         [ "$acquired" = 1 ] && fm_lock_release "$lock"
         return 0
       fi
+      [ "$acquired" = 1 ] && fm_lock_release "$lock"
+      return 1
     else
       [ "$acquired" = 1 ] && fm_lock_release "$lock"
       return 1
