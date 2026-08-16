@@ -29,6 +29,7 @@ DRAIN_RESTORE_MANIFEST="$STATE/.wake-queue.restore"
 DRAIN_RESTORE_PENDING=false
 DRAIN_RESTORE_OFFSET=0
 DRAIN_RESTORE_SOURCE=
+DRAIN_RESTORE_SOURCE_RETIRED=0
 DRAIN_DEDUPED_READY=0
 DRAIN_FINALIZED_KEYS=()
 FM_WAKE_DRAIN_RESUMED_SOURCE=0
@@ -222,7 +223,7 @@ restore_pending_write() {
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
   [ ! -L "$DRAIN_RESTORE_MANIFEST" ] || return 1
   tmp=$(mktemp "$DRAIN_RESTORE_MANIFEST.XXXXXX") || return 1
-  if ! printf 'schema=fm-wake-queue-restore.v1\nsource=%s\noffset=%s\n' \
+  if ! printf 'schema=fm-wake-queue-restore.v1\nsource=%s\noffset=%s\nsource_retired=0\n' \
     "$base" "$offset" > "$tmp" || [ -L "$DRAIN_RESTORE_MANIFEST" ] \
     || ! mv -f "$tmp" "$DRAIN_RESTORE_MANIFEST"; then
     rm -f "$tmp"
@@ -231,7 +232,7 @@ restore_pending_write() {
 }
 
 restore_pending_read() {
-  local schema source offset base
+  local schema source offset source_retired base
   [ -f "$DRAIN_RESTORE_MANIFEST" ] && [ ! -L "$DRAIN_RESTORE_MANIFEST" ] || return 1
   schema=$(awk -F= '$1 == "schema" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' \
     "$DRAIN_RESTORE_MANIFEST" 2>/dev/null) || return 1
@@ -240,6 +241,11 @@ restore_pending_read() {
     "$DRAIN_RESTORE_MANIFEST" 2>/dev/null) || return 1
   offset=$(awk -F= '$1 == "offset" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' \
     "$DRAIN_RESTORE_MANIFEST" 2>/dev/null) || return 1
+  if ! source_retired=$(awk -F= '$1 == "source_retired" { print $2; n++ } END { exit(n == 0 || n == 1 ? 0 : 1) }' \
+    "$DRAIN_RESTORE_MANIFEST" 2>/dev/null); then
+    return 1
+  fi
+  case "$source_retired" in ''|0) source_retired=0 ;; 1) ;; *) return 1 ;; esac
   case "$source" in
     .wake-queue.deduped.*|.wake-queue.drain.*) ;;
     *) return 1 ;;
@@ -249,10 +255,39 @@ restore_pending_read() {
   esac
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
   base="$STATE/$source"
-  [ -f "$base" ] && [ ! -L "$base" ] || return 1
-  fm_wake_queue_offset_valid "$base" "$offset" || return 1
+  if [ "$source_retired" = 1 ]; then
+    if [ -e "$base" ] || [ -L "$base" ]; then
+      [ -f "$base" ] && [ ! -L "$base" ] || return 1
+      fm_wake_queue_offset_valid "$base" "$offset" || return 1
+    fi
+  else
+    [ -f "$base" ] && [ ! -L "$base" ] || return 1
+    fm_wake_queue_offset_valid "$base" "$offset" || return 1
+  fi
   DRAIN_RESTORE_SOURCE=$base
   DRAIN_RESTORE_OFFSET=$offset
+  DRAIN_RESTORE_SOURCE_RETIRED=$source_retired
+}
+
+restore_pending_mark_source_retired() {
+  local source=$1 offset=$2 base tmp
+  base=${source##*/}
+  [ "$source" = "$STATE/$base" ] || return 1
+  case "$base" in
+    .wake-queue.deduped.*|.wake-queue.drain.*) ;;
+    *) return 1 ;;
+  esac
+  case "${base##*.}" in ''|*[!0-9]*) return 1 ;; esac
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  [ -f "$DRAIN_RESTORE_MANIFEST" ] && [ ! -L "$DRAIN_RESTORE_MANIFEST" ] || return 1
+  tmp=$(mktemp "$DRAIN_RESTORE_MANIFEST.XXXXXX") || return 1
+  if ! printf 'schema=fm-wake-queue-restore.v1\nsource=%s\noffset=%s\nsource_retired=1\n' \
+    "$base" "$offset" > "$tmp" || [ -L "$DRAIN_RESTORE_MANIFEST" ] \
+    || ! mv -f "$tmp" "$DRAIN_RESTORE_MANIFEST"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  DRAIN_RESTORE_SOURCE_RETIRED=1
 }
 
 restore_queue_fallback() {
@@ -459,6 +494,15 @@ if [ -e "$DRAIN_RESTORE_MANIFEST" ] || [ -L "$DRAIN_RESTORE_MANIFEST" ]; then
   FM_WAKE_DRAIN_RESUMED_SOURCE=1
   DRAIN_DEDUPED=$DRAIN_RESTORE_SOURCE
   DRAIN_OFFSET=$DRAIN_RESTORE_OFFSET
+  if [ "$DRAIN_RESTORE_SOURCE_RETIRED" = 1 ]; then
+    rm -f "$DRAIN_RESTORE_SOURCE" || exit 1
+    rm -f "$DRAIN_RESTORE_MANIFEST" || exit 1
+    DRAIN_RESTORE_SOURCE=
+    DRAIN_RESTORE_SOURCE_RETIRED=0
+    DRAIN_RESTORE_PENDING=false
+    DRAIN_RESUMING=false
+    DRAIN_DEDUPED=
+  fi
 elif [ -e "$DRAIN_CURSOR" ] || [ -L "$DRAIN_CURSOR" ]; then
   fm_wake_queue_cursor_read || {
     echo "error: wake queue cursor is invalid; refusing to drain" >&2
@@ -614,10 +658,12 @@ if [ "$DRAIN_RESTORE_PENDING" = true ]; then
     [ "$batch_status" = 0 ] || [ "$batch_status" = 3 ] || exit "$batch_status"
     exit "$batch_status"
   fi
+  restore_pending_mark_source_retired "$DRAIN_RESTORE_SOURCE" "$DRAIN_RESTORE_OFFSET" || exit 1
+  rm -f "$DRAIN_RESTORE_SOURCE" || exit 1
   rm -f "$DRAIN_RESTORE_MANIFEST" || exit 1
-  rm -f "$DRAIN_DEDUPED" || exit 1
   DRAIN_DEDUPED=
   DRAIN_RESTORE_SOURCE=
+  DRAIN_RESTORE_SOURCE_RETIRED=0
   DRAIN_RESTORE_PENDING=false
 elif [ "$DRAIN_RESUMING" = true ]; then
   if [ "$DRAIN_RETAINED_ANY" = 1 ]; then

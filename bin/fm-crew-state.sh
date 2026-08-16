@@ -59,6 +59,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-numeric-lib.sh
 . "$SCRIPT_DIR/fm-numeric-lib.sh"
+FM_SESSION_LOCK_BOOTSTRAP=1 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -182,6 +183,69 @@ strip_quotes() {
     \"*\") s=${s#\"}; s=${s%\"} ;;
   esac
   trim "$s"
+}
+
+run_step_incarnation_binding_write() {
+  local id=$1 run_id=$2 incarnation=$3 evidence lock owner tmp acquired=0
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ -n "$incarnation" ] || return 1
+  evidence="$STATE/.run-step-incarnation-$id"
+  lock=${FM_TASK_LOCK_PATH:-$STATE/.spawn-$id.lock}
+  owner=${FM_TASK_LOCK_OWNER:-}
+  if [ -n "$owner" ] && fm_lock_points_to_owner "$lock" "$owner"; then
+    :
+  else
+    fm_lock_acquire_wait "$lock" || return 1
+    acquired=1
+  fi
+  if [ -e "$evidence" ] || [ -L "$evidence" ]; then
+    [ -f "$evidence" ] && [ ! -L "$evidence" ] || {
+      [ "$acquired" = 1 ] && fm_lock_release "$lock"
+      return 1
+    }
+    if awk -F= -v task="$id" -v run="$run_id" -v inc="$incarnation" '
+      BEGIN {
+        allowed["schema"]=1; allowed["task_id"]=1; allowed["run_id"]=1
+        allowed["spawn_incarnation"]=1; allowed["state"]=1
+        valid=1
+      }
+      /^[^=]+=/ {
+        key=$1
+        if (!(key in allowed) || (key in seen)) valid=0
+        seen[key]=1
+        value=substr($0, index($0, "=") + 1)
+        if (key == "schema" && value != "fm-jt-run-step-incarnation.v1") valid=0
+        if (key == "task_id" && value != task) valid=0
+        if (key == "run_id" && value != run) valid=0
+        if (key == "spawn_incarnation" && value != inc) valid=0
+        if (key == "state" && value != "active") valid=0
+        next
+      }
+      { valid=0 }
+      END {
+        if (!("schema" in seen) || !("task_id" in seen) || !("run_id" in seen) \
+          || !("spawn_incarnation" in seen) || !("state" in seen)) valid=0
+        exit !valid
+      }
+    ' "$evidence" 2>/dev/null; then
+      [ "$acquired" = 1 ] && fm_lock_release "$lock"
+      return 0
+    fi
+    [ "$acquired" = 1 ] && fm_lock_release "$lock"
+    return 1
+  fi
+  tmp=$(mktemp "$STATE/.run-step-incarnation.$id.XXXXXX") || {
+    [ "$acquired" = 1 ] && fm_lock_release "$lock"
+    return 1
+  }
+  if ! printf 'schema=fm-jt-run-step-incarnation.v1\ntask_id=%s\nrun_id=%s\nspawn_incarnation=%s\nstate=active\n' \
+    "$id" "$run_id" "$incarnation" > "$tmp" || ! mv -f "$tmp" "$evidence"; then
+    rm -f "$tmp"
+    [ "$acquired" = 1 ] && fm_lock_release "$lock"
+    return 1
+  fi
+  [ "$acquired" = 1 ] && fm_lock_release "$lock"
 }
 
 # Bounded no-mistakes call in the worktree; stdout only, never fails the script.
@@ -531,8 +595,16 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
 
   run_id=$(strip_quotes "$(nm_field id)")
+  incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
   case "$RUN_STATE" in
-    done|failed)
+    working|parked|paused)
+      if [ -n "$run_id" ] && [ -n "$incarnation" ]; then
+        run_step_incarnation_binding_write "$ID" "$run_id" "$incarnation" || true
+      fi
+      ;;
+  esac
+  case "$RUN_STATE" in
+    working|parked|paused|done|failed)
       [ -n "$run_id" ] && RUN_DETAIL="$RUN_DETAIL${SEP}run-id=$run_id"
       ;;
   esac

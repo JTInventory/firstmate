@@ -2971,30 +2971,6 @@ run_step_incarnation_evidence_path() {
   printf '%s/.run-step-incarnation-%s' "$STATE" "$1"
 }
 
-run_step_incarnation_evidence_write() {
-  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 evidence run_id tmp
-  valid_task_id "$id" || return 1
-  case "$outcome" in done|failed) ;; *) return 1 ;; esac
-  [ -n "$incarnation" ] && [ -n "$snapshot" ] || return 1
-  run_id=$(printf '%s' "$snapshot" | sed -n 's/.* · run-id=\([^ ·]*\)$/\1/p')
-  case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
-  evidence=$(run_step_incarnation_evidence_path "$id") || return 1
-  if [ -e "$evidence" ] || [ -L "$evidence" ]; then
-    [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
-    if run_step_incarnation_evidence_valid "$id" "$incarnation" "$outcome" "$snapshot"; then
-      return 0
-    fi
-  fi
-  tmp=$(mktemp "$evidence.XXXXXX") || return 1
-  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  if ! printf 'schema=fm-jt-run-step-incarnation.v1\ntask_id=%s\nrun_id=%s\nspawn_incarnation=%s\noutcome=%s\nterminal_snapshot=%s\n' \
-    "$id" "$run_id" "$incarnation" "$outcome" "$snapshot" > "$tmp" \
-    || [ -L "$evidence" ] || ! mv -f "$tmp" "$evidence"; then
-    rm -f "$tmp"
-    return 1
-  fi
-}
-
 run_step_incarnation_evidence_valid() {
   local id=$1 incarnation=$2 outcome=$3 snapshot=$4 evidence run_id
   valid_task_id "$id" || return 1
@@ -3005,11 +2981,7 @@ run_step_incarnation_evidence_valid() {
   awk -F= '
     BEGIN {
       allowed["schema"]=1; allowed["task_id"]=1; allowed["run_id"]=1
-      allowed["spawn_incarnation"]=1; allowed["outcome"]=1
-      allowed["terminal_snapshot"]=1
-      required["schema"]=1; required["task_id"]=1; required["run_id"]=1
-      required["spawn_incarnation"]=1; required["outcome"]=1
-      required["terminal_snapshot"]=1
+      allowed["spawn_incarnation"]=1; allowed["state"]=1
       valid=1
     }
     /^[^=]+=/ {
@@ -3021,17 +2993,19 @@ run_step_incarnation_evidence_valid() {
     }
     { valid=0 }
     END {
-      for (key in required) if (!(key in seen)) valid=0
-      exit !(valid && values["schema"] == "fm-jt-run-step-incarnation.v1")
+      if (!("schema" in seen) || !("task_id" in seen) || !("run_id" in seen) \
+        || !("spawn_incarnation" in seen) || !("state" in seen)) valid=0
+      exit !(valid && values["schema"] == "fm-jt-run-step-incarnation.v1" \
+        && values["state"] == "active")
     }
   ' "$evidence" 2>/dev/null || return 1
   [ "$(meta_value_unique "$evidence" schema 2>/dev/null)" = fm-jt-run-step-incarnation.v1 ] || return 1
   [ "$(meta_value_unique "$evidence" task_id 2>/dev/null)" = "$id" ] || return 1
   run_id=$(meta_value_unique "$evidence" run_id 2>/dev/null) || return 1
   case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ -n "$(printf '%s' "$snapshot" | sed -n 's/.* · run-id=\([^ ·]*\)$/\1/p')" ] || return 1
+  [ "$run_id" = "$(printf '%s' "$snapshot" | sed -n 's/.* · run-id=\([^ ·]*\)$/\1/p')" ] || return 1
   [ "$(meta_value_unique "$evidence" spawn_incarnation 2>/dev/null)" = "$incarnation" ] || return 1
-  [ "$(meta_value_unique "$evidence" outcome 2>/dev/null)" = "$outcome" ] || return 1
-  [ "$(meta_value_unique "$evidence" terminal_snapshot 2>/dev/null)" = "$snapshot" ] || return 1
 }
 
 terminal_snapshot_matches_current() {
@@ -3392,7 +3366,7 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend window now activity age line outcome source
-  local snapshot token key route_rc parent_corr allow_prior_route state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining
+  local snapshot token key route_rc parent_corr allow_prior_route state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining child_lock_owner
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
@@ -3403,6 +3377,7 @@ reconcile_child() {
   FM_LOCK_WAIT_SECS=$(bounded_secs "${FM_INACTIVE_OUTCOME_LOCK_WAIT_SECS:-30}" 30 0 300)
   fm_lock_acquire_wait "$CHILD_LOCK" || return 75
   CHILD_LOCK_HELD=1
+  child_lock_owner=$(fm_lock_link_owner "$CHILD_LOCK") || return 75
   trap child_cleanup EXIT INT TERM
   # Teardown/relaunch can replace or remove metadata only after the same lock is
   # released. Re-read it after acquiring the lock so the snapshot belongs to the
@@ -3431,7 +3406,9 @@ reconcile_child() {
   esac
   state_rc=0
   export FM_CREW_STATE_NM_TIMEOUT="$state_timeout"
-  run_bounded_child "$state_timeout" "$FM_CREW_STATE_BIN" "$id" \
+  run_bounded_child "$state_timeout" env \
+    FM_TASK_LOCK_PATH="$CHILD_LOCK" FM_TASK_LOCK_OWNER="$child_lock_owner" \
+    "$FM_CREW_STATE_BIN" "$id" \
     > "$state_tmp" 2>/dev/null || state_rc=$?
   line=
   if [ "$state_rc" -eq 0 ]; then
@@ -3463,7 +3440,6 @@ reconcile_child() {
   fi
   case "$backend" in tmux|herdr) ;; *) return 0 ;; esac
   if [ "$source" = run-step ]; then
-    run_step_incarnation_evidence_write "$id" "$INC" "$outcome" "$snapshot" || return 0
     run_step_incarnation_evidence_valid "$id" "$INC" "$outcome" "$snapshot" || return 0
   elif ! fm_pane_idle_proof_valid "$STATE" "$meta" "$id" "$window" "$backend" "$INC" "$RECONCILE_SECS"; then
     return 0

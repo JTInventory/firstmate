@@ -335,6 +335,22 @@ test_orphaned_drain_source_is_recovered() {
   pass "drain recovers a source stranded between move and queue recreation"
 }
 
+test_restore_manifest_retires_raw_source_before_clear() {
+  local dir state row
+  dir=$(make_case restore-manifest-source)
+  state="$dir/state"
+  row=$'1\t1\tsignal\tretired-key\tsignal: retired'
+  printf '%s\n' "$row" > "$state/.wake-queue.deduped.99999"
+  printf 'schema=fm-wake-queue-restore.v1\nsource=.wake-queue.deduped.99999\noffset=0\nsource_retired=1\n' \
+    > "$state/.wake-queue.restore"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
+    || fail "drain did not recover a retired restore source"
+  [ ! -e "$state/.wake-queue.deduped.99999" ] || fail "retired restore source remained"
+  [ ! -e "$state/.wake-queue.restore" ] || fail "restore manifest remained after source retirement"
+  ! grep -Fqx "$row" "$dir/drain.out" || fail "retired restore source was replayed"
+  pass "restore manifest retires its raw source before clearing"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -346,3 +362,4 @@ test_drain_asserts_watcher_liveness
 test_unpreparable_lock_refuses_instead_of_spinning
 test_prepared_wake_transaction_recovery_removes_manifest
 test_orphaned_drain_source_is_recovered
+test_restore_manifest_retires_raw_source_before_clear

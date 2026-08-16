@@ -2160,6 +2160,10 @@ elif [ "$KIND" != secondmate ]; then
   echo "error: docs/worker-isolation.md owns the reclaim procedure for a pooled slot that cannot be stamped" >&2
   exit 1
 fi
+if [ -e "$STATE/.run-step-incarnation-$ID" ] || [ -L "$STATE/.run-step-incarnation-$ID" ]; then
+  [ -f "$STATE/.run-step-incarnation-$ID" ] && [ ! -L "$STATE/.run-step-incarnation-$ID" ] || exit 1
+  rm -f "$STATE/.run-step-incarnation-$ID" || exit 1
+fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }

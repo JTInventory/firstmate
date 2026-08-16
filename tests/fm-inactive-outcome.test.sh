@@ -250,7 +250,7 @@ write_run_step_evidence() {
   run_id=${6:-run-$id}
   fm_write_meta "$state/.run-step-incarnation-$id" \
     schema=fm-jt-run-step-incarnation.v1 task_id="$id" run_id="$run_id" \
-    spawn_incarnation="$incarnation" outcome="$outcome" terminal_snapshot="$snapshot"
+    spawn_incarnation="$incarnation" state=active
 }
 
 write_legacy_meta() {
@@ -401,22 +401,70 @@ test_done_and_failed_are_replayed_once() {
 }
 
 test_run_step_incarnation_evidence_is_persisted_under_task_lock() {
-  local dir root home fakebin state evidence
-  new_case run-step-evidence
+  local dir root home fakebin state evidence run_head
+  new_case run-step-evidence-terminal-only
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
   write_meta "$state" run-step-x1 run-step-inc
   rm -f "$state/.pane-idle/run-step-x1"
   export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-x1'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
-  [ "$(receipt_count "$state" pending)" = 1 ] || fail "run-step state did not create a receipt"
-  [ "$(queue_count "$state")" = 1 ] || fail "run-step state did not queue a wake"
+  [ "$(receipt_count "$state" pending)" = 0 ] || fail "terminal run-step without a binding created a receipt"
+  [ "$(queue_count "$state")" = 0 ] || fail "terminal run-step without a binding queued a wake"
+  new_case run-step-evidence
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  write_meta "$state" run-step-x1 run-step-inc
+  rm -f "$state/.pane-idle/run-step-x1"
+  replace_field "$state/run-step-x1.meta" worktree "$root"
+  replace_field "$state/run-step-x1.meta" project "$root"
+  run_head=$(git -C "$root" rev-parse HEAD)
+  set_old_mtime "$state/run-step-x1.meta"
+  cat > "$fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = axi ] && [ "\${2:-}" = status ]; then
+  case "\${FM_RUN_STEP_MODE:-active}" in
+    active)
+      cat <<EOF
+run:
+  id: run-step-x1
+  branch: main
+  status: running
+  head: $run_head
+  outcome: ""
+EOF
+      ;;
+    terminal)
+      cat <<EOF
+run:
+  id: run-step-x1
+  branch: main
+  status: completed
+  head: $run_head
+  outcome: checks-passed
+EOF
+      ;;
+  esac
+fi
+SH
+  chmod +x "$fakebin/no-mistakes"
+  FM_RUN_STEP_MODE=active PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" run-step-x1 >/dev/null \
+    || fail "current run-step state could not persist its binding"
+  unset FM_RUN_STEP_MODE
+  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: working · source: run-step · validating · run-id=run-step-x1'
   evidence="$state/.run-step-incarnation-run-step-x1"
-  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "run-step evidence was not persisted"
-  [ "$(receipt_value "$evidence" run_id)" = run-step-x1 ] || fail "run-step evidence lost its run id"
-  [ "$(receipt_value "$evidence" spawn_incarnation)" = run-step-inc ] || fail "run-step evidence used the wrong incarnation"
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || fail "active run-step binding was not persisted"
+  [ "$(receipt_value "$evidence" run_id)" = run-step-x1 ] || fail "run-step binding lost its run id"
+  [ "$(receipt_value "$evidence" spawn_incarnation)" = run-step-inc ] || fail "run-step binding used the wrong incarnation"
+  [ "$(receipt_value "$evidence" state)" = active ] || fail "run-step binding was not active"
+  export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-x1'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null
+  [ "$(receipt_count "$state" pending)" = 1 ] || fail "bound run-step state did not create a receipt"
+  [ "$(queue_count "$state")" = 1 ] || fail "bound run-step state did not queue a wake"
   unset FM_FAKE_CREW_STATE_RUN_STEP_X1
-  pass "run-step outcomes persist incarnation evidence under the task lock"
+  pass "run-step outcomes require a pre-existing incarnation binding"
 }
 
 test_portable_timeout_runner_is_used() {
