@@ -297,6 +297,28 @@ test_unpreparable_lock_refuses_instead_of_spinning() {
   pass "a lock that can never be prepared refuses promptly instead of waiting forever"
 }
 
+test_prepared_wake_transaction_recovery_removes_manifest() {
+  local dir state txn queue_count
+  dir=$(make_case prepared-transaction-recovery)
+  state="$dir/state"
+  txn=$(mktemp -d "$state/.wake-queue.txn.XXXXXX") || fail "could not create an interrupted wake transaction"
+  printf 'schema=fm-wake-queue-transaction.v1\nphase=prepared\naction=write\noffset=0\nhad_queue=0\nhad_cursor=0\n' \
+    > "$txn/manifest" || fail "could not persist the interrupted transaction manifest"
+  printf 'interrupted\n' > "$txn/queue.new" || fail "could not persist the staged queue"
+  append_wake "$state" signal recovered-key 'signal: recovered' \
+    || fail "wake append did not recover a prepared transaction"
+  [ ! -e "$txn" ] || fail "prepared transaction directory remained after recovery"
+  ! find "$state" -maxdepth 1 -type d -name '.wake-queue.txn.*' -print -quit | grep -q . \
+    || fail "prepared transaction residue remained after recovery"
+  grep -F $'\tsignal\trecovered-key\tsignal: recovered' "$state/.wake-queue" >/dev/null \
+    || fail "wake append did not publish after prepared transaction recovery"
+  append_wake "$state" signal retry-key 'signal: retry' \
+    || fail "wake append remained blocked after prepared transaction recovery"
+  queue_count=$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$queue_count" -eq 2 ] || fail "wake queue did not retain both post-recovery records"
+  pass "prepared wake transaction recovery removes its manifest and unblocks appends"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -306,3 +328,4 @@ test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_unpreparable_lock_refuses_instead_of_spinning
+test_prepared_wake_transaction_recovery_removes_manifest

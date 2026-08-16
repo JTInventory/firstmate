@@ -720,8 +720,7 @@ fm_wake_queue_txn_recover_one_locked() {
   fi
   if { [ "$phase" = prepared ] || [ "$phase" = staged ]; } \
     && [ ! -e "$txn/queue.old" ] && [ ! -e "$txn/cursor.old" ]; then
-    rm -f "$txn/queue.new" "$txn"/.manifest.* || return 1
-    rmdir "$txn" 2>/dev/null
+    fm_wake_queue_txn_cleanup_locked "$txn"
     return $?
   fi
   fm_wake_queue_txn_rollback_locked "$txn" "$had_queue" "$had_cursor" || return 1
