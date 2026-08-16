@@ -956,7 +956,7 @@ while (1) {
   $count =~ s/\0\z// or exit 2;
   my $next = tell($fh);
   defined($next) or exit 2;
-  if ($window =~ /[\r\n\t]/ || exists $seen{$window}) {
+  if ($count ne '1' || $window =~ /[\r\n\t]/ || exists $seen{$window}) {
     print $next, "\0\0\0" or exit 2;
     next;
   }
