@@ -1013,37 +1013,40 @@ use strict;
 use warnings;
 my ($state, $entries_path, $cursor) = @ARGV;
 open(my $entries_fh, '<', $entries_path) or exit 2;
-seek($entries_fh, 0 + $cursor, 0) or exit 2;
-my %seen;
+my @records;
+my %counts;
 while (defined(my $path = <$entries_fh>)) {
   my $next = tell($entries_fh);
   defined($next) or exit 2;
   chomp $path;
-  if ($path !~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/) {
-    print $next, "\0\0\0" or exit 2;
-    next;
-  }
-  if (!-f $path || -l $path) {
-    print $next, "\0\0\0" or exit 2;
-    next;
-  }
-  open(my $fh, '<', $path) or exit 2;
-  my ($window, $count) = ('', 0);
-  while (defined(my $line = <$fh>)) {
-    if ($line =~ /\Awindow=(.*)\n\z/) {
-      $window = $1;
-      $count++;
+  my ($window, $valid) = ('', 0);
+  if ($path =~ /\A\Q$state\E\/[^\/\r\n]+\.meta\z/ && -f $path && !-l $path) {
+    open(my $fh, '<', $path) or exit 2;
+    my $count = 0;
+    while (defined(my $line = <$fh>)) {
+      if ($line =~ /\Awindow=(.*)\n\z/) {
+        $window = $1;
+        $count++;
+      }
+    }
+    close($fh) or exit 2;
+    if ($count == 1 && $window !~ /[\r\n\t]/) {
+      $valid = 1;
+      $counts{$window}++;
     }
   }
-  close($fh) or exit 2;
-  if ($count != 1 || $window =~ /[\r\n\t]/ || exists $seen{$window}) {
+  push @records, [$next, $path, $window, $valid];
+}
+close($entries_fh) or exit 2;
+for my $record (@records) {
+  my ($next, $path, $window, $valid) = @$record;
+  next if $next <= (0 + ($cursor // 0));
+  if (!$valid || $counts{$window} != 1) {
     print $next, "\0\0\0" or exit 2;
     next;
   }
-  $seen{$window} = 1;
   print $next, "\0", $window, "\0", $path, "\0" or exit 2;
 }
-close($entries_fh) or exit 2;
 PERL
 }
 

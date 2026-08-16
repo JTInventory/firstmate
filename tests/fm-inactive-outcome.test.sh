@@ -2700,6 +2700,43 @@ test_pane_idle_index_resumes_and_rejects_path_cursor() {
   pass "pane-idle scan resumes valid path cursors and rejects unsafe cursors"
 }
 
+test_pane_idle_resumable_duplicate_windows_fail_closed() {
+  local dir root home fakebin state progress first_output second_output first_cursor first_window second_cursor second_window
+  new_case pane-idle-cross-chunk-duplicate
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  progress="$state/.pane-idle-meta-index"
+  first_output="$state/duplicate-first"
+  second_output="$state/duplicate-second"
+  write_meta "$state" duplicate-a duplicate-a-inc
+  write_meta "$state" duplicate-b duplicate-b-inc
+  replace_field "$state/duplicate-a.meta" window tmux:duplicate-window
+  replace_field "$state/duplicate-b.meta" window tmux:duplicate-window
+  mkdir -p "$progress"
+  printf '%s\n%s\n' "$state/duplicate-a.meta" "$state/duplicate-b.meta" > "$progress/.scan.entries"
+  printf 'complete\n' > "$progress/.scan.entries.complete"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_windows_direct_resumable "$2" 0' \
+    _ "$ROOT" "$state" > "$first_output" || fail "first duplicate-window chunk failed"
+  exec 3<"$first_output"
+  IFS= read -r -d '' first_cursor <&3 || fail "first duplicate-window cursor was missing"
+  IFS= read -r -d '' first_window <&3 || fail "first duplicate-window result was incomplete"
+  exec 3<&-
+  [ -n "$first_cursor" ] || fail "first duplicate-window cursor did not advance"
+  [ -z "$first_window" ] || fail "first duplicate-window chunk emitted an ambiguous window"
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_windows_direct_resumable "$2" "$3"' \
+    _ "$ROOT" "$state" "$first_cursor" > "$second_output" \
+    || fail "second duplicate-window chunk failed"
+  exec 3<"$second_output"
+  IFS= read -r -d '' second_cursor <&3 || fail "second duplicate-window cursor was missing"
+  IFS= read -r -d '' second_window <&3 || fail "second duplicate-window result was incomplete"
+  exec 3<&-
+  [ "$second_cursor" != "$first_cursor" ] || fail "second duplicate-window cursor did not advance"
+  [ -z "$second_window" ] || fail "second duplicate-window chunk emitted an ambiguous window"
+  pass "pane-idle resumable scans suppress duplicate windows globally"
+}
+
 test_pane_idle_index_retries_partial_publication_idempotently() {
   local dir root home fakebin state progress output stamp
   local record_fields aggregate_lines
@@ -2775,7 +2812,7 @@ test_secondmate_route_accepts_effective_state_overrides() {
 test_valid_secondmate_route_reports_parent_once() {
   local dir root home fakebin state child_home child_state parent_status corr rec outside send_out route_backup
   local outside_parent outside_parent_link other_parent fail_move_once
-  local history_corr history_record history_status active_record active_backup
+  local history_corr history_record history_status history_rec active_record active_backup
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -2948,13 +2985,19 @@ SH
   export FM_FAKE_CREW_STATE_CHILD_HISTORY_X1='state: done · source: pane · history child quiet'
   scan "$root" "$child_home" "$fakebin" --startup \
     || fail "pending-reply-history route scan failed"
-  [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "pending-reply-history route did not create a pending receipt"
-  rec=$(direct_first_file "$child_state/terminal-outcomes" '*.pending')
-  [ "$(receipt_value "$rec" parent_corr)" = "$history_corr" ] \
+  [ "$(receipt_count "$child_state" pending)" = 2 ] || fail "pending-reply-history route did not create route-bound receipts"
+  history_rec=
+  for rec in "$child_state"/terminal-outcomes/*.pending; do
+    [ -f "$rec" ] || continue
+    [ "$(receipt_value "$rec" task_id)" = child-history-x1 ] || continue
+    history_rec=$rec
+  done
+  [ -n "$history_rec" ] || fail "history route did not create its route-bound receipt"
+  [ "$(receipt_value "$history_rec" parent_corr)" = "$history_corr" ] \
     || fail "history route receipt used the wrong parent correlation"
   drain "$root" "$child_home" "$fakebin" >/dev/null \
     || fail "pending-reply-history route drain failed"
-  [ "$(receipt_count "$child_state" reported)" = 2 ] || fail "history route receipt was not reported"
+  [ "$(receipt_count "$child_state" reported)" = 3 ] || fail "history route receipts were not reported"
   [ ! -e "$child_state/.fm-jt-parent-route" ] || fail "history route marker was not cleared after presentation"
   ! grep -F 'inactive terminal outcome replayed: task=child-history-x1' "$history_status" >/dev/null 2>&1 \
     || fail "resolved history route appended a duplicate parent status"
@@ -3298,6 +3341,9 @@ SH
   scan "$root" "$child_home" "$fakebin" --startup >/dev/null \
     || fail "initial unchanged terminal scan failed"
   [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "initial replay route did not create a receipt"
+  rec=$(direct_first_file "$child_state/terminal-outcomes" '*.pending')
+  mv "$rec" "${rec%.pending}.presented"
+  : > "$child_state/.wake-queue"
   replace_field "$state/pending-replies/$corr_a" phase resolved
   prepare_primary_proof "$root" "$home" "$fakebin"
   send_out=$(cd "$root" && env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
@@ -3316,8 +3362,10 @@ SH
     || fail "replacement replay route did not publish the new correlation"
   scan "$root" "$child_home" "$fakebin" --startup >/dev/null \
     || fail "unchanged terminal state was not replayed for the replacement route"
-  [ "$(receipt_count "$child_state" pending)" = 2 ] \
-    || fail "replacement route did not create a second receipt"
+  [ "$(receipt_count "$child_state" pending)" = 1 ] \
+    || fail "replacement route did not create a current receipt"
+  [ "$(receipt_count "$child_state" presented)" = 1 ] \
+    || fail "old route receipt was not retained"
   corr_count=0
   for rec in "$child_state"/terminal-outcomes/*.pending; do
     [ -f "$rec" ] || continue
@@ -3325,7 +3373,7 @@ SH
     corr_count=$((corr_count + 1))
   done
   [ "$corr_count" = 1 ] || fail "replacement receipt was not bound to the new correlation"
-  [ "$(queue_count "$child_state")" = 2 ] || fail "replacement route did not queue a second wake"
+  [ "$(queue_count "$child_state")" = 1 ] || fail "replacement route did not queue a current wake"
   unset FM_FAKE_CREW_STATE_CHILD_REPLAY_X1
   pass "unchanged terminals replay for each secondmate correlation"
 }
@@ -4129,6 +4177,7 @@ test_pane_idle_snapshot_reads_honor_deadline
 test_pane_idle_snapshot_compare_honors_deadline
 test_pane_idle_lookup_propagates_deadline
 test_pane_idle_index_resumes_and_rejects_path_cursor
+test_pane_idle_resumable_duplicate_windows_fail_closed
 test_pane_idle_index_retries_partial_publication_idempotently
 test_secondmate_route_accepts_effective_state_overrides
 test_valid_secondmate_route_reports_parent_once

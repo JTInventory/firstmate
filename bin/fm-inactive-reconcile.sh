@@ -106,6 +106,7 @@ SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 ROUTE_MARKER="$FM_HOME/.fm-secondmate-home"
 CHILD_LOCK_HELD=0
 CHILD_LOCK=
+CHILD_LOCK_OWNER=
 WAKE_QUEUE_LOCK_HELD=0
 MAINTENANCE_ITEMS_PROCESSED=0
 
@@ -3010,6 +3011,7 @@ run_step_incarnation_evidence_valid() {
 
 terminal_snapshot_matches_current() {
   local id=$1 expected=$2 status_snapshot=$3 state_timeout state_tmp state_rc current
+  local lock_path=${CHILD_LOCK:-${FM_TASK_LOCK_PATH:-}} lock_owner=${CHILD_LOCK_OWNER:-${FM_TASK_LOCK_OWNER:-}}
   case "$expected" in
     done:*|failed:*) [ "$expected" = "$status_snapshot" ]; return $? ;;
     state:\ done\ *|state:\ failed\ *) ;;
@@ -3018,8 +3020,19 @@ terminal_snapshot_matches_current() {
   state_timeout=$(bounded_secs "${FM_INACTIVE_OUTCOME_STATE_TIMEOUT_SECS:-10}" 10 1 300)
   state_tmp=$(mktemp "$STATE/.inactive-terminal-snapshot.XXXXXX") || return 1
   state_rc=0
-  run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
-    "$FM_CREW_STATE_BIN" "$id" > "$state_tmp" 2>/dev/null || state_rc=$?
+  if [ "${CHILD_LOCK_HELD:-0}" = 1 ]; then
+    [ -n "$lock_path" ] && [ -n "$lock_owner" ] || {
+      rm -f "$state_tmp"
+      return 1
+    }
+    run_bounded_child "$state_timeout" env \
+      FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
+      FM_TASK_LOCK_PATH="$lock_path" FM_TASK_LOCK_OWNER="$lock_owner" \
+      "$FM_CREW_STATE_BIN" "$id" > "$state_tmp" 2>/dev/null || state_rc=$?
+  else
+    run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
+      "$FM_CREW_STATE_BIN" "$id" > "$state_tmp" 2>/dev/null || state_rc=$?
+  fi
   current=
   if [ "$state_rc" -eq 0 ]; then
     current=$(cat "$state_tmp" 2>/dev/null) || state_rc=$?
@@ -3177,32 +3190,8 @@ surface_retry_published_current() {
   surface_retry_mark_published "$retry" || return 2
 }
 
-prior_secondmate_receipt_exists() {
-  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 parent_corr=$5 suffix rec rec_corr
-  [ "$KIND" = secondmate ] || return 1
-  for suffix in presented reported; do
-    for rec in "$OUTCOME_DIR"/*."$suffix"; do
-      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
-      if ! (
-        prepare_pending_receipt "$rec" \
-          && [ "$ID" = "$id" ] \
-          && [ "$INC" = "$incarnation" ] \
-          && [ "$OUTCOME" = "$outcome" ] \
-          && [ "$SNAPSHOT" = "$snapshot" ] \
-          && [ "$KIND" = secondmate ]
-      ); then
-        continue
-      fi
-      rec_corr=$(receipt_field "$rec" parent_corr 2>/dev/null || true)
-      [ "$rec_corr" != "$parent_corr" ] || continue
-      return 0
-    done
-  done
-  return 1
-}
-
 terminal_outcome_surfaced() {
-  local id=$1 meta=$2 outcome=$3 wake_key=${4:-} allow_prior_route=${5:-0}
+  local id=$1 meta=$2 outcome=$3 wake_key=${4:-}
   local key raw raw_outcome marker retry marker_snapshot marker_spawn marker_parent_corr current_parent_corr current_snapshot retry_status
   local current_spawn current_tasktmp current_window current_worktree status_file
   key=$(printf '%s' "$id" | tr ':/.' '___')
@@ -3257,10 +3246,7 @@ terminal_outcome_surfaced() {
     }
   ' "$marker" 2>/dev/null || return 1
   marker_parent_corr=$(meta_value_unique "$marker" parent_corr 2>/dev/null || true)
-  if [ "$marker_parent_corr" != "$current_parent_corr" ]; then
-    [ "$allow_prior_route" = 1 ] || return 1
-    fm_pending_reply_secondmate_route_validate "$FM_HOME" "$marker_parent_corr" || return 1
-  fi
+  [ "$marker_parent_corr" = "$current_parent_corr" ] || return 1
   marker_snapshot=$(meta_value_unique "$marker" snapshot 2>/dev/null) || return 1
   [ "$marker_snapshot" = "$raw" ] || return 1
   marker_spawn=$(meta_value_unique "$marker" spawn_incarnation 2>/dev/null) || return 1
@@ -3366,7 +3352,7 @@ child_cleanup() {
 
 reconcile_child() {
   local id=$1 meta="$STATE/$1.meta" kind backend window now activity age line outcome source
-  local snapshot token key route_rc parent_corr allow_prior_route state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining child_lock_owner
+  local snapshot token key route_rc parent_corr state_tmp state_rc existing_rc surface_status publication_status state_timeout scan_remaining child_lock_owner
   valid_task_id "$id" || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_value "$meta" kind)
@@ -3378,6 +3364,7 @@ reconcile_child() {
   fm_lock_acquire_wait "$CHILD_LOCK" || return 75
   CHILD_LOCK_HELD=1
   child_lock_owner=$(fm_lock_link_owner "$CHILD_LOCK") || return 75
+  CHILD_LOCK_OWNER=$child_lock_owner
   trap child_cleanup EXIT INT TERM
   # Teardown/relaunch can replace or remove metadata only after the same lock is
   # released. Re-read it after acquiring the lock so the snapshot belongs to the
@@ -3459,28 +3446,19 @@ reconcile_child() {
     KIND=secondmate
     fm_pending_reply_secondmate_route_validate "$FM_HOME" || return 75
     parent_corr=$FM_PENDING_ROUTE_CORR
-    allow_prior_route=0
-    case "$FM_PENDING_ROUTE_PHASE" in
-      resolved|retired) allow_prior_route=1 ;;
-    esac
   else
     FM_PENDING_ROUTE_CORR=
     parent_corr=
-    allow_prior_route=0
   fi
   FP=$(terminal_outcome_fingerprint "$id" "$INC" "$outcome" "$snapshot" "$KIND" "$parent_corr") || return 1
   surface_status=0
-  terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" "$allow_prior_route" \
+  terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" \
     || surface_status=$?
   case "$surface_status" in
     0) return 0 ;;
     1) ;;
     *) return 2 ;;
   esac
-  if [ "$allow_prior_route" = 1 ] \
-    && prior_secondmate_receipt_exists "$id" "$INC" "$outcome" "$snapshot" "$parent_corr"; then
-    return 0
-  fi
   if [ "$route_rc" = 0 ]; then
     key="inactive-outcome:$FP"
     replay_surface_retry_write "$id" "$meta" "$snapshot" "$INC" "$key" 2 || return 1
