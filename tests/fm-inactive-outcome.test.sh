@@ -1593,6 +1593,89 @@ SH
   pass "run binding rejects stale bridge generations"
 }
 
+test_run_bridge_rolls_back_failed_metadata_binding() {
+  local dir root home fakebin state handoff meta evidence status
+  new_case bridge-metadata-rollback
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-rollback"
+  meta="$state/bridge-rollback.meta"
+  evidence="$state/.run-step-incarnation-bridge-rollback"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-rollback worktree="$state/work-bridge-rollback" \
+    project="$state/work-bridge-rollback" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-rollback
+  mkdir -p "$state/work-bridge-rollback"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-rollback \
+    spawn_incarnation=inc-a state=pending
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01ROLLBACKMETA"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target="${!#}"
+if [ "$target" = "${FM_TEST_META_TARGET:-}" ]; then
+  exit 91
+fi
+exec /usr/bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-rollback \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_TEST_META_TARGET="$meta" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "metadata publication failure was treated as success"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
+    || fail "metadata publication failure left active run evidence"
+  [ "$(receipt_value "$meta" run_binding_state)" = pending ] \
+    || fail "metadata publication failure changed the pending state"
+  [ "$(grep -c '^run_id=' "$meta" 2>/dev/null || true)" = 0 ] \
+    || fail "metadata publication failure left a stale run id"
+  pass "run binding rolls back evidence when metadata publication fails"
+}
+
+test_pane_idle_reclaim_advances_malformed_cursor() {
+  local dir root home fakebin state index_dir snapshot window key status
+  new_case pane-idle-reclaim-malformed
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  index_dir="$state/.reclaim-index"
+  snapshot="$dir/reclaim.snapshot"
+  window=tmux:fm-reclaim-live
+  if command -v shasum >/dev/null 2>&1; then
+    key=$(printf '%s' "$window" | shasum -a 256 | awk '{print $1}')
+  else
+    key=$(printf '%s' "$window" | sha256sum | awk '{print $1}')
+  fi
+  mkdir -p "$index_dir"
+  printf '%s\0%s\0%s\0' "$state/reclaim.meta" "$window" 1 > "$snapshot"
+  ln -s "$dir/missing-pane-index-entry" "$index_dir/$key"
+  printf 'malformed-entry\n%s\n' "$key" > "$index_dir/.reclaim.entries"
+  : > "$index_dir/.reclaim.entries.complete"
+  set +e
+  env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" bash -c \
+    '. "$1/bin/fm-pane-idle-lib.sh"; fm_pane_idle_meta_index_reclaim "$2" "" "$3"' _ \
+    "$ROOT" "$index_dir" "$snapshot"
+  status=$?
+  set -u
+  [ "$status" = 1 ] || fail "reclaim did not fail closed on a symlinked pane-index entry"
+  [ "$(cat "$index_dir/.reclaim.cursor" 2>/dev/null || true)" = 1 ] \
+    || fail "reclaim did not advance past the malformed durable entry"
+  [ -L "$index_dir/$key" ] || fail "reclaim removed the symlinked pane-index entry"
+  pass "reclaim advances its durable cursor past malformed entries"
+}
+
 test_session_start_drains_before_inactive_scan() {
   local dir root home fakebin state out status wake_line inactive_line
   new_case session-start-wiring
@@ -4209,6 +4292,8 @@ test_state_paths_reject_symlinks_and_non_directories
 test_reused_task_id_gets_new_fingerprint
 test_spawn_publishes_incarnation_token
 test_run_bridge_rejects_relaunched_generation
+test_run_bridge_rolls_back_failed_metadata_binding
+test_pane_idle_reclaim_advances_malformed_cursor
 test_session_start_drains_before_inactive_scan
 test_session_start_generation_bound_replay
 test_watcher_runs_inactive_cadence

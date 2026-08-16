@@ -1493,19 +1493,43 @@ while (defined(my $key = <$cfh>)) {
 close($cfh) or exit 1;
 my $cursor = '';
 if (-e $cursor_path) {
+  exit 1 if -l $cursor_path;
   open(my $rfh, '<', $cursor_path) or exit 1;
   my $value = <$rfh> // '';
   close($rfh) or exit 1;
   chomp $value;
-  $cursor = $value if $value =~ /^[0-9A-Fa-f]{64}\z/;
+  exit 1 if $value ne '' && $value !~ /^(?:\d+|[0-9A-Fa-f]{64}|legacy:\d+:[0-9A-Fa-f]{64})\z/;
+  $cursor = $value;
+}
+my $cursor_line = $cursor =~ /^\d+\z/ ? 0 + $cursor : 0;
+my $legacy_cursor = '';
+if ($cursor =~ /^legacy:(\d+):([0-9A-Fa-f]{64})\z/) {
+  $cursor_line = 0 + $1;
+  $legacy_cursor = $2;
+} elsif ($cursor =~ /^[0-9A-Fa-f]{64}\z/) {
+  $legacy_cursor = $cursor;
+}
+sub write_cursor {
+  my ($path, $line, $legacy) = @_;
+  return write_progress($path, $legacy ne '' ? "legacy:$line:$legacy" : $line);
 }
 my $efh;
 sysopen($efh, $entries_path, O_RDONLY | $nofollow) or exit 1;
+my $line_no = 0;
 while (defined(my $entry = <$efh>)) {
   exit 124 if expired();
+  $line_no++;
   chomp $entry;
-  next unless $entry =~ /^[0-9A-Fa-f]{64}\z/;
-  next if $cursor ne '' && $entry le $cursor;
+  next if $cursor_line > 0 && $line_no <= $cursor_line;
+  if ($legacy_cursor ne '' && $entry !~ /^[0-9A-Fa-f]{64}\z/) {
+    write_cursor($cursor_path, $line_no, $legacy_cursor) or exit 1;
+    next;
+  }
+  if ($legacy_cursor ne '' && $entry =~ /^[0-9A-Fa-f]{64}\z/ && $entry le $legacy_cursor) {
+    write_cursor($cursor_path, $line_no, $legacy_cursor) or exit 1;
+    next;
+  }
+  $legacy_cursor = '' if $legacy_cursor ne '' && $entry =~ /^[0-9A-Fa-f]{64}\z/ && $entry gt $legacy_cursor;
   if ($entry =~ /^[0-9A-Fa-f]{64}\z/) {
     my $path = "$directory/$entry";
     exit 1 if -l $path;
@@ -1516,7 +1540,7 @@ while (defined(my $entry = <$efh>)) {
       }
     }
   }
-  write_progress($cursor_path, $entry) or exit 1;
+  write_cursor($cursor_path, $line_no, '') or exit 1;
 }
 close($efh) or exit 1;
 PERL
