@@ -1106,8 +1106,11 @@ surface_retry_wake_state() {
   if fm_pane_idle_run_bounded_child "$remaining" perl - "$FM_WAKE_QUEUE" "$wake_key" <<'PERL'
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 my ($path, $wanted) = @ARGV;
-open(my $fh, '<', $path) or exit 2;
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 2;
+sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 2;
 while (defined(my $line = <$fh>)) {
   my @fields = split(/\t/, $line, -1);
   next unless @fields == 5;
@@ -1395,8 +1398,11 @@ inactive_replay_queued_for_task() {
   queue_match=$(fm_pane_idle_run_bounded_perl "$queue_deadline" "$FM_WAKE_QUEUE" "$task" <<'PERL'
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 my ($queue, $task) = @ARGV;
-open(my $fh, '<', $queue) or exit 2;
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 2;
+sysopen(my $fh, $queue, O_RDONLY | $nofollow) or exit 2;
 my $needle = "task=$task ";
 my $found = 0;
 while (defined(my $line = <$fh>)) {
@@ -1882,7 +1888,7 @@ EOF
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
-      echo "$n" | fm_nofollow_write "$cf"
+      echo "$n" | fm_nofollow_write "$cf" || exit 1
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         if [ "$kind" != secondmate ]; then
           idle_meta=$window_meta
@@ -1977,7 +1983,7 @@ EOF
       fi
     else
       printf '%s' "$h" | fm_nofollow_write "$hf"
-      echo 0 | fm_nofollow_write "$cf"
+      echo 0 | fm_nofollow_write "$cf" || exit 1
       fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || exit 1
       if [ -n "$prev" ]; then
         pause_tracking_clear "$w"

@@ -871,11 +871,14 @@ fm_wake_queue_key_status_locked() {
   perl - "$queue" "$key" "$budget" <<'PERL'
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 
 my ($path, $wanted, $seconds) = @ARGV;
 $SIG{ALRM} = sub { exit 124 };
 alarm($seconds);
-open(my $fh, '<', $path) or exit 2;
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 2;
+sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 2;
 while (defined(my $line = <$fh>)) {
   my @fields = split(/\t/, $line, -1);
   next unless @fields == 5;

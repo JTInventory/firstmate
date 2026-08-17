@@ -2145,7 +2145,8 @@ parent_status_append_line() {
 }
 
 pending_secondmate_report_recorded() {
-  local fp=$1 pending kind task_id outcome parent_status parent_corr line status
+  local fp=$1 pending kind task_id outcome parent_task_id parent_home parent_status parent_corr line status
+  local route_lock route_status=0
   pending=$(receipt_path "$fp" pending)
   kind=$(receipt_field "$pending" kind) || return 2
   case "$kind" in
@@ -2156,8 +2157,21 @@ pending_secondmate_report_recorded() {
   prepare_pending_receipt "$pending" || return 2
   task_id=$(receipt_field "$pending" task_id) || return 2
   outcome=$(receipt_field "$pending" outcome) || return 2
+  parent_task_id=$(receipt_field "$pending" parent_task_id) || return 2
+  parent_home=$(receipt_field "$pending" parent_home) || return 2
   parent_status=$(receipt_field "$pending" parent_status) || return 2
   parent_corr=$(receipt_field "$pending" parent_corr) || return 2
+  route_lock=$(fm_pending_reply_secondmate_route_lock_path "$FM_HOME")
+  fm_lock_acquire_wait "$route_lock" || return 2
+  if ! fm_pending_reply_secondmate_route_validate "$FM_HOME" "$parent_corr" 2 \
+    || [ "$FM_PENDING_ROUTE_SECOND_MATE_ID" != "$parent_task_id" ] \
+    || [ "$FM_PENDING_ROUTE_PARENT_HOME" != "$parent_home" ] \
+    || [ "$FM_PENDING_ROUTE_PARENT_STATUS" != "$parent_status" ] \
+    || [ "$FM_PENDING_ROUTE_CORR" != "$parent_corr" ]; then
+    route_status=2
+  fi
+  fm_lock_release "$route_lock" || route_status=2
+  [ "$route_status" = 0 ] || return "$route_status"
   [ -f "$parent_status" ] && [ ! -L "$parent_status" ] || return 1
   line="$outcome [corr=$parent_corr]: inactive terminal outcome replayed: task=$task_id fingerprint=$fp"
   parent_status_line_status "$parent_status" "$line"
@@ -3228,8 +3242,11 @@ surface_retry_wake_present() {
   [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
   command -v perl >/dev/null 2>&1 || return 1
   perl -e '
+    use Fcntl qw(:DEFAULT);
     my ($path, $wanted) = @ARGV;
-    open(my $fh, "<", $path) or exit 2;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 2;
+    sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 2;
     while (defined(my $line = <$fh>)) {
       chomp $line;
       my @fields = split(/\t/, $line, -1);

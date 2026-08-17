@@ -694,8 +694,8 @@ elif [ -e "$DRAIN_CURSOR" ] || [ -L "$DRAIN_CURSOR" ]; then
 fi
 
 if [ "$DRAIN_RESTORE_PENDING" != true ] && [ ! -s "$FM_WAKE_QUEUE" ]; then
-  rm -f "$DRAIN_CURSOR"
-  : | fm_nofollow_write "$FM_WAKE_QUEUE"
+  rm -f "$DRAIN_CURSOR" || exit 1
+  : | fm_nofollow_write "$FM_WAKE_QUEUE" || exit 1
   assert_watcher_liveness
   exit 0
 fi
