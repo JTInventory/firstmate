@@ -132,10 +132,10 @@ bounded_secs() {
   minimum_len=${#minimum}
   maximum_len=${#maximum}
   if [ "$value_len" -lt "$minimum_len" ] \
-    || { [ "$value_len" -eq "$minimum_len" ] && [[ "$value" < "$minimum" ]]; }; then
+    || { [ "$value_len" -eq "$minimum_len" ] && [ "$value" -lt "$minimum" ]; }; then
     value=$minimum
   elif [ "$value_len" -gt "$maximum_len" ] \
-    || { [ "$value_len" -eq "$maximum_len" ] && [[ "$value" > "$maximum" ]]; }; then
+    || { [ "$value_len" -eq "$maximum_len" ] && [ "$value" -gt "$maximum" ]; }; then
     value=$maximum
   fi
   printf '%s' "$value"
@@ -501,7 +501,7 @@ inactive_nul_contains_from_offset() {
 }
 
 inactive_pending_retry_filter_duplicates() {
-  local pending=$1 retry=$2 deadline_ms= offset tags sorted tmp rc remaining tab
+  local pending=$1 retry=$2 deadline_ms='' offset tags sorted tmp rc remaining tab
   [ "$#" -ge 3 ] && deadline_ms=$3
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
   [ -f "$retry" ] && [ ! -L "$retry" ] || return 1
@@ -1327,7 +1327,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
 }
 
 claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
-  local key=$1 row=$2 fp claim state tmp line defer_ack=0 defer_generation= defer_generation_start=
+  local key=$1 row=$2 fp claim state tmp line defer_ack=0 defer_generation='' defer_generation_start=''
   local preserve_output=0 seen_pid=0 seen_output=0 seen_emitted=0 seen_complete=0 seen_caller_confirmed=0
   local seen_defer_ack=0 seen_defer_generation=0 seen_defer_generation_start=0
   if [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" = 1 ] || [ -n "${FM_WAKE_DRAIN_GENERATION:-}" ]; then
@@ -1768,7 +1768,6 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
   local pending tmp existing
   inactive_state_preflight || return 1
   pending=$(receipt_path "$FP" pending)
-  RECEIPT_CREATED=0
   for suffix in pending presented reported; do
     existing=$(receipt_path "$FP" "$suffix")
     [ ! -L "$existing" ] || return 1
@@ -1796,7 +1795,6 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   if fm_nofollow_rename "$tmp" "$pending" 1; then
     rm -f "$tmp"
-    RECEIPT_CREATED=1
   else
     rm -f "$tmp"
     receipt_matches_expected "$pending" || return 1
@@ -3367,7 +3365,7 @@ terminal_outcome_surfaced() {
   [ -n "$raw" ] || return 1
   case "$raw" in
     done:*|failed:*) raw_outcome=${raw%%:*} ;;
-    state:\ done\ *) raw_outcome=done ;;
+    state:\ 'done'\ *) raw_outcome='done' ;;
     state:\ failed\ *) raw_outcome=failed ;;
     *) return 1 ;;
   esac
@@ -3428,7 +3426,7 @@ replay_surface_retry_write() {
   tasktmp=$(meta_value "$meta" tasktmp)
   window=$(meta_value "$meta" window)
   worktree=$(meta_value "$meta" worktree)
-  if explicit_incarnation=$(meta_value_unique "$meta" spawn_incarnation); then
+  if meta_value_unique "$meta" spawn_incarnation >/dev/null; then
     marker_incarnation=$incarnation
   else
     rc=$?
@@ -3861,7 +3859,7 @@ scan_locked() {
   local find_source_drained=0
   local find_pending_offset=0 find_tmp_owned=0 pending_skip=0 find_enum_cursor=
   local find_enum_complete=0 find_enum_persisted=0 child_remaining child_scan_deadline
-  local pane_idle_index_dir= pane_idle_index_ready=0
+  local pane_idle_index_dir=''
   inactive_state_preflight || return 1
   inactive_merge_txn_recover || return 1
   marker_mtime=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
@@ -4170,7 +4168,7 @@ scan_locked() {
     fi
     if [ -n "$pane_idle_index_dir" ] \
       && fm_pane_idle_meta_index_persist "$STATE" "$pane_idle_index_dir" "$scan_deadline"; then
-      pane_idle_index_ready=1
+      :
     else
       pane_idle_index_dir=
       complete=0
