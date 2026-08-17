@@ -13,6 +13,11 @@ fi
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Fixture commits must not depend on the runner's global Git identity. This is
+# especially important on hosted macOS, where the stock Git config may have an
+# empty user name.
+fm_git_identity fmtest fmtest@example.invalid
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
