@@ -128,7 +128,7 @@ meta_set_run_binding_state() {
         { print }
         END { exit(found ? 0 : 1) }
       ' "$meta" | fm_nofollow_write "$tmp" \
-        || ! mv -f "$tmp" "$meta"; then
+        || ! fm_nofollow_rename "$tmp" "$meta"; then
         rm -f "$tmp"
         status=1
       fi

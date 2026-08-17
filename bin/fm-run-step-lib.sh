@@ -195,7 +195,7 @@ fm_run_step_binding_publish() {
   if [ "$status" = 0 ]; then
     if ! printf 'schema=fm-jt-run-step-incarnation.v1\ntask_id=%s\nrun_id=%s\nspawn_incarnation=%s\nstate=staged\n' \
       "$id" "$run_id" "$incarnation" | fm_nofollow_write "$tmp" \
-      || ! mv -f "$tmp" "$evidence"; then
+      || ! fm_nofollow_rename "$tmp" "$evidence" 1; then
       rm -f "$tmp"
       status=1
     fi
@@ -249,7 +249,7 @@ fm_run_step_binding_activate() {
           exit(valid ? 0 : 1)
         }
       ' | fm_nofollow_write "$tmp" \
-        || ! mv -f "$tmp" "$evidence"; then
+        || ! fm_nofollow_rename "$tmp" "$evidence"; then
         rm -f "$tmp"
         status=1
       fi

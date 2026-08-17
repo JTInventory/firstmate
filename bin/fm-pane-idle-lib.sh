@@ -1869,7 +1869,7 @@ fm_pane_idle_write() {  # <state> <meta> <task> <window> <backend> <hash> <sampl
   path=$(fm_pane_idle_path "$state" "$task")
   [ ! -L "$path" ] || return 1
   tmp=$(mktemp "$dir/.tmp.XXXXXX") || return 1
-  if printf 'schema=fm-jt-pane-idle.v1\ntask=%s\nwindow=%s\nbackend=%s\nspawn_incarnation=%s\npane_hash=%s\nsample_count=%s\nobserved_epoch=%s\n' "$task" "$window" "$backend" "$token" "$pane_hash" "$samples" "$(date +%s)" | fm_nofollow_write "$tmp" && mv -f "$tmp" "$path"; then
+  if printf 'schema=fm-jt-pane-idle.v1\ntask=%s\nwindow=%s\nbackend=%s\nspawn_incarnation=%s\npane_hash=%s\nsample_count=%s\nobserved_epoch=%s\n' "$task" "$window" "$backend" "$token" "$pane_hash" "$samples" "$(date +%s)" | fm_nofollow_write "$tmp" && fm_nofollow_rename "$tmp" "$path"; then
     return 0
   fi
   rm -f "$tmp"

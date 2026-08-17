@@ -703,9 +703,17 @@ fi
 if [ "$DRAIN_RESUMING" != true ]; then
   DRAIN_TMP="$STATE/.wake-queue.drain.$DRAIN_PID"
   DRAIN_DEDUPED="$STATE/.wake-queue.deduped.$DRAIN_PID"
-  rm -f "$DRAIN_TMP"
-  rm -f "$DRAIN_DEDUPED"
-  mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
+  [ ! -L "$DRAIN_TMP" ] || exit 1
+  if [ -e "$DRAIN_TMP" ]; then
+    [ -f "$DRAIN_TMP" ] || exit 1
+    rm -f "$DRAIN_TMP" || exit 1
+  fi
+  [ ! -L "$DRAIN_DEDUPED" ] || exit 1
+  if [ -e "$DRAIN_DEDUPED" ]; then
+    [ -f "$DRAIN_DEDUPED" ] || exit 1
+    rm -f "$DRAIN_DEDUPED" || exit 1
+  fi
+  fm_nofollow_rename "$FM_WAKE_QUEUE" "$DRAIN_TMP" 1 || exit 1
   : | fm_nofollow_write "$FM_WAKE_QUEUE" || exit 1
 
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1

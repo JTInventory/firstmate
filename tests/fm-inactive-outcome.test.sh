@@ -1662,14 +1662,15 @@ test_run_bridge_metadata_stage_failure_preserves_committed_pair() {
 printf 'run:\n  id: "01STABLE"\n'
 SH
   chmod +x "$fakebin/real-no-mistakes"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-target="${!#}"
-[ "$target" = "${FM_TEST_META_TARGET:?}" ] && exit 91
-exec /usr/bin/mv "$@"
+if [ "$#" -ge 5 ] && [ "$4" = "${FM_TEST_META_TARGET:?}" ]; then
+  exit 91
+fi
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   set +e
   env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
     FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-metadata-stage \
@@ -1706,17 +1707,16 @@ test_run_bridge_rejects_staged_run_rebinding() {
   fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-staged-rebinding \
     spawn_incarnation=inc-a state=pending
   : > "$fail_marker"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-target="${!#}"
-if [ "$target" = "${FM_TEST_EVIDENCE_TARGET:?}" ] && [ -e "${FM_TEST_EVIDENCE_FAIL:?}" ]; then
+if [ "$#" -ge 5 ] && [ "$4" = "${FM_TEST_EVIDENCE_TARGET:?}" ] && [ -e "${FM_TEST_EVIDENCE_FAIL:?}" ]; then
   rm -f "$FM_TEST_EVIDENCE_FAIL"
   exit 91
 fi
-exec /usr/bin/mv "$@"
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   cat > "$fakebin/real-no-mistakes" <<'SH'
 #!/usr/bin/env bash
 printf 'run:\n  id: "01STAGEDORIGINAL"\n'
@@ -2066,19 +2066,18 @@ test_run_bridge_rolls_back_failed_metadata_binding() {
 printf 'run:\n  id: "01ROLLBACKMETA"\n'
 SH
   chmod +x "$fakebin/real-no-mistakes"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-target="${!#}"
-if [ "$target" = "${FM_TEST_META_TARGET:-}" ]; then
+if [ "$#" -ge 5 ] && [ "$4" = "${FM_TEST_META_TARGET:-}" ]; then
   count=$(cat "${FM_TEST_META_COUNT:?}" 2>/dev/null || printf '0')
   count=$((count + 1))
   printf '%s\n' "$count" > "$FM_TEST_META_COUNT"
   [ "$count" = 2 ] && exit 91
 fi
-exec /usr/bin/mv "$@"
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   set +e
   env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
     FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-rollback \
@@ -2122,19 +2121,18 @@ test_run_bridge_activation_failure_is_recoverable() {
 printf 'run:\n  id: "01ACTIVATIONFAIL"\n'
 SH
   chmod +x "$fakebin/real-no-mistakes"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-target="${!#}"
-if [ "$target" = "${FM_TEST_EVIDENCE_TARGET:-}" ]; then
+if [ "$#" -ge 5 ] && [ "$4" = "${FM_TEST_EVIDENCE_TARGET:-}" ]; then
   count=$(cat "${FM_TEST_EVIDENCE_COUNT:?}" 2>/dev/null || printf '0')
   count=$((count + 1))
   printf '%s\n' "$count" > "$FM_TEST_EVIDENCE_COUNT"
   [ "$count" = 2 ] && exit 91
 fi
-exec /usr/bin/mv "$@"
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   set +e
   env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
     FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-activation \
@@ -3480,7 +3478,7 @@ test_secondmate_route_accepts_effective_state_overrides() {
 
 test_valid_secondmate_route_reports_parent_once() {
   local dir root home fakebin state child_home child_state parent_status corr rec outside send_out route_backup
-  local outside_parent outside_parent_link other_parent fail_move_once
+  local outside_parent outside_parent_link other_parent fail_move_once fingerprint
   local history_corr history_record history_status history_rec active_record active_backup
   new_case secondmate-route-valid
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
@@ -3586,31 +3584,36 @@ SH
   fi
   [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "symlinked parent status lost the pending receipt"
   rm -f "$parent_status"
-  fail_move_once="$dir/fail-mv-once"
+  fingerprint=${rec##*/}
+  fingerprint=${fingerprint%.pending}
+  rm -f "$child_state/terminal-outcomes/.$fingerprint.claim"
+  fail_move_once="$dir/fail-reported-rename-once"
   : > "$fail_move_once"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-for arg in "$@"; do
-  case "$arg" in
-    *.pending)
-      if [ -e "${FM_TEST_FAIL_MOVE_ONCE:?}" ]; then
-        rm -f "$FM_TEST_FAIL_MOVE_ONCE"
-        exit 42
-      fi
-      ;;
-  esac
-done
-exec /bin/mv "$@"
+if [ "$#" -eq 5 ] && [ "${5:-}" = 1 ] && case "${4:-}" in *.reported) true ;; *) false ;; esac \
+  && [ -e "${FM_TEST_FAIL_REPORTED_RENAME:?}" ]; then
+  rm -f "$FM_TEST_FAIL_REPORTED_RENAME"
+  exit 42
+fi
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
-  export FM_TEST_FAIL_MOVE_ONCE="$fail_move_once"
+  chmod +x "$fakebin/perl"
+  export FM_TEST_FAIL_REPORTED_RENAME="$fail_move_once"
   if drain "$root" "$child_home" "$fakebin" >/dev/null 2>&1; then
     fail "secondmate acknowledgement hid a receipt move failure"
   fi
   [ "$(receipt_count "$child_state" pending)" = 1 ] || fail "receipt move failure consumed the pending receipt"
   [ -f "$child_state/.fm-jt-parent-route" ] || fail "receipt move failure cleared the route before transition"
-  rm -f "$fakebin/mv"
+  rm -f "$fakebin/perl"
+  unset FM_TEST_FAIL_REPORTED_RENAME
+  replace_field "$child_state/terminal-outcomes/.$fingerprint.claim" output_started 1
+  replace_field "$child_state/terminal-outcomes/.$fingerprint.claim" output_emitted 1
+  replace_field "$child_state/terminal-outcomes/.$fingerprint.claim" output_complete 1
+  replace_field "$child_state/terminal-outcomes/.$fingerprint.claim" output_confirmed 1
+  replace_field "$child_state/terminal-outcomes/.$fingerprint.claim" caller_confirmed 1
+  replace_field "$child_state/terminal-outcomes/.$fingerprint.claim" defer_generation_start proc:0
   if ! drain "$root" "$child_home" "$fakebin" >"$dir/second-drain.out" 2>&1; then
     cat "$dir/second-drain.out" >&2
     fail "valid secondmate route drain failed after symlink removal"
@@ -3624,7 +3627,6 @@ SH
   drain "$root" "$child_home" "$fakebin" >/dev/null
   [ "$(grep -Fc "failed [corr=$corr]: inactive terminal outcome replayed: task=child-x1" "$parent_status")" = 1 ] \
     || fail "secondmate parent report was duplicated"
-  unset FM_TEST_FAIL_MOVE_ONCE
 
   printf 'sm-history\n' > "$child_home/.fm-secondmate-home"
   write_meta "$state" sm-history history-parent-inc secondmate tmux firstmate:fm-sm-history

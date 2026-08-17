@@ -727,7 +727,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
     fi
   fi
   if [ "$route_status" = 0 ]; then
-    if mv -f "$tmp" "$marker"; then
+    if fm_nofollow_rename "$tmp" "$marker"; then
       FM_PENDING_REPLY_ROUTE_COMMITTED=1
     else
       route_status=1

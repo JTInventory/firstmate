@@ -1735,6 +1735,31 @@ claim_remove() {  # <inactive-outcome:fingerprint> <wake-row>
   rm -f "$claim"
 }
 
+receipt_matches_expected() {
+  local existing=$1
+  [ ! -L "$existing" ] || return 1
+  [ -f "$existing" ] || return 1
+  [ "$(receipt_field "$existing" schema)" = fm-jt-terminal-outcome.v1 ] || return 1
+  [ "$(receipt_field "$existing" fingerprint)" = "$FP" ] || return 1
+  [ "$(receipt_field "$existing" task_id)" = "$ID" ] || return 1
+  [ "$(receipt_field "$existing" incarnation)" = "$INC" ] || return 1
+  [ "$(receipt_field "$existing" outcome)" = "$OUTCOME" ] || return 1
+  [ "$(receipt_field "$existing" terminal_source)" = "$SOURCE" ] || return 1
+  [ "$(receipt_field "$existing" terminal_snapshot)" = "$SNAPSHOT" ] || return 1
+  [ "$(receipt_field "$existing" kind)" = "$KIND" ] || return 1
+  if [ "$KIND" = secondmate ]; then
+    [ "$(receipt_field "$existing" parent_task_id)" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 1
+    [ "$(receipt_field "$existing" parent_home)" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 1
+    [ "$(receipt_field "$existing" parent_status)" = "${FM_PENDING_ROUTE_PARENT_STATUS:-}" ] || return 1
+    [ "$(receipt_field "$existing" parent_corr)" = "${FM_PENDING_ROUTE_CORR:-}" ] || return 1
+  else
+    [ -z "$(receipt_field "$existing" parent_task_id)" ] || return 1
+    [ -z "$(receipt_field "$existing" parent_home)" ] || return 1
+    [ -z "$(receipt_field "$existing" parent_status)" ] || return 1
+    [ -z "$(receipt_field "$existing" parent_corr)" ] || return 1
+  fi
+}
+
 receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
   local pending tmp existing
   inactive_state_preflight || return 1
@@ -1744,26 +1769,7 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
     existing=$(receipt_path "$FP" "$suffix")
     [ ! -L "$existing" ] || return 1
     [ -e "$existing" ] || continue
-    [ -f "$existing" ] || return 1
-    [ "$(receipt_field "$existing" schema)" = fm-jt-terminal-outcome.v1 ] || return 1
-    [ "$(receipt_field "$existing" fingerprint)" = "$FP" ] || return 1
-    [ "$(receipt_field "$existing" task_id)" = "$ID" ] || return 1
-    [ "$(receipt_field "$existing" incarnation)" = "$INC" ] || return 1
-    [ "$(receipt_field "$existing" outcome)" = "$OUTCOME" ] || return 1
-    [ "$(receipt_field "$existing" terminal_source)" = "$SOURCE" ] || return 1
-    [ "$(receipt_field "$existing" terminal_snapshot)" = "$SNAPSHOT" ] || return 1
-    [ "$(receipt_field "$existing" kind)" = "$KIND" ] || return 1
-    if [ "$KIND" = secondmate ]; then
-      [ "$(receipt_field "$existing" parent_task_id)" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 1
-      [ "$(receipt_field "$existing" parent_home)" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 1
-      [ "$(receipt_field "$existing" parent_status)" = "${FM_PENDING_ROUTE_PARENT_STATUS:-}" ] || return 1
-      [ "$(receipt_field "$existing" parent_corr)" = "${FM_PENDING_ROUTE_CORR:-}" ] || return 1
-    else
-      [ -z "$(receipt_field "$existing" parent_task_id)" ] || return 1
-      [ -z "$(receipt_field "$existing" parent_home)" ] || return 1
-      [ -z "$(receipt_field "$existing" parent_status)" ] || return 1
-      [ -z "$(receipt_field "$existing" parent_corr)" ] || return 1
-    fi
+    receipt_matches_expected "$existing" || return 1
     return 0
   done
   mkdir -p "$OUTCOME_DIR" || return 1
@@ -1784,14 +1790,12 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
     printf 'parent_corr=%s\n' "${FM_PENDING_ROUTE_CORR:-}"
     printf 'created_epoch=%s\n' "$(date +%s)"
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
-  # ln is an exclusive, same-filesystem publication. A concurrent scanner can
-  # therefore never replace a receipt for another incarnation.
-  if ln "$tmp" "$pending" 2>/dev/null; then
+  if fm_nofollow_rename "$tmp" "$pending" 1; then
     rm -f "$tmp"
     RECEIPT_CREATED=1
   else
     rm -f "$tmp"
-    [ -e "$pending" ] || return 1
+    receipt_matches_expected "$pending" || return 1
   fi
   return 0
 }
@@ -3437,7 +3441,7 @@ replay_surface_retry_write() {
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\nwake_key=%s\nwake_published=%s\n' \
     "$id" "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$key" "$published" | fm_nofollow_write "$tmp" \
-    || ! mv -f "$tmp" "$retry"; then
+    || ! fm_nofollow_rename "$tmp" "$retry"; then
     rm -f "$tmp"
     return 1
   fi
@@ -3465,12 +3469,12 @@ replay_surface_marker() {
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\n' \
     "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" | fm_nofollow_write "$tmp" \
-    || ! mv -f "$tmp" "$marker"; then
+    || ! fm_nofollow_rename "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
-  if ! printf '%s' "$snapshot" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$raw"; then
+  if ! printf '%s' "$snapshot" | fm_nofollow_write "$tmp" || ! fm_nofollow_rename "$tmp" "$raw"; then
     rm -f "$tmp"
     return 1
   fi
@@ -3738,7 +3742,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
     fm_wake_remove_key_locked "$key" || return 2
     return 1
   fi
-  mv "$rec" "$target" || return 2
+  fm_nofollow_rename "$rec" "$target" 1 || return 2
   if [ "$kind" = secondmate ]; then
     fm_pending_reply_secondmate_route_clear_reported "$FM_HOME" "$corr" \
       "$parent_task_id" "$parent_home" "$parent_status" || return 2

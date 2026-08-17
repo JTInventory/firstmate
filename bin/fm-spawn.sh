@@ -2198,7 +2198,7 @@ if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
   chmod 600 "$HANDOFF_TMP" || { rm -f "$HANDOFF_TMP"; exit 1; }
   if ! printf 'schema=fm-jt-run-step-handoff.v1\ntask_id=%s\nspawn_incarnation=%s\nstate=pending\n' \
     "$ID" "$SPAWN_INCARNATION" | fm_nofollow_write "$HANDOFF_TMP" \
-    || ! mv "$HANDOFF_TMP" "$SPAWN_RUN_BINDING_HANDOFF"; then
+    || ! fm_nofollow_rename "$HANDOFF_TMP" "$SPAWN_RUN_BINDING_HANDOFF" 1; then
     rm -f "$HANDOFF_TMP"
     exit 1
   fi
@@ -2251,7 +2251,7 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
   fi
 } | fm_nofollow_write "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
-mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
+fm_nofollow_rename "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 SPAWN_META_PUBLISHED=1
 fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 if [ "$BACKEND" = herdr ]; then
