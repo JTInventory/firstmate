@@ -167,30 +167,61 @@ budget_remaining_secs() {
 }
 
 inactive_copy_nul_prefix() {
-  local source=$1 target=$2 deadline_ms=${3:-} value
+  local source=$1 target=$2 deadline_ms=${3:-}
   [ -f "$source" ] && [ ! -L "$source" ] || return 1
   [ ! -L "$target" ] || return 1
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
-  : > "$target" || return 1
-  while IFS= read -r -d '' value; do
-    if [ -n "$deadline_ms" ] && [ "$(clock_millis)" -ge "$deadline_ms" ]; then
-      return 124
-    fi
-    printf '%s\0' "$value" >> "$target" || return 1
-  done < "$source"
+  command -v perl >/dev/null 2>&1 || return 125
+  perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($source, $target, $deadline) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    my $in;
+    sysopen($in, $source, O_RDONLY | $nofollow) or exit 1;
+    my $out;
+    sysopen($out, $target, O_WRONLY | O_CREAT | O_TRUNC | $nofollow, 0600) or exit 1;
+    binmode($in);
+    binmode($out);
+    local $/ = "\0";
+    while (defined(my $value = <$in>)) {
+      if (defined($deadline) && $deadline ne '' && int(time() * 1000) >= $deadline) {
+        exit 124;
+      }
+      print($out $value) or exit 1;
+    }
+    close($in) or exit 1;
+    close($out) or exit 1;
+  ' "$source" "$target" "$deadline_ms"
 }
 
 inactive_append_nul_records() {
-  local source=$1 target=$2 deadline_ms=${3:-} value
+  local source=$1 target=$2 deadline_ms=${3:-}
   [ -f "$source" ] && [ ! -L "$source" ] || return 1
   [ -f "$target" ] && [ ! -L "$target" ] || return 1
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
-  while IFS= read -r -d '' value; do
-    if [ -n "$deadline_ms" ] && [ "$(clock_millis)" -ge "$deadline_ms" ]; then
-      return 124
-    fi
-    printf '%s\0' "$value" >> "$target" || return 1
-  done < "$source"
+  command -v perl >/dev/null 2>&1 || return 125
+  perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($source, $target, $deadline) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    my $in;
+    sysopen($in, $source, O_RDONLY | $nofollow) or exit 1;
+    my $out;
+    sysopen($out, $target, O_WRONLY | O_APPEND | $nofollow) or exit 1;
+    binmode($in);
+    binmode($out);
+    local $/ = "\0";
+    while (defined(my $value = <$in>)) {
+      if (defined($deadline) && $deadline ne '' && int(time() * 1000) >= $deadline) {
+        exit 124;
+      }
+      print($out $value) or exit 1;
+    }
+    close($in) or exit 1;
+    close($out) or exit 1;
+  ' "$source" "$target" "$deadline_ms"
 }
 
 inactive_merge_path_is_safe() {
@@ -304,7 +335,16 @@ inactive_retry_file_prepare() {
     return 0
   fi
   [ ! -L "$path" ] || return 1
-  : > "$path"
+  command -v perl >/dev/null 2>&1 || return 125
+  perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($path) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    my $fh;
+    sysopen($fh, $path, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 1;
+    close($fh) or exit 1;
+  ' "$path"
 }
 
 inactive_append_nul_value() {
@@ -316,7 +356,20 @@ inactive_append_nul_value() {
     [ "$now" -lt "$deadline_ms" ] || return 124
   fi
   [ ! -L "$target" ] || return 1
-  printf '%s\0' "$value" >> "$target" || return 1
+  command -v perl >/dev/null 2>&1 || return 125
+  printf '%s\0' "$value" | perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($target) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    my $fh;
+    sysopen($fh, $target, O_WRONLY | O_APPEND | $nofollow) or exit 1;
+    binmode($fh);
+    local $/;
+    my $value = <STDIN> // "";
+    print($fh $value) or exit 1;
+    close($fh) or exit 1;
+  ' "$target"
   if [ -n "$deadline_ms" ]; then
     now=$(clock_millis)
     [ "$now" -lt "$deadline_ms" ] || return 124
@@ -2160,6 +2213,20 @@ sub atomic_write {
   }
   return 1;
 }
+sub open_append {
+  my ($path) = @_;
+  return undef if -l $path;
+  my $flags = O_WRONLY | O_APPEND;
+  if (-e $path) {
+    return undef unless -f $path;
+    $flags |= $nofollow;
+  } else {
+    $flags |= O_CREAT | O_EXCL;
+  }
+  my $fh;
+  sysopen($fh, $path, $flags, 0600) or return undef;
+  return $fh;
+}
 sub directory_stamp {
   if ($metadata_boundary ne '' && -f $metadata_boundary && !-l $metadata_boundary) {
     open(my $bfh, '<', $metadata_boundary) or return undef;
@@ -2198,13 +2265,7 @@ if ($source_path ne '') {
     defined($cookie) or exit 1 if -e $source_cookie;
     $cookie = '' unless defined($cookie) && ($cookie eq 'EOF' || $cookie =~ /^\d+\z/);
     if ($cookie ne 'EOF') {
-      my $pfh;
-      if (-e $source_partial) {
-        -f $source_partial && !-l $source_partial or exit 1;
-        open($pfh, '>>', $source_partial) or exit 1;
-      } else {
-        sysopen($pfh, $source_partial, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 1;
-      }
+      my $pfh = open_append($source_partial) or exit 1;
       select((select($pfh), $| = 1)[0]);
       opendir(my $dh, $dir) or exit 1;
       seekdir($dh, 0 + $cookie) or exit 1 if $cookie ne '';

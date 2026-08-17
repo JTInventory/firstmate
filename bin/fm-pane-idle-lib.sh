@@ -152,6 +152,20 @@ sub atomic_write {
   rename($tmp, $path) or return 0;
   return 1;
 }
+sub open_append {
+  my ($path) = @_;
+  return undef if -l $path;
+  my $flags = O_WRONLY | O_APPEND;
+  if (-e $path) {
+    return undef unless -f $path;
+    $flags |= $nofollow;
+  } else {
+    $flags |= O_CREAT | O_EXCL;
+  }
+  my $fh;
+  sysopen($fh, $path, $flags, 0600) or return undef;
+  return $fh;
+}
 sub dir_stamp {
   if (-f $boundary && !-l $boundary) {
     open(my $bfh, '<', $boundary) or return undef;
@@ -187,13 +201,7 @@ my $cookie = read_text($cookie_path);
 defined($cookie) or exit 1 if -e $cookie_path;
 $cookie = '' unless defined($cookie) && ($cookie eq 'EOF' || $cookie =~ /^\d+\z/);
 if ($cookie ne 'EOF') {
-  my $pfh;
-  if (-e $partial) {
-    exit 1 if -l $partial || !-f $partial;
-    open($pfh, '>>', $partial) or exit 1;
-  } else {
-    sysopen($pfh, $partial, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 1;
-  }
+  my $pfh = open_append($partial) or exit 1;
   select((select($pfh), $| = 1)[0]);
   opendir(my $dh, $state) or exit 1;
   seekdir($dh, 0 + $cookie) or exit 1 if $cookie ne '';
@@ -1030,6 +1038,8 @@ use warnings;
 use Fcntl qw(:DEFAULT);
 my ($state, $entries_path, $cursor, $windows_path, $windows_complete_path,
     $windows_partial_path, $windows_cursor_path, $windows_stamp_path, $source_stamp) = @ARGV;
+my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+defined($nofollow) or exit 2;
 sub atomic_write {
   my ($path, $value) = @_;
   return 0 if -l $path;
@@ -1049,6 +1059,20 @@ sub atomic_write {
     return 0;
   }
   return 1;
+}
+sub open_append {
+  my ($path) = @_;
+  return undef if -l $path;
+  my $flags = O_WRONLY | O_APPEND;
+  if (-e $path) {
+    return undef unless -f $path;
+    $flags |= $nofollow;
+  } else {
+    $flags |= O_CREAT | O_EXCL;
+  }
+  my $fh;
+  sysopen($fh, $path, $flags, 0600) or return undef;
+  return $fh;
 }
 sub read_text {
   my ($path) = @_;
@@ -1074,13 +1098,7 @@ if (!-e $windows_complete_path) {
   my $efh;
   open($efh, '<', $entries_path) or exit 2;
   seek($efh, 0 + $raw_cursor, 0) or exit 2;
-  my $pfh;
-  if (-e $windows_partial_path) {
-    -f $windows_partial_path && !-l $windows_partial_path or exit 2;
-    open($pfh, '>>', $windows_partial_path) or exit 2;
-  } else {
-    sysopen($pfh, $windows_partial_path, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 2;
-  }
+  my $pfh = open_append($windows_partial_path) or exit 2;
   while (defined(my $path = <$efh>)) {
     my $next = tell($efh);
     defined($next) or exit 2;
@@ -1592,6 +1610,20 @@ sub atomic_write {
   return 0 if -l $path;
   rename($tmp, $path) or return 0;
 }
+sub open_append {
+  my ($path) = @_;
+  return undef if -l $path;
+  my $flags = O_WRONLY | O_APPEND;
+  if (-e $path) {
+    return undef unless -f $path;
+    $flags |= $nofollow;
+  } else {
+    $flags |= O_CREAT | O_EXCL;
+  }
+  my $fh;
+  sysopen($fh, $path, $flags, 0600) or return undef;
+  return $fh;
+}
 sub read_text {
   my ($path) = @_;
   return '' unless -e $path;
@@ -1607,13 +1639,7 @@ my $cookie = read_text($cookie_path);
 defined($cookie) or exit 1 if -e $cookie_path;
 $cookie = '' unless defined($cookie) && ($cookie eq 'EOF' || $cookie =~ /^\d+\z/);
 if ($cookie ne 'EOF') {
-  my $pfh;
-  if (-e $partial) {
-    exit 1 if -l $partial || !-f $partial;
-    open($pfh, '>>', $partial) or exit 1;
-  } else {
-    sysopen($pfh, $partial, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 1;
-  }
+  my $pfh = open_append($partial) or exit 1;
   select((select($pfh), $| = 1)[0]);
   opendir(my $dh, $directory) or exit 1;
   seekdir($dh, 0 + $cookie) or exit 1 if $cookie ne '';

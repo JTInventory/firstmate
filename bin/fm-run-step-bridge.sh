@@ -229,7 +229,7 @@ publish_run_id() {
 }
 
 run_axi() {
-  local output child child_status=0 run_id published=0 tmpdir output_file
+  local output child child_status=0 run_id published=0 startup_seen=0 tmpdir output_file
   local startup_wait_secs startup_deadline
   tmpdir=${FM_RUN_BINDING_TMP:-${TMPDIR:-/tmp}}
   output_file=$(mktemp "$tmpdir/.fm-run-step-output.XXXXXX") || return 1
@@ -249,17 +249,9 @@ run_axi() {
   startup_deadline=$(( $(date +%s) + startup_wait_secs ))
   while kill -0 "$child" 2>/dev/null; do
     if run_id=$(run_id_from_output "$output_file") && [ -n "$run_id" ]; then
-      if ! publish_run_id "$run_id"; then
-        kill "$child" 2>/dev/null || true
-        wait "$child" 2>/dev/null || true
-        cat "$output_file"
-        rm -f "$output_file"
-        return 1
-      fi
-      published=1
-      break
+      startup_seen=1
     fi
-    if [ "$(date +%s)" -ge "$startup_deadline" ]; then
+    if [ "$startup_seen" = 0 ] && [ "$(date +%s)" -ge "$startup_deadline" ]; then
       kill "$child" 2>/dev/null || true
       wait "$child" 2>/dev/null || true
       cat "$output_file"
@@ -269,11 +261,18 @@ run_axi() {
     sleep 0.05
   done
   wait "$child" || child_status=$?
-  if [ "$published" = 0 ] && run_id=$(run_id_from_output "$output_file") && [ -n "$run_id" ]; then
-    if publish_run_id "$run_id"; then
-      published=1
-    fi
+  run_id=
+  if ! run_id=$(run_id_from_output "$output_file") || [ -z "$run_id" ]; then
+    cat "$output_file"
+    rm -f "$output_file"
+    return 1
   fi
+  if ! publish_run_id "$run_id"; then
+    cat "$output_file"
+    rm -f "$output_file"
+    return 1
+  fi
+  published=1
   cat "$output_file"
   rm -f "$output_file"
   [ "$published" = 1 ] || return 1
