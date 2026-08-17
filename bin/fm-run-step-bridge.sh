@@ -228,9 +228,16 @@ publish_run_id() {
   return "$status"
 }
 
+run_axi_abort_child() {
+  local child=$1
+  kill "$child" 2>/dev/null || true
+  kill -KILL "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+}
+
 run_axi() {
   local output child child_status=0 run_id published=0 startup_seen=0 tmpdir output_file
-  local startup_wait_secs startup_deadline
+  local startup_wait_secs startup_deadline total_wait_secs total_deadline now
   tmpdir=${FM_RUN_BINDING_TMP:-${TMPDIR:-/tmp}}
   output_file=$(mktemp "$tmpdir/.fm-run-step-output.XXXXXX") || return 1
   "$FM_RUN_BINDING_REAL" "$@" >"$output_file" 2>&1 &
@@ -247,13 +254,31 @@ run_axi() {
     *) startup_wait_secs=300 ;;
   esac
   startup_deadline=$(( $(date +%s) + startup_wait_secs ))
+  total_wait_secs=${FM_RUN_BINDING_TOTAL_WAIT_SECS:-3600}
+  case "$total_wait_secs" in ''|*[!0-9]*|0) total_wait_secs=3600 ;; esac
+  while [ "${total_wait_secs#0}" != "$total_wait_secs" ]; do
+    total_wait_secs=${total_wait_secs#0}
+  done
+  [ -n "$total_wait_secs" ] || total_wait_secs=3600
+  case "${#total_wait_secs}" in
+    1|2|3) [ "$total_wait_secs" -le 3600 ] || total_wait_secs=3600 ;;
+    4) [ "$total_wait_secs" -le 3600 ] || total_wait_secs=3600 ;;
+    *) total_wait_secs=3600 ;;
+  esac
+  total_deadline=$(( $(date +%s) + total_wait_secs ))
   while kill -0 "$child" 2>/dev/null; do
     if run_id=$(run_id_from_output "$output_file") && [ -n "$run_id" ]; then
       startup_seen=1
     fi
-    if [ "$startup_seen" = 0 ] && [ "$(date +%s)" -ge "$startup_deadline" ]; then
-      kill "$child" 2>/dev/null || true
-      wait "$child" 2>/dev/null || true
+    now=$(date +%s)
+    if [ "$now" -ge "$total_deadline" ]; then
+      run_axi_abort_child "$child"
+      cat "$output_file"
+      rm -f "$output_file"
+      return 1
+    fi
+    if [ "$startup_seen" = 0 ] && [ "$now" -ge "$startup_deadline" ]; then
+      run_axi_abort_child "$child"
       cat "$output_file"
       rm -f "$output_file"
       return 1

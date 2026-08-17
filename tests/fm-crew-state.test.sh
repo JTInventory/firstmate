@@ -548,6 +548,22 @@ test_bound_run_missing_evidence_fails_closed() {
   pass "bound run metadata without evidence fails closed"
 }
 
+test_pending_run_binding_fails_closed() {
+  reset_fakes
+  local d; d=$(new_case pending-missing-evidence)
+  make_repo_on_branch "$d/wt" fm/feat-pending-missing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pending-missing.meta" \
+    "window=fm:fm-feat-pending-missing" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=test-incarnation" "run_binding_state=pending"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-pending-missing)"
+  local out; out=$(run_crew_state "$d" feat-pending-missing)
+  assert_contains "$out" "state: unknown" "pending run without evidence -> unknown"
+  assert_contains "$out" "source: run-step" "pending run without evidence -> run-step source"
+  assert_not_contains "$out" "state: working" "pending run without evidence must not use generic attribution"
+  pass "pending run metadata without evidence fails closed"
+}
+
 test_terminal_passed_delivery_completed() {
   reset_fakes
   local d; d=$(new_case passed-delivery-completed)
@@ -1169,6 +1185,7 @@ test_ci_ready_done_log_beats_monitoring_run
 test_terminal_passed
 test_terminal_passed_delivery_skipped
 test_bound_run_missing_evidence_fails_closed
+test_pending_run_binding_fails_closed
 test_terminal_passed_delivery_completed
 test_terminal_failed
 test_active_run_does_not_create_incarnation_binding

@@ -397,7 +397,7 @@ if [ -e "$BOUND_RUN_EVIDENCE" ] || [ -L "$BOUND_RUN_EVIDENCE" ]; then
   BOUND_RUN_REQUIRED=1
 fi
 case "$META_BINDING_STATE" in
-  bound|staged|invalid) BOUND_RUN_REQUIRED=1 ;;
+  pending|bound|staged|invalid) BOUND_RUN_REQUIRED=1 ;;
 esac
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && [ -n "$META_INCARNATION" ]; then
   if BOUND_RUN_ID=$(fm_run_step_binding_read "$ID" "$META_INCARNATION"); then

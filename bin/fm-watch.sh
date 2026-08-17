@@ -701,7 +701,11 @@ run_check_capture() {
 # from one that has not - the latter being a per-wake-path miss it must surface.
 _hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
 _hb_terminal_surfaced_path() { printf '%s/.hb-terminal-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
-_hb_surface_retry_path() { printf '%s/.hb-surface-retry-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
+_hb_surface_task_valid() { fm_pr_task_id_valid "$1"; }
+_hb_surface_retry_path() {
+  _hb_surface_task_valid "$1" || return 1
+  printf '%s/.hb-surface-retry-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
+}
 
 surface_meta_value() {
   awk -F= -v wanted="$2" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "$1" 2>/dev/null
@@ -860,6 +864,7 @@ mark_terminal_surfaced() {
 }
 
 surface_retry_valid() {
+  local task
   awk -F= '
     BEGIN {
       allowed["schema"]=1; allowed["task"]=1; allowed["snapshot"]=1
@@ -886,12 +891,16 @@ surface_retry_valid() {
       for (key in required) if (!(key in seen)) valid=0
       exit !(valid && values["schema"] == "fm-hb-surface-retry.v1" && values["task"] != "" && values["snapshot"] != "" && values["wake_key"] != "" && values["wake_published"] ~ /^[012]$/)
     }
-  ' "$1" 2>/dev/null
+  ' "$1" 2>/dev/null || return 1
+  task=$(surface_meta_value_unique "$1" task 2>/dev/null) || return 1
+  _hb_surface_task_valid "$task"
 }
 
 surface_retry_matches_current() {
-  local retry=$1 task=$2 last=$3 meta="$STATE/$2.meta" current_spawn saved_spawn
+  local retry=$1 task=$2 last=$3 meta current_spawn saved_spawn
   local current_tasktmp current_window current_worktree saved_snapshot current_parent_corr saved_parent_corr rc
+  _hb_surface_task_valid "$task" || return 1
+  meta="$STATE/$task.meta"
   surface_retry_valid "$retry" || return 1
   [ "$(surface_meta_value_unique "$retry" task 2>/dev/null)" = "$task" ] || return 1
   saved_parent_corr=$(surface_meta_value_unique "$retry" parent_corr 2>/dev/null) || return 1
@@ -918,7 +927,9 @@ surface_retry_matches_current() {
 
 surface_retry_write() {
   local task=$1 last=$2 wake_key=$3 wake_published=${4:-1}
-  local meta="$STATE/$1.meta" retry tmp spawn_incarnation tasktmp window worktree parent_corr rc
+  local meta retry tmp spawn_incarnation tasktmp window worktree parent_corr rc
+  _hb_surface_task_valid "$task" || return 1
+  meta="$STATE/$task.meta"
   case "$wake_published" in 0|1|2) ;; *) return 1 ;; esac
   parent_corr=$(surface_parent_corr "$task") || return 1
   spawn_incarnation= tasktmp= window= worktree=
@@ -952,6 +963,7 @@ surface_retry_write() {
 
 surface_retry_mark_published() {
   local task=$1 last=$2 wake_key=$3 retry tmp line seen=0
+  _hb_surface_task_valid "$task" || return 1
   retry=$(_hb_surface_retry_path "$task")
   surface_retry_matches_current "$retry" "$task" "$last" || return 1
   [ "$(surface_meta_value_unique "$retry" wake_key 2>/dev/null)" = "$wake_key" ] || return 1
@@ -970,6 +982,7 @@ surface_retry_mark_published() {
 surface_retry_complete_consumed() {
   local retry=$1 task=$2 last=$3 spawn_incarnation=$4 tasktmp=$5 window=$6 worktree=$7
   local marker tmp snapshot
+  _hb_surface_task_valid "$task" || return 2
   surface_retry_matches_current "$retry" "$task" "$last" || return 2
   snapshot=$(surface_meta_value_unique "$retry" snapshot 2>/dev/null) || return 2
   mark_terminal_surfaced_snapshot "$task" "$snapshot" "$spawn_incarnation" \
@@ -986,6 +999,7 @@ surface_retry_complete_consumed() {
 
 surface_retry_ordinary_consumed() {
   local retry=$1 task=$2 last=$3 wake_key=$4 marker spawn_incarnation
+  _hb_surface_task_valid "$task" || return 2
   [ "$wake_key" = "$task" ] || return 1
   marker=$(fm_wake_surface_consumed_path "$task")
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
@@ -1027,6 +1041,7 @@ surface_retry_ordinary_consumed() {
 surface_retry_receipt_consumed() {
   local retry=$1 task=$2 last=$3 wake_key=$4 fp rec suffix outcome expected_incarnation
   local spawn_incarnation tasktmp window worktree receipt_snapshot saved_snapshot
+  _hb_surface_task_valid "$task" || return 2
   case "$wake_key" in
     inactive-outcome:*) fp=${wake_key#inactive-outcome:} ;;
     *) surface_retry_ordinary_consumed "$retry" "$task" "$last" "$wake_key"; return $? ;;
@@ -1089,6 +1104,7 @@ PERL
 
 surface_retry_published_current() {
   local retry=$1 task=$2 last=$3 wake_key=$4 published
+  _hb_surface_task_valid "$task" || return 2
   if [ -L "$retry" ] || [ -e "$retry" ]; then
     [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || return 2
   else

@@ -1813,6 +1813,49 @@ SH
   pass "bound metadata without evidence rejects replacement binding"
 }
 
+test_run_bridge_total_wait_is_bounded() {
+  local dir root home fakebin state handoff meta evidence status started elapsed
+  new_case bridge-total-wait
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-total-wait"
+  meta="$state/bridge-total-wait.meta"
+  evidence="$state/.run-step-incarnation-bridge-total-wait"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-total-wait worktree="$state/work-bridge-total-wait" \
+    project="$state/work-bridge-total-wait" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-total-wait
+  mkdir -p "$state/work-bridge-total-wait"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-total-wait \
+    spawn_incarnation=inc-a state=pending
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01TOTALWAIT"\n'
+while :; do :; done
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  started=$(date +%s)
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-total-wait \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_RUN_BINDING_TOTAL_WAIT_SECS=1 FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1
+  status=$?
+  set -u
+  elapsed=$(( $(date +%s) - started ))
+  [ "$status" -ne 0 ] || fail "bridge accepted a child that exceeded its total wait"
+  [ "$elapsed" -le 5 ] || fail "bridge total wait exceeded its bound: ${elapsed}s"
+  [ "$(receipt_value "$meta" run_binding_state)" = pending ] \
+    || fail "bridge total timeout changed pending metadata"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
+    || fail "bridge total timeout published incomplete evidence"
+  pass "run bridge total wait is bounded"
+}
+
 test_run_bridge_rolls_back_failed_metadata_binding() {
   local dir root home fakebin state handoff meta evidence meta_count status
   new_case bridge-metadata-rollback
@@ -2480,6 +2523,33 @@ SH
     || fail "surface-marker retry caused an inactive receipt replay"
   unset FM_FAKE_CREW_STATE_SURFACE_MARKER_X1
   pass "surface-marker failures retain and repair their wake transaction"
+}
+
+test_surface_retry_rejects_unsafe_task_path() {
+  local dir root home fakebin state retry status
+  new_case surface-unsafe-task
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  retry="$state/.hb-surface-retry-unsafe-task"
+  fm_write_meta "$retry" \
+    schema=fm-hb-surface-retry.v1 task=../../outside snapshot='state: done unsafe' \
+    spawn_incarnation=inc-a tasktmp= window=tmux:surface-unsafe-task worktree= \
+    parent_corr= wake_key=unsafe-task wake_published=1
+  prepare_primary_proof "$root" "$home" "$fakebin"
+  set +e
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
+    CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" \
+    FM_WATCH_SURFACE_REPAIR_BUDGET_SECS=1 \
+    bash -c '. "$1/bin/fm-watch.sh"; surface_retry_repair' _ "$root" \
+    > "$dir/surface.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "surface repair accepted an unsafe task id"
+  [ -f "$retry" ] || fail "unsafe surface retry was removed"
+  pass "surface retry rejects unsafe task paths"
 }
 
 test_legacy_metadata_uses_stable_fallback() {
@@ -4603,6 +4673,7 @@ test_run_bridge_metadata_stage_failure_preserves_committed_pair
 test_run_bridge_rejects_staged_run_rebinding
 test_run_bridge_rejects_existing_evidence_rebinding
 test_run_bridge_rejects_bound_metadata_without_evidence
+test_run_bridge_total_wait_is_bounded
 test_run_bridge_rolls_back_failed_metadata_binding
 test_run_bridge_activation_failure_is_recoverable
 test_pane_idle_reclaim_advances_malformed_cursor
@@ -4614,6 +4685,7 @@ test_canonical_terminal_snapshot_suppresses_status_replay
 test_postpublication_uncertainty_is_not_replayed
 test_ordinary_terminal_wake_consumption_is_durable
 test_surface_marker_failure_is_retryable
+test_surface_retry_rejects_unsafe_task_path
 test_legacy_metadata_uses_stable_fallback
 test_empty_spawn_incarnation_is_rejected
 test_relaunch_and_teardown_races_recheck_under_spawn_lock
