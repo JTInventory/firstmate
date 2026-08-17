@@ -907,15 +907,17 @@ claim_defer_generation_live() {
 }
 
 drain_claim_owner() {
-  local row=$1 owner parent_pid drain_file drain_dir state_dir drain_base
+  local row=$1 owner parent_pid parent_start drain_file drain_dir state_dir drain_base
   owner=$(fm_lock_link_owner "$FM_WAKE_QUEUE_LOCK" 2>/dev/null || true)
   if [ "${FM_WAKE_DRAIN_DELEGATED:-0}" = 1 ]; then
     parent_pid=${FM_WAKE_DRAIN_PARENT_PID:-}
   else
     parent_pid=${PPID:-}
   fi
+  parent_start=${FM_WAKE_DRAIN_PARENT_START:-}
   drain_file=${FM_WAKE_DRAIN_FILE:-}
-  [ -n "$owner" ] && [ -n "$parent_pid" ] && [ -n "$row" ] && [ -n "$drain_file" ] || return 1
+  [ -n "$owner" ] && [ -n "$parent_pid" ] && [ -n "$parent_start" ] && [ -n "$row" ] && [ -n "$drain_file" ] || return 1
+  fm_pid_start_matches_stored "$parent_pid" "$parent_start" || return 1
   [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$parent_pid" ] || return 1
   fm_lock_points_to_owner "$FM_WAKE_QUEUE_LOCK" "$owner" || return 1
   [ -f "$drain_file" ] && [ ! -L "$drain_file" ] || return 1

@@ -15,6 +15,7 @@ DRAIN_TMP=
 DRAIN_DEDUPED=
 DRAIN_RESTORE=
 DRAIN_PID=${BASHPID:-$$}
+DRAIN_PID_START=
 DRAIN_LOCK_HELD=false
 DRAIN_ACTIONABLE=0
 DRAIN_RESUMING=false
@@ -38,6 +39,8 @@ DRAIN_DEDUPED_READY=0
 DRAIN_FINALIZED_KEYS=()
 FM_WAKE_DRAIN_RESUMED_SOURCE=0
 export FM_WAKE_DRAIN_RESUMED_SOURCE
+DRAIN_PID_START=$(fm_pid_start "$DRAIN_PID" 2>/dev/null || true)
+export FM_WAKE_DRAIN_PARENT_START="$DRAIN_PID_START"
 case "$DRAIN_BATCH_ROWS" in
   ''|*[!0-9]*|0) DRAIN_BATCH_ROWS=16 ;;
 esac
@@ -62,7 +65,10 @@ presentation_reconcile() {
 }
 
 presentation_parent_alive() {
-  kill -0 "$1" 2>/dev/null
+  local pid=$1 start=${2:-}
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ -n "$start" ] || return 1
+  fm_pid_start_matches_stored "$pid" "$start"
 }
 
 wake_marker_write() {
@@ -82,30 +88,34 @@ wake_marker_write() {
 }
 
 present_inactive_worker() {
-  local key=$1 row=$2 deduped=$3 parent_pid=$4 go=$5 emitted=$6 script_dir=$7 timeout=$8
+  local key=$1 row=$2 deduped=$3 parent_pid=$4 parent_start=$5 go=$6 emitted=$7 script_dir=$8 timeout=$9
   while [ ! -s "$go" ]; do
-    presentation_parent_alive "$parent_pid" || exit 125
+    presentation_parent_alive "$parent_pid" "$parent_start" || exit 125
     sleep 0.01
   done
-  presentation_parent_alive "$parent_pid" || exit 125
+  presentation_parent_alive "$parent_pid" "$parent_start" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
-    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
+    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" FM_WAKE_DRAIN_PARENT_START="$parent_start" \
+    "$script_dir/fm-inactive-reconcile.sh" \
     output-started "$key" "$row" || exit 1
-  presentation_parent_alive "$parent_pid" || exit 125
+  presentation_parent_alive "$parent_pid" "$parent_start" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
-    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
+    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" FM_WAKE_DRAIN_PARENT_START="$parent_start" \
+    "$script_dir/fm-inactive-reconcile.sh" \
     output-emitted "$key" "$row" || exit 1
-  presentation_parent_alive "$parent_pid" || exit 125
+  presentation_parent_alive "$parent_pid" "$parent_start" || exit 125
   printf '%s\n' "$row" || exit 1
-  presentation_parent_alive "$parent_pid" || exit 125
+  presentation_parent_alive "$parent_pid" "$parent_start" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
-    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
+    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" FM_WAKE_DRAIN_PARENT_START="$parent_start" \
+    "$script_dir/fm-inactive-reconcile.sh" \
     output-confirmed "$key" "$row" || exit 1
-  presentation_parent_alive "$parent_pid" || exit 125
+  presentation_parent_alive "$parent_pid" "$parent_start" || exit 125
   wake_marker_write "$emitted" emitted || exit 1
-  presentation_parent_alive "$parent_pid" || exit 125
+  presentation_parent_alive "$parent_pid" "$parent_start" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
-    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
+    FM_WAKE_DRAIN_PARENT_PID="$parent_pid" FM_WAKE_DRAIN_PARENT_START="$parent_start" \
+    "$script_dir/fm-inactive-reconcile.sh" \
     output-complete "$key" "$row" || exit 1
 }
 
@@ -198,11 +208,12 @@ present_inactive_row() {
   [ -f "$go" ] && [ ! -L "$go" ] || { rm -f "$go"; return 1; }
   emitted=$(mktemp "$STATE/.wake-emitted.XXXXXX") || { rm -f "$go"; return 1; }
   [ -f "$emitted" ] && [ ! -L "$emitted" ] || { rm -f "$go" "$emitted"; return 1; }
-  export -f fm_pane_idle_run_bounded_child presentation_reconcile presentation_parent_alive wake_marker_write present_inactive_worker
+  export -f fm_pane_idle_run_bounded_child presentation_reconcile presentation_parent_alive wake_marker_write \
+    present_inactive_worker fm_pid_start_ps_token fm_pid_start fm_pid_start_matches_stored
   if command -v perl >/dev/null 2>&1; then
     perl -e 'use POSIX (); POSIX::setpgid(0, 0) == 0 or exit 125; exec @ARGV or exit 127' \
       "$BASH" -c 'present_inactive_worker "$@"' present-inactive-worker \
-      "$key" "$row" "$DRAIN_DEDUPED" "$DRAIN_PID" "$go" "$emitted" "$SCRIPT_DIR" \
+      "$key" "$row" "$DRAIN_DEDUPED" "$DRAIN_PID" "$DRAIN_PID_START" "$go" "$emitted" "$SCRIPT_DIR" \
       "$PRESENTATION_TIMEOUT_SECS" &
     worker=$!
   else

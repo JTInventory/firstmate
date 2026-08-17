@@ -34,6 +34,22 @@ fm_nofollow_append() {
   ' "$path"
 }
 
+fm_nofollow_chmod() {
+  local path=$1 mode=$2
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -e '
+    use Fcntl qw(:DEFAULT);
+    use POSIX ();
+    my ($path, $mode) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    $mode =~ /\A[0-7]{3,4}\z/ or exit 1;
+    sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 1;
+    chmod(oct($mode), "/proc/self/fd/" . fileno($fh)) == 1 or exit 1;
+    close($fh) or exit 1;
+  ' "$path" "$mode"
+}
+
 fm_nofollow_spawn_capture() {
   local path=$1
   shift

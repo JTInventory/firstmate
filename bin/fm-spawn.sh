@@ -2298,8 +2298,8 @@ if [ -n "$SPAWN_RUN_BINDING_HANDOFF" ]; then
     printf 'exec %s wrap %s "$@"\n' \
       "$(shell_quote "$FM_ROOT/bin/fm-run-step-bridge.sh")" \
       "$(shell_quote "$SPAWN_RUN_BINDING_REAL")"
-  } > "$bridge_wrapper" || exit 1
-  chmod 700 "$bridge_wrapper" || exit 1
+  } | fm_nofollow_write "$bridge_wrapper" || exit 1
+  fm_nofollow_chmod "$bridge_wrapper" 0700 || exit 1
   sq_run_binding_path=$(shell_quote "$TASK_TMP/bin:$PATH")
   LAUNCH="PATH=$sq_run_binding_path $LAUNCH"
 fi

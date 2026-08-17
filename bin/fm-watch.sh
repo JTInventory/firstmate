@@ -1110,6 +1110,9 @@ my ($path, $wanted) = @ARGV;
 open(my $fh, '<', $path) or exit 2;
 while (defined(my $line = <$fh>)) {
   my @fields = split(/\t/, $line, -1);
+  next unless @fields == 5;
+  next unless $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/;
+  next unless $fields[2] =~ /\A(?:signal|stale|check|heartbeat)\z/;
   exit 0 if defined($fields[3]) && $fields[3] eq $wanted;
 }
 close($fh) or exit 2;
@@ -1398,8 +1401,9 @@ my $needle = "task=$task ";
 my $found = 0;
 while (defined(my $line = <$fh>)) {
   chomp $line;
-  my @fields = split(/\t/, $line, 5);
+  my @fields = split(/\t/, $line, -1);
   @fields == 5 or exit 2;
+  $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/ or exit 2;
   next unless $fields[2] eq 'check';
   next unless $fields[3] =~ /\Ainactive-outcome:(.*)\z/;
   my $fp = $1;
