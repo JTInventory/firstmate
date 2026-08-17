@@ -761,12 +761,12 @@ scan_cursor_write() {
   [ -f "$identity_tmp" ] && [ ! -L "$identity_tmp" ] || { rm -f "$identity_tmp" "$cursor_tmp"; return 1; }
   [ -f "$cursor_tmp" ] && [ ! -L "$cursor_tmp" ] || { rm -f "$identity_tmp" "$cursor_tmp"; return 1; }
   if ! printf '%s\n' "$identity" | fm_nofollow_write "$identity_tmp" \
-    || [ -L "$SCAN_CURSOR_IDENTITY" ] || ! mv -f "$identity_tmp" "$SCAN_CURSOR_IDENTITY"; then
+    || ! fm_nofollow_rename "$identity_tmp" "$SCAN_CURSOR_IDENTITY"; then
     rm -f "$identity_tmp" "$cursor_tmp"
     return 1
   fi
   if ! printf '%s\n' "$id" | fm_nofollow_write "$cursor_tmp" \
-    || [ -L "$SCAN_CURSOR" ] || ! mv -f "$cursor_tmp" "$SCAN_CURSOR"; then
+    || ! fm_nofollow_rename "$cursor_tmp" "$SCAN_CURSOR"; then
     rm -f "$cursor_tmp"
     return 1
   fi
@@ -845,6 +845,10 @@ receipt_field() {  # <receipt> <key>
 
 claim_path() {  # <fingerprint>
   printf '%s/.%s.claim' "$OUTCOME_DIR" "$1"
+}
+
+claim_publish() {
+  fm_nofollow_rename "$1" "$2" "${3:-0}"
 }
 
 claim_field() {  # <claim> <key>
@@ -967,7 +971,7 @@ claim_rewrite_row() {
     case "$line" in row=*) printf 'row=%s\n' "$row" ;; *) printf '%s\n' "$line" ;; esac
   done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 1; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 1; }
 }
 
 claim_recover_deferred_handoff() {
@@ -1006,7 +1010,7 @@ claim_recover_deferred_handoff() {
     [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=1\n'
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_rebind_deferred_generation() {
@@ -1037,7 +1041,7 @@ claim_rebind_deferred_generation() {
     [ "$seen_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$generation_start"
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_recorded_presented() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1073,7 +1077,7 @@ claim_mark_recorded_presented() {  # <inactive-outcome:fingerprint> <wake-row>
     done
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1289,7 +1293,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
           esac
         done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
         [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-        mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+        claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
         return 0
       fi
       return 5
@@ -1306,7 +1310,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     printf 'state=reserved\n'
     printf 'created_epoch=%s\n' "$(date +%s)"
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
-  if ln "$tmp" "$claim" 2>/dev/null; then
+  if claim_publish "$tmp" "$claim" 1; then
     rm -f "$tmp"
     if [ "$recorded_report" = 1 ]; then
       claim_mark_presenting "$key" "$row" || return 2
@@ -1388,7 +1392,7 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
     [ "$seen_defer_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$defer_generation_start"
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1450,7 +1454,7 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
       printf 'caller_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)"
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1492,7 +1496,7 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
     [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n'
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1535,7 +1539,7 @@ claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
     [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n'
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_output_emitted() {
@@ -1588,7 +1592,7 @@ claim_mark_output_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
     [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n'
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1624,7 +1628,7 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
     esac
   done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_presented_recovered() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1648,7 +1652,7 @@ claim_mark_presented_recovered() {  # <inactive-outcome:fingerprint> <wake-row>
     case "$line" in state=*) printf 'state=presented\n' ;; *) printf '%s\n' "$line" ;; esac
   done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -1716,7 +1720,7 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
     [ "$owner_required" = 0 ] && [ "$seen_caller_confirmed" = 1 ] || { rm -f "$tmp"; return 2; }
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
-  mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
+  claim_publish "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
 
 claim_remove() {  # <inactive-outcome:fingerprint> <wake-row>
@@ -2740,7 +2744,7 @@ repair_reported_secondmate_routes() {
     if cursor_tmp=$(mktemp "$STATE/.reported-route-repair.cursor.XXXXXX"); then
       if [ ! -f "$cursor_tmp" ] || [ -L "$cursor_tmp" ] \
         || ! printf '%s\n' "$last" | fm_nofollow_write "$cursor_tmp" \
-        || ! mv -f "$cursor_tmp" "$REPORTED_ROUTE_CURSOR"; then
+        || ! fm_nofollow_rename "$cursor_tmp" "$REPORTED_ROUTE_CURSOR"; then
         status=1
         rm -f "$cursor_tmp"
       fi
@@ -3077,7 +3081,7 @@ republish_pending_receipts() {
     if cursor_tmp=$(mktemp "$STATE/.pending-receipt-republish.cursor.XXXXXX"); then
       if [ ! -f "$cursor_tmp" ] || [ -L "$cursor_tmp" ] \
         || ! printf '%s\n' "$last" | fm_nofollow_write "$cursor_tmp" \
-        || ! mv -f "$cursor_tmp" "$PENDING_RECEIPT_CURSOR"; then
+        || ! fm_nofollow_rename "$cursor_tmp" "$PENDING_RECEIPT_CURSOR"; then
         status=1
         rm -f "$cursor_tmp"
       fi
@@ -3965,7 +3969,7 @@ scan_locked() {
     }
     if [ ! -f "$maintenance_phase_tmp" ] || [ -L "$maintenance_phase_tmp" ] \
       || ! printf '%s\n' "$maintenance_next_phase" | fm_nofollow_write "$maintenance_phase_tmp" \
-      || ! mv -f "$maintenance_phase_tmp" "$MAINTENANCE_PHASE_CURSOR"; then
+      || ! fm_nofollow_rename "$maintenance_phase_tmp" "$MAINTENANCE_PHASE_CURSOR"; then
       maintenance_status=1
       rm -f "$maintenance_phase_tmp"
     fi
@@ -3980,7 +3984,7 @@ scan_locked() {
   maintenance_order_tmp=$(mktemp "$STATE/.inactive-outcome-maintenance-order.XXXXXX") || return 1
   if [ ! -f "$maintenance_order_tmp" ] || [ -L "$maintenance_order_tmp" ] \
     || ! printf '%s\n' "$next_order" | fm_nofollow_write "$maintenance_order_tmp" \
-    || ! mv -f "$maintenance_order_tmp" "$MAINTENANCE_ORDER_CURSOR"; then
+    || ! fm_nofollow_rename "$maintenance_order_tmp" "$MAINTENANCE_ORDER_CURSOR"; then
     rm -f "$maintenance_order_tmp"
     return 1
   fi

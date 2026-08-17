@@ -86,6 +86,15 @@ fm_run_step_binding_read_held() {
   owner=${FM_TASK_LOCK_OWNER:-}
   if [ -n "$owner" ] && fm_lock_points_to_owner "$lock" "$owner"; then
     :
+  elif [ "${FM_RUN_STEP_READ_ONLY:-0}" = 1 ]; then
+    stored_run=$(fm_run_step_binding_read_state "$evidence" "$id" "$incarnation" "$expected_state")
+    status=$?
+    [ "$status" = 0 ] || return "$status"
+    FM_RUN_STEP_HELD_LOCK=
+    FM_RUN_STEP_HELD_LOCK_RELEASE=0
+    FM_RUN_STEP_HELD_PREVIOUS_OWNER=
+    FM_RUN_STEP_HELD_VALUE=$stored_run
+    return 0
   else
     fm_lock_acquire_wait "$lock" || return 1
     acquired=1

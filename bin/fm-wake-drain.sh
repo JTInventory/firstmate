@@ -364,7 +364,7 @@ restore_pending_manifest_write() {
   tmp=$(mktemp "$DRAIN_RESTORE_MANIFEST.XXXXXX") || return 1
   if ! printf 'schema=fm-wake-queue-restore.v1\nsource=%s\noffset=%s\nsource_retired=%s\nraw_source=%s\nraw_source_retired=%s\n' \
     "$source_base" "$offset" "$source_retired" "$raw_base" "$raw_source_retired" | fm_nofollow_write "$tmp" \
-    || [ -L "$DRAIN_RESTORE_MANIFEST" ] || ! mv -f "$tmp" "$DRAIN_RESTORE_MANIFEST"; then
+    || ! fm_nofollow_rename "$tmp" "$DRAIN_RESTORE_MANIFEST"; then
     rm -f "$tmp"
     return 1
   fi
@@ -487,13 +487,13 @@ drain_recover_orphaned_sources_locked() {
       [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
       tmp=$(mktemp "$STATE/.wake-queue.recover.XXXXXX") || return 1
       if ! cat "$orphan" "$FM_WAKE_QUEUE" | fm_nofollow_write "$tmp" \
-        || [ -L "$FM_WAKE_QUEUE" ] || ! mv -f "$tmp" "$FM_WAKE_QUEUE"; then
+        || ! fm_nofollow_rename "$tmp" "$FM_WAKE_QUEUE"; then
         rm -f "$tmp"
         return 1
       fi
       rm -f "$orphan" || return 1
     else
-      mv -f "$orphan" "$FM_WAKE_QUEUE" || return 1
+      fm_nofollow_rename "$orphan" "$FM_WAKE_QUEUE" 1 || return 1
     fi
   done
 }

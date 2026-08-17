@@ -93,7 +93,7 @@ fm_pane_idle_meta_freshness_bump() {
   tmp=$(mktemp "$boundary_path.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
   printf '%s\n' "$value" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
-  [ ! -L "$boundary_path" ] && mv -f "$tmp" "$boundary_path" || {
+  [ ! -L "$boundary_path" ] && fm_nofollow_rename "$tmp" "$boundary_path" || {
     rm -f "$tmp"
     return 1
   }
@@ -724,7 +724,7 @@ PERL
     }
     if fm_pane_idle_run_bounded_child "$remaining" env LC_ALL=C sort -u \
       "$aggregate_path" | fm_nofollow_write "$sorted_tmp" \
-      && [ ! -L "$sorted_path" ] && mv -f "$sorted_tmp" "$sorted_path" \
+      && fm_nofollow_rename "$sorted_tmp" "$sorted_path" \
       && fm_pane_idle_meta_index_cursor_write "$sorted_complete_path" complete; then
       :
     else
@@ -862,7 +862,7 @@ fm_pane_idle_meta_index_build() {  # <state> [deadline-ms] [force]
       rm -f "$tmp"
       continue
     fi
-    [ ! -L "$snapshot" ] && mv -f "$tmp" "$snapshot" || {
+    fm_nofollow_rename "$tmp" "$snapshot" || {
       rm -f "$tmp"
       return 1
     }
@@ -1280,7 +1280,7 @@ fm_pane_idle_meta_index_cursor_write() {
   [ ! -L "$path" ] || return 1
   tmp=$(mktemp "$path.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  if ! printf '%s\n' "$value" | fm_nofollow_write "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+  if ! printf '%s\n' "$value" | fm_nofollow_write "$tmp" || ! fm_nofollow_rename "$tmp" "$path"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1365,7 +1365,7 @@ fm_pane_idle_meta_index_persist() {
       return 1
     }
     [ ! -L "$snapshot_path" ] || { rm -f "$snapshot_tmp"; return 1; }
-    mv -f "$snapshot_tmp" "$snapshot_path" || { rm -f "$snapshot_tmp"; return 1; }
+    fm_nofollow_rename "$snapshot_tmp" "$snapshot_path" || { rm -f "$snapshot_tmp"; return 1; }
     snapshot_changed=0
     cursor=
     started=1
@@ -1409,7 +1409,7 @@ fm_pane_idle_meta_index_persist() {
     tmp=$(mktemp "$path.XXXXXX") || { rm -f "$snapshot_tmp"; return 1; }
     [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp" "$snapshot_tmp"; return 1; }
     if ! printf '%s\n%s\n' "$count" "$meta" | fm_nofollow_write "$tmp" \
-      || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+      || ! fm_nofollow_rename "$tmp" "$path"; then
       rm -f "$tmp" "$snapshot_tmp"
       return 1
     fi
