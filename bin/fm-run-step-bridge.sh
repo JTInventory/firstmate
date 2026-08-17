@@ -269,15 +269,71 @@ recover_staged_binding() {
   return "$status"
 }
 
+run_axi_proc_group_id() {
+  local pid=$1 stat rest
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  rest=${stat##*) }
+  set -- $rest
+  [ "$#" -ge 3 ] || return 1
+  printf '%s\n' "$3"
+}
+
+run_axi_child_group_is_current() {
+  local child=$1 expected_start=$2 actual_start pgid
+  actual_start=$(fm_pid_start "$child" 2>/dev/null) || return 1
+  [ "$actual_start" = "$expected_start" ] || return 1
+  pgid=$(run_axi_proc_group_id "$child") || return 1
+  [ "$pgid" = "$child" ]
+}
+
+run_axi_group_member_identity() {
+  local child=$1 entry pid stat rest start
+  for entry in /proc/[0-9]*; do
+    pid=${entry#/proc/}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$pid" = "$child" ] && continue
+    [ -r "$entry/stat" ] || continue
+    stat=$(cat "$entry/stat" 2>/dev/null) || continue
+    rest=${stat##*) }
+    set -- $rest
+    [ "$#" -ge 20 ] || continue
+    [ "$3" = "$child" ] || continue
+    start="proc:${20}"
+    printf '%s|%s\n' "$pid" "$start"
+    return 0
+  done
+  return 1
+}
+
+run_axi_group_member_is_current() {
+  local child=$1 pid=$2 expected_start=$3 actual_start pgid
+  actual_start=$(fm_pid_start "$pid" 2>/dev/null) || return 1
+  [ "$actual_start" = "$expected_start" ] || return 1
+  pgid=$(run_axi_proc_group_id "$pid") || return 1
+  [ "$pgid" = "$child" ]
+}
+
 run_axi_stop_group() {
-  local child=$1 attempts=0
+  local child=$1 expected_start=$2 member_pid=${3:-} member_start=${4:-} attempts=0
   case "$child" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$expected_start" ] || return 1
+  if ! run_axi_child_group_is_current "$child" "$expected_start"; then
+    if ! kill -0 -- "-$child" 2>/dev/null; then
+      return 0
+    fi
+    run_axi_group_member_is_current "$child" "$member_pid" "$member_start" || return 1
+  fi
   kill -TERM -- "-$child" 2>/dev/null || true
   while kill -0 -- "-$child" 2>/dev/null && [ "$attempts" -lt 100 ]; do
     sleep 0.01
     attempts=$((attempts + 1))
   done
   if kill -0 -- "-$child" 2>/dev/null; then
+    if ! run_axi_child_group_is_current "$child" "$expected_start"; then
+      run_axi_group_member_is_current "$child" "$member_pid" "$member_start" || return 1
+    fi
     kill -KILL -- "-$child" 2>/dev/null || true
     attempts=0
     while kill -0 -- "-$child" 2>/dev/null && [ "$attempts" -lt 100 ]; do
@@ -289,21 +345,31 @@ run_axi_stop_group() {
 }
 
 run_axi_abort_child() {
-  local child=$1
-  run_axi_stop_group "$child" || true
-  kill -TERM "$child" 2>/dev/null || true
-  kill -KILL "$child" 2>/dev/null || true
+  local child=$1 expected_start=$2 member_pid=${3:-} member_start=${4:-} actual_start
+  run_axi_stop_group "$child" "$expected_start" "$member_pid" "$member_start" || true
+  if actual_start=$(fm_pid_start "$child" 2>/dev/null) \
+    && [ "$actual_start" = "$expected_start" ]; then
+    kill -TERM "$child" 2>/dev/null || true
+    kill -KILL "$child" 2>/dev/null || true
+  fi
   wait "$child" 2>/dev/null || true
 }
 
 run_axi() {
-  local output child child_status=0 run_id published=0 startup_seen=0 tmpdir output_file
+  local output child child_start child_status=0 run_id published=0 startup_seen=0 tmpdir output_file
+  local group_member group_member_pid= group_member_start=
   local startup_wait_secs startup_deadline total_wait_secs total_deadline now
   tmpdir=${FM_RUN_BINDING_TMP:-${TMPDIR:-/tmp}}
   output_file=$(mktemp "$tmpdir/.fm-run-step-output.XXXXXX") || return 1
   fm_nofollow_spawn_capture "$output_file" "$FM_RUN_BINDING_REAL" "$@" &
   child=$!
   case "$child" in ''|*[!0-9]*) rm -f "$output_file"; return 1 ;; esac
+  child_start=$(fm_pid_start "$child" 2>/dev/null) || {
+    wait "$child" 2>/dev/null || true
+    cat "$output_file"
+    rm -f "$output_file"
+    return 1
+  }
   startup_wait_secs=${FM_RUN_BINDING_STARTUP_WAIT_SECS:-30}
   case "$startup_wait_secs" in ''|*[!0-9]*|0) startup_wait_secs=30 ;; esac
   while [ "${startup_wait_secs#0}" != "$startup_wait_secs" ]; do
@@ -329,30 +395,33 @@ run_axi() {
   esac
   total_deadline=$(( $(date +%s) + total_wait_secs ))
   while kill -0 "$child" 2>/dev/null; do
+    if [ -z "$group_member_pid" ] && group_member=$(run_axi_group_member_identity "$child"); then
+      IFS='|' read -r group_member_pid group_member_start <<< "$group_member"
+    fi
     if run_id=$(run_id_from_output "$output_file") && [ -n "$run_id" ]; then
       startup_seen=1
     fi
     now=$(date +%s)
     if [ "$now" -ge "$total_deadline" ]; then
-      run_axi_abort_child "$child"
+      run_axi_abort_child "$child" "$child_start" "$group_member_pid" "$group_member_start"
       cat "$output_file"
       rm -f "$output_file"
       return 1
     fi
     if [ "$startup_seen" = 0 ] && [ "$now" -ge "$startup_deadline" ]; then
-      run_axi_abort_child "$child"
+      run_axi_abort_child "$child" "$child_start" "$group_member_pid" "$group_member_start"
       cat "$output_file"
       rm -f "$output_file"
       return 1
     fi
     sleep 0.05
   done
-  wait "$child" || child_status=$?
-  if ! run_axi_stop_group "$child"; then
+  if ! run_axi_stop_group "$child" "$child_start" "$group_member_pid" "$group_member_start"; then
     cat "$output_file"
     rm -f "$output_file"
     return 1
   fi
+  wait "$child" || child_status=$?
   run_id=
   if ! run_id=$(run_id_from_output "$output_file") || [ -z "$run_id" ]; then
     cat "$output_file"
