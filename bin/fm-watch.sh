@@ -1150,63 +1150,66 @@ surface_replay_incarnation() {
   printf 'legacy-%s' "${digest:0:32}"
 }
 
+surface_retry_repair_one() {
+  local retry=$1 task=$2 last=$3
+  local spawn_incarnation tasktmp window worktree wake_key status_file sig sf marker tmp
+  spawn_incarnation=$(surface_meta_value "$retry" spawn_incarnation)
+  tasktmp=$(surface_meta_value "$retry" tasktmp)
+  window=$(surface_meta_value "$retry" window)
+  worktree=$(surface_meta_value "$retry" worktree)
+  surface_retry_matches_current "$retry" "$task" "$last" || return 1
+  case "$(surface_meta_value_unique "$retry" wake_published 2>/dev/null || true)" in
+    1) ;;
+    2)
+      wake_key=$(surface_meta_value_unique "$retry" wake_key 2>/dev/null) || return 1
+      surface_retry_wake_state "$wake_key"
+      case "$?" in
+        0) surface_retry_mark_published "$task" "$last" "$wake_key" || return 1 ;;
+        1)
+          surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"
+          case "$?" in 0|1) return 0 ;; *) return 1 ;; esac
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    0) return 0 ;;
+    *) return 1 ;;
+  esac
+  mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
+    "$tasktmp" "$window" "$worktree" || return 1
+  marker=$(_hb_surfaced_path "$task")
+  tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
+  if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  status_file="$STATE/$task.status"
+  if [ -f "$status_file" ] && [ ! -L "$status_file" ] \
+    && [ "$(last_status_line "$status_file")" = "$last" ]; then
+    sig=$(stat_sig "$status_file") || return 1
+    sf="$STATE/.seen-$(basename "$status_file" | tr '.' '_')"
+    printf '%s' "$sig" > "$sf" || return 1
+  fi
+  surface_retry_matches_current "$retry" "$task" "$last" || return 1
+  rm -f "$retry" || return 1
+}
+
 surface_retry_repair() {
-  local retry task last spawn_incarnation tasktmp window worktree wake_key
-  local status=0 status_file sig sf marker tmp
+  local retry task last repair_rc status=0 repair_budget deadline_ms
+  repair_budget=$(positive_seconds_or_default "${FM_WATCH_SURFACE_REPAIR_BUDGET_SECS:-1}" 1)
+  [ "$repair_budget" -le 60 ] || repair_budget=60
+  deadline_ms=$(( $(fm_pane_idle_now_ms) + repair_budget * 1000 ))
   for retry in "$STATE"/.hb-surface-retry-*; do
+    [ "$(fm_pane_idle_now_ms)" -lt "$deadline_ms" ] || break
     [ -e "$retry" ] || continue
     [ -f "$retry" ] && [ ! -L "$retry" ] && surface_retry_valid "$retry" || { status=1; continue; }
     task=$(surface_meta_value "$retry" task)
     last=$(surface_meta_value "$retry" snapshot)
-    spawn_incarnation=$(surface_meta_value "$retry" spawn_incarnation)
-    tasktmp=$(surface_meta_value "$retry" tasktmp)
-    window=$(surface_meta_value "$retry" window)
-    worktree=$(surface_meta_value "$retry" worktree)
-    if ! surface_retry_matches_current "$retry" "$task" "$last"; then
-      status=1
-      continue
-    fi
-    case "$(surface_meta_value_unique "$retry" wake_published 2>/dev/null || true)" in
-      1) ;;
-      2)
-        wake_key=$(surface_meta_value_unique "$retry" wake_key 2>/dev/null) || { status=1; continue; }
-        surface_retry_wake_state "$wake_key"
-        case "$?" in
-          0) surface_retry_mark_published "$task" "$last" "$wake_key" || { status=1; continue; } ;;
-          1)
-            surface_retry_receipt_consumed "$retry" "$task" "$last" "$wake_key"
-            case "$?" in 0|1) continue ;; *) status=1; continue ;; esac
-            ;;
-          *) status=1; continue ;;
-        esac
-        ;;
-      0) continue ;;
-      *) status=1; continue ;;
-    esac
-    if ! mark_terminal_surfaced_snapshot "$task" "$last" "$spawn_incarnation" \
-      "$tasktmp" "$window" "$worktree"; then
-      status=1
-      continue
-    fi
-    marker=$(_hb_surfaced_path "$task")
-    tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || { status=1; continue; }
-    if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
-      rm -f "$tmp"
-      status=1
-      continue
-    fi
-    status_file="$STATE/$task.status"
-    if [ -f "$status_file" ] && [ ! -L "$status_file" ] \
-      && [ "$(last_status_line "$status_file")" = "$last" ]; then
-      sig=$(stat_sig "$status_file") || { status=1; continue; }
-      sf="$STATE/.seen-$(basename "$status_file" | tr '.' '_')"
-      printf '%s' "$sig" > "$sf" || { status=1; continue; }
-    fi
-    if ! surface_retry_matches_current "$retry" "$task" "$last"; then
-      status=1
-      continue
-    fi
-    rm -f "$retry" || status=1
+    watch_task_lock_acquire "$task" || { status=1; continue; }
+    surface_retry_repair_one "$retry" "$task" "$last"
+    repair_rc=$?
+    watch_task_lock_release || repair_rc=1
+    [ "$repair_rc" = 0 ] || status=1
   done
   return "$status"
 }

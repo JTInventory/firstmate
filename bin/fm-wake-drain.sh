@@ -59,6 +59,22 @@ presentation_reconcile() {
   fm_pane_idle_run_bounded_child "$PRESENTATION_TIMEOUT_SECS" env "$@"
 }
 
+wake_marker_write() {
+  local path=$1 value=$2
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($path, $value) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    my $fh;
+    sysopen($fh, $path, O_WRONLY | O_TRUNC | $nofollow) or exit 1;
+    binmode($fh);
+    print($fh $value) or exit 1;
+    close($fh) or exit 1;
+  ' "$path" "$value"
+}
+
 inactive_generation_valid() {
   local generation=${FM_WAKE_DRAIN_GENERATION:-}
   case "${FM_WAKE_DRAIN_DEFER_ACK:-0}" in 0|1) ;; *) return 1 ;; esac
@@ -126,12 +142,10 @@ present_inactive_row() {
   trap - INT TERM HUP
   go=$(mktemp "$STATE/.wake-presentation.XXXXXX") || return 1
   [ -f "$go" ] && [ ! -L "$go" ] || { rm -f "$go"; return 1; }
-  rm -f "$go"
   emitted=$(mktemp "$STATE/.wake-emitted.XXXXXX") || { rm -f "$go"; return 1; }
   [ -f "$emitted" ] && [ ! -L "$emitted" ] || { rm -f "$go" "$emitted"; return 1; }
-  rm -f "$emitted"
   (
-    while [ ! -e "$go" ]; do
+    while [ ! -s "$go" ]; do
       if ! kill -0 "$DRAIN_PID" 2>/dev/null; then
         break
       fi
@@ -147,13 +161,13 @@ present_inactive_row() {
     presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-confirmed "$key" "$row" || exit 1
-    : > "$emitted" || exit 1
+    wake_marker_write "$emitted" emitted || exit 1
     presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-complete "$key" "$row" || exit 1
   ) &
   worker=$!
-  : > "$go" || status=1
+  wake_marker_write "$go" go || status=1
   if [ "$status" = 0 ]; then
     presentation_deadline=$(( $(date +%s) + PRESENTATION_TIMEOUT_SECS ))
     while kill -0 "$worker" 2>/dev/null; do
@@ -177,7 +191,7 @@ present_inactive_row() {
   fi
   rm -f "$go"
   if [ "$status" -ne 0 ]; then
-    if [ -e "$emitted" ]; then
+    if [ -s "$emitted" ]; then
       if presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" \
           "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-complete "$key" "$row" \
           >/dev/null 2>&1; then
@@ -198,7 +212,7 @@ present_inactive_row() {
   if [ "$status" = 0 ] && [ "${FM_WAKE_DRAIN_DEFER_ACK:-0}" != 1 ]; then
     if ! FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" presented "$key" "$row"; then
       status=1
-      if [ -e "$emitted" ] \
+      if [ -s "$emitted" ] \
         && FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
           presented "$key" "$row" >/dev/null 2>&1; then
         status=0

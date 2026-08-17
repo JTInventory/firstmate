@@ -185,7 +185,7 @@ inactive_copy_nul_prefix() {
     binmode($out);
     local $/ = "\0";
     while (defined(my $value = <$in>)) {
-      if (defined($deadline) && $deadline ne '' && int(time() * 1000) >= $deadline) {
+      if (defined($deadline) && $deadline ne q{} && int(time() * 1000) >= $deadline) {
         exit 124;
       }
       print($out $value) or exit 1;
@@ -214,7 +214,7 @@ inactive_append_nul_records() {
     binmode($out);
     local $/ = "\0";
     while (defined(my $value = <$in>)) {
-      if (defined($deadline) && $deadline ne '' && int(time() * 1000) >= $deadline) {
+      if (defined($deadline) && $deadline ne q{} && int(time() * 1000) >= $deadline) {
         exit 124;
       }
       print($out $value) or exit 1;
@@ -724,15 +724,19 @@ replay_parent_corr() {
 }
 
 terminal_outcome_fingerprint() {
-  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 kind=$5 parent_corr=${6:-}
+  local id=$1 incarnation=$2 outcome=$3 snapshot=$4 kind=$5 parent_corr=${6:-} source=${7:-}
+  case "$source" in
+    run-step|pane) ;;
+    *) return 1 ;;
+  esac
   case "$kind" in
     secondmate)
       printf '%s' "$parent_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
-      hash_text "$id|$incarnation|$outcome|$snapshot|$kind|$parent_corr"
+      hash_text "$id|$incarnation|$outcome|$snapshot|$kind|$source|$parent_corr"
       ;;
     ship|scout)
       [ -z "$parent_corr" ] || return 1
-      hash_text "$id|$incarnation|$outcome|$snapshot|$kind"
+      hash_text "$id|$incarnation|$outcome|$snapshot|$kind|$source"
       ;;
     *) return 1 ;;
   esac
@@ -1829,7 +1833,7 @@ receipt_existing_core() {
   local existing_outcome existing_snapshot existing_source parent_id parent_home parent_status parent_corr current_corr
   RECEIPT_EXISTING_SUFFIX=
   current_corr=$(replay_parent_corr) || return 1
-  expected_fp=$(terminal_outcome_fingerprint "$ID" "$INC" "$OUTCOME" "$SNAPSHOT" "$KIND" "$current_corr") || return 1
+  expected_fp=$(terminal_outcome_fingerprint "$ID" "$INC" "$OUTCOME" "$SNAPSHOT" "$KIND" "$current_corr" "$SOURCE") || return 1
   [ "$expected_fp" = "$FP" ] || return 1
   for suffix in pending presented reported; do
     existing=$(receipt_path "$FP" "$suffix")
@@ -1879,7 +1883,7 @@ receipt_existing_core() {
       *) return 2 ;;
     esac
     expected_fp=$(terminal_outcome_fingerprint "$existing_task_id" "$existing_incarnation" \
-      "$existing_outcome" "$existing_snapshot" "$existing_kind" "$parent_corr") || return 2
+      "$existing_outcome" "$existing_snapshot" "$existing_kind" "$parent_corr" "$existing_source") || return 2
     [ "$expected_fp" = "$existing_fingerprint" ] || return 2
     RECEIPT_EXISTING_SUFFIX=$suffix
     return 0
@@ -2049,6 +2053,10 @@ prepare_pending_receipt() {
   [ "$schema" = fm-jt-terminal-outcome.v1 ] || return 1
   [ -n "$task_id" ] && [ -n "$incarnation" ] && [ -n "$terminal_source" ] \
     && [ -n "$terminal_snapshot" ] || return 1
+  case "$terminal_source" in
+    run-step|pane) ;;
+    *) return 1 ;;
+  esac
   valid_task_id "$task_id" || return 1
   case "$outcome" in done|failed) ;; *) return 1 ;; esac
   case "$kind" in ship|scout)
@@ -2062,7 +2070,7 @@ prepare_pending_receipt() {
     *) return 1 ;;
   esac
   expected_fp=$(terminal_outcome_fingerprint "$task_id" "$incarnation" "$outcome" \
-    "$terminal_snapshot" "$kind" "$parent_corr") || return 1
+    "$terminal_snapshot" "$kind" "$parent_corr" "$terminal_source") || return 1
   [ "$serialized_fp" = "$FP" ] || return 1
   [ "$expected_fp" = "$FP" ] || return 1
   if [ "$terminal_source" = run-step ] \
@@ -2099,6 +2107,24 @@ parent_status_line_status() {
     0|1|124) return "$status" ;;
     *) return 2 ;;
   esac
+}
+
+parent_status_append_line() {
+  local parent_status=$1 line=$2
+  command -v perl >/dev/null 2>&1 || return 1
+  printf '%s\n' "$line" | perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($parent_status) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    my $fh;
+    sysopen($fh, $parent_status, O_WRONLY | O_APPEND | O_CREAT | $nofollow, 0600) or exit 1;
+    binmode($fh);
+    local $/;
+    my $line = <STDIN> // "";
+    print($fh $line) or exit 1;
+    close($fh) or exit 1;
+  ' "$parent_status"
 }
 
 pending_secondmate_report_recorded() {
@@ -3520,7 +3546,7 @@ reconcile_child() {
     FM_PENDING_ROUTE_CORR=
     parent_corr=
   fi
-  FP=$(terminal_outcome_fingerprint "$id" "$INC" "$outcome" "$snapshot" "$KIND" "$parent_corr") || return 1
+  FP=$(terminal_outcome_fingerprint "$id" "$INC" "$outcome" "$snapshot" "$KIND" "$parent_corr" "$source") || return 1
   surface_status=0
   terminal_outcome_surfaced "$id" "$meta" "$outcome" "inactive-outcome:$FP" \
     || surface_status=$?
@@ -3622,7 +3648,7 @@ ack_receipt() {  # <inactive-outcome:fingerprint>
   corr=$(receipt_field "$rec" parent_corr)
   outcome=$(receipt_field "$rec" outcome)
   snapshot=$(receipt_field "$rec" terminal_snapshot)
-  expected_fp=$(terminal_outcome_fingerprint "$id" "$incarnation" "$outcome" "$snapshot" "$kind" "$corr") || return 2
+  expected_fp=$(terminal_outcome_fingerprint "$id" "$incarnation" "$outcome" "$snapshot" "$kind" "$corr" "$SOURCE") || return 2
   [ "$expected_fp" = "$fp" ] || return 2
   case "$kind" in ship|scout|secondmate) ;; *) return 2 ;; esac
   if [ "$kind" = secondmate ]; then
@@ -3730,15 +3756,16 @@ secondmate_ack_report() {  # <secondmate-home> <parent-id> <parent-home> <parent
         && [ "$phase" != resolved ] \
         && [ "$phase" != retired ] \
         && [ "$report_recorded" != 1 ]; then
-        if [ ! -e "$parent_status" ]; then
-          : > "$parent_status" || rc=2
-        fi
-        if [ "$rc" = 0 ]; then
+        if [ ! -e "$parent_status" ] && [ ! -L "$parent_status" ]; then
+          parent_status_append_line "$parent_status" "$line" || rc=2
+          [ "$rc" = 0 ] && report_recorded=1
+        elif [ "$rc" = 0 ]; then
           parent_status_line_status "$parent_status" "$line"
           report_probe_status=$?
           case "$report_probe_status" in
             0) report_recorded=1 ;;
-            1) printf '%s\n' "$line" >> "$parent_status" || rc=2 ;;
+            1) parent_status_append_line "$parent_status" "$line" || rc=2
+               [ "$rc" = 0 ] && report_recorded=1 ;;
             *) rc=2 ;;
           esac
         fi

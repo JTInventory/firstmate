@@ -289,14 +289,16 @@ receipt_value() {
 }
 
 receipt_fingerprint() {
-  local value=$1 kind=${2:-ship} parent_corr=${3:-}
-  if [ "$kind" = secondmate ] && [ -n "$parent_corr" ]; then
-    value="$value|$parent_corr"
+  local value=$1 kind=${2:-ship} parent_corr=${3:-} source=${4:-pane}
+  if [ "$kind" = secondmate ]; then
+    value="$value|$kind|$source|$parent_corr"
+  else
+    value="$value|$kind|$source"
   fi
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$value|$kind" | shasum -a 256 | awk '{print $1}'
+    printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$value|$kind" | sha256sum | awk '{print $1}'
+    printf '%s' "$value" | sha256sum | awk '{print $1}'
   else
     return 1
   fi
@@ -359,7 +361,7 @@ test_done_and_failed_are_replayed_once() {
         [ "$(receipt_value "$rec" incarnation)" = inc-failed ] || fail "failed receipt used the wrong incarnation"
         [ "$(receipt_value "$rec" outcome)" = failed ] || fail "failed receipt outcome was incorrect"
         [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: failed · source: run-step · checks failed · run-id=run-failed-x1' ] || fail "failed receipt snapshot was not exact"
-        [ "$fingerprint" = "$(receipt_fingerprint 'failed-x1|inc-failed|failed|state: failed · source: run-step · checks failed · run-id=run-failed-x1')" ] || fail "failed receipt fingerprint was not bound to its fields"
+        [ "$fingerprint" = "$(receipt_fingerprint 'failed-x1|inc-failed|failed|state: failed · source: run-step · checks failed · run-id=run-failed-x1' ship '' run-step)" ] || fail "failed receipt fingerprint was not bound to its fields"
         ;;
       *) fail "receipt persisted an unexpected task id: $task" ;;
     esac
