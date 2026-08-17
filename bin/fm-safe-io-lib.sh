@@ -39,13 +39,13 @@ fm_nofollow_chmod() {
   command -v perl >/dev/null 2>&1 || return 1
   perl -e '
     use Fcntl qw(:DEFAULT);
-    use POSIX ();
     my ($path, $mode) = @ARGV;
     my $nofollow = eval { O_NOFOLLOW() };
     defined($nofollow) or exit 1;
     $mode =~ /\A[0-7]{3,4}\z/ or exit 1;
     sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 1;
-    chmod(oct($mode), "/proc/self/fd/" . fileno($fh)) == 1 or exit 1;
+    my $fd_dir = -d "/dev/fd" ? "/dev/fd" : "/proc/self/fd";
+    chmod(oct($mode), "$fd_dir/" . fileno($fh)) == 1 or exit 1;
     close($fh) or exit 1;
   ' "$path" "$mode"
 }
@@ -55,23 +55,17 @@ fm_nofollow_spawn_capture() {
   shift
   [ "$#" -gt 0 ] || return 1
   command -v perl >/dev/null 2>&1 || return 1
-  perl -e '
+  exec perl -e '
     use Fcntl qw(:DEFAULT);
     use POSIX ();
     my ($path, @command) = @ARGV;
     my $nofollow = eval { O_NOFOLLOW() };
     defined($nofollow) or exit 1;
+    POSIX::setpgid(0, 0) == 0 or exit 125;
     sysopen(my $fh, $path, O_WRONLY | O_CREAT | O_TRUNC | $nofollow, 0600) or exit 1;
-    my $pid = fork();
-    defined($pid) or exit 1;
-    if ($pid == 0) {
-      POSIX::setpgid(0, 0) == 0 or exit 125;
-      open(STDOUT, ">&", $fh) or exit 1;
-      open(STDERR, ">&", $fh) or exit 1;
-      exec @command;
-      exit 127;
-    }
-    eval { POSIX::setpgid($pid, $pid); };
-    print "$pid\n" or exit 1;
+    open(STDOUT, ">&", $fh) or exit 1;
+    open(STDERR, ">&", $fh) or exit 1;
+    exec @command;
+    exit 127;
   ' "$path" "$@"
 }

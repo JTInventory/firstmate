@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -o pipefail
+
 _FM_RUN_STEP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-safe-io-lib.sh
 . "$_FM_RUN_STEP_LIB_DIR/fm-safe-io-lib.sh"

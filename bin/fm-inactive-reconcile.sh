@@ -3226,8 +3226,21 @@ surface_retry_mark_published() {
 surface_retry_wake_present() {
   local wake_key=$1
   [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
-  awk -F '\t' -v wanted="$wake_key" '$4 == wanted { found=1; exit } END { exit !found }' \
-    "$FM_WAKE_QUEUE" 2>/dev/null
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -e '
+    my ($path, $wanted) = @ARGV;
+    open(my $fh, "<", $path) or exit 2;
+    while (defined(my $line = <$fh>)) {
+      chomp $line;
+      my @fields = split(/\t/, $line, -1);
+      next unless @fields == 5;
+      next unless $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/;
+      next unless $fields[2] =~ /\A(?:signal|stale|check|heartbeat)\z/;
+      exit 0 if $fields[3] eq $wanted;
+    }
+    close($fh) or exit 2;
+    exit 1;
+  ' "$FM_WAKE_QUEUE" "$wake_key"
 }
 
 surface_retry_remove() {

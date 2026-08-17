@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u
+set -o pipefail
 
 run_id_from_output() {
   awk '
@@ -261,10 +262,8 @@ run_axi() {
   local startup_wait_secs startup_deadline total_wait_secs total_deadline now
   tmpdir=${FM_RUN_BINDING_TMP:-${TMPDIR:-/tmp}}
   output_file=$(mktemp "$tmpdir/.fm-run-step-output.XXXXXX") || return 1
-  child=$(fm_nofollow_spawn_capture "$output_file" "$FM_RUN_BINDING_REAL" "$@") || {
-    rm -f "$output_file"
-    return 1
-  }
+  fm_nofollow_spawn_capture "$output_file" "$FM_RUN_BINDING_REAL" "$@" &
+  child=$!
   case "$child" in ''|*[!0-9]*) rm -f "$output_file"; return 1 ;; esac
   startup_wait_secs=${FM_RUN_BINDING_STARTUP_WAIT_SECS:-30}
   case "$startup_wait_secs" in ''|*[!0-9]*|0) startup_wait_secs=30 ;; esac

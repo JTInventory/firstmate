@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Atomically drain durable watcher wake records, then assert watcher liveness.
-set -u
+set -u -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
