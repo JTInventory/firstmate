@@ -57,7 +57,7 @@ case "${1:-}" in
     shift
     if [ "${1:-}" = --run ]; then
       run_key="FM_FAKE_AXI_STATUS_RUN_${2:-}"
-      printf '%s\n' "${!run_key:-${FM_FAKE_AXI_STATUS_RUN:-}}"
+      printf '%s\n' "${!run_key:-${FM_FAKE_AXI_STATUS_RUN:-${FM_FAKE_AXI_STATUS:-}}}"
     else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
   '') printf '%s\n' "${FM_FAKE_AXI_LIST:-}" ;;
 esac
@@ -95,7 +95,12 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  local dir=$1 id=$2 meta="$1/state/$2.meta"
+  if [ -f "$meta" ] && [ -n "${FM_FAKE_AXI_STATUS:-}${FM_FAKE_AXI_LIST:-}" ] \
+    && ! grep -q '^spawn_incarnation=' "$meta"; then
+    printf 'spawn_incarnation=test-incarnation\n' >> "$meta"
+  fi
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" "$CREW_STATE" "$id"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -301,6 +306,13 @@ outcome: failed
 EOF
 }
 
+write_run_step_binding() {  # <state> <id> <run-id> <incarnation>
+  local state=$1 id=$2 run_id=$3 incarnation=$4
+  fm_write_meta "$state/.run-step-incarnation-$id" \
+    schema=fm-jt-run-step-incarnation.v1 task_id="$id" run_id="$run_id" \
+    spawn_incarnation="$incarnation" state=active
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -493,7 +505,8 @@ test_terminal_passed() {
   local d; d=$(new_case passed)
   make_repo_on_branch "$d/wt" fm/feat-d
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
+  write_run_step_binding "$d/state" feat-d 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
   local out; out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
@@ -507,7 +520,8 @@ test_terminal_passed_delivery_skipped() {
   local d; d=$(new_case passed-delivery-skipped)
   make_repo_on_branch "$d/wt" fm/feat-dsk
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dsk.meta" "window=fm:fm-feat-dsk" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-dsk.meta" "window=fm:fm-feat-dsk" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
+  write_run_step_binding "$d/state" feat-dsk 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed_delivery_skipped fm/feat-dsk)"
   local out; out=$(run_crew_state "$d" feat-dsk)
   assert_not_contains "$out" "merged" "passed with skipped delivery must not claim merged"
@@ -518,12 +532,45 @@ test_terminal_passed_delivery_skipped() {
   pass "passed run with skipped pr/ci steps never claims merged"
 }
 
+test_bound_run_missing_evidence_fails_closed() {
+  reset_fakes
+  local d; d=$(new_case bound-missing-evidence)
+  make_repo_on_branch "$d/wt" fm/feat-bound-missing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bound-missing.meta" \
+    "window=fm:fm-feat-bound-missing" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=test-incarnation" "run_binding_state=bound" "run_id=01OTHER"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bound-missing)"
+  local out; out=$(run_crew_state "$d" feat-bound-missing)
+  assert_contains "$out" "state: unknown" "bound run without evidence -> unknown"
+  assert_contains "$out" "source: run-step" "bound run without evidence -> run-step source"
+  assert_not_contains "$out" "state: working" "bound run without evidence must not use generic attribution"
+  pass "bound run metadata without evidence fails closed"
+}
+
+test_pending_run_binding_fails_closed() {
+  reset_fakes
+  local d; d=$(new_case pending-missing-evidence)
+  make_repo_on_branch "$d/wt" fm/feat-pending-missing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pending-missing.meta" \
+    "window=fm:fm-feat-pending-missing" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=test-incarnation" "run_binding_state=pending"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-pending-missing)"
+  local out; out=$(run_crew_state "$d" feat-pending-missing)
+  assert_contains "$out" "state: unknown" "pending run without evidence -> unknown"
+  assert_contains "$out" "source: run-step" "pending run without evidence -> run-step source"
+  assert_not_contains "$out" "state: working" "pending run without evidence must not use generic attribution"
+  pass "pending run metadata without evidence fails closed"
+}
+
 test_terminal_passed_delivery_completed() {
   reset_fakes
   local d; d=$(new_case passed-delivery-completed)
   make_repo_on_branch "$d/wt" fm/feat-dok
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dok.meta" "window=fm:fm-feat-dok" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-dok.meta" "window=fm:fm-feat-dok" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
+  write_run_step_binding "$d/state" feat-dok 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_passed_delivery_completed fm/feat-dok)"
   local out; out=$(run_crew_state "$d" feat-dok)
   assert_contains "$out" "state: done" "passed with completed delivery -> done"
@@ -536,12 +583,120 @@ test_terminal_failed() {
   local d; d=$(new_case failed)
   make_repo_on_branch "$d/wt" fm/feat-e
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-e.meta" "window=fm:fm-feat-e" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-e.meta" "window=fm:fm-feat-e" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
+  write_run_step_binding "$d/state" feat-e 01RUN test-incarnation
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-e)"
   local out; out=$(run_crew_state "$d" feat-e)
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+test_active_run_does_not_create_incarnation_binding() {
+  reset_fakes
+  local d out evidence
+  d=$(new_case active-no-binding)
+  make_repo_on_branch "$d/wt" fm/feat-active-no-binding
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-active-no-binding.meta" \
+    "window=fm:fm-feat-active-no-binding" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=active-no-binding-inc"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-active-no-binding)"
+  out=$(run_crew_state "$d" feat-active-no-binding)
+  assert_contains "$out" "state: working" "active run remains authoritative without binding"
+  evidence="$d/state/.run-step-incarnation-feat-active-no-binding"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "active branch/head lookup created a binding"
+  pass "active branch/head lookup cannot create terminal evidence"
+}
+
+test_terminal_first_observation_requires_binding() {
+  reset_fakes
+  local d out evidence status
+  d=$(new_case terminal-first-observation)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-first
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-terminal-first.meta" \
+    "window=fm:fm-feat-terminal-first" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=terminal-first-inc"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-terminal-first)"
+  set +e
+  out=$(run_crew_state "$d" feat-terminal-first)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "terminal first observation was accepted without a binding"
+  evidence="$d/state/.run-step-incarnation-feat-terminal-first"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "terminal first observation created a binding"
+  pass "terminal first observation requires a lifecycle binding"
+}
+
+test_terminal_candidate_requires_existing_binding() {
+  reset_fakes
+  local d status out evidence
+  d=$(new_case terminal-candidate)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-candidate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-terminal-candidate.meta" \
+    "window=fm:fm-feat-terminal-candidate" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=terminal-candidate-inc"
+  status=$(run_passed fm/unrelated-branch)
+  FM_FAKE_AXI_STATUS="$status"
+  status=$(run_passed fm/feat-terminal-candidate | sed 's/id: "01RUN"/id: "01HIST"/')
+  export FM_FAKE_AXI_STATUS_RUN_01HIST="$status"
+  FM_FAKE_AXI_LIST=$(cat <<EOF
+runs[1]{id,branch,status,head,pr}:
+  "01HIST",fm/feat-terminal-candidate,completed,$FM_FAKE_RUN_HEAD,""
+EOF
+)
+  set +e
+  out=$(run_crew_state "$d" feat-terminal-candidate 2>&1)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "terminal candidate run created a new binding"
+  evidence="$d/state/.run-step-incarnation-feat-terminal-candidate"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] || fail "terminal candidate run persisted historical evidence"
+  unset FM_FAKE_AXI_STATUS_RUN_01HIST
+  pass "terminal candidate run requires a pre-existing binding"
+}
+
+test_terminal_metadata_run_id_must_match_binding() {
+  reset_fakes
+  local d status out evidence
+  d=$(new_case terminal-metadata-mismatch)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-metadata-mismatch
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-terminal-metadata-mismatch.meta" \
+    "window=fm:fm-feat-terminal-metadata-mismatch" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=terminal-metadata-inc" "run_step_id=spawned-run"
+  write_run_step_binding "$d/state" feat-terminal-metadata-mismatch 01RUN terminal-metadata-inc
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-terminal-metadata-mismatch)"
+  set +e
+  out=$(run_crew_state "$d" feat-terminal-metadata-mismatch 2>&1)
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "terminal run crossed a mismatched metadata run id"
+  evidence="$d/state/.run-step-incarnation-feat-terminal-metadata-mismatch"
+  [ -f "$evidence" ] || fail "mismatched metadata test lost its binding evidence"
+  pass "terminal state requires the metadata and binding run ids to match"
+}
+
+test_bound_run_id_is_selected_before_current_run() {
+  reset_fakes
+  local d out
+  d=$(new_case bound-run-selection)
+  make_repo_on_branch "$d/wt" fm/feat-bound-selection
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bound-selection.meta" \
+    "window=fm:fm-feat-bound-selection" "worktree=$d/wt" "kind=ship" \
+    "spawn_incarnation=bound-selection-inc" "run_step_id=01BOUND"
+  write_run_step_binding "$d/state" feat-bound-selection 01BOUND bound-selection-inc
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bound-selection)"
+  FM_FAKE_AXI_STATUS_RUN_01BOUND="$(run_failed fm/feat-bound-selection | sed 's/id: "01RUN"/id: "01BOUND"/')"
+  export FM_FAKE_AXI_STATUS_RUN_01BOUND
+  out=$(run_crew_state "$d" feat-bound-selection)
+  assert_contains "$out" "state: failed" "bound run id selects its exact terminal run"
+  assert_contains "$out" "run-id=01BOUND" "bound run id remains in the terminal detail"
+  unset FM_FAKE_AXI_STATUS_RUN_01BOUND
+  pass "stored run binding wins over the current same-branch run"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run, so the
@@ -733,7 +888,8 @@ test_dead_window_still_reports_terminal_run_step() {
   local d; d=$(new_case dead-window-done)
   make_repo_on_branch "$d/wt" fm/feat-dead-done
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship" "spawn_incarnation=test-incarnation" "run_step_id=01RUN"
+  write_run_step_binding "$d/state" feat-dead-done 01RUN test-incarnation
   printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-dead-done.status"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
   FM_FAKE_TMUX_MISSING=1   # the crew's window has closed
@@ -883,6 +1039,17 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+test_missing_state_read_is_side_effect_free() {
+  reset_fakes
+  local d out
+  d=$(new_case missing-state)
+  rmdir "$d/state" || fail "missing-state fixture could not remove its state directory"
+  out=$(run_crew_state "$d" missing-state)
+  assert_contains "$out" "state: unknown" "missing state -> unknown"
+  [ ! -e "$d/state" ] || fail "crew-state recreated missing state"
+  pass "missing state reads remain side-effect free"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1018,8 +1185,15 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_terminal_passed
 test_terminal_passed_delivery_skipped
+test_bound_run_missing_evidence_fails_closed
+test_pending_run_binding_fails_closed
 test_terminal_passed_delivery_completed
 test_terminal_failed
+test_active_run_does_not_create_incarnation_binding
+test_terminal_first_observation_requires_binding
+test_terminal_candidate_requires_existing_binding
+test_terminal_metadata_run_id_must_match_binding
+test_bound_run_id_is_selected_before_current_run
 test_cross_branch_attribution_via_list
 test_cross_branch_attribution_unquoted_run_list
 test_other_branch_run_ignored
@@ -1040,6 +1214,7 @@ test_unknown_fixing_round_stays_visible_unknown
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
+test_missing_state_read_is_side_effect_free
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current

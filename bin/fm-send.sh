@@ -87,7 +87,50 @@ shift
 MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
+PENDING_ROUTE_COMMITTED=0
 TARGET_TASK_ID=
+TARGET_HOME=
+
+clear_new_pending_route() {
+  [ "$PENDING_ROUTE_COMMITTED" = 1 ] || return 0
+  if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+    && [ -n "$TARGET_HOME" ]; then
+    fm_pending_reply_secondmate_route_clear_undelivered "$TARGET_HOME" "$PENDING_REPLY_CORR"
+  fi
+}
+
+discard_new_pending_reply() {
+  local route_status=0 discard_status=0
+  if [ "$PENDING_REPLY_CREATED" = 1 ] \
+    && [ -n "$PENDING_REPLY_CORR" ] \
+    && [ -n "$TARGET_HOME" ] \
+    && ! fm_pending_reply_schedule_undelivered_cleanup \
+      "$STATE" "$PENDING_REPLY_CORR" "$TARGET_HOME"; then
+    discard_status=1
+  fi
+  if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+    && ! fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" 1; then
+    discard_status=1
+  fi
+  if [ "$discard_status" = 0 ]; then
+    if clear_new_pending_route; then
+      fm_pending_reply_finish_undelivered "$STATE" "$PENDING_REPLY_CORR" || route_status=1
+    else
+      route_status=1
+      fm_pending_reply_restore_undelivered "$STATE" "$PENDING_REPLY_CORR" || discard_status=1
+    fi
+  elif [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+    fm_pending_reply_restore_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+  fi
+  if [ "$route_status" = 1 ]; then
+    echo "error: failed to clear the secondmate pending-reply route; undelivered record cleanup continued" >&2
+  fi
+  if [ "$discard_status" = 1 ]; then
+    echo "error: failed to discard the undelivered pending-reply record" >&2
+  fi
+  [ "$route_status" = 0 ] && [ "$discard_status" = 0 ]
+}
+
 case "$RAW_TARGET" in
   fm-*)
     meta="$STATE/${RAW_TARGET#fm-}.meta"
@@ -136,8 +179,18 @@ else
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
     if [ "$PENDING_REPLY_CREATED" = 1 ] \
       && ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
-      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      discard_new_pending_reply || exit 1
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
+      exit 1
+    fi
+    TARGET_HOME=$(fm_meta_get "$meta" home)
+    if fm_pending_reply_secondmate_route_write \
+      "$TARGET_HOME" "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$PENDING_REPLY_CORR"; then
+      PENDING_ROUTE_COMMITTED=${FM_PENDING_REPLY_ROUTE_COMMITTED:-0}
+    else
+      PENDING_ROUTE_COMMITTED=${FM_PENDING_REPLY_ROUTE_COMMITTED:-0}
+      discard_new_pending_reply || exit 1
+      echo "error: failed to bind the secondmate pending-reply route for $TARGET_TASK_ID" >&2
       exit 1
     fi
   fi
@@ -171,9 +224,7 @@ else
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle"); then
-    if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-    fi
+    discard_new_pending_reply || exit 1
     echo "error: text not sent to $T ($TARGET_BACKEND send failed)" >&2
     exit 1
   fi
@@ -184,33 +235,25 @@ else
     sleep "$settle"
     final_after_pending=1
     if ! verdict=$(fm_backend_submit_enter "$TARGET_BACKEND" "$T" 1 "$sleep_s" "$MESSAGE"); then
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
+      discard_new_pending_reply || exit 1
       echo "error: final Enter submission to $T failed" >&2
       exit 1
     fi
   fi
   case "$verdict" in
     pending)
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
+      discard_new_pending_reply || exit 1
       echo "error: text not submitted to $T (Enter swallowed; text left in composer)" >&2
       exit 1
       ;;
     send-failed)
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
+      discard_new_pending_reply || exit 1
       echo "error: text not sent to $T (tmux send-keys failed)" >&2
       exit 1
       ;;
     unknown)
       if [ "$final_after_pending" = 1 ]; then
-        if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-          fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-        fi
+        discard_new_pending_reply || exit 1
         echo "error: final Enter submission to $T could not be confirmed" >&2
         exit 1
       fi

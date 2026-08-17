@@ -331,6 +331,36 @@ test_primary_ancestry_refuses_any_inherited_worker_marker() {
   pass "primary proof refuses any inherited worker declaration marker"
 }
 
+test_primary_ancestry_handles_exported_functions_without_weakening_newline_rejection() {
+  local status payload
+  require_procfs || {
+    pass "skip: exported-function ancestry proof requires readable Linux procfs"
+    return 0
+  }
+  if bash -c '
+    exported_helper() { :; }
+    export -f exported_helper
+    . "$1"; fm_worker_primary_ancestry_clear
+  ' _ "$ROOT/bin/fm-worker-isolation-lib.sh"; then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 0 "$status" "exported Bash functions must not block primary ancestry proof"
+
+  payload=$'owner\nFM_AGENT_ROLE=secondmate'
+  if env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_AGENT_OWNER_HOME="$payload" bash -c '
+        . "$1"; fm_worker_primary_ancestry_clear
+      ' _ "$ROOT/bin/fm-worker-isolation-lib.sh"; then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "newline-bearing worker markers must remain rejected"
+  pass "primary ancestry tolerates exported functions but rejects unsafe marker environments"
+}
+
 test_reparented_markerless_worker_is_refused() {
   local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
@@ -715,6 +745,8 @@ SH
   chmod +x "$fakebin/ps"
   primary="$case_dir/primary-root"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf '%s\n' '- project [local-only] - worker-isolation launch fixture (added 2026-08-17)' \
+    > "$home/data/projects.md"
   make_primary_root "$primary"
   token="launch-$id"
   fm_test_write_primary_attestation "$primary" \
@@ -752,7 +784,8 @@ test_every_verified_harness_launches_with_its_home_declaration() {
       FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_PID="$pid" \
+      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+      FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_PID="$pid" \
       FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
       FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
       PATH="$FAKEBIN_DIR:$PATH" \
@@ -1832,6 +1865,7 @@ test_markerless_worker_is_refused_at_primary_cwd
 test_forged_primary_role_is_refused_from_worker_ancestry
 test_primary_ancestry_refuses_unreadable_process_environment
 test_primary_ancestry_refuses_any_inherited_worker_marker
+test_primary_ancestry_handles_exported_functions_without_weakening_newline_rejection
 test_reparented_markerless_worker_is_refused
 test_primary_origin_requires_state_attestation
 test_primary_initialization_requires_explicit_bootstrap

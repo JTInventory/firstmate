@@ -209,6 +209,30 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
+test_malformed_wake_row_does_not_suppress_republish() {
+  local dir state deduped rows
+  dir=$(make_case malformed-republish)
+  state="$dir/state"
+  printf '1\t1\tcheck\tduplicate-key\n' > "$state/.wake-queue"
+  FM_SESSION_LOCK_BOOTSTRAP=1 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    fm_wake_append_if_absent_locked created signal duplicate-key replacement
+    status=$?
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+    [ "$status" -eq 0 ] && [ "$created" -eq 1 ]
+  ' _ "$ROOT" || fail "malformed wake row suppressed republish"
+  rows=$(awk -F '\t' '$4 == "duplicate-key" { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$rows" = 2 ] || fail "republish did not add a complete wake row"
+  deduped=$(FM_SESSION_LOCK_BOOTSTRAP=1 FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_print_deduped "$2"' _ "$ROOT" "$state/.wake-queue")
+  [ "$(printf '%s\n' "$deduped" | awk 'NF { n++ } END { print n + 0 }')" = 1 ] \
+    || fail "dedupe did not discard the malformed wake row"
+  printf '%s\n' "$deduped" | grep -F $'\tsignal\tduplicate-key\treplacement' >/dev/null \
+    || fail "dedupe did not preserve the replacement wake row"
+  pass "malformed wake rows cannot suppress republish"
+}
+
 # The drain runs at the top of every wake-handling turn, so it also asserts
 # watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
 # plain drain-and-handle turn that runs no other supervision script. It must warn
@@ -297,6 +321,63 @@ test_unpreparable_lock_refuses_instead_of_spinning() {
   pass "a lock that can never be prepared refuses promptly instead of waiting forever"
 }
 
+test_prepared_wake_transaction_recovery_removes_manifest() {
+  local dir state txn queue_count
+  dir=$(make_case prepared-transaction-recovery)
+  state="$dir/state"
+  txn=$(mktemp -d "$state/.wake-queue.txn.XXXXXX") || fail "could not create an interrupted wake transaction"
+  printf 'schema=fm-wake-queue-transaction.v1\nphase=prepared\naction=write\noffset=0\nhad_queue=0\nhad_cursor=0\n' \
+    > "$txn/manifest" || fail "could not persist the interrupted transaction manifest"
+  printf 'interrupted\n' > "$txn/queue.new" || fail "could not persist the staged queue"
+  append_wake "$state" signal recovered-key 'signal: recovered' \
+    || fail "wake append did not recover a prepared transaction"
+  [ ! -e "$txn" ] || fail "prepared transaction directory remained after recovery"
+  ! find "$state" -maxdepth 1 -type d -name '.wake-queue.txn.*' -print -quit | grep -q . \
+    || fail "prepared transaction residue remained after recovery"
+  grep -F $'\tsignal\trecovered-key\tsignal: recovered' "$state/.wake-queue" >/dev/null \
+    || fail "wake append did not publish after prepared transaction recovery"
+  append_wake "$state" signal retry-key 'signal: retry' \
+    || fail "wake append remained blocked after prepared transaction recovery"
+  queue_count=$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$queue_count" -eq 2 ] || fail "wake queue did not retain both post-recovery records"
+  pass "prepared wake transaction recovery removes its manifest and unblocks appends"
+}
+
+test_orphaned_drain_source_is_recovered() {
+  local dir state row out
+  dir=$(make_case orphaned-drain-source)
+  state="$dir/state"
+  row=$'1\t1\tsignal\torphaned-key\tsignal: orphaned'
+  printf '%s\n' "$row" > "$state/.wake-queue"
+  mv "$state/.wake-queue" "$state/.wake-queue.drain.99999" \
+    || fail "could not stage the interrupted drain source"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
+    || fail "drain did not recover the orphaned source"
+  out=$(cat "$dir/drain.out")
+  grep -Fqx "$row" "$dir/drain.out" || fail "orphaned source row was not drained: $out"
+  [ ! -e "$state/.wake-queue.drain.99999" ] || fail "orphaned source was not removed"
+  pass "drain recovers a source stranded between move and queue recreation"
+}
+
+test_restore_manifest_retires_raw_source_before_clear() {
+  local dir state row raw
+  dir=$(make_case restore-manifest-source)
+  state="$dir/state"
+  row=$'1\t1\tsignal\tretired-key\tsignal: retired'
+  raw=.wake-queue.drain.99998
+  printf '%s\n' "$row" > "$state/.wake-queue.deduped.99999"
+  printf '%s\n' "$row" > "$state/$raw"
+  printf 'schema=fm-wake-queue-restore.v1\nsource=.wake-queue.deduped.99999\noffset=0\nsource_retired=1\nraw_source=%s\nraw_source_retired=0\n' "$raw" \
+    > "$state/.wake-queue.restore"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
+    || fail "drain did not recover a retired restore source"
+  [ ! -e "$state/.wake-queue.deduped.99999" ] || fail "retired restore source remained"
+  [ ! -e "$state/$raw" ] || fail "owned raw drain source remained"
+  [ ! -e "$state/.wake-queue.restore" ] || fail "restore manifest remained after source retirement"
+  ! grep -Fqx "$row" "$dir/drain.out" || fail "retired restore source was replayed"
+  pass "restore manifest retires its raw source before clearing"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -304,5 +385,9 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_malformed_wake_row_does_not_suppress_republish
 test_drain_asserts_watcher_liveness
 test_unpreparable_lock_refuses_instead_of_spinning
+test_prepared_wake_transaction_recovery_removes_manifest
+test_orphaned_drain_source_is_recovered
+test_restore_manifest_retires_raw_source_before_clear

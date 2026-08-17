@@ -66,6 +66,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "teardown" || exit 1
+# shellcheck source=bin/fm-pane-idle-lib.sh
+. "$SCRIPT_DIR/fm-pane-idle-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -128,7 +130,7 @@ trap 'teardown_release_task_lock || true' EXIT
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
-WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
+WT=$(grep '^worktree=' "$META" | cut -d= -f2- || true)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
@@ -2819,6 +2821,10 @@ teardown_remove_task_tmp "$TASK_TMP_CLEANUP" || {
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 cleanup_direct_pr_refs || {
   echo "REFUSED: transactional direct-PR private ref cleanup failed for $ID; preserving task state" >&2
+  exit 1
+}
+fm_pane_idle_meta_freshness_bump "$STATE" || {
+  echo "error: could not advance metadata freshness boundary for $ID" >&2
   exit 1
 }
 if [ "$TOP_SLOT_UNRESOLVED_LEASE" != 1 ] && [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then

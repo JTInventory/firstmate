@@ -152,7 +152,31 @@ fm_worker_paths_same() {
 }
 
 fm_worker_process_environ() {
-  fm_process_environ "$1"
+  local pid=$1 entry
+  local -a entries=()
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if fm_process_environ "$pid"; then
+    return 0
+  fi
+  fm_process_environ_supported || return 1
+  [ -r "/proc/$pid/environ" ] || return 1
+  if ! {
+    while IFS= read -r -d '' entry; do
+      case "$entry" in
+        BASH_FUNC_[A-Za-z0-9_]*'%%=() {'*) continue ;;
+        *$'\n'*) return 1 ;;
+      esac
+      entries+=("$entry")
+    done < "/proc/$pid/environ"
+  } 2>/dev/null; then
+    return 1
+  fi
+  if [ "${#entries[@]}" -gt 0 ]; then
+    printf '%s\n' "${entries[@]}"
+  fi
+  return 0
 }
 
 fm_worker_process_ppid() {

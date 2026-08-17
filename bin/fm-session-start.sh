@@ -126,6 +126,24 @@ SUBRULE='-----------------------------------------------------------------------
 section() { printf '\n%s\n%s\n%s\n' "$RULE" "$1" "$RULE"; }
 subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
 
+session_start_confirm_inactive_rows() {
+  local wake_output=$1 row _epoch _seq _kind _key _payload confirm_status
+  while IFS= read -r row || [ -n "$row" ]; do
+    IFS=$(printf '\t') read -r _epoch _seq _kind _key _payload <<< "$row"
+    case "$_key" in
+      inactive-outcome:*)
+        "$SCRIPT_DIR/fm-inactive-reconcile.sh" caller-output-complete \
+          "$_key" "$row" >/dev/null 2>&1 || return 1
+        confirm_status=0
+        "$SCRIPT_DIR/fm-inactive-reconcile.sh" confirm "$_key" "$row" >/dev/null 2>&1 \
+          || confirm_status=$?
+        [ "$confirm_status" = 0 ] || [ "$confirm_status" = 1 ] \
+          || return "$confirm_status"
+        ;;
+    esac
+  done <<< "$wake_output"
+}
+
 # print_file_or_absent <path> <label>: full contents under a labeled
 # subsection, or an explicit ABSENT marker. Absence is semantically
 # meaningful for every one of these files (captain.md absent = firstmate
@@ -362,11 +380,43 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
-  DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
-  if [ -n "$DRAIN_OUT" ]; then
-    printf '%s\n' "$DRAIN_OUT"
+  DRAIN_OUTPUT=
+  DRAIN_STATUS=0
+  DRAIN_OUTPUT=$(FM_WAKE_DRAIN_DIRECT=0 FM_WAKE_DRAIN_DEFER_ACK=1 \
+    FM_WAKE_DRAIN_GENERATION="$$" "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1) \
+    || DRAIN_STATUS=$?
+  if [ "$DRAIN_STATUS" -ne 0 ] && [ "$DRAIN_STATUS" -ne 3 ]; then
+    printf 'error: wake drain failed (status %s); inactive reconciliation skipped\n' \
+      "$DRAIN_STATUS" >&2
   else
-    printf '(no queued wakes)\n'
+    if [ -n "$DRAIN_OUTPUT" ]; then
+      printf '%s\n' "$DRAIN_OUTPUT" || DRAIN_STATUS=1
+      if printf '%s\n' "$DRAIN_OUTPUT" | grep -q "$(printf '\t')"; then
+        if [ "$DRAIN_STATUS" = 0 ] || [ "$DRAIN_STATUS" = 3 ]; then
+          if session_start_confirm_inactive_rows "$DRAIN_OUTPUT"; then
+            DRAIN_STATUS=0
+          else
+            DRAIN_STATUS=$?
+            printf 'error: wake drain confirmation failed (status %s); inactive reconciliation skipped\n' \
+              "$DRAIN_STATUS" >&2
+          fi
+        fi
+      else
+        printf '(no queued wakes)\n'
+      fi
+    else
+      printf '(no queued wakes)\n'
+    fi
+  fi
+  if [ "$DRAIN_STATUS" = 0 ]; then
+    INACTIVE_STATUS=0
+    INACTIVE_OUT=$("$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_STATUS=$?
+    if [ "$INACTIVE_STATUS" -ne 0 ]; then
+      printf 'error: inactive outcome reconciliation failed (status %s)\n%s\n' \
+        "$INACTIVE_STATUS" "$INACTIVE_OUT" >&2
+    elif [ -n "$INACTIVE_OUT" ]; then
+      printf '%s\n' "$INACTIVE_OUT"
+    fi
   fi
 fi
 

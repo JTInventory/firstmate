@@ -59,6 +59,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-numeric-lib.sh
 . "$SCRIPT_DIR/fm-numeric-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+FM_SESSION_LOCK_BOOTSTRAP=1
+FM_WAKE_LIB_NO_INIT=1
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-run-step-lib.sh
+FM_RUN_STEP_READ_ONLY=1
+. "$SCRIPT_DIR/fm-run-step-lib.sh"
+trap 'fm_run_step_binding_release_held >/dev/null 2>&1 || true' EXIT
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -368,6 +376,62 @@ nm_run_ids_for_branch() {  # <branch> <list-output>
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+META_INCARNATION=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
+META_SPAWN_STATE=absent
+META_SPAWN_STATE_COUNT=0
+META_BINDING_STATE=absent
+META_BINDING_STATE_COUNT=0
+while IFS= read -r META_BINDING_LINE; do
+  case "$META_BINDING_LINE" in
+    spawn_state=*)
+      META_SPAWN_STATE_COUNT=$((META_SPAWN_STATE_COUNT + 1))
+      META_SPAWN_STATE=${META_BINDING_LINE#*=}
+      ;;
+    run_binding_state=*)
+      META_BINDING_STATE_COUNT=$((META_BINDING_STATE_COUNT + 1))
+      META_BINDING_STATE=${META_BINDING_LINE#*=}
+      ;;
+  esac
+done < "$META"
+if [ "$META_SPAWN_STATE_COUNT" -ne 0 ]; then
+  [ "$META_SPAWN_STATE_COUNT" = 1 ] || META_SPAWN_STATE=invalid
+  case "$META_SPAWN_STATE" in
+    starting|aborted) ;;
+    *) META_SPAWN_STATE=invalid ;;
+  esac
+fi
+if [ "$META_BINDING_STATE_COUNT" -ne 0 ]; then
+  [ "$META_BINDING_STATE_COUNT" = 1 ] || META_BINDING_STATE=invalid
+  case "$META_BINDING_STATE" in
+    pending|staged|bound) ;;
+    *) META_BINDING_STATE=invalid ;;
+  esac
+fi
+BOUND_RUN_ID=
+BOUND_RUN_STATUS=75
+BOUND_RUN_REQUIRED=0
+BOUND_RUN_EVIDENCE=$(fm_run_step_binding_path "$ID") || exit 1
+if [ -e "$BOUND_RUN_EVIDENCE" ] || [ -L "$BOUND_RUN_EVIDENCE" ]; then
+  BOUND_RUN_REQUIRED=1
+fi
+case "$META_BINDING_STATE" in
+  pending|bound|staged|invalid) BOUND_RUN_REQUIRED=1 ;;
+esac
+case "$META_SPAWN_STATE" in
+  starting|aborted|invalid) BOUND_RUN_REQUIRED=1 ;;
+esac
+if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && [ -n "$META_INCARNATION" ]; then
+  if fm_run_step_binding_read_held "$ID" "$META_INCARNATION"; then
+    BOUND_RUN_ID=$FM_RUN_STEP_HELD_VALUE
+    BOUND_RUN_STATUS=0
+  else
+    BOUND_RUN_STATUS=$?
+  fi
+  [ "$BOUND_RUN_STATUS" = 1 ] && {
+    printf '%s\n' 'state: unknown · source: run-step · incarnation binding could not be read' >&2
+    exit 1
+  }
+fi
 
 # A branch match is not enough when branch names are reused. Accept a run only
 # when its recorded head is the local worktree HEAD, or a descendant of that
@@ -387,29 +451,48 @@ HAVE_RUN=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
-    run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
+  if [ "$BOUND_RUN_STATUS" = 0 ] || [ "$BOUND_RUN_REQUIRED" = 1 ]; then
+    BOUND_RUN_REQUIRED=1
+    if [ "$BOUND_RUN_STATUS" = 0 ]; then
+      RUN_OUT=$(nm_run axi status --run "$BOUND_RUN_ID")
+      run_id=$(strip_quotes "$(nm_field id)")
+      run_branch=$(strip_quotes "$(nm_field branch)")
+      if [ "$run_id" = "$BOUND_RUN_ID" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+        && nm_run_head_matches_worktree; then
+        HAVE_RUN=1
+      else
+        RUN_OUT=
+      fi
     else
-      # The active-or-most-recent run is for another branch, or its branch name
-      # matches but its code identity does not. Inspect bounded recent runs for
-      # this branch until one is compatible with the worktree.
-      list_out=$(nm_run axi)
-      candidate_ids=$(nm_run_ids_for_branch "$CREW_BRANCH" "$list_out")
-      while IFS= read -r rid; do
-        [ -n "$rid" ] || continue
-        RUN_OUT=$(nm_run axi status --run "$rid")
-        run_branch=$(strip_quotes "$(nm_field branch)")
-        if [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-          HAVE_RUN=1
-          break
-        fi
-      done <<< "$candidate_ids"
+      RUN_OUT=
+    fi
+  else
+    RUN_OUT=$(nm_run axi status)
+    if [ -n "$RUN_OUT" ]; then
+      run_branch=$(strip_quotes "$(nm_field branch)")
+      if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+        HAVE_RUN=1
+      else
+        # The active-or-most-recent run is for another branch, or its branch name
+        # matches but its code identity does not. Inspect bounded recent runs for
+        # this branch until one is compatible with the worktree.
+        list_out=$(nm_run axi)
+        candidate_ids=$(nm_run_ids_for_branch "$CREW_BRANCH" "$list_out")
+        while IFS= read -r rid; do
+          [ -n "$rid" ] || continue
+          RUN_OUT=$(nm_run axi status --run "$rid")
+          run_branch=$(strip_quotes "$(nm_field branch)")
+          if [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+            HAVE_RUN=1
+            break
+          fi
+        done <<< "$candidate_ids"
+      fi
     fi
   fi
 fi
+
+[ "$HAVE_RUN" = 1 ] || [ "$BOUND_RUN_REQUIRED" = 0 ] || emit unknown run-step "bound run unavailable"
 
 # --- run-step authoritative path -------------------------------------------
 
@@ -529,6 +612,38 @@ if [ "$HAVE_RUN" = 1 ]; then
     [ -n "$convergence_round" ] || convergence_round=unknown
     RUN_DETAIL="$RUN_DETAIL${SEP}convergence-round=$convergence_round${SEP}convergence-fingerprint=unavailable"
   fi
+
+  run_id=$(strip_quotes "$(nm_field id)")
+  run_step_id_count=$(grep -c '^run_step_id=' "$META" 2>/dev/null || true)
+  run_step_id=
+  if [ "$run_step_id_count" = 1 ]; then
+    run_step_id=$(grep '^run_step_id=' "$META" 2>/dev/null | cut -d= -f2- || true)
+  fi
+  incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
+  case "$RUN_STATE" in
+    done|failed)
+      case "$run_step_id_count" in
+        0) run_step_id_matches_meta=1 ;;
+        1) [ "$run_step_id" = "$run_id" ] && run_step_id_matches_meta=1 || run_step_id_matches_meta=0 ;;
+        *) run_step_id_matches_meta=0 ;;
+      esac
+      if [ "$run_step_id_matches_meta" != 1 ] || [ -z "$run_id" ] || [ -z "$incarnation" ]; then
+        printf '%s\n' 'state: unknown · source: run-step · incarnation binding unavailable' >&2
+        exit 75
+      fi
+      fm_run_step_binding_validate "$ID" "$run_id" "$incarnation" || {
+        status=$?
+        printf '%s\n' 'state: unknown · source: run-step · incarnation binding unavailable' >&2
+        [ "$status" = 75 ] && exit 75
+        exit 1
+      }
+      ;;
+  esac
+  case "$RUN_STATE" in
+    working|parked|paused|done|failed)
+      [ -n "$run_id" ] && RUN_DETAIL="$RUN_DETAIL${SEP}run-id=$run_id"
+      ;;
+  esac
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

@@ -41,6 +41,7 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   No-mistakes ship launches bind the actual run id through the child command bridge.
 #   Matching JT Control Room ship spawns for .openclaw or jt-control-room append a
 #   JT PR Intake Governor block to direct-PR/no-mistakes briefs before launch.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
@@ -77,6 +78,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "spawn" || exit 1
+# shellcheck source=bin/fm-pane-idle-lib.sh
+. "$SCRIPT_DIR/fm-pane-idle-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -94,6 +97,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-run-step-lib.sh
+. "$SCRIPT_DIR/fm-run-step-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -197,6 +202,7 @@ HERDR_FLAT_ABORT_LABEL=
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE=
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_INCARNATION=
 SPAWN_ENDPOINT_CREATED=0
 SPAWN_WORKTREE_LEASED=0
 SPAWN_WORKTREE_PROVEN=0
@@ -234,6 +240,8 @@ SPAWN_GROK_AUTH_FILE=
 SPAWN_GROK_AUTH_TMP=
 SPAWN_GROK_HOOK_FILE=
 SPAWN_GROK_CONFIG_FILE=
+SPAWN_RUN_BINDING_HANDOFF=
+SPAWN_RUN_BINDING_HANDOFF_CREATED=0
 SPAWN_CLAUDE_HOOK_INODE=
 SPAWN_CLAUDE_HOOK_DIGEST=
 SPAWN_OPENCODE_HOOK_INODE=
@@ -279,7 +287,7 @@ spawn_herdr_flat_uncertainty_record() {
     printf 'target=%s\n' "$target"
     printf 'scope=%s\n' "$scope"
     printf 'label=%s\n' "$label"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$file"
 }
 
@@ -306,9 +314,11 @@ spawn_abort_recovery_meta() {
       echo "worktree=$record_worktree"
     else
       echo "worktree="
-      echo "slot_lease_state=unresolved"
-      echo "slot_lease_holder=$ID"
-      [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
+      if [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ]; then
+        echo "slot_lease_state=unresolved"
+        echo "slot_lease_holder=$ID"
+        [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
+      fi
     fi
     echo "project=$PROJ_ABS"
     [ -z "${SPAWN_WORKTREE_LEASE_GENERATION:-}" ] || echo "slot_lease_generation=$SPAWN_WORKTREE_LEASE_GENERATION"
@@ -316,6 +326,7 @@ spawn_abort_recovery_meta() {
     echo "kind=${KIND:-ship}"
     echo "mode=${MODE:-no-mistakes}"
     echo "yolo=${YOLO:-off}"
+    echo "spawn_incarnation=${SPAWN_INCARNATION:-legacy-unknown}"
     echo "tasktmp=${TASK_TMP:-}"
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
@@ -351,7 +362,7 @@ spawn_abort_recovery_meta() {
       fi
     fi
     echo "spawn_state=aborted"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_RECOVERY_META_PUBLISHED=1
 }
@@ -376,10 +387,11 @@ spawn_endpoint_recovery_meta() {
     printf 'kind=%s\n' "${KIND:-ship}"
     printf 'mode=%s\n' "${MODE:-no-mistakes}"
     printf 'yolo=%s\n' "${YOLO:-off}"
+    printf 'spawn_incarnation=%s\n' "${SPAWN_INCARNATION:-legacy-unknown}"
     printf 'backend=tmux\n'
     printf 'endpoint_recovery=1\n'
     printf 'spawn_state=aborted\n'
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
   SPAWN_ENDPOINT_RECOVERY_RESERVATION=0
@@ -403,11 +415,12 @@ spawn_endpoint_recovery_reservation() {
     printf 'kind=%s\n' "${KIND:-ship}"
     printf 'mode=%s\n' "${MODE:-no-mistakes}"
     printf 'yolo=%s\n' "${YOLO:-off}"
+    printf 'spawn_incarnation=%s\n' "${SPAWN_INCARNATION:-legacy-unknown}"
     printf 'backend=tmux\n'
     printf 'endpoint_recovery=1\n'
     printf 'endpoint_recovery_pending=1\n'
     printf 'spawn_state=starting\n'
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
   SPAWN_ENDPOINT_RECOVERY_RESERVATION=1
@@ -489,6 +502,16 @@ spawn_release_task_lock() {
     return 0
   fi
   return 1
+}
+
+spawn_task_lock_incarnation_valid() {
+  local owner recorded
+  [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ] || return 1
+  owner=$(fm_lock_link_owner "$SPAWN_TASK_LOCK" 2>/dev/null) || return 1
+  [ -n "$owner" ] && [ -d "$owner" ] && [ ! -L "$owner" ] || return 1
+  fm_lock_points_to_owner "$SPAWN_TASK_LOCK" "$owner" || return 1
+  recorded=$(cat "$owner/incarnation" 2>/dev/null || true)
+  [ "$recorded" = "${SPAWN_INCARNATION:-}" ] && [ -n "$recorded" ]
 }
 
 spawn_require_new_artifact() {
@@ -828,6 +851,14 @@ spawn_abort_artifacts_cleanup() {
       fi
     fi
   done
+  if [ "${SPAWN_RUN_BINDING_HANDOFF_CREATED:-0}" = 1 ] \
+    && [ -n "${SPAWN_RUN_BINDING_HANDOFF:-}" ]; then
+    if [ -f "$SPAWN_RUN_BINDING_HANDOFF" ] && [ ! -L "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+      rm -f "$SPAWN_RUN_BINDING_HANDOFF" || rc=1
+    else
+      rc=1
+    fi
+  fi
   [ -z "${HERDR_LABEL_JOURNAL:-}" ] || rm -f "$HERDR_LABEL_JOURNAL" || rc=1
   if [ -n "${TASK_TMP:-}" ] && [ -d "$TASK_TMP" ]; then
     owner_file="$TASK_TMP/.fm-tasktmp-owner"
@@ -877,6 +908,7 @@ spawn_abort_cleanup() {
             echo "kind=$KIND"
             echo "mode=${MODE:-no-mistakes}"
             echo "yolo=${YOLO:-off}"
+            echo "spawn_incarnation=${SPAWN_INCARNATION:-legacy-unknown}"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
@@ -902,6 +934,17 @@ spawn_abort_cleanup() {
   if [ "$status" -ne 0 ] && [ "$endpoint_cleanup_status" -eq 0 ]; then
     if spawn_abort_artifacts_cleanup; then
       SPAWN_ARTIFACTS_CLEAN=1
+      if [ "${KIND:-}" = secondmate ] \
+         && [ "${SPAWN_META_PUBLISHED:-0}" = 1 ] \
+         && [ -e "$STATE/$ID.meta" ]; then
+        if [ ! -L "$STATE/$ID.meta" ] && rm -f "$STATE/$ID.meta" \
+          && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+          SPAWN_META_PUBLISHED=0
+        else
+          echo "warning: spawn abort removed the secondmate endpoint but could not remove its task record" >&2
+          SPAWN_ARTIFACTS_CLEAN=0
+        fi
+      fi
       if [ "${SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED:-0}" = 1 ] \
          && [ "${SPAWN_META_PUBLISHED:-0}" != 1 ] \
          && [ "${SPAWN_WORKTREE_LEASED:-0}" != 1 ] \
@@ -914,6 +957,17 @@ spawn_abort_cleanup() {
       fi
     else
       echo "warning: spawn abort could not remove every task artifact; preserving recovery metadata" >&2
+    fi
+  fi
+  if [ "$status" -ne 0 ] \
+     && [ "${KIND:-}" = secondmate ] \
+     && [ "${SPAWN_META_PUBLISHED:-0}" = 1 ] \
+     && { [ "$endpoint_cleanup_status" -ne 0 ] || [ "$SPAWN_ARTIFACTS_CLEAN" != 1 ]; }; then
+    SPAWN_RECOVERY_META_REPLACE_ALLOWED=1
+    if spawn_abort_recovery_meta; then
+      SPAWN_META_PUBLISHED=0
+    else
+      echo "error: spawn abort could not publish recoverable metadata for secondmate $ID" >&2
     fi
   fi
   if [ "$status" -ne 0 ] \
@@ -1039,11 +1093,21 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+SPAWN_INCARNATION="s$(date +%s)-${BASHPID:-$$}-$RANDOM"
+FM_LOCK_OWNER_INCARNATION=$SPAWN_INCARNATION
+export FM_LOCK_OWNER_INCARNATION
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+  unset FM_LOCK_OWNER_INCARNATION
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
 fi
+unset FM_LOCK_OWNER_INCARNATION
 SPAWN_TASK_LOCK_HELD=1
+spawn_task_lock_incarnation_valid || {
+  echo "error: task lock incarnation could not be verified for $ID" >&2
+  exit 1
+}
+unset FM_RUN_STEP_ID
 HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/$ID.herdr-cleanup-uncertain"
 if [ -e "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ] || [ -L "$HERDR_FLAT_ABORT_UNCERTAINTY_FILE" ]; then
   echo "error: unresolved Herdr cleanup uncertainty for $ID at $HERDR_FLAT_ABORT_UNCERTAINTY_FILE; refusing another spawn" >&2
@@ -2110,8 +2174,39 @@ elif [ "$KIND" != secondmate ]; then
   echo "error: docs/worker-isolation.md owns the reclaim procedure for a pooled slot that cannot be stamped" >&2
   exit 1
 fi
+RUN_STEP_EVIDENCE=$(fm_run_step_binding_path "$ID")
+if [ -e "$RUN_STEP_EVIDENCE" ] || [ -L "$RUN_STEP_EVIDENCE" ]; then
+  [ -f "$RUN_STEP_EVIDENCE" ] && [ ! -L "$RUN_STEP_EVIDENCE" ] || exit 1
+  RUN_STEP_OLD_INCARNATION=$(fm_nofollow_read "$RUN_STEP_EVIDENCE" | awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }') || exit 1
+  case "$RUN_STEP_OLD_INCARNATION" in ''|*[!A-Za-z0-9._:-]*) exit 1 ;; esac
+  RUN_STEP_ARCHIVE=$(fm_run_step_binding_archive_path "$ID" "$RUN_STEP_OLD_INCARNATION")
+  if [ -e "$RUN_STEP_ARCHIVE" ] || [ -L "$RUN_STEP_ARCHIVE" ]; then
+    [ -f "$RUN_STEP_ARCHIVE" ] && [ ! -L "$RUN_STEP_ARCHIVE" ] || exit 1
+    cmp -s "$RUN_STEP_EVIDENCE" "$RUN_STEP_ARCHIVE" || exit 1
+    rm -f "$RUN_STEP_EVIDENCE" || exit 1
+  else
+    fm_nofollow_rename "$RUN_STEP_EVIDENCE" "$RUN_STEP_ARCHIVE" 1 || exit 1
+  fi
+fi
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  SPAWN_RUN_BINDING_HANDOFF="$STATE/.run-step-handoff-$ID"
+  if [ -e "$SPAWN_RUN_BINDING_HANDOFF" ] || [ -L "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+    [ -f "$SPAWN_RUN_BINDING_HANDOFF" ] && [ ! -L "$SPAWN_RUN_BINDING_HANDOFF" ] || exit 1
+    rm -f "$SPAWN_RUN_BINDING_HANDOFF" || exit 1
+  fi
+  HANDOFF_TMP=$(mktemp "$STATE/.$ID.run-step-handoff.XXXXXX") || exit 1
+  chmod 600 "$HANDOFF_TMP" || { rm -f "$HANDOFF_TMP"; exit 1; }
+  if ! printf 'schema=fm-jt-run-step-handoff.v1\ntask_id=%s\nspawn_incarnation=%s\nstate=pending\n' \
+    "$ID" "$SPAWN_INCARNATION" | fm_nofollow_write "$HANDOFF_TMP" \
+    || ! fm_nofollow_rename "$HANDOFF_TMP" "$SPAWN_RUN_BINDING_HANDOFF" 1; then
+    rm -f "$HANDOFF_TMP"
+    exit 1
+  fi
+  SPAWN_RUN_BINDING_HANDOFF_CREATED=1
+fi
 META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
 chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
+spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 {
   echo "window=$T"
   echo "worktree=$WT"
@@ -2120,9 +2215,14 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "spawn_incarnation=$SPAWN_INCARNATION"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ -n "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+    echo "run_binding_state=pending"
+    echo "run_binding_handoff=${SPAWN_RUN_BINDING_HANDOFF##*/}"
+  fi
   # Missing backend= is the compatibility spelling for tmux. Record only
   # non-default backends so existing and new tmux metadata stay unchanged.
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
@@ -2149,9 +2249,11 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
-mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
+} | fm_nofollow_write "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
+spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
+fm_nofollow_rename "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 SPAWN_META_PUBLISHED=1
+fm_pane_idle_meta_freshness_bump "$STATE" || exit 1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
   if [ "$HERDR_LABEL_LOCK_HELD" = 1 ]; then
@@ -2180,6 +2282,36 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
   echo "error: could not build the home declaration for $ID; refusing to launch a task child that would inherit this home" >&2
   exit 1
 }
+if [ -n "$SPAWN_RUN_BINDING_HANDOFF" ]; then
+  SPAWN_RUN_BINDING_REAL=$(command -v no-mistakes 2>/dev/null || true)
+  [ -n "$SPAWN_RUN_BINDING_REAL" ] && [ -x "$SPAWN_RUN_BINDING_REAL" ] || {
+    echo "error: no-mistakes is required to publish the real run binding for ship task $ID; refusing to launch" >&2
+    exit 1
+  }
+  [ -x "$FM_ROOT/bin/fm-run-step-bridge.sh" ] || {
+    echo "error: run-step bridge is unavailable for ship task $ID; refusing to launch" >&2
+    exit 1
+  }
+  mkdir -p "$TASK_TMP/bin" || exit 1
+  [ ! -e "$TASK_TMP/bin/no-mistakes" ] && [ ! -L "$TASK_TMP/bin/no-mistakes" ] || exit 1
+  bridge_wrapper="$TASK_TMP/bin/no-mistakes"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'export FM_RUN_BINDING_ROOT=%s\n' "$(shell_quote "$FM_ROOT")"
+    printf 'export FM_RUN_BINDING_HOME=%s\n' "$(shell_quote "$FM_HOME")"
+    printf 'export FM_RUN_BINDING_STATE=%s\n' "$(shell_quote "$STATE")"
+    printf 'export FM_RUN_BINDING_TASK=%s\n' "$(shell_quote "$ID")"
+    printf 'export FM_RUN_BINDING_INCARNATION=%s\n' "$(shell_quote "$SPAWN_INCARNATION")"
+    printf 'export FM_RUN_BINDING_HANDOFF=%s\n' "$(shell_quote "$SPAWN_RUN_BINDING_HANDOFF")"
+    printf 'export FM_RUN_BINDING_TMP=%s\n' "$(shell_quote "$TASK_TMP")"
+    printf 'exec %s wrap %s "$@"\n' \
+      "$(shell_quote "$FM_ROOT/bin/fm-run-step-bridge.sh")" \
+      "$(shell_quote "$SPAWN_RUN_BINDING_REAL")"
+  } | fm_nofollow_write "$bridge_wrapper" || exit 1
+  fm_nofollow_chmod "$bridge_wrapper" 0700 || exit 1
+  sq_run_binding_path=$(shell_quote "$TASK_TMP/bin:$PATH")
+  LAUNCH="PATH=$sq_run_binding_path $LAUNCH"
+fi
 LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
