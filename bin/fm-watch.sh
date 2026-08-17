@@ -260,7 +260,7 @@ triage_log() {
   sz=$(wc -c < "$TRIAGE_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$sz" in ''|*[!0-9]*) return 0 ;; esac
   if [ "$sz" -ge "$TRIAGE_LOG_MAX_BYTES" ]; then
-    tail -n 2000 "$TRIAGE_LOG" 2>/dev/null | fm_nofollow_write "$TRIAGE_LOG.tmp" && mv -f "$TRIAGE_LOG.tmp" "$TRIAGE_LOG" 2>/dev/null
+    tail -n 2000 "$TRIAGE_LOG" 2>/dev/null | fm_nofollow_write "$TRIAGE_LOG.tmp" && fm_nofollow_rename "$TRIAGE_LOG.tmp" "$TRIAGE_LOG" 2>/dev/null
     rm -f "$TRIAGE_LOG.tmp" 2>/dev/null || true
   fi
 }
@@ -424,7 +424,7 @@ watch_window_scan_prepare() {
     tmp=$(mktemp "$source_path.XXXXXX") || return 1
     [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
     if ! printf '%s\n' "$source" | fm_nofollow_write "$tmp" || [ -L "$source_path" ] \
-      || ! mv -f "$tmp" "$source_path"; then
+      || ! fm_nofollow_rename "$tmp" "$source_path"; then
       rm -f "$tmp"
       return 1
     fi
@@ -563,8 +563,8 @@ event_wait_herdr() {
 wake() {
   local wake_output=$1 row _epoch _seq _kind _key _payload confirm_status
   case "$1" in
-    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) | fm_nofollow_write "$STATE/.heartbeat-streak" ;;
-    *) echo 0 | fm_nofollow_write "$STATE/.heartbeat-streak" ;;
+    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) | fm_nofollow_write "$STATE/.heartbeat-streak" || exit 1 ;;
+    *) echo 0 | fm_nofollow_write "$STATE/.heartbeat-streak" || exit 1 ;;
   esac
   printf '%s\n' "$wake_output" || exit 1
   while IFS= read -r row || [ -n "$row" ]; do
@@ -813,9 +813,11 @@ surface_parent_corr() {
 
 surface_receipt_identity_matches_current() {
   local task=$1 fp=$2 rec=$3 expected_incarnation=$4 outcome=$5 snapshot=$6
-  local kind parent_corr current_parent_corr parent_task_id parent_home parent_status expected_fp
+  local kind terminal_source parent_corr current_parent_corr parent_task_id parent_home parent_status expected_fp
   kind=$(surface_task_kind "$task") || return 1
   [ "$(surface_meta_value_unique "$rec" kind 2>/dev/null)" = "$kind" ] || return 1
+  terminal_source=$(surface_meta_value_unique "$rec" terminal_source 2>/dev/null) || return 1
+  case "$terminal_source" in run-step|pane) ;; *) return 1 ;; esac
   current_parent_corr=$(surface_parent_corr "$task") || return 1
   parent_corr=$(surface_meta_value_unique "$rec" parent_corr 2>/dev/null) || return 1
   parent_task_id=$(surface_meta_value_unique "$rec" parent_task_id 2>/dev/null) || return 1
@@ -837,7 +839,7 @@ surface_receipt_identity_matches_current() {
     *) return 1 ;;
   esac
   [ "$parent_corr" = "$current_parent_corr" ] || return 1
-  expected_fp=$(surface_hash_text "$task|$expected_incarnation|$outcome|$snapshot|$kind${current_parent_corr:+|$current_parent_corr}") || return 1
+  expected_fp=$(surface_hash_text "$task|$expected_incarnation|$outcome|$snapshot|$kind|$terminal_source${current_parent_corr:+|$current_parent_corr}") || return 1
   [ "$expected_fp" = "$fp" ] || return 1
   [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$expected_fp" ] || return 1
 }
@@ -854,7 +856,7 @@ mark_terminal_surfaced_snapshot() {
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\n' \
     "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" | fm_nofollow_write "$tmp" \
-    || ! mv -f "$tmp" "$marker"; then
+    || ! fm_nofollow_rename "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
@@ -975,7 +977,7 @@ surface_retry_write() {
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\nwake_key=%s\nwake_published=%s\n' \
     "$task" "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$wake_key" "$wake_published" | fm_nofollow_write "$tmp" \
-    || ! mv -f "$tmp" "$retry"; then
+    || ! fm_nofollow_rename "$tmp" "$retry"; then
     rm -f "$tmp"
     return 1
   fi
@@ -998,7 +1000,7 @@ surface_retry_mark_published() {
     [ "$seen" = 1 ] || printf 'wake_published=1\n'
   } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   [ ! -L "$retry" ] || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$retry" || { rm -f "$tmp"; return 1; }
+  fm_nofollow_rename "$tmp" "$retry" || { rm -f "$tmp"; return 1; }
 }
 
 surface_retry_complete_consumed() {
@@ -1011,7 +1013,7 @@ surface_retry_complete_consumed() {
     "$tasktmp" "$window" "$worktree" || return 2
   marker=$(_hb_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 2
-  if ! printf '%s' "$snapshot" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf '%s' "$snapshot" | fm_nofollow_write "$tmp" || ! fm_nofollow_rename "$tmp" "$marker"; then
     rm -f "$tmp"
     return 2
   fi
@@ -1116,6 +1118,7 @@ while (defined(my $line = <$fh>)) {
   next unless @fields == 5;
   next unless $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/;
   next unless $fields[2] =~ /\A(?:signal|stale|check|heartbeat)\z/;
+  next unless defined($fields[4]) && $fields[4] ne '';
   exit 0 if defined($fields[3]) && $fields[3] eq $wanted;
 }
 close($fh) or exit 2;
@@ -1223,7 +1226,7 @@ surface_retry_repair_one() {
     "$tasktmp" "$window" "$worktree" || return 1
   marker=$(_hb_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
-  if ! printf '%s' "$last" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf '%s' "$last" | fm_nofollow_write "$tmp" || ! fm_nofollow_rename "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1273,7 +1276,7 @@ mark_surfaced() {  # <status-file>
   mark_terminal_surfaced "$task" "$last" || return 1
   marker=$(_hb_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
-  if ! printf '%s' "$last" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf '%s' "$last" | fm_nofollow_write "$tmp" || ! fm_nofollow_rename "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1410,6 +1413,7 @@ while (defined(my $line = <$fh>)) {
   my @fields = split(/\t/, $line, -1);
   @fields == 5 or exit 2;
   $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/ or exit 2;
+  defined($fields[4]) && $fields[4] ne '' or exit 2;
   next unless $fields[2] eq 'check';
   next unless $fields[3] =~ /\Ainactive-outcome:(.*)\z/;
   my $fp = $1;
@@ -2024,7 +2028,7 @@ EOF
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
-    echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) | fm_nofollow_write "$STATE/.heartbeat-streak"
+    echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) | fm_nofollow_write "$STATE/.heartbeat-streak" || exit 1
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi

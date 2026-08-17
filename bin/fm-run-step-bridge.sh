@@ -35,8 +35,9 @@ run_id_from_output() {
 
 handoff_value() {
   local key=$1
-  awk -F= -v wanted="$key" '$1 == wanted { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' \
-    "$FM_RUN_BINDING_HANDOFF" 2>/dev/null
+  fm_nofollow_read "$FM_RUN_BINDING_HANDOFF" | awk -F= -v wanted="$key" \
+    '$1 == wanted { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' \
+    2>/dev/null
 }
 
 handoff_valid() {
@@ -58,12 +59,12 @@ handoff_valid() {
 }
 
 metadata_generation_valid() {
-  local meta=$STATE/$FM_RUN_BINDING_TASK.meta incarnation state handoff
+  local meta=$STATE/$FM_RUN_BINDING_TASK.meta incarnation state handoff contents
   FM_RUN_BINDING_METADATA_STATE=
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  incarnation=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
-  state=$(awk -F= '$1 == "run_binding_state" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
-  handoff=$(awk -F= '$1 == "run_binding_handoff" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$meta" 2>/dev/null) || return 1
+  contents=$(fm_nofollow_read "$meta") || return 1
+  incarnation=$(printf '%s\n' "$contents" | awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }') || return 1
+  state=$(printf '%s\n' "$contents" | awk -F= '$1 == "run_binding_state" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }') || return 1
+  handoff=$(printf '%s\n' "$contents" | awk -F= '$1 == "run_binding_handoff" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }') || return 1
   [ "$incarnation" = "$FM_RUN_BINDING_INCARNATION" ] || return 1
   case "$state" in pending|staged|bound) ;; *) return 1 ;; esac
   [ "$handoff" = "${FM_RUN_BINDING_HANDOFF##*/}" ] || return 1
@@ -71,9 +72,9 @@ metadata_generation_valid() {
 }
 
 metadata_staged_run_id() {
-  local meta=$STATE/$FM_RUN_BINDING_TASK.meta result status
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 75
-  result=$(awk -F= -v inc="$FM_RUN_BINDING_INCARNATION" '
+  local meta=$STATE/$FM_RUN_BINDING_TASK.meta result status contents
+  contents=$(fm_nofollow_read "$meta") || return 75
+  result=$(printf '%s\n' "$contents" | awk -F= -v inc="$FM_RUN_BINDING_INCARNATION" '
     BEGIN { valid=1 }
     /^[^=]+=/ {
       key=$1
@@ -91,7 +92,7 @@ metadata_staged_run_id() {
         || state != "staged" || stored_inc != inc || run_id == "") exit 75
       print run_id
     }
-  ' "$meta" 2>/dev/null)
+  ' 2>/dev/null)
   status=$?
   case "$status" in
     0)
@@ -152,9 +153,13 @@ publish_run_id() {
     evidence existing_active=0 existing_staged=0
   case "$run_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   old_owner=${FM_TASK_LOCK_OWNER:-}
-  fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
-  acquired=1
-  owner=$(fm_lock_link_owner "$FM_TASK_LOCK_PATH" 2>/dev/null) || status=1
+  if [ -n "$old_owner" ] && fm_lock_points_to_owner "$FM_TASK_LOCK_PATH" "$old_owner"; then
+    owner=$old_owner
+  else
+    fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
+    acquired=1
+    owner=$(fm_lock_link_owner "$FM_TASK_LOCK_PATH" 2>/dev/null) || status=1
+  fi
   if [ "$status" = 0 ]; then
     FM_TASK_LOCK_OWNER=$owner
     export FM_TASK_LOCK_OWNER
@@ -215,7 +220,41 @@ publish_run_id() {
       fi
       if [ "$status" = 0 ] && ! meta_bind_run_id "$run_id"; then
         status=1
+        fm_run_step_binding_deactivate \
+          "$FM_RUN_BINDING_TASK" "$run_id" "$FM_RUN_BINDING_INCARNATION" || true
       fi
+    fi
+  fi
+  if [ "$acquired" = 1 ]; then
+    fm_lock_release "$FM_TASK_LOCK_PATH" || status=1
+  fi
+  if [ -n "$old_owner" ]; then
+    FM_TASK_LOCK_OWNER=$old_owner
+    export FM_TASK_LOCK_OWNER
+  else
+    unset FM_TASK_LOCK_OWNER
+  fi
+  return "$status"
+}
+
+recover_staged_binding() {
+  local staged old_owner owner acquired=0 status=0
+  old_owner=${FM_TASK_LOCK_OWNER:-}
+  if [ -n "$old_owner" ] && fm_lock_points_to_owner "$FM_TASK_LOCK_PATH" "$old_owner"; then
+    owner=$old_owner
+  else
+    fm_lock_acquire_wait "$FM_TASK_LOCK_PATH" || return 1
+    acquired=1
+    owner=$(fm_lock_link_owner "$FM_TASK_LOCK_PATH" 2>/dev/null) || status=1
+  fi
+  if [ "$status" = 0 ]; then
+    FM_TASK_LOCK_OWNER=$owner
+    export FM_TASK_LOCK_OWNER
+    if ! metadata_generation_valid; then
+      status=1
+    elif [ "${FM_RUN_BINDING_METADATA_STATE:-}" = staged ]; then
+      staged=$(metadata_staged_run_id 2>/dev/null) || status=1
+      [ "$status" -ne 0 ] || publish_run_id "$staged" || status=1
     fi
   fi
   if [ "$acquired" = 1 ]; then
@@ -353,6 +392,7 @@ main() {
   shift || true
   [ -x "$FM_RUN_BINDING_REAL" ] || return 1
   if [ "${1:-}" = axi ] && [ "${2:-}" = run ]; then
+    recover_staged_binding || return 1
     run_axi "$@"
   else
     "$FM_RUN_BINDING_REAL" "$@"

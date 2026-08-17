@@ -1755,12 +1755,14 @@ SH
   status=$?
   set -u
   [ "$status" -ne 0 ] || fail "staged run binding was rebound to a new run id"
-  [ "$(receipt_value "$meta" run_binding_state)" = staged ] \
-    || fail "rejected rebinding changed staged metadata state"
+  [ "$(receipt_value "$meta" run_binding_state)" = bound ] \
+    || fail "staged binding recovery did not activate the original metadata state"
   [ "$(receipt_value "$meta" run_id)" = 01STAGEDORIGINAL ] \
     || fail "rejected rebinding changed the staged run id"
-  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
-    || fail "rejected rebinding published replacement evidence"
+  [ "$(receipt_value "$evidence" state)" = active ] \
+    || fail "staged binding recovery did not publish active evidence"
+  [ "$(receipt_value "$evidence" run_id)" = 01STAGEDORIGINAL ] \
+    || fail "staged binding recovery published a replacement run id"
   pass "staged run bindings reject rebinding within one incarnation"
 }
 
@@ -2620,6 +2622,7 @@ test_surface_marker_failure_is_retryable() {
   printf 'done: surface marker retry\n' > "$state/surface-marker-x1.status"
   : > "$state/surface-marker-x1.turn-ended"
   touch "$state/surface-marker-x1.meta" "$state/surface-marker-x1.status" "$state/surface-marker-x1.turn-ended"
+  ln -s "$dir/marker-target" "$state/.hb-terminal-surfaced-surface-marker-x1"
   export FM_FAKE_CREW_STATE_SURFACE_MARKER_X1='state: working · source: pane · marker retry'
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -2633,16 +2636,6 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cat > "$fakebin/mv" <<'SH'
-#!/usr/bin/env bash
-set -u
-target="${!#}"
-case "$target" in
-  *.hb-terminal-surfaced-*) exit 91 ;;
-esac
-exec /usr/bin/mv "$@"
-SH
-  chmod +x "$fakebin/mv"
   prepare_primary_proof "$root" "$home" "$fakebin"
   set +e
   out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
@@ -2685,7 +2678,7 @@ SH
   [ -f "$state/.hb-surface-retry-surface-marker-x1" ] \
     || fail "stale surface-marker retry was discarded"
   printf 'done: surface marker retry\n' > "$state/surface-marker-x1.status"
-  rm -f "$fakebin/mv"
+  rm -f "$state/.hb-terminal-surfaced-surface-marker-x1"
   out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \

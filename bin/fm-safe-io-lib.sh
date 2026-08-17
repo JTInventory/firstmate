@@ -34,6 +34,41 @@ fm_nofollow_append() {
   ' "$path"
 }
 
+fm_nofollow_read() {
+  local path=$1
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($path) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 1;
+    binmode($fh);
+    local $/;
+    my $content = <$fh> // "";
+    print STDOUT $content or exit 1;
+    close($fh) or exit 1;
+  ' "$path"
+}
+
+fm_nofollow_rename() {
+  local source=$1 target=$2 exclusive=${3:-0}
+  command -v perl >/dev/null 2>&1 || return 1
+  case "$exclusive" in 0|1) ;; *) return 1 ;; esac
+  perl -e '
+    use Errno qw(ENOENT);
+    my ($source, $target, $exclusive) = @ARGV;
+    lstat($source) && !-l($source) && -f($source) or exit 1;
+    if (lstat($target)) {
+      (-l($target) || -d($target) || !-f($target)) and exit 1;
+      $exclusive and exit 1;
+    } elsif ($! != ENOENT) {
+      exit 1;
+    }
+    rename($source, $target) or exit 1;
+  ' "$source" "$target" "$exclusive"
+}
+
 fm_nofollow_chmod() {
   local path=$1 mode=$2
   command -v perl >/dev/null 2>&1 || return 1

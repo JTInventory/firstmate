@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+set -o pipefail
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
@@ -18,7 +19,9 @@ FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 FM_LOCK_LEGACY_IDENTITY_MAX_AGE="${FM_LOCK_LEGACY_IDENTITY_MAX_AGE:-300}"
 FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-30}"
-mkdir -p "$STATE"
+if [ "${FM_WAKE_LIB_NO_INIT:-0}" != 1 ]; then
+  mkdir -p "$STATE"
+fi
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
@@ -642,9 +645,9 @@ fm_wake_clean_field() {
 
 fm_wake_queue_txn_field() {
   local manifest=$1 wanted=$2
-  awk -F= -v wanted="$wanted" \
+  fm_nofollow_read "$manifest" | awk -F= -v wanted="$wanted" \
     '$1 == wanted { print substr($0, index($0, "=") + 1); count++ } END { exit(count == 1 ? 0 : 1) }' \
-    "$manifest" 2>/dev/null
+    2>/dev/null
 }
 
 fm_wake_queue_txn_manifest_write() {
@@ -652,7 +655,7 @@ fm_wake_queue_txn_manifest_write() {
   tmp=$(mktemp "$txn/.manifest.XXXXXX") || return 1
   if ! printf 'schema=fm-wake-queue-transaction.v1\nphase=%s\naction=%s\noffset=%s\nhad_queue=%s\nhad_cursor=%s\n' \
     "$phase" "$action" "$offset" "$had_queue" "$had_cursor" | fm_nofollow_write "$tmp" \
-    || ! mv -f "$tmp" "$txn/manifest"; then
+    || ! fm_nofollow_rename "$tmp" "$txn/manifest"; then
     rm -f "$tmp"
     return 1
   fi
@@ -679,7 +682,7 @@ fm_wake_queue_txn_rollback_locked() {
   if [ -e "$txn/queue.old" ] || [ -L "$txn/queue.old" ]; then
     [ -f "$txn/queue.old" ] && [ ! -L "$txn/queue.old" ] || return 1
     rm -f "$FM_WAKE_QUEUE" || return 1
-    mv -f "$txn/queue.old" "$FM_WAKE_QUEUE" || return 1
+    fm_nofollow_rename "$txn/queue.old" "$FM_WAKE_QUEUE" || return 1
   elif [ "$had_queue" = 0 ]; then
     rm -f "$FM_WAKE_QUEUE" || return 1
   elif [ ! -e "$FM_WAKE_QUEUE" ]; then
@@ -688,7 +691,7 @@ fm_wake_queue_txn_rollback_locked() {
   if [ -e "$txn/cursor.old" ] || [ -L "$txn/cursor.old" ]; then
     [ -f "$txn/cursor.old" ] && [ ! -L "$txn/cursor.old" ] || return 1
     rm -f "$cursor" || return 1
-    mv -f "$txn/cursor.old" "$cursor" || return 1
+    fm_nofollow_rename "$txn/cursor.old" "$cursor" || return 1
   elif [ "$had_cursor" = 0 ]; then
     rm -f "$cursor" || return 1
   elif [ ! -e "$cursor" ]; then
@@ -775,7 +778,7 @@ fm_wake_queue_txn_replace_locked() {
     fm_wake_queue_txn_cleanup_locked "$txn" || true
     return 1
   }
-  if [ "$had_queue" = 1 ] && ! mv -f "$FM_WAKE_QUEUE" "$txn/queue.old"; then
+  if [ "$had_queue" = 1 ] && ! fm_nofollow_rename "$FM_WAKE_QUEUE" "$txn/queue.old" 1; then
     fm_wake_queue_txn_recover_one_locked "$txn" || true
     return 1
   fi
@@ -783,7 +786,7 @@ fm_wake_queue_txn_replace_locked() {
     fm_wake_queue_txn_recover_one_locked "$txn" || true
     return 1
   }
-  if [ "$had_cursor" = 1 ] && ! mv -f "$cursor" "$txn/cursor.old"; then
+  if [ "$had_cursor" = 1 ] && ! fm_nofollow_rename "$cursor" "$txn/cursor.old" 1; then
     fm_wake_queue_txn_recover_one_locked "$txn" || true
     return 1
   fi
@@ -791,7 +794,7 @@ fm_wake_queue_txn_replace_locked() {
     fm_wake_queue_txn_recover_one_locked "$txn" || true
     return 1
   }
-  if ! mv -f "$txn/queue.new" "$FM_WAKE_QUEUE"; then
+  if ! fm_nofollow_rename "$txn/queue.new" "$FM_WAKE_QUEUE"; then
     fm_wake_queue_txn_recover_one_locked "$txn" || true
     return 1
   fi
@@ -884,6 +887,7 @@ while (defined(my $line = <$fh>)) {
   next unless @fields == 5;
   next unless $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/;
   next unless $fields[2] =~ /\A(?:signal|stale|check|heartbeat)\z/;
+  next unless defined($fields[4]) && $fields[4] ne '';
   if ($fields[3] eq $wanted) {
     close($fh) or exit 2;
     exit 0;
@@ -939,10 +943,10 @@ use warnings;
 use Fcntl qw(:DEFAULT);
 
 my ($input, $output, $wanted, $cursor_offset, $cursor_active) = @ARGV;
-open(my $in, '<', $input) or exit 1;
-binmode($in);
 my $nofollow = eval { O_NOFOLLOW() };
 defined($nofollow) or exit 1;
+sysopen(my $in, $input, O_RDONLY | $nofollow) or exit 1;
+binmode($in);
 sysopen(my $out, $output, O_WRONLY | O_TRUNC | $nofollow) or exit 1;
 binmode($out);
 my $removed_before = 0;
@@ -1047,20 +1051,21 @@ fm_wake_queue_cursor_write() {
   [ ! -L "$cursor" ] || return 1
   tmp=$(mktemp "$cursor.XXXXXX") || return 1
   if ! printf 'schema=fm-wake-queue-cursor.v1\nidentity=%s\noffset=%s\n' \
-    "$identity" "$offset" | fm_nofollow_write "$tmp" || [ -L "$cursor" ] || ! mv -f "$tmp" "$cursor"; then
+    "$identity" "$offset" | fm_nofollow_write "$tmp" || ! fm_nofollow_rename "$tmp" "$cursor"; then
     rm -f "$tmp"
     return 1
   fi
 }
 
 fm_wake_queue_cursor_read() {
-  local cursor identity current offset schema_count identity_count offset_count
+  local cursor identity current offset schema_count identity_count offset_count cursor_data
   cursor=$(fm_wake_queue_cursor_path)
   [ -f "$cursor" ] && [ ! -L "$cursor" ] || return 1
-  schema_count=$(awk -F= '$1 == "schema" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' "$cursor" 2>/dev/null) || return 1
+  cursor_data=$(fm_nofollow_read "$cursor") || return 1
+  schema_count=$(printf '%s\n' "$cursor_data" | awk -F= '$1 == "schema" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }') || return 1
   [ "$schema_count" = fm-wake-queue-cursor.v1 ] || return 1
-  identity_count=$(awk -F= '$1 == "identity" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$cursor" 2>/dev/null) || return 1
-  offset=$(awk -F= '$1 == "offset" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }' "$cursor" 2>/dev/null) || return 1
+  identity_count=$(printf '%s\n' "$cursor_data" | awk -F= '$1 == "identity" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }') || return 1
+  offset=$(printf '%s\n' "$cursor_data" | awk -F= '$1 == "offset" { print $2; n++ } END { exit(n == 1 ? 0 : 1) }') || return 1
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
   case "$identity_count" in *:*:*) ;; *) return 1 ;; esac
   current=$(fm_wake_queue_identity "$FM_WAKE_QUEUE") || return 1
@@ -1073,8 +1078,11 @@ fm_wake_queue_cursor_read() {
     perl - "$FM_WAKE_QUEUE" "$offset" <<'PERL' || return 1
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 my ($path, $offset) = @ARGV;
-open(my $fh, '<', $path) or exit 1;
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 1;
 binmode($fh);
 seek($fh, $offset - 1, 0) or exit 1;
 my $byte = getc($fh);
@@ -1091,8 +1099,11 @@ fm_wake_queue_stream_from_offset() {
   perl - "$queue" "$offset" <<'PERL'
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 my ($path, $offset) = @ARGV;
-open(my $fh, '<', $path) or exit 1;
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 1;
 binmode($fh);
 seek($fh, $offset, 0) or exit 1;
 while (defined(my $line = <$fh>)) {
@@ -1109,8 +1120,11 @@ fm_wake_queue_offset_valid() {
   perl - "$queue" "$offset" <<'PERL'
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 my ($path, $offset) = @ARGV;
-open(my $fh, '<', $path) or exit 1;
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 1;
 binmode($fh);
 seek($fh, 0, 2) or exit 1;
 my $size = tell($fh);
@@ -1131,8 +1145,11 @@ fm_wake_queue_offset_after_rows() {
   perl - "$queue" "$offset" "$rows" <<'PERL'
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 my ($path, $offset, $rows) = @ARGV;
-open(my $fh, '<', $path) or exit 1;
+my $nofollow = eval { O_NOFOLLOW() };
+defined($nofollow) or exit 1;
+sysopen(my $fh, $path, O_RDONLY | $nofollow) or exit 1;
 binmode($fh);
 seek($fh, $offset, 0) or exit 1;
 my $next = $offset;
@@ -1238,7 +1255,7 @@ fm_wake_mark_surface_consumed() {
   tmp=$(mktemp "$STATE/.hb-surface-consumed.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-surface-consumed.v1\ntask=%s\nwake_key=%s\nsnapshot=%s\nspawn_incarnation=%s\n' \
     "$key" "$key" "$snapshot" "$spawn_incarnation" | fm_nofollow_write "$tmp" \
-    || [ -L "$marker" ] || ! mv -f "$tmp" "$marker"; then
+    || ! fm_nofollow_rename "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1248,7 +1265,7 @@ fm_wake_print_deduped() {
   local file=$1
   awk -F '\t' '
     NF == 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ &&
-    $3 ~ /^(signal|stale|check|heartbeat)$/ {
+    $3 ~ /^(signal|stale|check|heartbeat)$/ && $5 != "" {
       dedupe = $3 SUBSEP $4
       if ($3 == "heartbeat") {
         dedupe = "heartbeat"

@@ -2174,9 +2174,19 @@ elif [ "$KIND" != secondmate ]; then
   echo "error: docs/worker-isolation.md owns the reclaim procedure for a pooled slot that cannot be stamped" >&2
   exit 1
 fi
-if [ -e "$STATE/.run-step-incarnation-$ID" ] || [ -L "$STATE/.run-step-incarnation-$ID" ]; then
-  [ -f "$STATE/.run-step-incarnation-$ID" ] && [ ! -L "$STATE/.run-step-incarnation-$ID" ] || exit 1
-  rm -f "$STATE/.run-step-incarnation-$ID" || exit 1
+RUN_STEP_EVIDENCE=$(fm_run_step_binding_path "$ID")
+if [ -e "$RUN_STEP_EVIDENCE" ] || [ -L "$RUN_STEP_EVIDENCE" ]; then
+  [ -f "$RUN_STEP_EVIDENCE" ] && [ ! -L "$RUN_STEP_EVIDENCE" ] || exit 1
+  RUN_STEP_OLD_INCARNATION=$(fm_nofollow_read "$RUN_STEP_EVIDENCE" | awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }') || exit 1
+  case "$RUN_STEP_OLD_INCARNATION" in ''|*[!A-Za-z0-9._:-]*) exit 1 ;; esac
+  RUN_STEP_ARCHIVE=$(fm_run_step_binding_archive_path "$ID" "$RUN_STEP_OLD_INCARNATION")
+  if [ -e "$RUN_STEP_ARCHIVE" ] || [ -L "$RUN_STEP_ARCHIVE" ]; then
+    [ -f "$RUN_STEP_ARCHIVE" ] && [ ! -L "$RUN_STEP_ARCHIVE" ] || exit 1
+    cmp -s "$RUN_STEP_EVIDENCE" "$RUN_STEP_ARCHIVE" || exit 1
+    rm -f "$RUN_STEP_EVIDENCE" || exit 1
+  else
+    fm_nofollow_rename "$RUN_STEP_EVIDENCE" "$RUN_STEP_ARCHIVE" 1 || exit 1
+  fi
 fi
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
   SPAWN_RUN_BINDING_HANDOFF="$STATE/.run-step-handoff-$ID"

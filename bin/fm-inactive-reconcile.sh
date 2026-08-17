@@ -2070,6 +2070,7 @@ prepare_pending_receipt() {
   [ "$schema" = fm-jt-terminal-outcome.v1 ] || return 1
   [ -n "$task_id" ] && [ -n "$incarnation" ] && [ -n "$terminal_source" ] \
     && [ -n "$terminal_snapshot" ] || return 1
+  case "$incarnation" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
   case "$terminal_source" in
     run-step|pane) ;;
     *) return 1 ;;
@@ -3087,17 +3088,26 @@ republish_pending_receipts() {
 read_incarnation() { fm_pane_idle_read_incarnation "$@"; }
 
 run_step_incarnation_evidence_path() {
-  printf '%s/.run-step-incarnation-%s' "$STATE" "$1"
+  if [ "$#" = 1 ]; then
+    printf '%s/.run-step-incarnation-%s' "$STATE" "$1"
+  else
+    printf '%s/.run-step-incarnation-%s.%s' "$STATE" "$1" "$2"
+  fi
 }
 
 run_step_incarnation_evidence_valid() {
   local id=$1 incarnation=$2 outcome=$3 snapshot=$4 evidence run_id
   valid_task_id "$id" || return 1
   case "$outcome" in done|failed) ;; *) return 1 ;; esac
-  [ -n "$incarnation" ] && [ -n "$snapshot" ] || return 1
+  case "$incarnation" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ -n "$snapshot" ] || return 1
   evidence=$(run_step_incarnation_evidence_path "$id") || return 1
+  if [ ! -f "$evidence" ] || [ -L "$evidence" ] \
+    || [ "$(meta_value_unique "$evidence" spawn_incarnation 2>/dev/null || true)" != "$incarnation" ]; then
+    evidence=$(run_step_incarnation_evidence_path "$id" "$incarnation") || return 1
+  fi
   [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
-  awk -F= '
+  fm_nofollow_read "$evidence" | awk -F= '
     BEGIN {
       allowed["schema"]=1; allowed["task_id"]=1; allowed["run_id"]=1
       allowed["spawn_incarnation"]=1; allowed["state"]=1
@@ -3117,7 +3127,7 @@ run_step_incarnation_evidence_valid() {
       exit !(valid && values["schema"] == "fm-jt-run-step-incarnation.v1" \
         && values["state"] == "active")
     }
-  ' "$evidence" 2>/dev/null || return 1
+  ' 2>/dev/null || return 1
   [ "$(meta_value_unique "$evidence" schema 2>/dev/null)" = fm-jt-run-step-incarnation.v1 ] || return 1
   [ "$(meta_value_unique "$evidence" task_id 2>/dev/null)" = "$id" ] || return 1
   run_id=$(meta_value_unique "$evidence" run_id 2>/dev/null) || return 1
@@ -3253,6 +3263,7 @@ surface_retry_wake_present() {
       next unless @fields == 5;
       next unless $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/;
       next unless $fields[2] =~ /\A(?:signal|stale|check|heartbeat)\z/;
+      next unless defined($fields[4]) && $fields[4] ne '';
       exit 0 if $fields[3] eq $wanted;
     }
     close($fh) or exit 2;

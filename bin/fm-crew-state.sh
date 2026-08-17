@@ -59,9 +59,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-numeric-lib.sh
 . "$SCRIPT_DIR/fm-numeric-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+FM_SESSION_LOCK_BOOTSTRAP=1
+FM_WAKE_LIB_NO_INIT=1
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-run-step-lib.sh
 FM_RUN_STEP_READ_ONLY=1
 . "$SCRIPT_DIR/fm-run-step-lib.sh"
+trap 'fm_run_step_binding_release_held >/dev/null 2>&1 || true' EXIT
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -372,16 +377,29 @@ nm_run_ids_for_branch() {  # <branch> <list-output>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 META_INCARNATION=$(awk -F= '$1 == "spawn_incarnation" { print substr($0, index($0, "=") + 1); n++ } END { exit(n == 1 ? 0 : 1) }' "$META" 2>/dev/null || true)
+META_SPAWN_STATE=absent
+META_SPAWN_STATE_COUNT=0
 META_BINDING_STATE=absent
 META_BINDING_STATE_COUNT=0
 while IFS= read -r META_BINDING_LINE; do
   case "$META_BINDING_LINE" in
+    spawn_state=*)
+      META_SPAWN_STATE_COUNT=$((META_SPAWN_STATE_COUNT + 1))
+      META_SPAWN_STATE=${META_BINDING_LINE#*=}
+      ;;
     run_binding_state=*)
       META_BINDING_STATE_COUNT=$((META_BINDING_STATE_COUNT + 1))
       META_BINDING_STATE=${META_BINDING_LINE#*=}
       ;;
   esac
 done < "$META"
+if [ "$META_SPAWN_STATE_COUNT" -ne 0 ]; then
+  [ "$META_SPAWN_STATE_COUNT" = 1 ] || META_SPAWN_STATE=invalid
+  case "$META_SPAWN_STATE" in
+    starting|aborted) ;;
+    *) META_SPAWN_STATE=invalid ;;
+  esac
+fi
 if [ "$META_BINDING_STATE_COUNT" -ne 0 ]; then
   [ "$META_BINDING_STATE_COUNT" = 1 ] || META_BINDING_STATE=invalid
   case "$META_BINDING_STATE" in
@@ -399,8 +417,12 @@ fi
 case "$META_BINDING_STATE" in
   pending|bound|staged|invalid) BOUND_RUN_REQUIRED=1 ;;
 esac
+case "$META_SPAWN_STATE" in
+  starting|aborted|invalid) BOUND_RUN_REQUIRED=1 ;;
+esac
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && [ -n "$META_INCARNATION" ]; then
-  if BOUND_RUN_ID=$(fm_run_step_binding_read "$ID" "$META_INCARNATION"); then
+  if fm_run_step_binding_read_held "$ID" "$META_INCARNATION"; then
+    BOUND_RUN_ID=$FM_RUN_STEP_HELD_VALUE
     BOUND_RUN_STATUS=0
   else
     BOUND_RUN_STATUS=$?
