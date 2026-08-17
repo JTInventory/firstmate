@@ -18,6 +18,23 @@ FM_LOCK_LEGACY_IDENTITY_MAX_AGE="${FM_LOCK_LEGACY_IDENTITY_MAX_AGE:-300}"
 FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-30}"
 mkdir -p "$STATE"
 
+fm_nofollow_write() {
+  local path=$1
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -e '
+    use Fcntl qw(:DEFAULT);
+    my ($path) = @ARGV;
+    my $nofollow = eval { O_NOFOLLOW() };
+    defined($nofollow) or exit 1;
+    sysopen(my $fh, $path, O_WRONLY | O_TRUNC | $nofollow) or exit 1;
+    binmode($fh);
+    local $/;
+    my $content = <STDIN> // "";
+    print $fh $content or exit 1;
+    close($fh) or exit 1;
+  ' "$path"
+}
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
@@ -875,7 +892,10 @@ alarm($seconds);
 open(my $fh, '<', $path) or exit 2;
 while (defined(my $line = <$fh>)) {
   my @fields = split(/\t/, $line, -1);
-  if (defined($fields[3]) && $fields[3] eq $wanted) {
+  next unless @fields == 5;
+  next unless $fields[0] =~ /\A[0-9]+\z/ && $fields[1] =~ /\A[0-9]+\z/;
+  next unless $fields[2] =~ /\A(?:signal|stale|check|heartbeat)\z/;
+  if ($fields[3] eq $wanted) {
     close($fh) or exit 2;
     exit 0;
   }
@@ -1238,7 +1258,8 @@ fm_wake_mark_surface_consumed() {
 fm_wake_print_deduped() {
   local file=$1
   awk -F '\t' '
-    NF >= 5 {
+    NF == 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ &&
+    $3 ~ /^(signal|stale|check|heartbeat)$/ {
       dedupe = $3 SUBSEP $4
       if ($3 == "heartbeat") {
         dedupe = "heartbeat"

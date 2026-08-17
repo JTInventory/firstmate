@@ -125,7 +125,8 @@ meta_set_run_binding_state() {
         /^run_id=/ { next }
         { print }
         END { exit(found ? 0 : 1) }
-      ' "$meta" > "$tmp" || ! mv -f "$tmp" "$meta"; then
+      ' "$meta" | fm_nofollow_write "$tmp" \
+        || ! mv -f "$tmp" "$meta"; then
         rm -f "$tmp"
         status=1
       fi

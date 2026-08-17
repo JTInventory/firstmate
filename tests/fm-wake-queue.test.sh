@@ -209,6 +209,30 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
+test_malformed_wake_row_does_not_suppress_republish() {
+  local dir state deduped rows
+  dir=$(make_case malformed-republish)
+  state="$dir/state"
+  printf '1\t1\tcheck\tduplicate-key\n' > "$state/.wake-queue"
+  FM_SESSION_LOCK_BOOTSTRAP=1 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    fm_wake_append_if_absent_locked created signal duplicate-key replacement
+    status=$?
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
+    [ "$status" -eq 0 ] && [ "$created" -eq 1 ]
+  ' _ "$ROOT" || fail "malformed wake row suppressed republish"
+  rows=$(awk -F '\t' '$4 == "duplicate-key" { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$rows" = 2 ] || fail "republish did not add a complete wake row"
+  deduped=$(FM_SESSION_LOCK_BOOTSTRAP=1 FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_print_deduped "$2"' _ "$ROOT" "$state/.wake-queue")
+  [ "$(printf '%s\n' "$deduped" | awk 'NF { n++ } END { print n + 0 }')" = 1 ] \
+    || fail "dedupe did not discard the malformed wake row"
+  printf '%s\n' "$deduped" | grep -F $'\tsignal\tduplicate-key\treplacement' >/dev/null \
+    || fail "dedupe did not preserve the replacement wake row"
+  pass "malformed wake rows cannot suppress republish"
+}
+
 # The drain runs at the top of every wake-handling turn, so it also asserts
 # watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
 # plain drain-and-handle turn that runs no other supervision script. It must warn
@@ -361,6 +385,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_malformed_wake_row_does_not_suppress_republish
 test_drain_asserts_watcher_liveness
 test_unpreparable_lock_refuses_instead_of_spinning
 test_prepared_wake_transaction_recovery_removes_manifest

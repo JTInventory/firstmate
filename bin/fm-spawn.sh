@@ -287,7 +287,7 @@ spawn_herdr_flat_uncertainty_record() {
     printf 'target=%s\n' "$target"
     printf 'scope=%s\n' "$scope"
     printf 'label=%s\n' "$label"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$file"
 }
 
@@ -362,7 +362,7 @@ spawn_abort_recovery_meta() {
       fi
     fi
     echo "spawn_state=aborted"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_RECOVERY_META_PUBLISHED=1
 }
@@ -391,7 +391,7 @@ spawn_endpoint_recovery_meta() {
     printf 'backend=tmux\n'
     printf 'endpoint_recovery=1\n'
     printf 'spawn_state=aborted\n'
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
   SPAWN_ENDPOINT_RECOVERY_RESERVATION=0
@@ -420,7 +420,7 @@ spawn_endpoint_recovery_reservation() {
     printf 'endpoint_recovery=1\n'
     printf 'endpoint_recovery_pending=1\n'
     printf 'spawn_state=starting\n'
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
   SPAWN_ENDPOINT_RECOVERY_META_PUBLISHED=1
   SPAWN_ENDPOINT_RECOVERY_RESERVATION=1
@@ -2187,7 +2187,7 @@ if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
   HANDOFF_TMP=$(mktemp "$STATE/.$ID.run-step-handoff.XXXXXX") || exit 1
   chmod 600 "$HANDOFF_TMP" || { rm -f "$HANDOFF_TMP"; exit 1; }
   if ! printf 'schema=fm-jt-run-step-handoff.v1\ntask_id=%s\nspawn_incarnation=%s\nstate=pending\n' \
-    "$ID" "$SPAWN_INCARNATION" > "$HANDOFF_TMP" \
+    "$ID" "$SPAWN_INCARNATION" | fm_nofollow_write "$HANDOFF_TMP" \
     || ! mv "$HANDOFF_TMP" "$SPAWN_RUN_BINDING_HANDOFF"; then
     rm -f "$HANDOFF_TMP"
     exit 1
@@ -2239,7 +2239,7 @@ spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
+} | fm_nofollow_write "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
 spawn_task_lock_incarnation_valid || { rm -f "$META_TMP"; exit 1; }
 mv "$META_TMP" "$STATE/$ID.meta" || { rm -f "$META_TMP"; exit 1; }
 SPAWN_META_PUBLISHED=1

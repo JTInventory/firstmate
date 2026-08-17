@@ -1098,6 +1098,47 @@ test_deferred_ack_retries_after_caller_crash() {
   pass "deferred inactive receipts recover after caller crash"
 }
 
+test_deferred_drain_kills_presentation_descendants() {
+  local dir root home fakebin state marker fingerprint row
+  new_case deferred-descendant-cleanup
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  marker="$dir/descendant-survived"
+  write_meta "$state" deferred-descendant-x1 deferred-descendant-inc
+  export FM_FAKE_CREW_STATE_DEFERRED_DESCENDANT_X1='state: done · source: pane · descendant cleanup'
+  scan "$root" "$home" "$fakebin" --startup >/dev/null || fail "descendant cleanup receipt setup failed"
+  fingerprint=$(basename "$(direct_first_file "$state/terminal-outcomes" '*.pending')" .pending)
+  row=$(awk -F '\t' -v key="inactive-outcome:$fingerprint" '$4 == key { print; exit }' "$state/.wake-queue")
+  [ -n "$row" ] || fail "descendant cleanup receipt did not queue its wake"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -u
+shift
+( sleep 2; printf 'survived\n' > "${FM_DESCENDANT_MARKER:?}" ) &
+descendant=$!
+"$@" >/dev/null 2>&1 &
+child=$!
+sleep 5
+kill "$child" 2>/dev/null || true
+wait "$child" 2>/dev/null || true
+kill "$descendant" 2>/dev/null || true
+wait "$descendant" 2>/dev/null || true
+exit 124
+SH
+  chmod +x "$fakebin/timeout"
+  export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$" \
+    FM_WAKE_DRAIN_PRESENTATION_TIMEOUT_SECS=1 FM_DESCENDANT_MARKER="$marker"
+  if drain "$root" "$home" "$fakebin" >"$dir/descendant.out"; then
+    fail "presentation timeout was hidden"
+  fi
+  sleep 3
+  [ ! -e "$marker" ] || fail "presentation descendant survived timeout cleanup"
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION \
+    FM_WAKE_DRAIN_PRESENTATION_TIMEOUT_SECS FM_DESCENDANT_MARKER \
+    FM_FAKE_CREW_STATE_DEFERRED_DESCENDANT_X1
+  pass "presentation timeout cleanup kills descendant processes"
+}
+
 test_deferred_output_completion_retries_before_confirmation() {
   local dir root home fakebin state fingerprint row
   new_case deferred-output-complete-retry
@@ -1854,6 +1895,100 @@ SH
   [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
     || fail "bridge total timeout published incomplete evidence"
   pass "run bridge total wait is bounded"
+}
+
+test_run_bridge_rejects_temporary_symlink() {
+  local dir root home fakebin state handoff meta evidence outside temp_link status
+  new_case bridge-temporary-symlink
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-temporary-symlink"
+  meta="$state/bridge-temporary-symlink.meta"
+  evidence="$state/.run-step-incarnation-bridge-temporary-symlink"
+  outside="$dir/outside-target"
+  temp_link="$dir/run-step-temp-link"
+  printf 'protected\n' > "$outside"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-temporary-symlink worktree="$state/work-bridge-temporary-symlink" \
+    project="$state/work-bridge-temporary-symlink" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-temporary-symlink
+  mkdir -p "$state/work-bridge-temporary-symlink"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-temporary-symlink \
+    spawn_incarnation=inc-a state=pending
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  */.run-step-incarnation.*.XXXXXX)
+    rm -f "${FM_TEST_TEMP_LINK:?}"
+    ln -s "${FM_TEST_TEMP_TARGET:?}" "$FM_TEST_TEMP_LINK"
+    printf '%s\n' "$FM_TEST_TEMP_LINK"
+    exit 0
+    ;;
+esac
+exec /usr/bin/mktemp "$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run:\n  id: "01TEMPORARYSYMLINK"\n'
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-temporary-symlink \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_TEST_TEMP_LINK="$temp_link" FM_TEST_TEMP_TARGET="$outside" \
+    FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "temporary binding symlink was accepted"
+  [ "$(cat "$outside")" = protected ] || fail "temporary binding symlink redirected state outside the home"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
+    || fail "temporary binding symlink left authoritative evidence"
+  pass "run binding rejects replaced temporary symlinks"
+}
+
+test_receipt_rejects_temporary_symlink() {
+  local dir root home fakebin state outside temp_link status
+  new_case receipt-temporary-symlink
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  outside="$dir/outside-target"
+  temp_link="$dir/receipt-temp-link"
+  write_meta "$state" receipt-temporary-symlink receipt-inc
+  export FM_FAKE_CREW_STATE_RECEIPT_TEMPORARY_SYMLINK='state: done · source: pane · receipt temp'
+  printf 'protected\n' > "$outside"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  */terminal-outcomes/.receipt.XXXXXX)
+    rm -f "${FM_TEST_RECEIPT_TEMP_LINK:?}"
+    ln -s "${FM_TEST_RECEIPT_TEMP_TARGET:?}" "$FM_TEST_RECEIPT_TEMP_LINK"
+    printf '%s\n' "$FM_TEST_RECEIPT_TEMP_LINK"
+    exit 0
+    ;;
+esac
+exec /usr/bin/mktemp "$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  export FM_TEST_RECEIPT_TEMP_LINK="$temp_link" FM_TEST_RECEIPT_TEMP_TARGET="$outside"
+  set +e
+  scan "$root" "$home" "$fakebin" --startup >/dev/null
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "receipt temporary symlink was accepted"
+  [ "$(cat "$outside")" = protected ] || fail "receipt temporary symlink redirected state outside the home"
+  [ "$(direct_file_count "$state/terminal-outcomes" '*.pending')" = 0 ] \
+    || fail "receipt temporary symlink left a pending receipt"
+  unset FM_TEST_RECEIPT_TEMP_LINK FM_TEST_RECEIPT_TEMP_TARGET \
+    FM_FAKE_CREW_STATE_RECEIPT_TEMPORARY_SYMLINK
+  pass "receipt writes reject replaced temporary symlinks"
 }
 
 test_run_bridge_rolls_back_failed_metadata_binding() {
@@ -4659,6 +4794,7 @@ test_finalized_receipt_rows_are_suppressed
 test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
+test_deferred_drain_kills_presentation_descendants
 test_deferred_output_completion_retries_before_confirmation
 test_deferred_output_completion_failure_retains_emitted_row
 test_deferred_ack_confirms_after_caller_emission
@@ -4674,6 +4810,8 @@ test_run_bridge_rejects_staged_run_rebinding
 test_run_bridge_rejects_existing_evidence_rebinding
 test_run_bridge_rejects_bound_metadata_without_evidence
 test_run_bridge_total_wait_is_bounded
+test_run_bridge_rejects_temporary_symlink
+test_receipt_rejects_temporary_symlink
 test_run_bridge_rolls_back_failed_metadata_binding
 test_run_bridge_activation_failure_is_recoverable
 test_pane_idle_reclaim_advances_malformed_cursor

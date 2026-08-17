@@ -1762,7 +1762,7 @@ receipt_write() {  # globals: FP ID INC OUTCOME SNAPSHOT KIND SOURCE
     printf 'parent_status=%s\n' "${FM_PENDING_ROUTE_PARENT_STATUS:-}"
     printf 'parent_corr=%s\n' "${FM_PENDING_ROUTE_CORR:-}"
     printf 'created_epoch=%s\n' "$(date +%s)"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   # ln is an exclusive, same-filesystem publication. A concurrent scanner can
   # therefore never replace a receipt for another incarnation.
   if ln "$tmp" "$pending" 2>/dev/null; then
