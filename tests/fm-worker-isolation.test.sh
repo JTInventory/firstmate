@@ -331,6 +331,32 @@ test_primary_ancestry_refuses_any_inherited_worker_marker() {
   pass "primary proof refuses any inherited worker declaration marker"
 }
 
+test_primary_ancestry_handles_exported_functions_without_weakening_newline_rejection() {
+  local status payload
+  if bash -c '
+    exported_helper() { :; }
+    export -f exported_helper
+    . "$1"; fm_worker_primary_ancestry_clear
+  ' _ "$ROOT/bin/fm-worker-isolation-lib.sh"; then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 0 "$status" "exported Bash functions must not block primary ancestry proof"
+
+  payload=$'owner\nFM_AGENT_ROLE=secondmate'
+  if env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_AGENT_OWNER_HOME="$payload" bash -c '
+        . "$1"; fm_worker_primary_ancestry_clear
+      ' _ "$ROOT/bin/fm-worker-isolation-lib.sh"; then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "newline-bearing worker markers must remain rejected"
+  pass "primary ancestry tolerates exported functions but rejects unsafe marker environments"
+}
+
 test_reparented_markerless_worker_is_refused() {
   local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token
   primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
@@ -1833,6 +1859,7 @@ test_markerless_worker_is_refused_at_primary_cwd
 test_forged_primary_role_is_refused_from_worker_ancestry
 test_primary_ancestry_refuses_unreadable_process_environment
 test_primary_ancestry_refuses_any_inherited_worker_marker
+test_primary_ancestry_handles_exported_functions_without_weakening_newline_rejection
 test_reparented_markerless_worker_is_refused
 test_primary_origin_requires_state_attestation
 test_primary_initialization_requires_explicit_bootstrap

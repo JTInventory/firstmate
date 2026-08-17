@@ -81,11 +81,13 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; READ-ONLY for you
-state/               volatile runtime signals; gitignored
+state/               gitignored operational state: volatile runtime signals plus durable local inactive-outcome receipts
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=, and spawn_incarnation=; no-mistakes ship tasks also carry the run-binding handoff/state and, after binding, run_id=; kind=secondmate also records home= and projects= (fm-pr-check appends pr= and verified pr_head= when available)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
+  terminal-outcomes/ fingerprinted local inactive terminal-outcome receipts; the locked wake drain is the only path that presents and acknowledges them
+  .inactive-outcome-* bounded scan, claim, cursor, and retry state; never touch
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-outbox/          generated X-mode dry-run reply previews; inspect it when FMX_DRY_RUN is set (section 14)

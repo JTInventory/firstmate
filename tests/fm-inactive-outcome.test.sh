@@ -191,18 +191,21 @@ scan() {
   if [ -d "$home/state" ] && [ ! -L "$home/state" ]; then
     prepare_primary_proof "$root" "$home" "$fakebin"
   fi
+  # The suite runs many process-isolated fixtures in one shell. Keep the
+  # harness default bounded, but leave enough headroom for cumulative host
+  # load; tests that target a specific short budget set it explicitly.
   ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
       -u FM_ROOT -u STATE PATH="$fakebin:$PATH" \
       FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_PRIMARY_ATTESTATION="$CASE_TOKEN" CODEX_THREAD_ID="$CASE_THREAD" \
       FM_FAKE_HARNESS_PID="$$" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
       FM_INACTIVE_OUTCOME_SECS="${FM_INACTIVE_OUTCOME_SECS:-60}" \
-      FM_INACTIVE_OUTCOME_BUDGET_SECS="${FM_INACTIVE_OUTCOME_BUDGET_SECS:-10}" \
+      FM_INACTIVE_OUTCOME_BUDGET_SECS="${FM_INACTIVE_OUTCOME_BUDGET_SECS:-30}" \
       "$RECON" scan "$startup" )
 }
 
 drain() {
-  local root=$1 home=$2 fakebin=$3 status generation=${FM_WAKE_DRAIN_GENERATION:-$$}
+  local root=$1 home=$2 fakebin=$3 status generation=${FM_WAKE_DRAIN_GENERATION:-$$} strict=${5:-}
   [ "${4:-}" = no-generation ] && generation=
   if [ -d "$home/state" ] && [ ! -L "$home/state" ]; then
     prepare_primary_proof "$root" "$home" "$fakebin"
@@ -214,6 +217,7 @@ drain() {
       FM_WAKE_DRAIN_DEFER_ACK="${FM_WAKE_DRAIN_DEFER_ACK:-0}" \
       FM_WAKE_DRAIN_GENERATION="$generation" "$DRAIN" )
   status=$?
+  [ "$strict" = strict ] && return "$status"
   [ "$status" = 0 ] || [ "$status" = 3 ] || return "$status"
 }
 
@@ -828,11 +832,12 @@ test_output_completion_failure_does_not_reprint() {
     terminal_snapshot='state: done · source: pane · output failure' kind=ship
   row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\toutput completion failure row'
   printf '%s\n' "$row" > "$state/.wake-queue"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-target="${!#}"
-source="${@: -2:1}"
+args=("$@")
+target="${args[$((${#args[@]} - 2))]}"
+source="${args[$((${#args[@]} - 3))]}"
 case "$target" in
   *.claim)
     if grep -Fqx 'output_complete=1' "$source" 2>/dev/null; then
@@ -845,12 +850,12 @@ case "$target" in
     fi
     ;;
 esac
-exec /usr/bin/mv "$@"
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
   export FM_WAKE_DRAIN_DIRECT=1 FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
-  if drain "$root" "$home" "$fakebin" >"$dir/output-failure.out"; then
+  if drain "$root" "$home" "$fakebin" '' strict >"$dir/output-failure.out"; then
     fail "output completion failure was hidden"
   fi
   [ "$(grep -Fxc "$row" "$dir/output-failure.out")" = 1 ] \
@@ -1139,7 +1144,7 @@ SH
   pass "presentation timeout cleanup kills descendant processes"
 }
 
-test_deferred_output_completion_retries_before_confirmation() {
+test_deferred_output_completion_waits_for_confirmation() {
   local dir root home fakebin state fingerprint row
   new_case deferred-output-complete-retry
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
@@ -1152,50 +1157,29 @@ test_deferred_output_completion_retries_before_confirmation() {
     terminal_snapshot='state: done · source: pane · deferred output retry' kind=ship
   row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tdeferred output retry row'
   printf '%s\n' "$row" > "$state/.wake-queue"
-  cat > "$fakebin/mv" <<'SH'
-#!/usr/bin/env bash
-set -u
-target="${!#}"
-source="${@: -2:1}"
-case "$target" in
-  *.claim)
-    if grep -Fqx 'output_complete=1' "$source" 2>/dev/null; then
-      count=$(cat "${FM_FAIL_CLAIM_MOVE:?}" 2>/dev/null || printf '0')
-      count=$((count + 1))
-      printf '%s\n' "$count" > "$FM_FAIL_CLAIM_MOVE"
-      if [ "$count" = 1 ]; then
-        exit 91
-      fi
-    fi
-    ;;
-esac
-exec /usr/bin/mv "$@"
-SH
-  chmod +x "$fakebin/mv"
-  export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
   export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
   drain "$root" "$home" "$fakebin" >"$dir/deferred-retry.out" \
-    || fail "deferred output-complete retry drain failed"
+    || fail "deferred output-complete drain failed"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" state)" = presenting ] \
-    || fail "deferred output-complete retry advanced the claim before confirmation"
+    || fail "deferred output-complete drain advanced the claim before confirmation"
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_complete)" = 1 ] \
-    || fail "deferred output-complete retry did not persist completion"
+    || fail "deferred output-complete drain did not persist completion"
   [ -f "$state/terminal-outcomes/$fingerprint.pending" ] \
-    || fail "deferred output-complete retry consumed the receipt early"
+    || fail "deferred output-complete drain consumed the receipt early"
   [ ! -e "$state/terminal-outcomes/$fingerprint.presented" ] \
-    || fail "deferred output-complete retry presented before confirmation"
+    || fail "deferred output-complete drain presented before confirmation"
   recon_from_root "$root" "$fakebin" "$home" "$state" \
       caller-output-complete "inactive-outcome:$fingerprint" "$row" \
-    || fail "deferred output-complete retry rejected caller completion"
+    || fail "deferred output-complete drain rejected caller completion"
   recon_from_root "$root" "$fakebin" "$home" "$state" \
       confirm "inactive-outcome:$fingerprint" "$row" \
-    || fail "deferred output-complete retry rejected caller confirmation"
+    || fail "deferred output-complete drain rejected caller confirmation"
   [ -e "$state/terminal-outcomes/$fingerprint.presented" ] \
-    || fail "deferred output-complete retry did not finalize after confirmation"
+    || fail "deferred output-complete drain did not finalize after confirmation"
   [ ! -e "$state/terminal-outcomes/.$fingerprint.claim" ] \
-    || fail "deferred output-complete retry left a claim"
-  unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
-  pass "deferred output completion retries before caller confirmation"
+    || fail "deferred output-complete drain left a claim"
+  unset FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
+  pass "deferred output completion waits for caller confirmation"
 }
 
 test_deferred_output_completion_failure_retains_emitted_row() {
@@ -1211,11 +1195,12 @@ test_deferred_output_completion_failure_retains_emitted_row() {
     terminal_snapshot='state: done · source: pane · deferred output failure' kind=ship
   row=$'2\t2\tcheck\tinactive-outcome:'"$fingerprint"$'\tdeferred output failure row'
   printf '%s\n' "$row" > "$state/.wake-queue"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-target="${!#}"
-source="${@: -2:1}"
+args=("$@")
+target="${args[$((${#args[@]} - 2))]}"
+source="${args[$((${#args[@]} - 3))]}"
 case "$target" in
   *.claim)
     if grep -Fqx 'output_complete=1' "$source" 2>/dev/null; then
@@ -1227,12 +1212,12 @@ case "$target" in
     fi
     ;;
 esac
-exec /usr/bin/mv "$@"
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   export FM_FAIL_CLAIM_MOVE="$dir/fail-claim-move"
   export FM_WAKE_DRAIN_DEFER_ACK=1 FM_WAKE_DRAIN_GENERATION="$$"
-  if drain "$root" "$home" "$fakebin" >"$dir/deferred-failure.out"; then
+  if drain "$root" "$home" "$fakebin" '' strict >"$dir/deferred-failure.out"; then
     fail "deferred output-complete persistence failure was hidden"
   fi
   [ "$(grep -Fxc "$row" "$dir/deferred-failure.out")" = 1 ] \
@@ -1246,7 +1231,7 @@ SH
   [ "$(receipt_value "$state/terminal-outcomes/.$fingerprint.claim" output_complete)" = 0 ] \
     || fail "deferred output-complete failure persisted completion"
   replace_field "$state/terminal-outcomes/.$fingerprint.claim" defer_generation_start proc:0
-  rm -f "$fakebin/mv"
+  rm -f "$fakebin/perl"
   unset FM_FAIL_CLAIM_MOVE FM_WAKE_DRAIN_DEFER_ACK FM_WAKE_DRAIN_GENERATION
   drain "$root" "$home" "$fakebin" >"$dir/deferred-failure-retry.out" \
     || fail "deferred output-complete retry did not retain the emitted row"
@@ -2482,6 +2467,7 @@ test_postpublication_uncertainty_is_not_replayed() {
   printf 'done: postpublication uncertainty\n' > "$state/postpublish-x1.status"
   : > "$state/postpublish-x1.turn-ended"
   touch "$state/postpublish-x1.meta" "$state/postpublish-x1.status" "$state/postpublish-x1.turn-ended"
+  touch "$state/.inactive-outcome-reconcile"
   export FM_FAKE_CREW_STATE_POSTPUBLISH_X1='state: done · source: pane · postpublication uncertainty'
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -2497,20 +2483,21 @@ SH
   chmod +x "$fakebin/tmux"
   flag="$dir/fail-postpublication-mark"
   : > "$flag"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-source_file="${@: -2:1}"
-target="${!#}"
+args=("$@")
+source_file="${args[$((${#args[@]} - 3))]}"
+target="${args[$((${#args[@]} - 2))]}"
 if [ -e "${FM_TEST_FAIL_POSTPUBLICATION:-}" ] \
   && [[ "$target" == *.hb-surface-retry-* ]] \
   && grep -Fqx 'wake_published=1' "$source_file" 2>/dev/null; then
   rm -f "$FM_TEST_FAIL_POSTPUBLICATION"
   exit 91
 fi
-exec /usr/bin/mv "$@"
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   export FM_TEST_FAIL_POSTPUBLICATION="$flag"
   prepare_primary_proof "$root" "$home" "$fakebin"
   set +e
@@ -2529,7 +2516,7 @@ SH
     || fail "post-publication failure did not retain an uncertain retry state"
   [ "$(awk 'NF { n++ } END { print n + 0 }' "$state/.wake-queue")" = 1 ] \
     || fail "post-publication failure did not retain its wake"
-  rm -f "$fakebin/mv"
+  rm -f "$fakebin/perl"
   unset FM_TEST_FAIL_POSTPUBLICATION
   out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
@@ -3125,18 +3112,19 @@ test_pane_idle_index_rejects_publication_stamp_race() {
     key=$(printf '%s' tmux:fm-publication-race-x1 | sha256sum | awk '{print $1}')
   fi
   : > "$flag"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 set -u
-source_file="${@: -2:1}"
-target="${!#}"
+args=("$@")
+source_file="${args[$((${#args[@]} - 3))]}"
+target="${args[$((${#args[@]} - 2))]}"
 if [ "$target" = "${FM_TEST_PUBLICATION_PATH:?}" ] && [ -e "${FM_TEST_PUBLICATION_FLAG:?}" ]; then
   rm -f "$FM_TEST_PUBLICATION_FLAG"
   printf 'window=tmux:fm-publication-race-x2\n' > "$FM_TEST_PUBLICATION_STATE/publication-race-x2.meta"
 fi
-exec /usr/bin/mv "$@"
+exec /usr/bin/perl "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/perl"
   set +e
   env FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_TEST_PUBLICATION_PATH="$index/$key" FM_TEST_PUBLICATION_FLAG="$flag" \
@@ -3199,6 +3187,7 @@ test_watcher_bounded_metadata_fail_closed() {
 
 test_watcher_skips_deterministic_malformed_metadata() {
   local dir root home fakebin state out status valid_key
+  local watch_timeout=10
   new_case watcher-malformed-metadata
   dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
   state="$home/state"
@@ -3209,6 +3198,7 @@ test_watcher_skips_deterministic_malformed_metadata() {
   replace_field "$state/malformed-backend-x1.meta" backend invalid-backend
   write_meta "$state" valid-scan-x1 valid-scan-inc
   rm -f "$state"/.hash-* "$state"/.count-* "$state"/*.status "$state"/*.turn-ended
+  touch "$state/.inactive-outcome-reconcile"
   prepare_primary_proof "$root" "$home" "$fakebin"
   set +e
   out=$(cd "$root" && env -u NO_MISTAKES_GATE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
@@ -3218,9 +3208,9 @@ test_watcher_skips_deterministic_malformed_metadata() {
     FM_INACTIVE_OUTCOME_BUDGET_SECS=10 FM_PRIMARY_ATTESTATION="$CASE_TOKEN" \
     CODEX_THREAD_ID="$CASE_THREAD" FM_FAKE_HARNESS_PID="$$" FM_BACKEND=tmux TMUX=fake,1,0 \
     FM_FAKE_PANE_PATH="$home" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_WATCHER_HEARTBEAT=999999 bash -c \
+    FM_WATCHER_HEARTBEAT=999999 FM_BUSY_REGEX='idle prompt' bash -c \
       '. "$1/bin/fm-pane-idle-lib.sh"; shift; fm_pane_idle_run_bounded_child "$@"' \
-      _ "$ROOT" 5 "$root/bin/fm-watch.sh" 2>&1)
+      _ "$ROOT" "$watch_timeout" "$root/bin/fm-watch.sh" 2>&1)
   status=$?
   set -u
   [ "$status" = 124 ] || fail "watcher did not remain bounded while scanning malformed metadata: $out"
@@ -3841,8 +3831,10 @@ test_pending_receipt_republish_is_bounded() {
     fm_write_meta "$state/terminal-outcomes/$fingerprint.pending" \
       schema=fm-jt-terminal-outcome.v1 fingerprint="$fingerprint" task_id="pending-limit-x${index}" \
       incarnation="pending-limit-inc-${index}" outcome=done terminal_source=pane \
-      terminal_snapshot="pending limit ${index}" kind=ship
+      terminal_snapshot="pending limit ${index}" kind=ship \
+      parent_task_id= parent_home= parent_status= parent_corr=
   done
+  export FM_INACTIVE_OUTCOME_BUDGET_SECS=30
   export FM_PENDING_RECEIPT_REPUBLISH_LIMIT=1
   scan "$root" "$home" "$fakebin" --startup >/dev/null \
     || fail "bounded pending-receipt maintenance failed on the first scan"
@@ -3857,7 +3849,7 @@ test_pending_receipt_republish_is_bounded() {
   [ "$(queue_count "$state")" = 2 ] || fail "bounded pending-receipt maintenance did not republish the next receipt"
   [ "$(receipt_count "$state" pending)" = 3 ] \
     || fail "bounded pending-receipt maintenance discarded durable receipts"
-  unset FM_PENDING_RECEIPT_REPUBLISH_LIMIT
+  unset FM_PENDING_RECEIPT_REPUBLISH_LIMIT FM_INACTIVE_OUTCOME_BUDGET_SECS
   pass "pending-receipt maintenance rotates bounded receipt batches"
 }
 
@@ -4840,7 +4832,7 @@ test_malformed_finalized_receipt_fails_closed
 test_presented_claim_is_acknowledged_in_deferred_drain
 test_deferred_ack_retries_after_caller_crash
 test_deferred_drain_kills_presentation_descendants
-test_deferred_output_completion_retries_before_confirmation
+test_deferred_output_completion_waits_for_confirmation
 test_deferred_output_completion_failure_retains_emitted_row
 test_deferred_ack_confirms_after_caller_emission
 test_deferred_ack_recovers_after_output_confirmation

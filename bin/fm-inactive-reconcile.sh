@@ -3860,7 +3860,7 @@ scan_locked() {
   local find_pending_source=0 find_retain=0 find_ordered=1 batch_consumed=0 batch_complete=1 retry_path=
   local find_source_drained=0
   local find_pending_offset=0 find_tmp_owned=0 pending_skip=0 find_enum_cursor=
-  local find_enum_complete=0 find_enum_persisted=0
+  local find_enum_complete=0 find_enum_persisted=0 child_remaining child_scan_deadline
   local pane_idle_index_dir= pane_idle_index_ready=0
   inactive_state_preflight || return 1
   inactive_merge_txn_recover || return 1
@@ -4157,7 +4157,10 @@ scan_locked() {
     batch_consumed=$find_pending_offset
   fi
   remaining=$(budget_remaining_secs "$scan_deadline")
-  if [ "$remaining" -gt 0 ]; then
+  # At the minimum one-second budget, spend the available time on the direct
+  # child scan. The indexed metadata pass is an optimization; running it first
+  # can consume the entire minimum budget before the authoritative state read.
+  if [ "$remaining" -gt 0 ] && [ "$DIRECT_SCAN_BUDGET_SECS" -gt 1 ]; then
     pane_idle_index_dir=$PANE_IDLE_INDEX_DIR
     if { [ -d "$pane_idle_index_dir" ] && [ ! -L "$pane_idle_index_dir" ]; } \
       || { [ ! -e "$pane_idle_index_dir" ] && mkdir -p "$pane_idle_index_dir"; }; then
@@ -4241,13 +4244,22 @@ scan_locked() {
       fi
     fi
     rc=0
+    child_remaining=$remaining
+    child_scan_deadline=$scan_deadline
+    if [ "$DIRECT_SCAN_BUDGET_SECS" -eq 1 ]; then
+      # A one-second minimum must still cover the child shell, lock proof, and
+      # durable receipt write. Keep this grace bounded and local to the child;
+      # the parent scan deadline still controls progress and cursor advancement.
+      child_remaining=$((child_remaining + 1))
+      child_scan_deadline=$((child_scan_deadline + 1000))
+    fi
     (
-      export FM_LOCK_WAIT_SECS="$remaining"
-      export FM_INACTIVE_OUTCOME_SCAN_REMAINING_SECS="$remaining"
-      export FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS="$scan_deadline"
+      export FM_LOCK_WAIT_SECS="$child_remaining"
+      export FM_INACTIVE_OUTCOME_SCAN_REMAINING_SECS="$child_remaining"
+      export FM_INACTIVE_OUTCOME_SCAN_DEADLINE_MS="$child_scan_deadline"
       export FM_INACTIVE_OUTCOME_CHILD_BOUND=1
       export FM_PANE_IDLE_META_INDEX_DIR="${pane_idle_index_dir:-}"
-      run_bounded_child "$remaining" "$SCRIPT_DIR/fm-inactive-reconcile.sh" _child "$id"
+      run_bounded_child "$child_remaining" "$SCRIPT_DIR/fm-inactive-reconcile.sh" _child "$id"
     ) || rc=$?
     if [ "$rc" -ne 0 ]; then
       complete=0

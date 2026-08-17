@@ -783,7 +783,20 @@ fm_pending_reply_secondmate_route_clear_with_mode() {  # <secondmate-home> <corr
     [ -z "$expected_home" ] || [ "$FM_PENDING_ROUTE_PARENT_HOME" = "$expected_home" ] || status=1
     [ -z "$expected_status" ] || [ "$FM_PENDING_ROUTE_PARENT_STATUS" = "$expected_status" ] || status=1
     if [ "$status" = 0 ]; then
-      rm -f "$FM_PENDING_ROUTE_MARKER" || status=1
+      pending_status=1
+      if [ "$allow_undelivered" = 4 ]; then
+        pending_status=0
+        fm_pending_reply_secondmate_route_has_pending_receipt "$secondmate_home" "$corr" \
+          || pending_status=$?
+      fi
+      case "$pending_status" in
+        0)
+          # Keep one shared route for all receipts bound to this parent
+          # correlation. The final reported receipt removes it.
+          ;;
+        1) rm -f "$FM_PENDING_ROUTE_MARKER" || status=1 ;;
+        *) status=1 ;;
+      esac
     fi
   elif [ "$status" = 0 ]; then
     status=1
@@ -1073,6 +1086,24 @@ fm_pending_reply_secondmate_receipt_validate() {  # <secondmate-home> <secondmat
   FM_PENDING_ROUTE_STATE=$state_abs
   FM_PENDING_ROUTE_PHASE=$phase
   return 0
+}
+
+fm_pending_reply_secondmate_route_has_pending_receipt() {  # <secondmate-home> <corr-id>
+  local secondmate_home=$1 corr=$2 outcome_dir rec kind rec_corr
+  outcome_dir="$secondmate_home/state/terminal-outcomes"
+  [ -d "$outcome_dir" ] && [ ! -L "$outcome_dir" ] || return 1
+  for rec in "$outcome_dir"/*.pending; do
+    if [ ! -e "$rec" ]; then
+      [ -L "$rec" ] && return 2
+      continue
+    fi
+    [ -f "$rec" ] && [ ! -L "$rec" ] || return 2
+    kind=$(fm_pending_reply_get "$rec" kind)
+    [ "$kind" = secondmate ] || continue
+    rec_corr=$(fm_pending_reply_get "$rec" parent_corr)
+    [ "$rec_corr" = "$corr" ] && return 0
+  done
+  return 1
 }
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
