@@ -333,6 +333,10 @@ test_primary_ancestry_refuses_any_inherited_worker_marker() {
 
 test_primary_ancestry_handles_exported_functions_without_weakening_newline_rejection() {
   local status payload
+  require_procfs || {
+    pass "skip: exported-function ancestry proof requires readable Linux procfs"
+    return 0
+  }
   if bash -c '
     exported_helper() { :; }
     export -f exported_helper
@@ -741,6 +745,8 @@ SH
   chmod +x "$fakebin/ps"
   primary="$case_dir/primary-root"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf '%s\n' '- project [local-only] - worker-isolation launch fixture (added 2026-08-17)' \
+    > "$home/data/projects.md"
   make_primary_root "$primary"
   token="launch-$id"
   fm_test_write_primary_attestation "$primary" \
