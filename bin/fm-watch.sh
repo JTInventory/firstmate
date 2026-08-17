@@ -954,7 +954,7 @@ surface_retry_write() {
   meta="$STATE/$task.meta"
   case "$wake_published" in 0|1|2) ;; *) return 1 ;; esac
   parent_corr=$(surface_parent_corr "$task") || return 1
-  spawn_incarnation= tasktmp= window= worktree=
+  spawn_incarnation='' tasktmp='' window='' worktree=''
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
     if spawn_incarnation=$(surface_meta_value_unique "$meta" spawn_incarnation); then
       :
@@ -1362,8 +1362,9 @@ surface_signal_transaction() {
 
 terminal_surface_marker_current() {
   local task=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status"
-  local marker="$STATE/.hb-terminal-surfaced-$(printf '%s' "$1" | tr ':/.' '___')"
+  local marker
   local last saved_snapshot saved_spawn current_spawn current_parent_corr saved_parent_corr rc
+  marker="$STATE/.hb-terminal-surfaced-$(printf '%s' "$1" | tr ':/.' '___')"
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 1
   marker=$(printf '%s' "$marker")

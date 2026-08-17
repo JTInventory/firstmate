@@ -920,7 +920,11 @@ fm_wake_append_if_absent_locked() {  # <result-var> <kind> <key> <payload>
   fi
   fm_wake_append_locked "$kind" "$key" "$payload"
   status=$?
-  [ "$status" -eq 0 ] && { FM_WAKE_APPEND_CREATED=1; printf -v "$result_var" '%s' 1; }
+  [ "$status" -eq 0 ] && {
+    # shellcheck disable=SC2034 # consumed by fm-inactive-reconcile.sh
+    FM_WAKE_APPEND_CREATED=1
+    printf -v "$result_var" '%s' 1
+  }
   return "$status"
 }
 
@@ -1058,7 +1062,7 @@ fm_wake_queue_cursor_write() {
 }
 
 fm_wake_queue_cursor_read() {
-  local cursor identity current offset schema_count identity_count offset_count cursor_data
+  local cursor identity current offset schema_count identity_count cursor_data
   cursor=$(fm_wake_queue_cursor_path)
   [ -f "$cursor" ] && [ ! -L "$cursor" ] || return 1
   cursor_data=$(fm_nofollow_read "$cursor") || return 1
@@ -1168,7 +1172,7 @@ fm_wake_install_queue_cursor_atomic() {
   local drained=$1 offset=$2 restore expected current status=0
   [ -f "$drained" ] && [ ! -L "$drained" ] || return 1
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
-  for attempt in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8; do
     status=0
     expected=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || return 1
     restore=$(mktemp "$STATE/.wake-queue.cursor-install.XXXXXX") || return 1
@@ -1203,9 +1207,9 @@ fm_wake_install_queue_cursor_atomic() {
 }
 
 fm_wake_restore_queue_atomic() {
-  local drained=$1 restore expected current status=0 attempt
+  local drained=$1 restore expected current status=0
   [ -f "$drained" ] && [ ! -L "$drained" ] || return 1
-  for attempt in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8; do
     expected=$(fm_wake_queue_signature "$FM_WAKE_QUEUE") || return 1
     restore=$(mktemp "$STATE/.wake-queue.restore.XXXXXX") || return 1
     [ -f "$restore" ] && [ ! -L "$restore" ] || { rm -f "$restore"; return 1; }

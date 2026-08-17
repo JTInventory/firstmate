@@ -356,8 +356,8 @@ run_axi_abort_child() {
 }
 
 run_axi() {
-  local output child child_start child_status=0 run_id published=0 startup_seen=0 tmpdir output_file
-  local group_member group_member_pid= group_member_start=
+  local child child_start child_status=0 run_id published=0 startup_seen=0 tmpdir output_file
+  local group_member group_member_pid='' group_member_start=''
   local startup_wait_secs startup_deadline total_wait_secs total_deadline now
   tmpdir=${FM_RUN_BINDING_TMP:-${TMPDIR:-/tmp}}
   output_file=$(mktemp "$tmpdir/.fm-run-step-output.XXXXXX") || return 1

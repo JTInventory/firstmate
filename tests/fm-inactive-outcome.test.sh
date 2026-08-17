@@ -129,6 +129,7 @@ direct_file_count() {
   for file in "$dir"/*; do
     [ -f "$file" ] || continue
     base=${file##*/}
+    # shellcheck disable=SC2254 # pattern intentionally accepts a caller-supplied glob
     case "$base" in $pattern) count=$((count + 1)) ;; esac
   done
   printf '%s' "$count"
@@ -139,6 +140,7 @@ direct_first_file() {
   for file in "$dir"/*; do
     [ -f "$file" ] || continue
     base=${file##*/}
+    # shellcheck disable=SC2254 # pattern intentionally accepts a caller-supplied glob
     case "$base" in
       $pattern) printf '%s' "$file"; return 0 ;;
     esac
@@ -147,7 +149,8 @@ direct_first_file() {
 }
 
 prepare_primary_proof() {
-  local root=$1 home=$2 fakebin=$3 state="$home/state" token
+  local root=$1 home=$2 fakebin=$3 token
+  local state="$home/state"
   mkdir -p "$state" "$home/projects"
   if [ ! -f "$state/.primary-attestation" ]; then
     ( cd "$root" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
@@ -250,7 +253,7 @@ write_meta() {
 }
 
 write_run_step_evidence() {
-  local state=$1 id=$2 incarnation=$3 outcome=$4 snapshot=$5 run_id
+  local state=$1 id=$2 incarnation=$3 snapshot=$5 run_id
   run_id=${6:-run-$id}
   fm_write_meta "$state/.run-step-incarnation-$id" \
     schema=fm-jt-run-step-incarnation.v1 task_id="$id" run_id="$run_id" \
@@ -357,7 +360,7 @@ test_done_and_failed_are_replayed_once() {
     case "$task" in
       done-x1)
         [ "$(receipt_value "$rec" incarnation)" = inc-done ] || fail "done receipt used the wrong incarnation"
-        [ "$(receipt_value "$rec" outcome)" = done ] || fail "done receipt outcome was incorrect"
+        [ "$(receipt_value "$rec" outcome)" = 'done' ] || fail "done receipt outcome was incorrect"
         [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: done · source: pane · pane is quiet' ] || fail "done receipt snapshot was not exact"
         [ "$fingerprint" = "$(receipt_fingerprint 'done-x1|inc-done|done|state: done · source: pane · pane is quiet')" ] || fail "done receipt fingerprint was not bound to its fields"
         ;;
@@ -423,7 +426,7 @@ test_run_step_incarnation_evidence_requires_lifecycle_binding() {
   write_meta "$state" run-step-x1 run-step-inc
   rm -f "$state/.pane-idle/run-step-x1"
   write_run_step_evidence "$state" run-step-x1 run-step-inc \
-    done 'state: done · source: run-step · checks green · run-id=run-step-x1' run-step-x1
+    'done' 'state: done · source: run-step · checks green · run-id=run-step-x1' run-step-x1
   export FM_FAKE_CREW_STATE_RUN_STEP_X1='state: done · source: run-step · checks green · run-id=run-step-x1'
   scan "$root" "$home" "$fakebin" --startup >/dev/null
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "bound run-step state did not create a receipt"
@@ -632,12 +635,12 @@ test_ack_recomputes_fingerprint_from_receipt_fields() {
     rec=$(direct_first_file "$state/terminal-outcomes" '*.pending')
     fingerprint=$(basename "$rec" .pending)
     case "$field" in
-      task_id) tampered=tampered-x1 ;;
-      incarnation) tampered=tampered-inc ;;
+      task_id) tampered='tampered-x1' ;;
+      incarnation) tampered='tampered-inc' ;;
       outcome) tampered=failed ;;
       terminal_snapshot) tampered='tampered snapshot' ;;
       kind) tampered=secondmate ;;
-      fingerprint) tampered=tampered-fingerprint ;;
+      fingerprint) tampered='tampered-fingerprint' ;;
     esac
     replace_field "$rec" "$field" "$tampered"
     if drain "$root" "$home" "$fakebin" >/dev/null 2>&1; then
@@ -1364,8 +1367,14 @@ SH
     || fail "retryable wake publication contention stopped the scan"
   [ ! -e "$state/.inactive-outcome-reconcile" ] || fail "failed scan advanced the cadence marker"
   [ "$(receipt_count "$state" pending)" = 1 ] || fail "receipt was created without publication-lock ownership"
-  [ ! -e "$state"/.first-x1.inactive-state.* ] || fail "failed crew-state scan leaked its temporary output"
-  [ ! -e "$state"/.second-x1.inactive-state.* ] || fail "failed crew-state scan leaked its temporary output"
+  for leaked in "$state"/.first-x1.inactive-state.*; do
+    [ -e "$leaked" ] || continue
+    fail "failed crew-state scan leaked its temporary output"
+  done
+  for leaked in "$state"/.second-x1.inactive-state.*; do
+    [ -e "$leaked" ] || continue
+    fail "failed crew-state scan leaked its temporary output"
+  done
   if ! grep -l '^task_id=first-x1$' "$state"/terminal-outcomes/*.pending >/dev/null 2>&1 \
     && ! grep -l '^task_id=second-x1$' "$state"/terminal-outcomes/*.pending >/dev/null 2>&1; then
     fail "a successfully published child receipt was not retained"
@@ -1427,7 +1436,7 @@ test_reused_task_id_gets_new_fingerprint() {
     [ "$(receipt_value "$rec" task_id)" = reused-x1 ] || fail "reused task receipt lost its task id"
     incarnation=$(receipt_value "$rec" incarnation)
     case "$incarnation" in incarnation-old|incarnation-new) ;; *) fail "reused task receipt lost its incarnation" ;; esac
-    [ "$(receipt_value "$rec" outcome)" = done ] || fail "reused task receipt lost its outcome"
+    [ "$(receipt_value "$rec" outcome)" = 'done' ] || fail "reused task receipt lost its outcome"
     [ "$(receipt_value "$rec" terminal_snapshot)" = 'state: done · source: pane · first run quiet' ] || fail "reused task receipt snapshot was not exact"
     fingerprint=$(basename "$rec" .pending)
     [ "$fingerprint" = "$(receipt_fingerprint "reused-x1|$incarnation|done|state: done · source: pane · first run quiet")" ] || fail "reused task fingerprint was not bound to its fields"

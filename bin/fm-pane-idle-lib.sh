@@ -256,7 +256,7 @@ PERL
 }
 
 fm_pane_idle_meta_index_collect() {
-  local state=$1 output=$2 deadline_ms=${3:-} worker rc remaining sorted_tmp entries_tmp entries_sorted_tmp state_stamp entries_stamp post_state_stamp
+  local state=$1 output=$2 deadline_ms=${3:-} worker rc remaining sorted_tmp state_stamp entries_stamp post_state_stamp
   local progress_dir cursor_path records_path complete_path seen_path aggregate_path aggregate_cursor_path
   local aggregate_complete_path sorted_path sorted_complete_path entries_path entries_complete_path entries_stamp_path
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
@@ -1288,7 +1288,7 @@ fm_pane_idle_meta_index_cursor_write() {
 
 fm_pane_idle_meta_index_persist() {
   local state=$1 directory=$2 deadline_ms=${3:-} window meta count key path
-  local cursor_path ready_path snapshot_path reclaim_cursor_path cursor= cursor_found=0 started=1
+  local cursor_path ready_path snapshot_path reclaim_cursor_path cursor='' cursor_found=0 started=1
   local reclaim_entries_path reclaim_entries_complete_path snapshot_source
   local snapshot_tmp snapshot_changed=1 tmp rc compare_rc source_stamp publish_stamp final_stamp
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
@@ -1434,7 +1434,7 @@ fm_pane_idle_meta_index_persist() {
 
 fm_pane_idle_meta_index_reclaim() {
   local directory=$1 deadline_ms=${2:-} snapshot_source=${3:-} current_tmp cursor_path worker rc path key meta window count
-  local entries_path entries_complete_path entries_tmp entries_sorted_tmp remaining
+  local entries_path entries_complete_path remaining
   case "$deadline_ms" in ''|*[!0-9]*) deadline_ms=;; esac
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
   [ -f "$snapshot_source" ] && [ ! -L "$snapshot_source" ] || return 1
@@ -1747,7 +1747,7 @@ fm_pane_idle_current_matches() {  # <backend> <target> <expected-hash>
 }
 
 fm_pane_idle_read_incarnation() {  # <meta> <id>
-  local meta=$1 id=$2 token tasktmp window worktree seed digest rc
+  local meta=$1 token tasktmp window worktree seed digest rc
   if token=$(fm_pane_idle_meta_value_unique "$meta" spawn_incarnation); then
     case "$token" in
       ''|legacy-unknown|*[!A-Za-z0-9._:-]*) return 1 ;;

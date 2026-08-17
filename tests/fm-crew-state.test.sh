@@ -690,7 +690,8 @@ test_bound_run_id_is_selected_before_current_run() {
     "spawn_incarnation=bound-selection-inc" "run_step_id=01BOUND"
   write_run_step_binding "$d/state" feat-bound-selection 01BOUND bound-selection-inc
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-bound-selection)"
-  export FM_FAKE_AXI_STATUS_RUN_01BOUND="$(run_failed fm/feat-bound-selection | sed 's/id: "01RUN"/id: "01BOUND"/')"
+  FM_FAKE_AXI_STATUS_RUN_01BOUND="$(run_failed fm/feat-bound-selection | sed 's/id: "01RUN"/id: "01BOUND"/')"
+  export FM_FAKE_AXI_STATUS_RUN_01BOUND
   out=$(run_crew_state "$d" feat-bound-selection)
   assert_contains "$out" "state: failed" "bound run id selects its exact terminal run"
   assert_contains "$out" "run-id=01BOUND" "bound run id remains in the terminal detail"

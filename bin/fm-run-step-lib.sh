@@ -109,6 +109,7 @@ fm_run_step_binding_read_held() {
   FM_RUN_STEP_HELD_LOCK=$lock
   FM_RUN_STEP_HELD_LOCK_RELEASE=$acquired
   FM_RUN_STEP_HELD_PREVIOUS_OWNER=${FM_TASK_LOCK_OWNER:-}
+  # shellcheck disable=SC2034 # consumed by fm-crew-state.sh after this helper returns
   FM_RUN_STEP_HELD_VALUE=$stored_run
   if [ "$acquired" = 1 ]; then
     FM_TASK_LOCK_OWNER=$owner

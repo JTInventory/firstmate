@@ -728,6 +728,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
   fi
   if [ "$route_status" = 0 ]; then
     if fm_nofollow_rename "$tmp" "$marker"; then
+      # shellcheck disable=SC2034 # consumed by fm-send.sh after sourcing this library
       FM_PENDING_REPLY_ROUTE_COMMITTED=1
     else
       route_status=1
@@ -876,7 +877,7 @@ fm_pending_reply_secondmate_route_clear_undelivered() {  # <secondmate-home> <co
 fm_pending_reply_secondmate_route_validate() {  # <secondmate-home> [<corr-id>] [<allow-undelivered>]
   local secondmate_home=$1 wanted_corr=${2:-} allow_undelivered=${3:-0} marker line key value schema marker_id secondmate_id current_corr history_marker
   local parent_home parent_status corr parent_abs state_abs expected_home parent_status_dir pending_dir expected_status rec active_rec history_rec history_dir
-  local phase delivered record_home record_home_abs record_status record_task record_corr home_marker
+  local phase delivered record_home record_home_abs record_task record_corr home_marker
   local seen_schema=0 seen_secondmate_id=0 seen_parent_home=0 seen_parent_status=0 seen_corr=0
   FM_PENDING_ROUTE_PARENT_STATUS=
   FM_PENDING_ROUTE_PARENT_HOME=
@@ -1506,7 +1507,7 @@ fm_pending_reply_cleanup_deadline_sleep() {
 
 fm_pending_reply_cleanup_retry_batch() {  # <state-dir> <pending-reply-dir>
   local state=$1 dir=$2 cursor_path cursor cleanup_meta base pass started=0
-  local processed=0 last= limit budget start deadline now lock_attempts tmp cleanup_rc
+  local processed=0 last='' limit budget start deadline now lock_attempts tmp cleanup_rc
   cursor_path="$state/.cleanup-retry.cursor"
   limit=$(fm_pending_reply_cleanup_retry_limit)
   budget=$(fm_pending_reply_cleanup_retry_budget_secs)

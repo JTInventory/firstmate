@@ -3420,7 +3420,7 @@ terminal_outcome_surfaced() {
 
 replay_surface_retry_write() {
   local id=$1 meta=$2 snapshot=$3 incarnation=$4 key=$5 published=$6
-  local retry tmp tasktmp window worktree marker_incarnation explicit_incarnation parent_corr rc
+  local retry tmp tasktmp window worktree marker_incarnation parent_corr rc
   case "$published" in 0|1|2) ;; *) return 1 ;; esac
   parent_corr=$(replay_parent_corr) || return 1
   tasktmp=$(meta_value "$meta" tasktmp)
@@ -3451,7 +3451,7 @@ replay_surface_retry_write() {
 
 replay_surface_marker() {
   local id=$1 meta=$2 snapshot=$3 incarnation=$4 wake_key=$5 key raw marker retry tmp tasktmp window worktree
-  local marker_incarnation explicit_incarnation parent_corr rc
+  local marker_incarnation parent_corr rc
   key=$(printf '%s' "$id" | tr ':/.' '___')
   parent_corr=$(replay_parent_corr) || return 1
   raw="$STATE/.hb-surfaced-$key"
@@ -3460,7 +3460,7 @@ replay_surface_marker() {
   tasktmp=$(meta_value "$meta" tasktmp)
   window=$(meta_value "$meta" window)
   worktree=$(meta_value "$meta" worktree)
-  if explicit_incarnation=$(meta_value_unique "$meta" spawn_incarnation); then
+  if meta_value_unique "$meta" spawn_incarnation >/dev/null; then
     marker_incarnation=$incarnation
   else
     rc=$?
