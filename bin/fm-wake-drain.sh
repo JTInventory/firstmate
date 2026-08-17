@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fm_worker_refuse_primary_operation "wake drain" || exit 1
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pane-idle-lib.sh
+. "$SCRIPT_DIR/fm-pane-idle-lib.sh"
 
 DRAIN_TMP=
 DRAIN_DEDUPED=
@@ -39,6 +41,23 @@ export FM_WAKE_DRAIN_RESUMED_SOURCE
 case "$DRAIN_BATCH_ROWS" in
   ''|*[!0-9]*|0) DRAIN_BATCH_ROWS=16 ;;
 esac
+PRESENTATION_TIMEOUT_SECS=${FM_WAKE_DRAIN_PRESENTATION_TIMEOUT_SECS:-30}
+case "$PRESENTATION_TIMEOUT_SECS" in
+  ''|*[!0-9]*|0) PRESENTATION_TIMEOUT_SECS=30 ;;
+esac
+while [ "${PRESENTATION_TIMEOUT_SECS#0}" != "$PRESENTATION_TIMEOUT_SECS" ]; do
+  PRESENTATION_TIMEOUT_SECS=${PRESENTATION_TIMEOUT_SECS#0}
+done
+[ -n "$PRESENTATION_TIMEOUT_SECS" ] || PRESENTATION_TIMEOUT_SECS=30
+case "${#PRESENTATION_TIMEOUT_SECS}" in
+  1|2) ;;
+  3) [ "$PRESENTATION_TIMEOUT_SECS" -le 300 ] || PRESENTATION_TIMEOUT_SECS=300 ;;
+  *) PRESENTATION_TIMEOUT_SECS=300 ;;
+esac
+
+presentation_reconcile() {
+  fm_pane_idle_run_bounded_child "$PRESENTATION_TIMEOUT_SECS" env "$@"
+}
 
 inactive_generation_valid() {
   local generation=${FM_WAKE_DRAIN_GENERATION:-}
@@ -51,6 +70,7 @@ inactive_generation_valid() {
 present_inactive_row() {
   local key=$1 row=$2 status=0 go emitted worker worker_status=0 generation
   local defer_pending=0 defer_payload=
+  local worker_timed_out=0 presentation_deadline
   local _epoch _seq _kind _queued_key payload
   generation=${FM_WAKE_DRAIN_GENERATION:-}
   if [ "${FM_WAKE_DRAIN_DIRECT:-0}" = 1 ]; then
@@ -117,25 +137,39 @@ present_inactive_row() {
       fi
       sleep 0.01
     done
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
+    presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-started "$key" "$row" || exit 1
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
+    presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-emitted "$key" "$row" || exit 1
     printf '%s\n' "$row" || exit 1
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
+    presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-confirmed "$key" "$row" || exit 1
     : > "$emitted" || exit 1
-    FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
+    presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" FM_WAKE_DRAIN_DELEGATED=1 \
       FM_WAKE_DRAIN_PARENT_PID="$DRAIN_PID" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
       output-complete "$key" "$row" || exit 1
   ) &
   worker=$!
   : > "$go" || status=1
   if [ "$status" = 0 ]; then
-    wait "$worker" || worker_status=$?
+    presentation_deadline=$(( $(date +%s) + PRESENTATION_TIMEOUT_SECS ))
+    while kill -0 "$worker" 2>/dev/null; do
+      if [ "$(date +%s)" -ge "$presentation_deadline" ] && kill -0 "$worker" 2>/dev/null; then
+        kill "$worker" 2>/dev/null || true
+        worker_timed_out=1
+        worker_status=124
+        break
+      fi
+      sleep 0.01
+    done
+    if [ "$worker_timed_out" = 0 ]; then
+      wait "$worker" || worker_status=$?
+    else
+      wait "$worker" 2>/dev/null || true
+    fi
     [ "$worker_status" = 0 ] || status=1
   else
     kill "$worker" 2>/dev/null || true
@@ -144,8 +178,9 @@ present_inactive_row() {
   rm -f "$go"
   if [ "$status" -ne 0 ]; then
     if [ -e "$emitted" ]; then
-      if FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" "$SCRIPT_DIR/fm-inactive-reconcile.sh" \
-          output-complete "$key" "$row" >/dev/null 2>&1; then
+      if presentation_reconcile FM_WAKE_DRAIN_FILE="$DRAIN_DEDUPED" \
+          "$SCRIPT_DIR/fm-inactive-reconcile.sh" output-complete "$key" "$row" \
+          >/dev/null 2>&1; then
         status=0
       else
         status=3

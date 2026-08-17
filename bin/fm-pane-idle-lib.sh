@@ -232,14 +232,7 @@ while (defined(my $path = <$pfh>)) {
 }
 close($pfh) or exit 1;
 @paths = sort @paths;
-my $tmp = "$entries.tmp.$$";
-open(my $efh, '>', $tmp) or exit 1;
-for my $path (@paths) {
-  print($efh $path, "\n") or exit 1;
-}
-close($efh) or exit 1;
-exit 1 if -l $entries;
-rename($tmp, $entries) or exit 1;
+atomic_write($entries, join('', map { "$_\n" } @paths)) or exit 1;
 atomic_write($stamp_path, "$finish\n") or exit 1;
 atomic_write($complete, "complete\n") or exit 1;
 unlink($partial, $cookie_path, $source_stamp) or exit 1;
@@ -1034,17 +1027,28 @@ fm_pane_idle_meta_index_windows_direct_resumable() {
     "$windows_stamp_path" "$source_stamp" <<'PERL'
 use strict;
 use warnings;
+use Fcntl qw(:DEFAULT);
 my ($state, $entries_path, $cursor, $windows_path, $windows_complete_path,
     $windows_partial_path, $windows_cursor_path, $windows_stamp_path, $source_stamp) = @ARGV;
 sub atomic_write {
   my ($path, $value) = @_;
   return 0 if -l $path;
   my $tmp = "$path.tmp.$$";
-  open(my $fh, '>', $tmp) or return 0;
+  my $nofollow = eval { Fcntl::O_NOFOLLOW() };
+  defined($nofollow) or return 0;
+  sysopen(my $fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or return 0;
   binmode($fh);
-  return 0 unless print($fh $value) && close($fh);
+  if (!print($fh $value) || !close($fh)) {
+    close($fh);
+    unlink($tmp);
+    return 0;
+  }
   return 0 if -l $path;
-  rename($tmp, $path) or return 0;
+  if (!rename($tmp, $path)) {
+    unlink($tmp);
+    return 0;
+  }
+  return 1;
 }
 sub read_text {
   my ($path) = @_;
@@ -1075,7 +1079,7 @@ if (!-e $windows_complete_path) {
     -f $windows_partial_path && !-l $windows_partial_path or exit 2;
     open($pfh, '>>', $windows_partial_path) or exit 2;
   } else {
-    open($pfh, '>', $windows_partial_path) or exit 2;
+    sysopen($pfh, $windows_partial_path, O_WRONLY | O_CREAT | O_EXCL | $nofollow, 0600) or exit 2;
   }
   while (defined(my $path = <$efh>)) {
     my $next = tell($efh);
@@ -1109,14 +1113,11 @@ if (!-e $windows_complete_path) {
     $counts{$window}++ if $window ne '';
   }
   close($rfh) or exit 2;
-  my $tmp = "$windows_path.tmp.$$";
-  open(my $wfh, '>', $tmp) or exit 2;
+  my $content = '';
   for my $window (sort keys %counts) {
-    print($wfh $window, "\t", $counts{$window}, "\n") or exit 2;
+    $content .= $window . "\t" . $counts{$window} . "\n";
   }
-  close($wfh) or exit 2;
-  -l $windows_path and exit 2;
-  rename($tmp, $windows_path) or exit 2;
+  atomic_write($windows_path, $content) or exit 2;
   atomic_write($windows_complete_path, "complete\n") or exit 2;
   unlink($windows_partial_path, $windows_cursor_path) or exit 2;
 }
@@ -1640,12 +1641,7 @@ while (defined(my $entry = <$pfh>)) {
 }
 close($pfh) or exit 1;
 @entries = sort @entries;
-my $tmp = "$entries.tmp.$$";
-open(my $efh, '>', $tmp) or exit 1;
-print($efh "$_\n") for @entries;
-close($efh) or exit 1;
-exit 1 if -l $entries;
-rename($tmp, $entries) or exit 1;
+atomic_write($entries, join('', map { "$_\n" } @entries)) or exit 1;
 atomic_write($complete, "complete\n") or exit 1;
 unlink($partial, $cookie_path) or exit 1;
 PERL

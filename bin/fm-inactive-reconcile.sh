@@ -2245,12 +2245,7 @@ if ($source_path ne '') {
     }
     close($pfh) or exit 1;
     @paths = sort @paths;
-    my $tmp = "$source_path.tmp.$$";
-    open(my $sfh, '>', $tmp) or exit 1;
-    print($sfh "$_\n") for @paths;
-    close($sfh) or exit 1;
-    -l $source_path and exit 1;
-    rename($tmp, $source_path) or exit 1;
+    atomic_write($source_path, join('', map { "$_\n" } @paths)) or exit 1;
     atomic_write($source_complete, "complete\n") or exit 1;
     unlink($source_partial, $source_cookie) or exit 1;
   }

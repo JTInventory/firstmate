@@ -278,10 +278,18 @@ meta_value_count() {
   printf '%s' "$count"
 }
 
+window_meta_matches() {
+  local w=$1 meta=$2 current
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  current=$(fm_pane_idle_meta_value_unique "$meta" window 2>/dev/null) || return 1
+  [ "$current" = "$w" ]
+}
+
 window_kind() {
   local w=$1 deadline_ms=${2:-} meta_hint=${3:-} meta mw kind kind_count
   if [ -n "$meta_hint" ]; then
     meta=$meta_hint
+    window_meta_matches "$w" "$meta" || return 1
   elif [ -n "$deadline_ms" ]; then
     if [ "${FM_PANE_IDLE_META_INDEX_BUILT:-0}" = 1 ]; then
       meta=$(fm_pane_idle_meta_for_window_bounded "$STATE" "$w" "$deadline_ms" 2>/dev/null) || return 1
@@ -360,6 +368,7 @@ window_backend() {  # <window>
   local w=$1 deadline_ms=${2:-} meta_hint=${3:-} meta
   if [ -n "$meta_hint" ]; then
     meta=$meta_hint
+    window_meta_matches "$w" "$meta" || return 1
     window_backend_from_meta "$meta"
     return $?
   elif [ -n "$deadline_ms" ]; then

@@ -3,25 +3,31 @@ set -u
 
 run_id_from_output() {
   awk '
-    function emit(value) {
+    function normalize(value) {
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       gsub(/^"|"$/, "", value)
       if (value ~ /^[A-Za-z0-9._:-]+$/) {
-        print value
-        exit
+        parsed=value
+      } else {
+        invalid=1
       }
     }
-    /^[[:space:]]*run:[[:space:]]*$/ { in_run=1; next }
+    /^run:[[:space:]]*$/ {
+      if (run_seen) invalid=1
+      run_seen=1
+      in_run=1
+      next
+    }
     /^[^[:space:]]/ { in_run=0 }
     in_run && /^[[:space:]]+id:[[:space:]]*/ {
+      id_count++
       value=$0
       sub(/^[[:space:]]+id:[[:space:]]*/, "", value)
-      emit(value)
+      normalize(value)
     }
-    /^[[:space:]]*(run|run_id)[[:space:]]*[:=][[:space:]]*/ {
-      value=$0
-      sub(/^[[:space:]]*(run|run_id)[[:space:]]*[:=][[:space:]]*/, "", value)
-      emit(value)
+    END {
+      if (!run_seen || invalid || id_count != 1 || parsed == "") exit 1
+      print parsed
     }
   ' "$1"
 }
@@ -224,10 +230,23 @@ publish_run_id() {
 
 run_axi() {
   local output child child_status=0 run_id published=0 tmpdir output_file
+  local startup_wait_secs startup_deadline
   tmpdir=${FM_RUN_BINDING_TMP:-${TMPDIR:-/tmp}}
   output_file=$(mktemp "$tmpdir/.fm-run-step-output.XXXXXX") || return 1
   "$FM_RUN_BINDING_REAL" "$@" >"$output_file" 2>&1 &
   child=$!
+  startup_wait_secs=${FM_RUN_BINDING_STARTUP_WAIT_SECS:-30}
+  case "$startup_wait_secs" in ''|*[!0-9]*|0) startup_wait_secs=30 ;; esac
+  while [ "${startup_wait_secs#0}" != "$startup_wait_secs" ]; do
+    startup_wait_secs=${startup_wait_secs#0}
+  done
+  [ -n "$startup_wait_secs" ] || startup_wait_secs=30
+  case "${#startup_wait_secs}" in
+    1|2) ;;
+    3) [ "$startup_wait_secs" -le 300 ] || startup_wait_secs=300 ;;
+    *) startup_wait_secs=300 ;;
+  esac
+  startup_deadline=$(( $(date +%s) + startup_wait_secs ))
   while kill -0 "$child" 2>/dev/null; do
     if run_id=$(run_id_from_output "$output_file") && [ -n "$run_id" ]; then
       if ! publish_run_id "$run_id"; then
@@ -239,6 +258,13 @@ run_axi() {
       fi
       published=1
       break
+    fi
+    if [ "$(date +%s)" -ge "$startup_deadline" ]; then
+      kill "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+      cat "$output_file"
+      rm -f "$output_file"
+      return 1
     fi
     sleep 0.05
   done
