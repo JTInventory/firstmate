@@ -69,6 +69,8 @@
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
+# shellcheck source=bin/fm-safe-io-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-safe-io-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -180,7 +182,7 @@ fm_pending_reply_txn_owner_write() {  # <owner-path> <pid> <identity> <token> <c
     "identity=$identity" \
     "token=$token" \
     "phase=$phase" \
-    "ticket=$ticket" > "$tmp"; then
+    "ticket=$ticket" | fm_nofollow_write "$tmp"; then
     rm -f "$tmp" || true
     return 1
   fi
@@ -664,7 +666,7 @@ fm_pending_reply_secondmate_route_write() {  # <secondmate-home> <parent-home> <
     printf 'parent_home=%s\n' "$parent_abs"
     printf 'parent_status=%s\n' "$status_path"
     printf 'corr_id=%s\n' "$corr"
-  } > "$tmp" || { rm -f "$tmp"; fm_lock_release "$route_lock" || true; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; fm_lock_release "$route_lock" || true; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     if [ -f "$marker" ] && [ ! -L "$marker" ] \
@@ -1094,14 +1096,15 @@ fm_pending_reply_set() {  # <record-path> <key> <value>
   dir=$(dirname "$rec")
   base=$(basename "$rec")
   tmp="$dir/.${base}.tmp.$$"
-  : > "$tmp" || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "${key}="*) continue ;;
-    esac
-    printf '%s\n' "$line" >> "$tmp" || return 1
-  done < "$rec"
-  printf '%s=%s\n' "$key" "$value" >> "$tmp" || return 1
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "${key}="*) continue ;;
+      esac
+      printf '%s\n' "$line"
+    done < "$rec"
+    printf '%s=%s\n' "$key" "$value"
+  } | fm_nofollow_write "$tmp" || return 1
   mv -f "$tmp" "$rec"
 }
 
@@ -1111,18 +1114,19 @@ fm_pending_reply_set_retirement_stage() {  # <record-path> <epoch> <history-stat
   dir=$(dirname "$rec")
   base=$(basename "$rec")
   tmp="$dir/.${base}.stage.$$"
-  : > "$tmp" || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      retirement_staged_epoch=*|retirement_history_state=*|retirement_staged_from=*|retirement_source_state=*) continue ;;
-    esac
-    printf '%s\n' "$line" >> "$tmp" || return 1
-  done < "$rec"
-  printf '%s\n' \
-    "retirement_staged_epoch=$epoch" \
-    "retirement_history_state=$history_state" \
-    "retirement_staged_from=$source_phase" \
-    "retirement_source_state=$source_state" >> "$tmp" || return 1
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        retirement_staged_epoch=*|retirement_history_state=*|retirement_staged_from=*|retirement_source_state=*) continue ;;
+      esac
+      printf '%s\n' "$line"
+    done < "$rec"
+    printf '%s\n' \
+      "retirement_staged_epoch=$epoch" \
+      "retirement_history_state=$history_state" \
+      "retirement_staged_from=$source_phase" \
+      "retirement_source_state=$source_state"
+  } | fm_nofollow_write "$tmp" || return 1
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$rec"
 }
@@ -1133,13 +1137,14 @@ fm_pending_reply_clear_retirement_stage() {  # <record-path>
   dir=$(dirname "$rec")
   base=$(basename "$rec")
   tmp="$dir/.${base}.unstage.$$"
-  : > "$tmp" || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      retirement_staged_epoch=*|retirement_history_state=*|retirement_staged_from=*) continue ;;
-    esac
-    printf '%s\n' "$line" >> "$tmp" || return 1
-  done < "$rec"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        retirement_staged_epoch=*|retirement_history_state=*|retirement_staged_from=*) continue ;;
+      esac
+      printf '%s\n' "$line"
+    done < "$rec"
+  } | fm_nofollow_write "$tmp" || return 1
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$rec"
 }
@@ -1198,7 +1203,7 @@ fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text
     *) parent_home=$(cd "$parent_home" 2>/dev/null && pwd) || parent_home=$1 ;;
   esac
   tmp="$dir/.${corr}.tmp.$$"
-  cat > "$tmp" <<EOF
+  cat <<EOF | fm_nofollow_write "$tmp"
 schema=$FM_PENDING_REPLY_SCHEMA
 corr_id=$corr
 task_id=$task_id
@@ -1269,7 +1274,7 @@ fm_pending_reply_write_delivery_confirmation() {  # <state-dir> <corr_id> <state
   dir=$(dirname "$marker")
   mkdir -p "$dir" || return 1
   tmp="$marker.tmp.$$"
-  printf '%s=%s\n' "$delivery_state" "$value" > "$tmp" || return 1
+  printf '%s=%s\n' "$delivery_state" "$value" | fm_nofollow_write "$tmp" || return 1
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$marker"
 }
@@ -1385,7 +1390,7 @@ fm_pending_reply_schedule_undelivered_cleanup() {  # <state-dir> <corr-id> <seco
     printf 'schema=fm-undelivered-cleanup.v1\n'
     printf 'corr_id=%s\n' "$corr"
     printf 'secondmate_home=%s\n' "$secondmate_home"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   if ln "$tmp" "$meta" 2>/dev/null; then
     rm -f "$tmp"
@@ -1519,7 +1524,7 @@ fm_pending_reply_cleanup_retry_batch() {  # <state-dir> <pending-reply-dir>
   if [ "$processed" -gt 0 ]; then
     tmp=$(mktemp "$state/.cleanup-retry.cursor.XXXXXX") || return 1
     [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-    printf '%s\n' "$last" > "$tmp" || { rm -f "$tmp"; return 1; }
+    printf '%s\n' "$last" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$cursor_path" || { rm -f "$tmp"; return 1; }
   fi
   return 0
@@ -1692,14 +1697,15 @@ fm_pending_reply_prepare_resolved_handoff() {  # <history-path> <history-state-d
     [ "$(fm_pending_reply_get "$receipt" retired_via)" = forced-teardown ] || return 1
   fi
   tmp="${receipt}.tmp.$$"
-  : > "$tmp" || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in retirement_source_state=*|retirement_history_state=*) continue ;; esac
-    printf '%s\n' "$line" >> "$tmp" || return 1
-  done < "$history"
-  printf '%s\n' \
-    "retirement_history_state=$history_state" \
-    "retirement_source_state=$source_state" >> "$tmp" || return 1
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in retirement_source_state=*|retirement_history_state=*) continue ;; esac
+      printf '%s\n' "$line"
+    done < "$history"
+    printf '%s\n' \
+      "retirement_history_state=$history_state" \
+      "retirement_source_state=$source_state"
+  } | fm_nofollow_write "$tmp" || return 1
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$receipt"
 }
@@ -1723,14 +1729,15 @@ fm_pending_reply_promote_resolved_record() {  # <record-path> <history-state-dir
       [ "$(fm_pending_reply_get "$history" retirement_source_state)" = "$source_state" ] || return 1
     else
       tmp="$history_dir/.${corr}.resolved.$$"
-      : > "$tmp" || return 1
-      while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in retirement_source_state=*|retirement_history_state=*) continue ;; esac
-        printf '%s\n' "$line" >> "$tmp" || return 1
-      done < "$record"
-      printf '%s\n' \
-        "retirement_history_state=$history_state" \
-        "retirement_source_state=$source_state" >> "$tmp" || return 1
+      {
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in retirement_source_state=*|retirement_history_state=*) continue ;; esac
+          printf '%s\n' "$line"
+        done < "$record"
+        printf '%s\n' \
+          "retirement_history_state=$history_state" \
+          "retirement_source_state=$source_state"
+      } | fm_nofollow_write "$tmp" || return 1
       chmod 600 "$tmp" 2>/dev/null || true
       mv "$tmp" "$history" || return 1
     fi
@@ -2150,7 +2157,7 @@ fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   if ! grep -Fqx "blocked: $payload" "$parent_status" 2>/dev/null; then
-    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || return 1
+    printf 'blocked: %s\n' "$payload" | fm_nofollow_append "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
@@ -2611,19 +2618,20 @@ fm_pending_reply_prepare_forced_retirement() {  # <record-path> <history-state-d
     return 0
   fi
   tmp="$history_dir/.${corr}.retire.$$"
-  : > "$tmp" || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      phase=*|retired_epoch=*|retired_via=*|retired_from=*) continue ;;
-    esac
-    printf '%s\n' "$line" >> "$tmp" || return 1
-  done < "$rec"
   now=$(fm_pending_reply_now)
-  printf '%s\n' \
-    "retired_epoch=$now" \
-    "retired_via=forced-teardown" \
-    "retired_from=$staged_from" \
-    "phase=retired" >> "$tmp" || return 1
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        phase=*|retired_epoch=*|retired_via=*|retired_from=*) continue ;;
+      esac
+      printf '%s\n' "$line"
+    done < "$rec"
+    printf '%s\n' \
+      "retired_epoch=$now" \
+      "retired_via=forced-teardown" \
+      "retired_from=$staged_from" \
+      "phase=retired"
+  } | fm_nofollow_write "$tmp" || return 1
   chmod 600 "$tmp" 2>/dev/null || true
   [ ! -e "$staged" ] || return 1
   mv "$tmp" "$staged"

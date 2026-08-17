@@ -28,6 +28,7 @@
 # duplicate invocations of this script still no-op through the watcher singleton
 # lock.
 set -u
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
@@ -161,7 +162,7 @@ pause_marker_record_status() {  # <status-file>
   key=$(pause_key "$win")
   marker="$STATE/.paused-$key"
   if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
-    date +%s > "$marker"
+    date +%s | fm_nofollow_write "$marker"
   fi
 }
 
@@ -206,7 +207,7 @@ pause_state_class() {  # <window> <task>
   class=$(crew_absorb_class "$task")
   case "$class" in
     paused)
-      date +%s > "$recheck"
+      date +%s | fm_nofollow_write "$recheck"
       printf 'paused'
       ;;
     *)
@@ -225,10 +226,10 @@ handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key marker resurfaced now age resurfaced_age reason
   key=$(pause_key "$win")
   marker="$STATE/.paused-$key"
-  printf '%s' "$h" > "$STATE/.stale-$key"
+  printf '%s' "$h" | fm_nofollow_write "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   if ! grep -qE '^[0-9]+$' "$marker" 2>/dev/null; then
-    date +%s > "$marker"
+    date +%s | fm_nofollow_write "$marker"
   fi
   now=$(date +%s)
   marker_epoch=$(cat "$marker" 2>/dev/null || true)
@@ -242,8 +243,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$resurfaced_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external; recheck the declared wait)"
     fm_wake_append stale "$win" "$reason" || exit 1
-    printf '%s' "$now" > "$resurfaced"
-    printf '%s' "$now" > "$marker"
+    printf '%s' "$now" | fm_nofollow_write "$resurfaced"
+    printf '%s' "$now" | fm_nofollow_write "$marker"
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
@@ -255,11 +256,11 @@ handle_paused_stale() {  # <window> <task> <hash>
 # a logging hiccup never affects supervision.
 triage_log() {
   local sz
-  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$TRIAGE_LOG" 2>/dev/null || return 0
+  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" | fm_nofollow_append "$TRIAGE_LOG" 2>/dev/null || return 0
   sz=$(wc -c < "$TRIAGE_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$sz" in ''|*[!0-9]*) return 0 ;; esac
   if [ "$sz" -ge "$TRIAGE_LOG_MAX_BYTES" ]; then
-    tail -n 2000 "$TRIAGE_LOG" > "$TRIAGE_LOG.tmp" 2>/dev/null && mv -f "$TRIAGE_LOG.tmp" "$TRIAGE_LOG" 2>/dev/null
+    tail -n 2000 "$TRIAGE_LOG" 2>/dev/null | fm_nofollow_write "$TRIAGE_LOG.tmp" && mv -f "$TRIAGE_LOG.tmp" "$TRIAGE_LOG" 2>/dev/null
     rm -f "$TRIAGE_LOG.tmp" 2>/dev/null || true
   fi
 }
@@ -422,7 +423,7 @@ watch_window_scan_prepare() {
     rm -f "$cursor_path" || return 1
     tmp=$(mktemp "$source_path.XXXXXX") || return 1
     [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-    if ! printf '%s\n' "$source" > "$tmp" || [ -L "$source_path" ] \
+    if ! printf '%s\n' "$source" | fm_nofollow_write "$tmp" || [ -L "$source_path" ] \
       || ! mv -f "$tmp" "$source_path"; then
       rm -f "$tmp"
       return 1
@@ -477,7 +478,7 @@ event_wait_herdr() {
   [ -f "$windows_tmp" ] && [ ! -L "$windows_tmp" ] || { rm -f "$windows_tmp"; return 2; }
   fm_pane_idle_meta_index_windows_from_snapshot_resumable \
     "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "$event_window_cursor" \
-    "$event_scan_deadline" > "$windows_tmp" || windows_status=$?
+    "$event_scan_deadline" | fm_nofollow_write "$windows_tmp" || windows_status=$?
   case "$windows_status" in
     0) ;;
     124) ;;
@@ -562,8 +563,8 @@ event_wait_herdr() {
 wake() {
   local wake_output=$1 row _epoch _seq _kind _key _payload confirm_status
   case "$1" in
-    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
-    *) echo 0 > "$STATE/.heartbeat-streak" ;;
+    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) | fm_nofollow_write "$STATE/.heartbeat-streak" ;;
+    *) echo 0 | fm_nofollow_write "$STATE/.heartbeat-streak" ;;
   esac
   printf '%s\n' "$wake_output" || exit 1
   while IFS= read -r row || [ -n "$row" ]; do
@@ -673,7 +674,7 @@ run_check_capture() {
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
-  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
+  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" 2>/dev/null | fm_nofollow_write "$FM_CHECK_OUTPUT" ) &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
@@ -765,10 +766,10 @@ surface_snapshot_matches_current() {
     fm_pane_idle_run_bounded_child "$state_timeout" env \
       FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
       FM_TASK_LOCK_PATH="$WATCH_TASK_LOCK" FM_TASK_LOCK_OWNER="$WATCH_TASK_LOCK_OWNER" \
-      "$FM_CREW_STATE_BIN" "$task" > "$state_tmp" 2>/dev/null || state_rc=$?
+      "$FM_CREW_STATE_BIN" "$task" 2>/dev/null | fm_nofollow_write "$state_tmp" || state_rc=$?
   else
     fm_pane_idle_run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
-      "$FM_CREW_STATE_BIN" "$task" > "$state_tmp" 2>/dev/null || state_rc=$?
+      "$FM_CREW_STATE_BIN" "$task" 2>/dev/null | fm_nofollow_write "$state_tmp" || state_rc=$?
   fi
   current=
   if [ "$state_rc" -eq 0 ]; then
@@ -833,7 +834,7 @@ mark_terminal_surfaced_snapshot() {
   marker=$(_hb_terminal_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\n' \
-    "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" > "$tmp" \
+    "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" | fm_nofollow_write "$tmp" \
     || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
@@ -954,7 +955,7 @@ surface_retry_write() {
   fi
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\nwake_key=%s\nwake_published=%s\n' \
-    "$task" "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$wake_key" "$wake_published" > "$tmp" \
+    "$task" "$last" "$spawn_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$wake_key" "$wake_published" | fm_nofollow_write "$tmp" \
     || ! mv -f "$tmp" "$retry"; then
     rm -f "$tmp"
     return 1
@@ -968,13 +969,15 @@ surface_retry_mark_published() {
   surface_retry_matches_current "$retry" "$task" "$last" || return 1
   [ "$(surface_meta_value_unique "$retry" wake_key 2>/dev/null)" = "$wake_key" ] || return 1
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      wake_published=*) printf 'wake_published=1\n'; seen=1 ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$retry" > "$tmp" || { rm -f "$tmp"; return 1; }
-  [ "$seen" = 1 ] || printf 'wake_published=1\n' >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        wake_published=*) printf 'wake_published=1\n'; seen=1 ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$retry"
+    [ "$seen" = 1 ] || printf 'wake_published=1\n'
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   [ ! -L "$retry" ] || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$retry" || { rm -f "$tmp"; return 1; }
 }
@@ -989,7 +992,7 @@ surface_retry_complete_consumed() {
     "$tasktmp" "$window" "$worktree" || return 2
   marker=$(_hb_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 2
-  if ! printf '%s' "$snapshot" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf '%s' "$snapshot" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 2
   fi
@@ -1195,7 +1198,7 @@ surface_retry_repair_one() {
     "$tasktmp" "$window" "$worktree" || return 1
   marker=$(_hb_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
-  if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf '%s' "$last" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1204,7 +1207,7 @@ surface_retry_repair_one() {
     && [ "$(last_status_line "$status_file")" = "$last" ]; then
     sig=$(stat_sig "$status_file") || return 1
     sf="$STATE/.seen-$(basename "$status_file" | tr '.' '_')"
-    printf '%s' "$sig" > "$sf" || return 1
+    printf '%s' "$sig" | fm_nofollow_write "$sf" || return 1
   fi
   surface_retry_matches_current "$retry" "$task" "$last" || return 1
   rm -f "$retry" || return 1
@@ -1245,7 +1248,7 @@ mark_surfaced() {  # <status-file>
   mark_terminal_surfaced "$task" "$last" || return 1
   marker=$(_hb_surfaced_path "$task")
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
-  if ! printf '%s' "$last" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf '%s' "$last" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1275,7 +1278,7 @@ surface_signal_transaction() {
     terminal_signal_suppressed "$f" || suppressed=$?
     case "$suppressed" in
       0)
-        printf '%s' "$sig" > "$sf" || status=1
+        printf '%s' "$sig" | fm_nofollow_write "$sf" || status=1
         watch_task_lock_release || status=1
         [ "$status" = 0 ] || break
         continue
@@ -1311,7 +1314,7 @@ surface_signal_transaction() {
     fi
     if [ "$status" = 0 ]; then
       FM_SURFACE_PUBLISHED=1
-      if ! mark_surfaced "$f" || ! printf '%s' "$sig" > "$sf"; then
+      if ! mark_surfaced "$f" || ! printf '%s' "$sig" | fm_nofollow_write "$sf"; then
         status=1
       fi
     fi
@@ -1486,7 +1489,7 @@ surface_terminal_stale_transaction() {
     mark_surfaced "$STATE/$task.status" "$w" || status=1
   fi
   if [ "$status" = 0 ]; then
-    printf '%s' "$h" > "$STATE/.stale-$(printf '%s' "$w" | tr ':/.' '___')" || status=1
+    printf '%s' "$h" | fm_nofollow_write "$STATE/.stale-$(printf '%s' "$w" | tr ':/.' '___')" || status=1
     rm -f "$STATE/.stale-since-$(printf '%s' "$w" | tr ':/.' '___')" || status=1
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || status=1
@@ -1566,9 +1569,9 @@ watcher_cleanup() {
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+printf '%s\n' "$FM_HOME" | fm_nofollow_write "$WATCH_LOCK/fm-home" || true
+printf '%s\n' "$WATCH_PATH" | fm_nofollow_write "$WATCH_LOCK/watcher-path" || true
+fm_pid_identity "$WATCHER_PID" | fm_nofollow_write "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 fm_watcher_protocol_acknowledge "$STATE" "$FM_HOME" "$WATCH_PATH" || exit 1
 
 surface_retry_repair || exit 1
@@ -1756,7 +1759,7 @@ EOF
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
+        printf '%s' "$sig" | fm_nofollow_write "$sf"
       done <<EOF
 $pending
 EOF
@@ -1787,13 +1790,13 @@ EOF
     watch_window_scan_prepare "$window_scan_source" || exit 1
     fm_pane_idle_meta_index_windows_from_snapshot_resumable \
       "$FM_PANE_IDLE_META_INDEX_SNAPSHOT" "${FM_WATCH_WINDOW_CURSOR:-0}" \
-      "$pane_idle_scan_deadline" > "$window_scan_stream" || window_scan_status=$?
+      "$pane_idle_scan_deadline" | fm_nofollow_write "$window_scan_stream" || window_scan_status=$?
   else
     window_scan_stamp=$(cat "$STATE/.pane-idle-meta-index/.scan.entries.stamp" 2>/dev/null || true)
     window_scan_source="entries:${window_scan_stamp:-unknown}"
     watch_window_scan_prepare "$window_scan_source" || exit 1
     fm_pane_idle_meta_index_windows_direct_resumable "$STATE" \
-      "${FM_WATCH_WINDOW_CURSOR:-}" "$pane_idle_scan_deadline" > "$window_scan_stream" \
+      "${FM_WATCH_WINDOW_CURSOR:-}" "$pane_idle_scan_deadline" | fm_nofollow_write "$window_scan_stream" \
       || window_scan_status=$?
   fi
   case "$window_scan_status" in
@@ -1856,7 +1859,7 @@ EOF
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
-      echo "$n" > "$cf"
+      echo "$n" | fm_nofollow_write "$cf"
       if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
         if [ "$kind" != secondmate ]; then
           idle_meta=$window_meta
@@ -1894,7 +1897,7 @@ EOF
         if afk_present; then
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
+            printf '%s' "$h" | fm_nofollow_write "$sf"
             wake "stale: $w"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
@@ -1915,12 +1918,12 @@ EOF
         else
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w")"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
+            printf '%s' "$h" | fm_nofollow_write "$sf"
+              date +%s | fm_nofollow_write "$ssf"
               triage_log "absorbed non-terminal stale (provably working): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
+              printf '%s' "$h" | fm_nofollow_write "$sf"
               rm -f "$ssf"
               wake "stale: $w"
             fi
@@ -1928,7 +1931,7 @@ EOF
             since=$(cat "$ssf" 2>/dev/null || true)
             case "$since" in
               ''|*[!0-9]*)
-                date +%s > "$ssf"
+                date +%s | fm_nofollow_write "$ssf"
                 triage_log "absorbed non-terminal stale timer reset: $w"
                 ;;
               *)
@@ -1950,8 +1953,8 @@ EOF
         rm -f "$ssf"
       fi
     else
-      printf '%s' "$h" > "$hf"
-      echo 0 > "$cf"
+      printf '%s' "$h" | fm_nofollow_write "$hf"
+      echo 0 | fm_nofollow_write "$cf"
       fm_pane_idle_clear_for_window "$STATE" "$w" "$pane_idle_scan_deadline" || exit 1
       if [ -n "$prev" ]; then
         pause_tracking_clear "$w"
@@ -1992,7 +1995,7 @@ EOF
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
-      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+    echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) | fm_nofollow_write "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi

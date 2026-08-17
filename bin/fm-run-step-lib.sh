@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+_FM_RUN_STEP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-safe-io-lib.sh
+. "$_FM_RUN_STEP_LIB_DIR/fm-safe-io-lib.sh"
+
 fm_run_step_binding_path() {
   printf '%s/.run-step-incarnation-%s' "$STATE" "$1"
 }

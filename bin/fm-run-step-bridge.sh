@@ -189,7 +189,7 @@ publish_run_id() {
             [ "$staged_existing" = "$run_id" ] || status=1
           else
             staged_status=$?
-            [ "$staged_status" = 75 ] || status=1
+            [ "${FM_RUN_BINDING_METADATA_STATE:-}" = pending ] && [ "$staged_status" = 75 ] || status=1
           fi
         fi
       else
@@ -241,8 +241,11 @@ run_axi() {
   local startup_wait_secs startup_deadline total_wait_secs total_deadline now
   tmpdir=${FM_RUN_BINDING_TMP:-${TMPDIR:-/tmp}}
   output_file=$(mktemp "$tmpdir/.fm-run-step-output.XXXXXX") || return 1
-  "$FM_RUN_BINDING_REAL" "$@" >"$output_file" 2>&1 &
-  child=$!
+  child=$(fm_nofollow_spawn_capture "$output_file" "$FM_RUN_BINDING_REAL" "$@") || {
+    rm -f "$output_file"
+    return 1
+  }
+  case "$child" in ''|*[!0-9]*) rm -f "$output_file"; return 1 ;; esac
   startup_wait_secs=${FM_RUN_BINDING_STARTUP_WAIT_SECS:-30}
   case "$startup_wait_secs" in ''|*[!0-9]*|0) startup_wait_secs=30 ;; esac
   while [ "${startup_wait_secs#0}" != "$startup_wait_secs" ]; do

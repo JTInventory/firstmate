@@ -3,6 +3,7 @@
 # be missed by the normal watcher. This is a reporting layer only: it never
 # closes an endpoint, returns a slot, removes a worktree, or changes a PR.
 set -u
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
@@ -252,7 +253,7 @@ inactive_merge_txn_write() {
   tmp=$(mktemp "$MERGE_TXN.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
   if ! printf 'schema=fm-jt-inactive-merge.v1\nsource=%s\ntarget=%s\nstage=%s\n' \
-    "$source" "$target" "$stage" > "$tmp"; then
+    "$source" "$target" "$stage" | fm_nofollow_write "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -404,7 +405,7 @@ inactive_pending_offset_write() {
   [ ! -L "$path" ] || return 1
   tmp=$(mktemp "$path.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  if ! printf '%s\n' "$value" > "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+  if ! printf '%s\n' "$value" | fm_nofollow_write "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
     rm -f "$tmp"
     return 1
   fi
@@ -425,7 +426,7 @@ inactive_text_cursor_write() {
   [ ! -L "$path" ] || return 1
   tmp=$(mktemp "$path.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  if ! printf '%s\n' "$value" > "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+  if ! printf '%s\n' "$value" | fm_nofollow_write "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
     rm -f "$tmp"
     return 1
   fi
@@ -516,7 +517,7 @@ inactive_pending_retry_filter_duplicates() {
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tags" "$sorted" "$tmp"; return 1; }
   remaining=$(budget_remaining_secs "$deadline_ms")
   [ "$remaining" -gt 0 ] || { rm -f "$tags" "$sorted" "$tmp"; return 124; }
-  if run_bounded_child "$remaining" perl - "$pending" "$offset" "$retry" > "$tags" <<'PERL'
+  if run_bounded_child "$remaining" perl - "$pending" "$offset" "$retry" <<'PERL' | fm_nofollow_write "$tags"
 use strict;
 use warnings;
 
@@ -556,7 +557,7 @@ PERL
   remaining=$(budget_remaining_secs "$deadline_ms")
   [ "$remaining" -gt 0 ] || { rm -f "$tags" "$sorted" "$tmp"; return 124; }
   tab=$(printf '\t')
-  if run_bounded_child "$remaining" env LC_ALL=C sort -t "$tab" -k1,1 -k2,2 "$tags" > "$sorted"; then :; else
+  if run_bounded_child "$remaining" env LC_ALL=C sort -t "$tab" -k1,1 -k2,2 "$tags" | fm_nofollow_write "$sorted"; then :; else
     rc=$?
     [ "$rc" -ne 0 ] || rc=124
     rm -f "$tags" "$sorted" "$tmp"
@@ -564,7 +565,7 @@ PERL
   fi
   remaining=$(budget_remaining_secs "$deadline_ms")
   [ "$remaining" -gt 0 ] || { rm -f "$tags" "$sorted" "$tmp"; return 124; }
-  if run_bounded_child "$remaining" perl - "$sorted" > "$tmp" <<'PERL'
+  if run_bounded_child "$remaining" perl - "$sorted" <<'PERL' | fm_nofollow_write "$tmp"
 use strict;
 use warnings;
 
@@ -759,12 +760,12 @@ scan_cursor_write() {
   cursor_tmp=$(mktemp "$SCAN_CURSOR.XXXXXX") || { rm -f "$identity_tmp"; return 1; }
   [ -f "$identity_tmp" ] && [ ! -L "$identity_tmp" ] || { rm -f "$identity_tmp" "$cursor_tmp"; return 1; }
   [ -f "$cursor_tmp" ] && [ ! -L "$cursor_tmp" ] || { rm -f "$identity_tmp" "$cursor_tmp"; return 1; }
-  if ! printf '%s\n' "$identity" > "$identity_tmp" \
+  if ! printf '%s\n' "$identity" | fm_nofollow_write "$identity_tmp" \
     || [ -L "$SCAN_CURSOR_IDENTITY" ] || ! mv -f "$identity_tmp" "$SCAN_CURSOR_IDENTITY"; then
     rm -f "$identity_tmp" "$cursor_tmp"
     return 1
   fi
-  if ! printf '%s\n' "$id" > "$cursor_tmp" \
+  if ! printf '%s\n' "$id" | fm_nofollow_write "$cursor_tmp" \
     || [ -L "$SCAN_CURSOR" ] || ! mv -f "$cursor_tmp" "$SCAN_CURSOR"; then
     rm -f "$cursor_tmp"
     return 1
@@ -962,7 +963,7 @@ claim_rewrite_row() {
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in row=*) printf 'row=%s\n' "$row" ;; *) printf '%s\n' "$line" ;; esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 1; }
+  done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 1; }
 }
@@ -988,18 +989,20 @@ claim_recover_deferred_handoff() {
   [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      state=*) printf 'state=presented\n' ;;
-      defer_generation=*) printf 'defer_generation=%s\n' "$generation"; seen_generation=1 ;;
-      defer_generation_start=*) printf 'defer_generation_start=%s\n' "$generation_start"; seen_generation_start=1 ;;
-      caller_confirmed=*) printf 'caller_confirmed=1\n'; seen_caller_confirmed=1 ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_generation" = 1 ] || printf 'defer_generation=%s\n' "$generation" >> "$tmp"
-  [ "$seen_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$generation_start" >> "$tmp"
-  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=1\n' >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        state=*) printf 'state=presented\n' ;;
+        defer_generation=*) printf 'defer_generation=%s\n' "$generation"; seen_generation=1 ;;
+        defer_generation_start=*) printf 'defer_generation_start=%s\n' "$generation_start"; seen_generation_start=1 ;;
+        caller_confirmed=*) printf 'caller_confirmed=1\n'; seen_caller_confirmed=1 ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_generation" = 1 ] || printf 'defer_generation=%s\n' "$generation"
+    [ "$seen_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$generation_start"
+    [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=1\n'
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1020,15 +1023,17 @@ claim_rebind_deferred_generation() {
   [ "$(claim_binary_field "$claim" caller_confirmed 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      defer_generation=*) printf 'defer_generation=%s\n' "$generation"; seen_generation=1 ;;
-      defer_generation_start=*) printf 'defer_generation_start=%s\n' "$generation_start"; seen_generation_start=1 ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_generation" = 1 ] || printf 'defer_generation=%s\n' "$generation" >> "$tmp"
-  [ "$seen_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$generation_start" >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        defer_generation=*) printf 'defer_generation=%s\n' "$generation"; seen_generation=1 ;;
+        defer_generation_start=*) printf 'defer_generation_start=%s\n' "$generation_start"; seen_generation_start=1 ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_generation" = 1 ] || printf 'defer_generation=%s\n' "$generation"
+    [ "$seen_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$generation_start"
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1049,20 +1054,22 @@ claim_mark_recorded_presented() {  # <inactive-outcome:fingerprint> <wake-row>
   done
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      state=*) printf 'state=presented\n' ;;
-      output_started=*) printf 'output_started=1\n' ;;
-      output_emitted=*) printf 'output_emitted=1\n' ;;
-      output_complete=*) printf 'output_complete=1\n' ;;
-      output_confirmed=*) printf 'output_confirmed=1\n' ;;
-      caller_confirmed=*) printf 'caller_confirmed=1\n' ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  for field in output_started output_emitted output_complete output_confirmed caller_confirmed; do
-    grep -Fq "$field=" "$tmp" || printf '%s=1\n' "$field" >> "$tmp"
-  done
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        state=*) printf 'state=presented\n' ;;
+        output_started=*) printf 'output_started=1\n' ;;
+        output_emitted=*) printf 'output_emitted=1\n' ;;
+        output_complete=*) printf 'output_complete=1\n' ;;
+        output_confirmed=*) printf 'output_confirmed=1\n' ;;
+        caller_confirmed=*) printf 'caller_confirmed=1\n' ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    for field in output_started output_emitted output_complete output_confirmed caller_confirmed; do
+      grep -Fq "$field=" "$claim" || printf '%s=1\n' "$field"
+    done
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1278,7 +1285,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
             defer_generation_start=*) printf 'defer_generation_start=\n' ;;
             *) printf '%s\n' "$line" ;;
           esac
-        done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+        done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
         [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
         mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
         return 0
@@ -1296,7 +1303,7 @@ claim_reserve() {  # <inactive-outcome:fingerprint> <wake-row>
     printf 'row=%s\n' "$row"
     printf 'state=reserved\n'
     printf 'created_epoch=%s\n' "$(date +%s)"
-  } > "$tmp" || { rm -f "$tmp"; return 2; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   if ln "$tmp" "$claim" 2>/dev/null; then
     rm -f "$tmp"
     if [ "$recorded_report" = 1 ]; then
@@ -1342,40 +1349,42 @@ claim_mark_presenting() {  # <inactive-outcome:fingerprint> <wake-row>
   fi
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      state=*) printf 'state=presenting\n' ;;
-      presentation_pid=*) printf 'presentation_pid=%s\n' "${BASHPID:-$$}"; seen_pid=1 ;;
-      output_started=*)
-        if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'output_started=0\n'; fi
-        seen_output=1
-        ;;
-      output_emitted=*)
-        if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'output_emitted=0\n'; fi
-        seen_emitted=1
-        ;;
-      output_complete=*)
-        if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'output_complete=0\n'; fi
-        seen_complete=1
-        ;;
-      caller_confirmed=*)
-        if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'caller_confirmed=0\n'; fi
-        seen_caller_confirmed=1
-        ;;
-      defer_ack=*) printf 'defer_ack=%s\n' "$defer_ack"; seen_defer_ack=1 ;;
-      defer_generation=*) printf 'defer_generation=%s\n' "$defer_generation"; seen_defer_generation=1 ;;
-      defer_generation_start=*) printf 'defer_generation_start=%s\n' "$defer_generation_start"; seen_defer_generation_start=1 ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_pid" = 1 ] || printf 'presentation_pid=%s\n' "${BASHPID:-$$}" >> "$tmp"
-  [ "$seen_output" = 1 ] || printf 'output_started=0\n' >> "$tmp"
-  [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n' >> "$tmp"
-  [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
-  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
-  [ "$seen_defer_ack" = 1 ] || printf 'defer_ack=%s\n' "$defer_ack" >> "$tmp"
-  [ "$seen_defer_generation" = 1 ] || printf 'defer_generation=%s\n' "$defer_generation" >> "$tmp"
-  [ "$seen_defer_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$defer_generation_start" >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        state=*) printf 'state=presenting\n' ;;
+        presentation_pid=*) printf 'presentation_pid=%s\n' "${BASHPID:-$$}"; seen_pid=1 ;;
+        output_started=*)
+          if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'output_started=0\n'; fi
+          seen_output=1
+          ;;
+        output_emitted=*)
+          if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'output_emitted=0\n'; fi
+          seen_emitted=1
+          ;;
+        output_complete=*)
+          if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'output_complete=0\n'; fi
+          seen_complete=1
+          ;;
+        caller_confirmed=*)
+          if [ "$preserve_output" = 1 ]; then printf '%s\n' "$line"; else printf 'caller_confirmed=0\n'; fi
+          seen_caller_confirmed=1
+          ;;
+        defer_ack=*) printf 'defer_ack=%s\n' "$defer_ack"; seen_defer_ack=1 ;;
+        defer_generation=*) printf 'defer_generation=%s\n' "$defer_generation"; seen_defer_generation=1 ;;
+        defer_generation_start=*) printf 'defer_generation_start=%s\n' "$defer_generation_start"; seen_defer_generation_start=1 ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_pid" = 1 ] || printf 'presentation_pid=%s\n' "${BASHPID:-$$}"
+    [ "$seen_output" = 1 ] || printf 'output_started=0\n'
+    [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n'
+    [ "$seen_complete" = 1 ] || printf 'output_complete=0\n'
+    [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n'
+    [ "$seen_defer_ack" = 1 ] || printf 'defer_ack=%s\n' "$defer_ack"
+    [ "$seen_defer_generation" = 1 ] || printf 'defer_generation=%s\n' "$defer_generation"
+    [ "$seen_defer_generation_start" = 1 ] || printf 'defer_generation_start=%s\n' "$defer_generation_start"
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1405,37 +1414,39 @@ claim_mark_output_complete() {  # <inactive-outcome:fingerprint> <wake-row>
   fi
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
-      output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
-      output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
-      output_confirmed=*)
-        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        confirmed_value=${line#output_confirmed=}
-        case "$confirmed_value" in 0|1) ;; *) rm -f "$tmp"; return 2 ;; esac
-        [ "$owner_required" = 0 ] && confirmed_value=1
-        printf 'output_confirmed=%s\n' "$confirmed_value"
-        seen_confirmed=1
-        ;;
-      caller_confirmed=*)
-        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        caller_confirmed_value=${line#caller_confirmed=}
-        case "$caller_confirmed_value" in 0|1) ;; *) rm -f "$tmp"; return 2 ;; esac
-        [ "$owner_required" = 0 ] && caller_confirmed_value=1
-        printf 'caller_confirmed=%s\n' "$caller_confirmed_value"
-        seen_caller_confirmed=1
-        ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
-  [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
-  [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
-  [ "$seen_confirmed" = 1 ] || \
-    printf 'output_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)" >> "$tmp"
-  [ "$seen_caller_confirmed" = 1 ] || \
-    printf 'caller_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)" >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+        output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
+        output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
+        output_confirmed=*)
+          [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          confirmed_value=${line#output_confirmed=}
+          case "$confirmed_value" in 0|1) ;; *) rm -f "$tmp"; return 2 ;; esac
+          [ "$owner_required" = 0 ] && confirmed_value=1
+          printf 'output_confirmed=%s\n' "$confirmed_value"
+          seen_confirmed=1
+          ;;
+        caller_confirmed=*)
+          [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          caller_confirmed_value=${line#caller_confirmed=}
+          case "$caller_confirmed_value" in 0|1) ;; *) rm -f "$tmp"; return 2 ;; esac
+          [ "$owner_required" = 0 ] && caller_confirmed_value=1
+          printf 'caller_confirmed=%s\n' "$caller_confirmed_value"
+          seen_caller_confirmed=1
+          ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_output" = 1 ] || printf 'output_started=1\n'
+    [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n'
+    [ "$seen_complete" = 1 ] || printf 'output_complete=1\n'
+    [ "$seen_confirmed" = 1 ] || \
+      printf 'output_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)"
+    [ "$seen_caller_confirmed" = 1 ] || \
+      printf 'caller_confirmed=%s\n' "$([ "$owner_required" = 0 ] && printf 1 || printf 0)"
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1453,29 +1464,31 @@ claim_mark_output_started() {  # <inactive-outcome:fingerprint> <wake-row>
   claim_binary_fields_valid "$claim" || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
-      output_emitted=*) printf 'output_emitted=0\n'; seen_emitted=1 ;;
-      output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
-      output_confirmed=*)
-        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'output_confirmed=0\n'
-        seen_confirmed=1
-        ;;
-      caller_confirmed=*)
-        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'caller_confirmed=0\n'
-        seen_caller_confirmed=1
-        ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
-  [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n' >> "$tmp"
-  [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
-  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=0\n' >> "$tmp"
-  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+        output_emitted=*) printf 'output_emitted=0\n'; seen_emitted=1 ;;
+        output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
+        output_confirmed=*)
+          [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'output_confirmed=0\n'
+          seen_confirmed=1
+          ;;
+        caller_confirmed=*)
+          [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'caller_confirmed=0\n'
+          seen_caller_confirmed=1
+          ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_output" = 1 ] || printf 'output_started=1\n'
+    [ "$seen_emitted" = 1 ] || printf 'output_emitted=0\n'
+    [ "$seen_complete" = 1 ] || printf 'output_complete=0\n'
+    [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=0\n'
+    [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n'
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1494,29 +1507,31 @@ claim_mark_output_emitted() {  # <inactive-outcome:fingerprint> <wake-row>
   [ "$(claim_binary_field "$claim" output_started 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
-      output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
-      output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
-      output_confirmed=*)
-        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'output_confirmed=0\n'
-        seen_confirmed=1
-        ;;
-      caller_confirmed=*)
-        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'caller_confirmed=0\n'
-        seen_caller_confirmed=1
-        ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
-  [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
-  [ "$seen_complete" = 1 ] || printf 'output_complete=0\n' >> "$tmp"
-  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=0\n' >> "$tmp"
-  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+        output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
+        output_complete=*) printf 'output_complete=0\n'; seen_complete=1 ;;
+        output_confirmed=*)
+          [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'output_confirmed=0\n'
+          seen_confirmed=1
+          ;;
+        caller_confirmed=*)
+          [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'caller_confirmed=0\n'
+          seen_caller_confirmed=1
+          ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_output" = 1 ] || printf 'output_started=1\n'
+    [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n'
+    [ "$seen_complete" = 1 ] || printf 'output_complete=0\n'
+    [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=0\n'
+    [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n'
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1551,23 +1566,25 @@ claim_mark_output_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   [ "$(claim_binary_field "$claim" output_emitted 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      output_confirmed=*)
-        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'output_confirmed=1\n'
-        seen_confirmed=1
-        ;;
-      caller_confirmed=*)
-        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'caller_confirmed=0\n'
-        seen_caller_confirmed=1
-        ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n' >> "$tmp"
-  [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n' >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        output_confirmed=*)
+          [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'output_confirmed=1\n'
+          seen_confirmed=1
+          ;;
+        caller_confirmed=*)
+          [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'caller_confirmed=0\n'
+          seen_caller_confirmed=1
+          ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n'
+    [ "$seen_caller_confirmed" = 1 ] || printf 'caller_confirmed=0\n'
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1603,7 +1620,7 @@ claim_mark_presented() {  # <inactive-outcome:fingerprint> <wake-row>
       state=*) printf 'state=presented\n' ;;
       *) printf '%s\n' "$line" ;;
     esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1627,7 +1644,7 @@ claim_mark_presented_recovered() {  # <inactive-outcome:fingerprint> <wake-row>
   chmod 600 "$tmp" 2>/dev/null || true
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in state=*) printf 'state=presented\n' ;; *) printf '%s\n' "$line" ;; esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
+  done < "$claim" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1669,31 +1686,33 @@ claim_mark_confirmed() {  # <inactive-outcome:fingerprint> <wake-row>
   [ "$(claim_field "$claim" defer_ack 2>/dev/null || true)" = 1 ] || return 2
   tmp=$(mktemp "$OUTCOME_DIR/.claim-state.XXXXXX") || return 2
   chmod 600 "$tmp" 2>/dev/null || true
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      state=*) printf 'state=presented\n' ;;
-      output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
-      output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
-      output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
-      output_confirmed=*)
-        [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'output_confirmed=1\n'
-        seen_confirmed=1
-        ;;
-      caller_confirmed=*)
-        [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
-        [ "$owner_required" = 0 ] || { rm -f "$tmp"; return 2; }
-        printf 'caller_confirmed=1\n'
-        seen_caller_confirmed=1
-        ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$claim" > "$tmp" || { rm -f "$tmp"; return 2; }
-  [ "$seen_output" = 1 ] || printf 'output_started=1\n' >> "$tmp"
-  [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n' >> "$tmp"
-  [ "$seen_complete" = 1 ] || printf 'output_complete=1\n' >> "$tmp"
-  [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n' >> "$tmp"
-  [ "$owner_required" = 0 ] && [ "$seen_caller_confirmed" = 1 ] || { rm -f "$tmp"; return 2; }
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        state=*) printf 'state=presented\n' ;;
+        output_started=*) printf 'output_started=1\n'; seen_output=1 ;;
+        output_emitted=*) printf 'output_emitted=1\n'; seen_emitted=1 ;;
+        output_complete=*) printf 'output_complete=1\n'; seen_complete=1 ;;
+        output_confirmed=*)
+          [ "$seen_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'output_confirmed=1\n'
+          seen_confirmed=1
+          ;;
+        caller_confirmed=*)
+          [ "$seen_caller_confirmed" = 0 ] || { rm -f "$tmp"; return 2; }
+          [ "$owner_required" = 0 ] || { rm -f "$tmp"; return 2; }
+          printf 'caller_confirmed=1\n'
+          seen_caller_confirmed=1
+          ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$claim"
+    [ "$seen_output" = 1 ] || printf 'output_started=1\n'
+    [ "$seen_emitted" = 1 ] || printf 'output_emitted=1\n'
+    [ "$seen_complete" = 1 ] || printf 'output_complete=1\n'
+    [ "$seen_confirmed" = 1 ] || printf 'output_confirmed=1\n'
+    [ "$owner_required" = 0 ] && [ "$seen_caller_confirmed" = 1 ] || { rm -f "$tmp"; return 2; }
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 2; }
   [ ! -L "$claim" ] || { rm -f "$tmp"; return 2; }
   mv -f "$tmp" "$claim" || { rm -f "$tmp"; return 2; }
 }
@@ -1868,14 +1887,10 @@ receipt_existing_core() {
         parent_home=$(receipt_field "$existing" parent_home) || return 2
         parent_status=$(receipt_field "$existing" parent_status) || return 2
         parent_corr=$(receipt_field "$existing" parent_corr) || return 2
-        if [ "$suffix" = pending ]; then
-          [ "$parent_id" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 2
-          [ "$parent_home" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 2
-          [ "$parent_status" = "${FM_PENDING_ROUTE_PARENT_STATUS:-}" ] || return 2
-          [ "$parent_corr" = "${FM_PENDING_ROUTE_CORR:-}" ] || return 2
-        else
-          [ -n "$parent_id" ] || return 2
-        fi
+        [ "$parent_id" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 2
+        [ "$parent_home" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 2
+        [ "$parent_status" = "${FM_PENDING_ROUTE_PARENT_STATUS:-}" ] || return 2
+        [ "$parent_corr" = "${FM_PENDING_ROUTE_CORR:-}" ] || return 2
         case "$parent_home" in /*) ;; *) return 2 ;; esac
         case "$parent_status" in /*) ;; *) return 2 ;; esac
         printf '%s' "$parent_corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 2
@@ -2503,7 +2518,8 @@ repair_reported_secondmate_routes() {
     if [ "$candidate_pending" = 1 ]; then
       :
     else
-      receipt_candidates reported "$remaining" "$enum_cursor" "$REPORTED_ROUTE_ENUM_CURSOR" > "$candidate_tmp" || enum_rc=$?
+      receipt_candidates reported "$remaining" "$enum_cursor" "$REPORTED_ROUTE_ENUM_CURSOR" \
+        | fm_nofollow_write "$candidate_tmp" || enum_rc=$?
       if [ "$enum_rc" = 0 ]; then
         enum_complete=1
         enum_incomplete=0
@@ -2702,7 +2718,7 @@ repair_reported_secondmate_routes() {
   if [ "$processed" -gt 0 ]; then
     if cursor_tmp=$(mktemp "$STATE/.reported-route-repair.cursor.XXXXXX"); then
       if [ ! -f "$cursor_tmp" ] || [ -L "$cursor_tmp" ] \
-        || ! printf '%s\n' "$last" > "$cursor_tmp" \
+        || ! printf '%s\n' "$last" | fm_nofollow_write "$cursor_tmp" \
         || ! mv -f "$cursor_tmp" "$REPORTED_ROUTE_CURSOR"; then
         status=1
         rm -f "$cursor_tmp"
@@ -2886,7 +2902,8 @@ republish_pending_receipts() {
     if [ "$candidate_pending" = 1 ]; then
       :
     else
-      receipt_candidates pending "$remaining" "$enum_cursor" "$PENDING_RECEIPT_ENUM_CURSOR" > "$candidate_tmp" || enum_rc=$?
+      receipt_candidates pending "$remaining" "$enum_cursor" "$PENDING_RECEIPT_ENUM_CURSOR" \
+        | fm_nofollow_write "$candidate_tmp" || enum_rc=$?
       if [ "$enum_rc" = 0 ]; then
         enum_complete=1
         enum_incomplete=0
@@ -3038,7 +3055,7 @@ republish_pending_receipts() {
   if [ "$processed" -gt 0 ]; then
     if cursor_tmp=$(mktemp "$STATE/.pending-receipt-republish.cursor.XXXXXX"); then
       if [ ! -f "$cursor_tmp" ] || [ -L "$cursor_tmp" ] \
-        || ! printf '%s\n' "$last" > "$cursor_tmp" \
+        || ! printf '%s\n' "$last" | fm_nofollow_write "$cursor_tmp" \
         || ! mv -f "$cursor_tmp" "$PENDING_RECEIPT_CURSOR"; then
         status=1
         rm -f "$cursor_tmp"
@@ -3113,10 +3130,10 @@ terminal_snapshot_matches_current() {
     run_bounded_child "$state_timeout" env \
       FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
       FM_TASK_LOCK_PATH="$lock_path" FM_TASK_LOCK_OWNER="$lock_owner" \
-      "$FM_CREW_STATE_BIN" "$id" > "$state_tmp" 2>/dev/null || state_rc=$?
+      "$FM_CREW_STATE_BIN" "$id" 2>/dev/null | fm_nofollow_write "$state_tmp" || state_rc=$?
   else
     run_bounded_child "$state_timeout" env FM_CREW_STATE_NM_TIMEOUT="$state_timeout" \
-      "$FM_CREW_STATE_BIN" "$id" > "$state_tmp" 2>/dev/null || state_rc=$?
+      "$FM_CREW_STATE_BIN" "$id" 2>/dev/null | fm_nofollow_write "$state_tmp" || state_rc=$?
   fi
   current=
   if [ "$state_rc" -eq 0 ]; then
@@ -3191,13 +3208,15 @@ surface_retry_matches_current() {
 surface_retry_mark_published() {
   local retry=$1 tmp line seen=0
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      wake_published=*) printf 'wake_published=1\n'; seen=1 ;;
-      *) printf '%s\n' "$line" ;;
-    esac
-  done < "$retry" > "$tmp" || { rm -f "$tmp"; return 1; }
-  [ "$seen" = 1 ] || printf 'wake_published=1\n' >> "$tmp"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        wake_published=*) printf 'wake_published=1\n'; seen=1 ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$retry"
+    [ "$seen" = 1 ] || printf 'wake_published=1\n'
+  } | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   [ ! -L "$retry" ] || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$retry" || { rm -f "$tmp"; return 1; }
 }
@@ -3374,7 +3393,7 @@ replay_surface_retry_write() {
   fi
   tmp=$(mktemp "$STATE/.hb-surface-retry.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-surface-retry.v1\ntask=%s\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\nwake_key=%s\nwake_published=%s\n' \
-    "$id" "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$key" "$published" > "$tmp" \
+    "$id" "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" "$key" "$published" | fm_nofollow_write "$tmp" \
     || ! mv -f "$tmp" "$retry"; then
     rm -f "$tmp"
     return 1
@@ -3402,13 +3421,13 @@ replay_surface_marker() {
   replay_surface_retry_write "$id" "$meta" "$snapshot" "$incarnation" "$wake_key" 1 || return 1
   tmp=$(mktemp "$STATE/.hb-terminal-surfaced.XXXXXX") || return 1
   if ! printf 'schema=fm-hb-terminal-surfaced.v1\nsnapshot=%s\nspawn_incarnation=%s\ntasktmp=%s\nwindow=%s\nworktree=%s\nparent_corr=%s\n' \
-    "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" > "$tmp" \
+    "$snapshot" "$marker_incarnation" "$tasktmp" "$window" "$worktree" "$parent_corr" | fm_nofollow_write "$tmp" \
     || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
   tmp=$(mktemp "$STATE/.hb-surfaced.XXXXXX") || return 1
-  if ! printf '%s' "$snapshot" > "$tmp" || ! mv -f "$tmp" "$raw"; then
+  if ! printf '%s' "$snapshot" | fm_nofollow_write "$tmp" || ! mv -f "$tmp" "$raw"; then
     rm -f "$tmp"
     return 1
   fi
@@ -3492,7 +3511,7 @@ reconcile_child() {
   run_bounded_child "$state_timeout" env \
     FM_TASK_LOCK_PATH="$CHILD_LOCK" FM_TASK_LOCK_OWNER="$child_lock_owner" \
     "$FM_CREW_STATE_BIN" "$id" \
-    > "$state_tmp" 2>/dev/null || state_rc=$?
+    2>/dev/null | fm_nofollow_write "$state_tmp" || state_rc=$?
   line=
   if [ "$state_rc" -eq 0 ]; then
     line=$(cat "$state_tmp" 2>/dev/null) || state_rc=$?
@@ -3898,7 +3917,7 @@ scan_locked() {
       return 0
     }
     if [ ! -f "$maintenance_phase_tmp" ] || [ -L "$maintenance_phase_tmp" ] \
-      || ! printf '%s\n' "$maintenance_next_phase" > "$maintenance_phase_tmp" \
+      || ! printf '%s\n' "$maintenance_next_phase" | fm_nofollow_write "$maintenance_phase_tmp" \
       || ! mv -f "$maintenance_phase_tmp" "$MAINTENANCE_PHASE_CURSOR"; then
       maintenance_status=1
       rm -f "$maintenance_phase_tmp"
@@ -3913,7 +3932,7 @@ scan_locked() {
   fi
   maintenance_order_tmp=$(mktemp "$STATE/.inactive-outcome-maintenance-order.XXXXXX") || return 1
   if [ ! -f "$maintenance_order_tmp" ] || [ -L "$maintenance_order_tmp" ] \
-    || ! printf '%s\n' "$next_order" > "$maintenance_order_tmp" \
+    || ! printf '%s\n' "$next_order" | fm_nofollow_write "$maintenance_order_tmp" \
     || ! mv -f "$maintenance_order_tmp" "$MAINTENANCE_ORDER_CURSOR"; then
     rm -f "$maintenance_order_tmp"
     return 1
@@ -4025,7 +4044,7 @@ scan_locked() {
       find_retain=1
     else
       if inactive_find_candidates "$remaining" "$find_enum_cursor" \
-        "$DIRECT_FIND_ENUM_CURSOR" > "$find_tmp"; then
+        "$DIRECT_FIND_ENUM_CURSOR" | fm_nofollow_write "$find_tmp"; then
         rm -f "$DIRECT_FIND_INCOMPLETE" || {
           [ "$maintenance_ran" = 1 ] || run_maintenance
           return 1
@@ -4304,7 +4323,7 @@ scan_locked() {
   if [ "$complete" = 1 ]; then
     rm -f "$SCAN_CURSOR" "$SCAN_CURSOR_IDENTITY" || return 1
   fi
-  date +%s > "$SCAN_MARKER" || return 1
+  date +%s | fm_nofollow_write "$SCAN_MARKER" || return 1
   return 0
 }
 

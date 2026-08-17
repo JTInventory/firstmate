@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+_FM_PANE_IDLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-safe-io-lib.sh
+. "$_FM_PANE_IDLE_LIB_DIR/fm-safe-io-lib.sh"
+
 FM_PANE_IDLE_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_PANE_IDLE_META_INDEX_STATE=
 FM_PANE_IDLE_META_INDEX_STATE_STAMP=
@@ -88,7 +92,7 @@ fm_pane_idle_meta_freshness_bump() {
   value="$(fm_pane_idle_now_ms).$$.${RANDOM:-0}"
   tmp=$(mktemp "$boundary_path.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  printf '%s\n' "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
+  printf '%s\n' "$value" | fm_nofollow_write "$tmp" || { rm -f "$tmp"; return 1; }
   [ ! -L "$boundary_path" ] && mv -f "$tmp" "$boundary_path" || {
     rm -f "$tmp"
     return 1
@@ -719,7 +723,7 @@ PERL
       return 1
     }
     if fm_pane_idle_run_bounded_child "$remaining" env LC_ALL=C sort -u \
-      "$aggregate_path" > "$sorted_tmp" \
+      "$aggregate_path" | fm_nofollow_write "$sorted_tmp" \
       && [ ! -L "$sorted_path" ] && mv -f "$sorted_tmp" "$sorted_path" \
       && fm_pane_idle_meta_index_cursor_write "$sorted_complete_path" complete; then
       :
@@ -1276,7 +1280,7 @@ fm_pane_idle_meta_index_cursor_write() {
   [ ! -L "$path" ] || return 1
   tmp=$(mktemp "$path.XXXXXX") || return 1
   [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp"; return 1; }
-  if ! printf '%s\n' "$value" > "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
+  if ! printf '%s\n' "$value" | fm_nofollow_write "$tmp" || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
     rm -f "$tmp"
     return 1
   fi
@@ -1337,7 +1341,7 @@ fm_pane_idle_meta_index_persist() {
     IFS= read -r -d '' count || { rm -f "$snapshot_tmp"; return 1; }
     case "$meta" in "$state"/*) ;; *) rm -f "$snapshot_tmp"; return 1 ;; esac
     [ -f "$meta" ] && [ ! -L "$meta" ] || { rm -f "$snapshot_tmp"; return 1; }
-    printf '%s\0%s\0%s\0' "$meta" "$window" "$count" >> "$snapshot_tmp" || {
+    printf '%s\0%s\0%s\0' "$meta" "$window" "$count" | fm_nofollow_append "$snapshot_tmp" || {
       rm -f "$snapshot_tmp"
       return 1
     }
@@ -1404,7 +1408,7 @@ fm_pane_idle_meta_index_persist() {
     fi
     tmp=$(mktemp "$path.XXXXXX") || { rm -f "$snapshot_tmp"; return 1; }
     [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f "$tmp" "$snapshot_tmp"; return 1; }
-    if ! printf '%s\n%s\n' "$count" "$meta" > "$tmp" \
+    if ! printf '%s\n%s\n' "$count" "$meta" | fm_nofollow_write "$tmp" \
       || [ -L "$path" ] || ! mv -f "$tmp" "$path"; then
       rm -f "$tmp" "$snapshot_tmp"
       return 1
@@ -1467,7 +1471,7 @@ fm_pane_idle_meta_index_reclaim() {
     }
     [ "${#key}" = 64 ] || { rm -f "$current_tmp"; return 1; }
     case "$key" in *[!0123456789abcdefABCDEF]*) rm -f "$current_tmp"; return 1 ;; esac
-    printf '%s\n' "$key" >> "$current_tmp" || {
+    printf '%s\n' "$key" | fm_nofollow_append "$current_tmp" || {
       rm -f "$current_tmp"
       return 1
     }
@@ -1865,7 +1869,7 @@ fm_pane_idle_write() {  # <state> <meta> <task> <window> <backend> <hash> <sampl
   path=$(fm_pane_idle_path "$state" "$task")
   [ ! -L "$path" ] || return 1
   tmp=$(mktemp "$dir/.tmp.XXXXXX") || return 1
-  if printf 'schema=fm-jt-pane-idle.v1\ntask=%s\nwindow=%s\nbackend=%s\nspawn_incarnation=%s\npane_hash=%s\nsample_count=%s\nobserved_epoch=%s\n' "$task" "$window" "$backend" "$token" "$pane_hash" "$samples" "$(date +%s)" > "$tmp" && mv -f "$tmp" "$path"; then
+  if printf 'schema=fm-jt-pane-idle.v1\ntask=%s\nwindow=%s\nbackend=%s\nspawn_incarnation=%s\npane_hash=%s\nsample_count=%s\nobserved_epoch=%s\n' "$task" "$window" "$backend" "$token" "$pane_hash" "$samples" "$(date +%s)" | fm_nofollow_write "$tmp" && mv -f "$tmp" "$path"; then
     return 0
   fi
   rm -f "$tmp"

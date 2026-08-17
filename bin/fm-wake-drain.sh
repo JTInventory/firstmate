@@ -61,6 +61,10 @@ presentation_reconcile() {
   fm_pane_idle_run_bounded_child "$timeout" env "$@"
 }
 
+presentation_parent_alive() {
+  kill -0 "$1" 2>/dev/null
+}
+
 wake_marker_write() {
   local path=$1 value=$2
   command -v perl >/dev/null 2>&1 || return 1
@@ -80,22 +84,26 @@ wake_marker_write() {
 present_inactive_worker() {
   local key=$1 row=$2 deduped=$3 parent_pid=$4 go=$5 emitted=$6 script_dir=$7 timeout=$8
   while [ ! -s "$go" ]; do
-    if ! kill -0 "$parent_pid" 2>/dev/null; then
-      break
-    fi
+    presentation_parent_alive "$parent_pid" || exit 125
     sleep 0.01
   done
+  presentation_parent_alive "$parent_pid" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
     FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
     output-started "$key" "$row" || exit 1
+  presentation_parent_alive "$parent_pid" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
     FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
     output-emitted "$key" "$row" || exit 1
+  presentation_parent_alive "$parent_pid" || exit 125
   printf '%s\n' "$row" || exit 1
+  presentation_parent_alive "$parent_pid" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
     FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
     output-confirmed "$key" "$row" || exit 1
+  presentation_parent_alive "$parent_pid" || exit 125
   wake_marker_write "$emitted" emitted || exit 1
+  presentation_parent_alive "$parent_pid" || exit 125
   presentation_reconcile "$timeout" FM_WAKE_DRAIN_FILE="$deduped" FM_WAKE_DRAIN_DELEGATED=1 \
     FM_WAKE_DRAIN_PARENT_PID="$parent_pid" "$script_dir/fm-inactive-reconcile.sh" \
     output-complete "$key" "$row" || exit 1
@@ -190,7 +198,7 @@ present_inactive_row() {
   [ -f "$go" ] && [ ! -L "$go" ] || { rm -f "$go"; return 1; }
   emitted=$(mktemp "$STATE/.wake-emitted.XXXXXX") || { rm -f "$go"; return 1; }
   [ -f "$emitted" ] && [ ! -L "$emitted" ] || { rm -f "$go" "$emitted"; return 1; }
-  export -f fm_pane_idle_run_bounded_child presentation_reconcile wake_marker_write present_inactive_worker
+  export -f fm_pane_idle_run_bounded_child presentation_reconcile presentation_parent_alive wake_marker_write present_inactive_worker
   if command -v perl >/dev/null 2>&1; then
     perl -e 'use POSIX (); POSIX::setpgid(0, 0) == 0 or exit 125; exec @ARGV or exit 127' \
       "$BASH" -c 'present_inactive_worker "$@"' present-inactive-worker \
@@ -344,7 +352,7 @@ restore_pending_manifest_write() {
   [ ! -L "$DRAIN_RESTORE_MANIFEST" ] || return 1
   tmp=$(mktemp "$DRAIN_RESTORE_MANIFEST.XXXXXX") || return 1
   if ! printf 'schema=fm-wake-queue-restore.v1\nsource=%s\noffset=%s\nsource_retired=%s\nraw_source=%s\nraw_source_retired=%s\n' \
-    "$source_base" "$offset" "$source_retired" "$raw_base" "$raw_source_retired" > "$tmp" \
+    "$source_base" "$offset" "$source_retired" "$raw_base" "$raw_source_retired" | fm_nofollow_write "$tmp" \
     || [ -L "$DRAIN_RESTORE_MANIFEST" ] || ! mv -f "$tmp" "$DRAIN_RESTORE_MANIFEST"; then
     rm -f "$tmp"
     return 1
@@ -467,7 +475,7 @@ drain_recover_orphaned_sources_locked() {
     if [ -e "$FM_WAKE_QUEUE" ]; then
       [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] || return 1
       tmp=$(mktemp "$STATE/.wake-queue.recover.XXXXXX") || return 1
-      if ! cat "$orphan" "$FM_WAKE_QUEUE" > "$tmp" \
+      if ! cat "$orphan" "$FM_WAKE_QUEUE" | fm_nofollow_write "$tmp" \
         || [ -L "$FM_WAKE_QUEUE" ] || ! mv -f "$tmp" "$FM_WAKE_QUEUE"; then
         rm -f "$tmp"
         return 1
@@ -676,7 +684,7 @@ fi
 
 if [ "$DRAIN_RESTORE_PENDING" != true ] && [ ! -s "$FM_WAKE_QUEUE" ]; then
   rm -f "$DRAIN_CURSOR"
-  : > "$FM_WAKE_QUEUE"
+  : | fm_nofollow_write "$FM_WAKE_QUEUE"
   assert_watcher_liveness
   exit 0
 fi
@@ -687,11 +695,11 @@ if [ "$DRAIN_RESUMING" != true ]; then
   rm -f "$DRAIN_TMP"
   rm -f "$DRAIN_DEDUPED"
   mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
-  : > "$FM_WAKE_QUEUE" || exit 1
+  : | fm_nofollow_write "$FM_WAKE_QUEUE" || exit 1
 
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
   DRAIN_LOCK_HELD=false
-  if ! fm_wake_print_deduped "$DRAIN_TMP" > "$DRAIN_DEDUPED"; then
+  if ! fm_wake_print_deduped "$DRAIN_TMP" | fm_nofollow_write "$DRAIN_DEDUPED"; then
     exit 1
   fi
   DRAIN_DEDUPED_READY=1
@@ -837,7 +845,7 @@ elif [ "$DRAIN_RESUMING" = true ]; then
     next_offset=$DRAIN_RETAINED_OFFSET
     fm_wake_queue_cursor_write "$next_offset" || exit 1
   else
-    : > "$FM_WAKE_QUEUE" || exit 1
+    : | fm_nofollow_write "$FM_WAKE_QUEUE" || exit 1
     rm -f "$DRAIN_CURSOR" || exit 1
   fi
   DRAIN_DEDUPED=
