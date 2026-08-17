@@ -1897,6 +1897,56 @@ SH
   pass "run bridge total wait is bounded"
 }
 
+test_run_bridge_timeout_terminates_descendants() {
+  local dir root home fakebin state handoff meta evidence desc_pid status
+  new_case bridge-descendant-timeout
+  dir=$CASE_DIR; root=$CASE_ROOT; home=$CASE_HOME; fakebin=$CASE_FAKEBIN
+  state="$home/state"
+  cp -a "$ROOT/bin/." "$root/bin/"
+  handoff="$state/.run-step-handoff-bridge-descendant-timeout"
+  meta="$state/bridge-descendant-timeout.meta"
+  evidence="$state/.run-step-incarnation-bridge-descendant-timeout"
+  fm_write_meta "$meta" \
+    window=tmux:fm-bridge-descendant-timeout worktree="$state/work-bridge-descendant-timeout" \
+    project="$state/work-bridge-descendant-timeout" harness=echo kind=ship mode=no-mistakes \
+    yolo=off spawn_incarnation=inc-a run_binding_state=pending \
+    run_binding_handoff=.run-step-handoff-bridge-descendant-timeout
+  mkdir -p "$state/work-bridge-descendant-timeout"
+  fm_write_meta "$handoff" schema=fm-jt-run-step-handoff.v1 task_id=bridge-descendant-timeout \
+    spawn_incarnation=inc-a state=pending
+  cat > "$fakebin/real-no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'run:\n  id: "01DESCENDANTTIMEOUT"\n'
+(sleep 30) &
+printf '%s\n' "$!" > "${FM_TEST_DESCENDANT_PID:?}"
+while :; do sleep 1; done
+SH
+  chmod +x "$fakebin/real-no-mistakes"
+  set +e
+  env PATH="$fakebin:$PATH" FM_RUN_BINDING_ROOT="$root" FM_RUN_BINDING_HOME="$home" \
+    FM_RUN_BINDING_STATE="$state" FM_RUN_BINDING_TASK=bridge-descendant-timeout \
+    FM_RUN_BINDING_INCARNATION=inc-a FM_RUN_BINDING_HANDOFF="$handoff" \
+    FM_RUN_BINDING_TMP="$dir" FM_RUN_BINDING_TOTAL_WAIT_SECS=1 \
+    FM_TEST_DESCENDANT_PID="$dir/descendant.pid" FM_SESSION_LOCK_BOOTSTRAP=1 \
+    "$root/bin/fm-run-step-bridge.sh" wrap "$fakebin/real-no-mistakes" axi run \
+    > "$dir/bridge.out" 2>&1
+  status=$?
+  set -u
+  [ "$status" -ne 0 ] || fail "bridge accepted a timed-out descendant group"
+  [ -f "$dir/descendant.pid" ] || fail "bridge fixture did not start a descendant"
+  desc_pid=$(cat "$dir/descendant.pid")
+  if kill -0 "$desc_pid" 2>/dev/null; then
+    kill -KILL "$desc_pid" 2>/dev/null || true
+    fail "bridge timeout left a descendant process alive"
+  fi
+  [ "$(receipt_value "$meta" run_binding_state)" = pending ] \
+    || fail "bridge descendant timeout changed pending metadata"
+  [ ! -e "$evidence" ] && [ ! -L "$evidence" ] \
+    || fail "bridge descendant timeout published incomplete evidence"
+  pass "run bridge timeout terminates descendant processes"
+}
+
 test_run_bridge_rejects_temporary_symlink() {
   local dir root home fakebin state handoff meta evidence outside temp_link status
   new_case bridge-temporary-symlink
@@ -4810,6 +4860,7 @@ test_run_bridge_rejects_staged_run_rebinding
 test_run_bridge_rejects_existing_evidence_rebinding
 test_run_bridge_rejects_bound_metadata_without_evidence
 test_run_bridge_total_wait_is_bounded
+test_run_bridge_timeout_terminates_descendants
 test_run_bridge_rejects_temporary_symlink
 test_receipt_rejects_temporary_symlink
 test_run_bridge_rolls_back_failed_metadata_binding

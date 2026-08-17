@@ -41,6 +41,7 @@ fm_nofollow_spawn_capture() {
   command -v perl >/dev/null 2>&1 || return 1
   perl -e '
     use Fcntl qw(:DEFAULT);
+    use POSIX ();
     my ($path, @command) = @ARGV;
     my $nofollow = eval { O_NOFOLLOW() };
     defined($nofollow) or exit 1;
@@ -48,11 +49,13 @@ fm_nofollow_spawn_capture() {
     my $pid = fork();
     defined($pid) or exit 1;
     if ($pid == 0) {
+      POSIX::setpgid(0, 0) == 0 or exit 125;
       open(STDOUT, ">&", $fh) or exit 1;
       open(STDERR, ">&", $fh) or exit 1;
       exec @command;
       exit 127;
     }
+    eval { POSIX::setpgid($pid, $pid); };
     print "$pid\n" or exit 1;
   ' "$path" "$@"
 }

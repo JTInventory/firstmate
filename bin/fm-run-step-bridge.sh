@@ -229,9 +229,29 @@ publish_run_id() {
   return "$status"
 }
 
+run_axi_stop_group() {
+  local child=$1 attempts=0
+  case "$child" in ''|*[!0-9]*) return 1 ;; esac
+  kill -TERM -- "-$child" 2>/dev/null || true
+  while kill -0 -- "-$child" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if kill -0 -- "-$child" 2>/dev/null; then
+    kill -KILL -- "-$child" 2>/dev/null || true
+    attempts=0
+    while kill -0 -- "-$child" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+      sleep 0.01
+      attempts=$((attempts + 1))
+    done
+  fi
+  ! kill -0 -- "-$child" 2>/dev/null
+}
+
 run_axi_abort_child() {
   local child=$1
-  kill "$child" 2>/dev/null || true
+  run_axi_stop_group "$child" || true
+  kill -TERM "$child" 2>/dev/null || true
   kill -KILL "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
 }
@@ -290,6 +310,11 @@ run_axi() {
     sleep 0.05
   done
   wait "$child" || child_status=$?
+  if ! run_axi_stop_group "$child"; then
+    cat "$output_file"
+    rm -f "$output_file"
+    return 1
+  fi
   run_id=
   if ! run_id=$(run_id_from_output "$output_file") || [ -z "$run_id" ]; then
     cat "$output_file"

@@ -813,12 +813,31 @@ surface_parent_corr() {
 
 surface_receipt_identity_matches_current() {
   local task=$1 fp=$2 rec=$3 expected_incarnation=$4 outcome=$5 snapshot=$6
-  local kind parent_corr expected_fp
+  local kind parent_corr current_parent_corr parent_task_id parent_home parent_status expected_fp
   kind=$(surface_task_kind "$task") || return 1
   [ "$(surface_meta_value_unique "$rec" kind 2>/dev/null)" = "$kind" ] || return 1
-  parent_corr=$(surface_parent_corr "$task") || return 1
-  [ "$(surface_meta_value_unique "$rec" parent_corr 2>/dev/null || true)" = "$parent_corr" ] || return 1
-  expected_fp=$(surface_hash_text "$task|$expected_incarnation|$outcome|$snapshot|$kind${parent_corr:+|$parent_corr}") || return 1
+  current_parent_corr=$(surface_parent_corr "$task") || return 1
+  parent_corr=$(surface_meta_value_unique "$rec" parent_corr 2>/dev/null) || return 1
+  parent_task_id=$(surface_meta_value_unique "$rec" parent_task_id 2>/dev/null) || return 1
+  parent_home=$(surface_meta_value_unique "$rec" parent_home 2>/dev/null) || return 1
+  parent_status=$(surface_meta_value_unique "$rec" parent_status 2>/dev/null) || return 1
+  case "$kind" in
+    secondmate)
+      [ "$parent_corr" = "${FM_PENDING_ROUTE_CORR:-}" ] || return 1
+      [ "$parent_task_id" = "${FM_PENDING_ROUTE_SECOND_MATE_ID:-}" ] || return 1
+      [ "$parent_home" = "${FM_PENDING_ROUTE_PARENT_HOME:-}" ] || return 1
+      [ "$parent_status" = "${FM_PENDING_ROUTE_PARENT_STATUS:-}" ] || return 1
+      ;;
+    ship|scout)
+      [ -z "$parent_corr" ] || return 1
+      [ -z "$parent_task_id" ] || return 1
+      [ -z "$parent_home" ] || return 1
+      [ -z "$parent_status" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$parent_corr" = "$current_parent_corr" ] || return 1
+  expected_fp=$(surface_hash_text "$task|$expected_incarnation|$outcome|$snapshot|$kind${current_parent_corr:+|$current_parent_corr}") || return 1
   [ "$expected_fp" = "$fp" ] || return 1
   [ "$(surface_meta_value_unique "$rec" fingerprint 2>/dev/null)" = "$expected_fp" ] || return 1
 }
