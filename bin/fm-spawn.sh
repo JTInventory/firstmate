@@ -2282,7 +2282,6 @@ WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HO
   echo "error: could not build the home declaration for $ID; refusing to launch a task child that would inherit this home" >&2
   exit 1
 }
-LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 if [ -n "$SPAWN_RUN_BINDING_HANDOFF" ]; then
   SPAWN_RUN_BINDING_REAL=$(command -v no-mistakes 2>/dev/null || true)
   [ -n "$SPAWN_RUN_BINDING_REAL" ] && [ -x "$SPAWN_RUN_BINDING_REAL" ] || {
@@ -2313,6 +2312,7 @@ if [ -n "$SPAWN_RUN_BINDING_HANDOFF" ]; then
   sq_run_binding_path=$(shell_quote "$TASK_TMP/bin:$PATH")
   LAUNCH="PATH=$sq_run_binding_path $LAUNCH"
 fi
+LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
